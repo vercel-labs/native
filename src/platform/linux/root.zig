@@ -9,6 +9,7 @@ pub const Error = error{
     CreateFailed,
     FocusFailed,
     CloseFailed,
+    UnsupportedWindowClosePolicy,
 };
 
 const GtkHost = opaque {};
@@ -32,6 +33,8 @@ const GtkEventKind = enum(c_int) {
     timer = 15,
     appearance = 16,
     audio = 17,
+    context_menu_action = 18,
+    view_focused = 19,
 };
 
 const GtkEvent = extern struct {
@@ -91,6 +94,12 @@ const GtkEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// CONTEXT_MENU_ACTION payload (same field names as the macOS and
+    /// Windows hosts): `widget_id` echoes the request's correlation
+    /// token and `menu_item_id` is the selected item's id (0 = dismissed
+    /// without a selection).
+    widget_id: u64,
+    menu_item_id: u32,
 };
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
@@ -102,7 +111,7 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) ?*GtkHost;
+extern fn native_sdk_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) ?*GtkHost;
 extern fn native_sdk_gtk_destroy(host: *GtkHost) void;
 extern fn native_sdk_gtk_run(host: *GtkHost, callback: GtkCallback, context: ?*anyopaque) void;
 extern fn native_sdk_gtk_stop(host: *GtkHost) void;
@@ -119,13 +128,14 @@ extern fn native_sdk_gtk_emit_window_event(host: *GtkHost, window_id: u64, name:
 extern fn native_sdk_gtk_set_security_policy(host: *GtkHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_gtk_set_menus(host: *GtkHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_gtk_set_shortcuts(host: *GtkHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) c_int;
 extern fn native_sdk_gtk_start_window_drag(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_set_window_drag_regions(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_gtk_window_chrome(host: *GtkHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
 extern fn native_sdk_gtk_start_timer(host: *GtkHost, timer_id: u64, interval_ns: u64, repeats: c_int) void;
 extern fn native_sdk_gtk_cancel_timer(host: *GtkHost, timer_id: u64) void;
 extern fn native_sdk_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
+extern fn native_sdk_gtk_show_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_close_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_minimize_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_create_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
@@ -164,6 +174,18 @@ extern fn native_sdk_gtk_clipboard_read(host: *GtkHost, buffer: [*]u8, buffer_le
 extern fn native_sdk_gtk_clipboard_write(host: *GtkHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_gtk_clipboard_read_data(host: *GtkHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_clipboard_write_data(host: *GtkHost, mime_type: [*]const u8, mime_type_len: usize, bytes: [*]const u8, bytes_len: usize) c_int;
+extern fn native_sdk_gtk_show_context_menu(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const GtkContextMenuItem, count: usize) c_int;
+
+/// One context-menu entry crossing the C ABI (the same shape the macOS
+/// and Windows hosts take): labels ride as pointer+length, flags as
+/// ints.
+const GtkContextMenuItem = extern struct {
+    item_id: u32,
+    label: [*]const u8,
+    label_len: usize,
+    enabled: c_int,
+    separator: c_int,
+};
 
 const GtkOpenDialogOpts = extern struct {
     title: [*]const u8,
@@ -212,12 +234,38 @@ extern fn native_sdk_gtk_show_open_dialog(host: *GtkHost, opts: *const GtkOpenDi
 extern fn native_sdk_gtk_show_save_dialog(host: *GtkHost, opts: *const GtkSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_show_message_dialog(host: *GtkHost, opts: *const GtkMessageDialogOpts) c_int;
 
+/// The startup-window twin of the runtime's create-time `.hide` gate:
+/// GTK reports `window_hide_on_close` false (no status item exists to
+/// bring a hidden window back), and every seam that could accept the
+/// declaration must refuse it loudly with the same teaching — the
+/// generated runner refuses at comptime, the runtime refuses secondary
+/// windows at create, and this refuses the platform-created main
+/// window at init. Pure (no GTK externs), so the refusal is
+/// unit-testable on every host.
+fn refuseUnsupportedMainWindowClosePolicy(window_options: platform_mod.WindowOptions) Error!void {
+    if (window_options.close_policy != .hide) return;
+    std.debug.print("window close_policy \"hide\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \"quit\" (the default), or scope the .hide declaration to macos/windows builds\n", .{});
+    return error.UnsupportedWindowClosePolicy;
+}
+
 pub const LinuxPlatform = struct {
     host: *GtkHost,
     web_engine: platform_mod.WebEngine,
     app_info: platform_mod.AppInfo,
     surface_value: platform_mod.Surface,
     state: RunState = .{},
+    /// Latched when the runtime's effects teardown abandons an
+    /// in-flight channel `wake_fn` call (see
+    /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale
+    /// call still holds this platform as its context and may execute
+    /// into it at any later time, so `deinit` must skip destruction
+    /// and leak the host, process-lived — and the wrapper struct the
+    /// context actually points at (the wake thunk casts to
+    /// `*LinuxPlatform` before reaching the host) must outlive the
+    /// call too, which is why runners allocate it through
+    /// `createWithOptions` and retire it through `destroy`, the
+    /// latch-gated free.
+    channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!LinuxPlatform {
         return initWithEngine(title, size, .system);
@@ -229,9 +277,17 @@ pub const LinuxPlatform = struct {
 
     pub fn initWithOptions(size: geometry.SizeF, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) Error!LinuxPlatform {
         const window_options = app_info.resolvedMainWindow();
+        // The MAIN window is created right here, before any runtime
+        // exists, so the runtime's create-time `.hide` gate
+        // (window_storage's error.UnsupportedWindowClosePolicy) never
+        // sees it — without this twin refusal a direct-SDK or
+        // custom-runner user declaring `.hide` silently got
+        // quit-on-close. Same loud line as the generated runner's
+        // comptime check, at the last seam that can hold it.
+        try refuseUnsupportedMainWindowClosePolicy(window_options);
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = native_sdk_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
+        const host = native_sdk_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -244,7 +300,44 @@ pub const LinuxPlatform = struct {
         };
     }
 
+    /// Heap-allocate the wrapper (process allocator) and initialize it
+    /// in place. Runners must use this over a stack `initWithOptions`
+    /// value: `platform().services.context` is this wrapper's ADDRESS,
+    /// worker threads dereference it inside the channel wake path, and
+    /// a wake call teardown abandons may do so at any later time —
+    /// after a runner's stack frame would have unwound. Pair with
+    /// `destroy`, the latch-gated free.
+    pub fn createWithOptions(size: geometry.SizeF, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) Error!*LinuxPlatform {
+        const self = std.heap.page_allocator.create(LinuxPlatform) catch return error.CreateFailed;
+        errdefer std.heap.page_allocator.destroy(self);
+        self.* = try initWithOptions(size, web_engine, app_info);
+        return self;
+    }
+
+    /// `deinit` plus the wrapper's own storage, gated by the same
+    /// latch: an abandoned channel wake call dereferences this wrapper
+    /// (its context) BEFORE it reaches the native host, so on abandon
+    /// both are leaked, process-lived — deinit-gating extended to
+    /// lifetime-gating, the honest completion of the abandoned-worker
+    /// idiom. No cross-thread race on the gate: the latch is set
+    /// synchronously on the loop thread during effects teardown, which
+    /// runs before the runner's deferred destroy.
+    pub fn destroy(self: *LinuxPlatform) void {
+        self.deinit();
+        if (self.channel_wake_abandoned.load(.seq_cst)) return;
+        std.heap.page_allocator.destroy(self);
+    }
+
     pub fn deinit(self: *LinuxPlatform) void {
+        // An abandoned channel wake call may still enter this host at
+        // any later time (see `channel_wake_abandoned`): destroying it
+        // would turn that stale call into a use-after-free, so the
+        // host is deliberately leaked, process-lived — the
+        // abandoned-worker idiom, applied to the platform itself.
+        if (self.channel_wake_abandoned.load(.seq_cst)) {
+            std.debug.print("linux platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
+            return;
+        }
         native_sdk_gtk_destroy(self.host);
     }
 
@@ -270,6 +363,8 @@ pub const LinuxPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .show_window_fn = showWindow,
+                .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .set_window_drag_regions_fn = setWindowDragRegions,
                 .window_chrome_fn = windowChrome,
@@ -281,6 +376,7 @@ pub const LinuxPlatform = struct {
                 .close_view_fn = closeView,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                .show_context_menu_fn = showContextMenu,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -305,6 +401,11 @@ pub const LinuxPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                // The video load verbs are teaching refusals (see
+                // `videoLoad`); the transport verbs stay null — the
+                // channel never activates without a successful load.
+                .video_load_fn = videoLoad,
+                .video_load_url_fn = videoLoadUrl,
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .remove_tray_fn = removeTray,
@@ -315,6 +416,7 @@ pub const LinuxPlatform = struct {
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
                 .wake_fn = wake,
+                .note_channel_wake_abandoned_fn = noteChannelWakeAbandoned,
                 .request_frame_fn = requestFrame,
                 .decode_image_fn = decodeImage,
             },
@@ -355,11 +457,26 @@ pub const LinuxPlatform = struct {
             // deck's glass rests honestly instead of dancing on fakes.
             .audio_spectrum => self.web_engine == .system and audioSpectrumAvailable(self.host),
             .tray => false,
-            // Native scroll drivers, native context menus, and app-owned
-            // view-surface adoption are macOS-only today; GTK keeps the
-            // engine's wheel physics and has no popover-menu presenter
-            // yet (documented in the skill).
-            .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption => false,
+            // No tray means no affordance to bring a policy-hidden
+            // window back — reporting support would strand windows, so
+            // GTK refuses `close_policy = .hide` at create instead.
+            .window_hide_on_close => false,
+            // Native context menus present through GtkPopoverMenu (a
+            // GMenu pointed at the click, dispatching through a
+            // per-invocation action group), riding the same
+            // system-engine gate as the other native surfaces.
+            .context_menus => self.web_engine == .system,
+            // Native scroll drivers and app-owned view-surface adoption
+            // are macOS-only today; GTK keeps the engine's wheel
+            // physics.
+            .gpu_surface_scroll_drivers, .view_surface_adoption => false,
+            // Video decode (a GStreamer appsink feeding the
+            // media-surface texture channel) is not implemented yet:
+            // an honest false rather than a half-implemented player.
+            // The load verbs teach and refuse (see `videoLoad`), so an
+            // app that skips the capability check still learns exactly
+            // what is missing.
+            .video_playback => false,
         };
     }
 
@@ -456,6 +573,10 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
                 .focused = event.focused != 0,
             } });
         },
+        .view_focused => state.emit(.{ .view_focused = .{
+            .window_id = event.window_id,
+            .label = event.view_label[0..event.view_label_len],
+        } }),
         .shortcut => state.emit(.{ .shortcut = .{
             .id = event.shortcut_id[0..event.shortcut_id_len],
             .key = event.shortcut_key[0..event.shortcut_key_len],
@@ -522,7 +643,22 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .buffering = event.audio_buffering != 0,
             .bands = event.audio_bands,
         } }),
+        .context_menu_action => state.emit(.{ .context_menu_action = contextMenuActionEventFromGtkEvent(event) }),
     }
+}
+
+/// Pure event mapping (no host calls), unit-testable on every build
+/// host: the C event's `widget_id` is the request's correlation token
+/// and `menu_item_id` the selected item (0 = dismissed) — the same
+/// payload contract as the macOS and Windows hosts, so replay is
+/// shape-identical.
+fn contextMenuActionEventFromGtkEvent(event: *const GtkEvent) platform_mod.ContextMenuActionEvent {
+    return .{
+        .window_id = event.window_id,
+        .view_label = event.view_label[0..event.view_label_len],
+        .token = event.widget_id,
+        .item_id = event.menu_item_id,
+    };
 }
 
 /// Ordinals match the audio report kinds in gtk_host.c (the same set the
@@ -656,11 +792,21 @@ fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name:
     native_sdk_gtk_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
 }
 
-/// Thread-safe: schedules an idle source on the GLib main loop, which
-/// emits `.wake` there. One of the two services worker threads may call.
+/// Thread-safe: schedules an idle source on the GLib main loop
+/// (`g_idle_add` — the enqueue-only shape the wake contract requires),
+/// which emits `.wake` there. One of the two services worker threads
+/// may call.
 fn wake(context: ?*anyopaque) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_gtk_wake(self.host);
+}
+
+/// Teardown abandoned an in-flight channel wake call: latch the flag
+/// `deinit` consults so this host is leaked rather than destroyed (see
+/// `LinuxPlatform.channel_wake_abandoned`).
+fn noteChannelWakeAbandoned(context: ?*anyopaque) void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    self.channel_wake_abandoned.store(true, .seq_cst);
 }
 
 /// Thread-safe like `wake`: schedules an idle source on the GLib main
@@ -670,6 +816,15 @@ fn wake(context: ?*anyopaque) anyerror!void {
 fn requestFrame(context: ?*anyopaque) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_gtk_request_frame(self.host);
+}
+
+/// Headless image codec for session replay: the SAME gdk-pixbuf decode
+/// a live host serves (see `decodeImage` below — a context-free
+/// bytes-to-pixels call, no window, no run loop), so journaled image
+/// bytes re-register the identical pixels under a headless replay on
+/// the same platform.
+pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {
+    services.decode_image_fn = decodeImage;
 }
 
 /// gdk-pixbuf-backed image decoding (PNG, JPEG, ... — whatever loaders
@@ -694,6 +849,22 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
     };
 }
 
+fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
+    return switch (mode) {
+        .immediate => 0,
+        .on_first_present => 1,
+    };
+}
+
+fn windowFlags(options: platform_mod.WindowOptions) u32 {
+    var flags: u32 = 0;
+    if (options.transparent) flags |= 1 << 0;
+    if (options.always_on_top) flags |= 1 << 1;
+    if (options.click_through) flags |= 1 << 2;
+    if (!options.activate_on_show) flags |= 1 << 3;
+    return flags;
+}
+
 /// Zero/negative/non-finite floors are the "no floor" sentinel (the
 /// host leaves that axis at its natural minimum).
 fn minSizeFloor(value: f32) f64 {
@@ -704,7 +875,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
+    if (native_sdk_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
     return .{
         .id = options.id,
         .label = options.label,
@@ -712,7 +883,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .frame = frame,
         .scale_factor = 1,
         .open = true,
-        .focused = false,
+        .focused = options.activate_on_show and options.show == .immediate,
     };
 }
 
@@ -729,6 +900,25 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_gtk_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+/// GTK has no hide-on-close, but show is still distinct from explicit
+/// focus for passive overlay windows.
+fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_gtk_show_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+/// The graceful quit: the same emitShutdown + g_application_quit the
+/// last window's close-request runs, queued to the NEXT loop turn —
+/// this verb is requested mid dispatch (the command whose update
+/// returned it is still being dispatched), and `app_shutdown` must
+/// emit only after that dispatch returns, or a recording session
+/// seals its journal before the requesting command commits (the
+/// command record is lost and replay diverges).
+fn quitApp(context: ?*anyopaque) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_gtk_stop(self.host);
 }
 
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
@@ -924,6 +1114,71 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
         pixels.rgba8.ptr,
         pixels.rgba8.len,
     ) == 0) return error.ViewNotFound;
+}
+
+/// GTK popover menus treat `_` in an item label as a mnemonic marker —
+/// GtkPopoverMenu eats the underscore and underlines the next character —
+/// so an app-authored label like "Save_As" must cross the ABI with the
+/// underscore doubled ("Save__As") to render literally. Labels without
+/// an underscore pass through uncopied; a label whose escaped form does
+/// not fit the remaining pool also passes through raw, because an
+/// accidental mnemonic on a pathological label beats dropping bytes.
+fn escapeMenuLabelUnderscores(label: []const u8, pool: []u8, used: *usize) []const u8 {
+    const underscores = std.mem.count(u8, label, "_");
+    if (underscores == 0) return label;
+    if (label.len + underscores > pool.len - used.*) return label;
+    const start = used.*;
+    var out = start;
+    for (label) |byte| {
+        pool[out] = byte;
+        out += 1;
+        if (byte == '_') {
+            pool[out] = '_';
+            out += 1;
+        }
+    }
+    used.* = out;
+    return pool[start..out];
+}
+
+/// Translate the request's items to the C ABI shape, escaping mnemonic
+/// underscores into `label_pool` (the host strndup-copies every label
+/// before returning, so a caller stack pool is safe). Pure (no host
+/// calls), so the separator/disabled/label mapping is unit-testable on
+/// every build host.
+fn contextMenuItemsToGtk(items: []const platform_mod.ContextMenuItem, buffer: []GtkContextMenuItem, label_pool: []u8) []const GtkContextMenuItem {
+    const count = @min(items.len, buffer.len);
+    var pool_used: usize = 0;
+    for (items[0..count], 0..) |item, index| {
+        const label = escapeMenuLabelUnderscores(item.label, label_pool, &pool_used);
+        buffer[index] = .{
+            .item_id = item.id,
+            .label = label.ptr,
+            .label_len = label.len,
+            .enabled = if (item.enabled) 1 else 0,
+            .separator = if (item.separator) 1 else 0,
+        };
+    }
+    return buffer[0..count];
+}
+
+fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuRequest) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    var items: [platform_mod.max_context_menu_items]GtkContextMenuItem = undefined;
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToGtk(request.items, &items, &label_pool);
+    if (native_sdk_gtk_show_context_menu(
+        self.host,
+        request.window_id,
+        request.view_label.ptr,
+        request.view_label.len,
+        request.point.x,
+        request.point.y,
+        request.token,
+        translated.ptr,
+        translated.len,
+    ) == 0) return error.WindowNotFound;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
@@ -1180,6 +1435,26 @@ fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
 fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     _ = native_sdk_gtk_audio_set_volume(self.host, volume);
+}
+
+/// The video tier's teaching refusal: the load verbs exist so a video
+/// source fails with a NAMED explanation instead of a bare
+/// unsupported-service, while the transport verbs stay null — the
+/// channel never activates without a successful load. Pure (no GTK
+/// externs), so the teaching is unit-testable on every host.
+fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
+    _ = context;
+    _ = path;
+    _ = token;
+    _ = sink;
+    std.debug.print("video playback is not implemented on linux yet: the GTK host has no GStreamer decode path into the media-surface texture channel - the app receives one failed video event (scope video sources to macos builds, or compose a media-surface with your own producer)\n", .{});
+    return error.UnsupportedService;
+}
+
+/// The URL twin rides the same teaching — a stream would need the same
+/// missing decode path a file does.
+fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
+    return videoLoad(context, url, token, sink);
 }
 
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
@@ -1481,6 +1756,68 @@ test "linux audio event maps kinds and payload" {
     try std.testing.expectEqual(platform_mod.AudioEventKind.failed, audioEventKindFromInt(99));
 }
 
+test "linux context menus ride the system-engine gate" {
+    var system = testPlatformWithEngine(.system);
+    try std.testing.expect(LinuxPlatform.supportsFeature(&system, .context_menus));
+    var chromium = testPlatformWithEngine(.chromium);
+    try std.testing.expect(!LinuxPlatform.supportsFeature(&chromium, .context_menus));
+}
+
+test "linux context menu items translate separators, disabled flags, and labels" {
+    const items = [_]platform_mod.ContextMenuItem{
+        .{ .id = 1, .label = "Complete" },
+        .{ .separator = true },
+        .{ .id = 3, .label = "Delete", .enabled = false },
+        .{ .id = 4, .label = "Move to Save_As" },
+    };
+    var buffer: [platform_mod.max_context_menu_items]GtkContextMenuItem = undefined;
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToGtk(&items, &buffer, &label_pool);
+    try std.testing.expectEqual(@as(usize, 4), translated.len);
+    try std.testing.expectEqual(@as(u32, 1), translated[0].item_id);
+    try std.testing.expectEqualStrings("Complete", translated[0].label[0..translated[0].label_len]);
+    try std.testing.expectEqual(@as(c_int, 1), translated[0].enabled);
+    try std.testing.expectEqual(@as(c_int, 0), translated[0].separator);
+    try std.testing.expectEqual(@as(c_int, 1), translated[1].separator);
+    try std.testing.expectEqual(@as(u32, 3), translated[2].item_id);
+    try std.testing.expectEqual(@as(c_int, 0), translated[2].enabled);
+    // A literal `_` doubles on the way to GtkPopoverMenu so GTK renders
+    // it instead of eating it as a mnemonic marker; underscore-free
+    // labels pass through pointing at the caller's bytes.
+    try std.testing.expectEqualStrings("Move to Save__As", translated[3].label[0..translated[3].label_len]);
+    try std.testing.expectEqual(items[0].label.ptr, translated[0].label);
+}
+
+test "linux menu label escape passes a label through raw when the pool cannot hold it" {
+    var pool: [8]u8 = undefined;
+    var used: usize = 0;
+    const label = "Save_As";
+    // Escaped form needs 8 bytes and fits exactly.
+    try std.testing.expectEqualStrings("Save__As", escapeMenuLabelUnderscores(label, &pool, &used));
+    // The pool is spent: the next underscore label rides unescaped
+    // (accidental mnemonic) rather than truncated.
+    const passed_through = escapeMenuLabelUnderscores(label, &pool, &used);
+    try std.testing.expectEqualStrings("Save_As", passed_through);
+    try std.testing.expectEqual(label.ptr, passed_through.ptr);
+}
+
+test "linux context menu action event maps token and item id" {
+    const label = "canvas";
+    var event = std.mem.zeroes(GtkEvent);
+    event.kind = .context_menu_action;
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.widget_id = 42;
+    event.menu_item_id = 3;
+
+    const action = contextMenuActionEventFromGtkEvent(&event);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), action.window_id);
+    try std.testing.expectEqualStrings("canvas", action.view_label);
+    try std.testing.expectEqual(@as(u64, 42), action.token);
+    try std.testing.expectEqual(@as(u32, 3), action.item_id);
+}
+
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) LinuxPlatform {
     return .{
         .host = undefined,
@@ -1516,4 +1853,200 @@ fn viewKindInt(kind: platform_mod.ViewKind) c_int {
 
 test "linux platform module exports type" {
     _ = LinuxPlatform;
+}
+
+test "linux transparent windows clear the main webview background" {
+    const host_source = @embedFile("gtk_host.c");
+    const ensure_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "static WebKitWebView *native_sdk_ensure_main_webview",
+    ) orelse return error.TestExpectedEqual;
+    const create_at = std.mem.indexOfPos(
+        u8,
+        host_source,
+        ensure_at,
+        "WebKitWebView *wv = WEBKIT_WEB_VIEW(",
+    ) orelse return error.TestExpectedEqual;
+    const assign_at = std.mem.indexOfPos(
+        u8,
+        host_source,
+        create_at,
+        "win->web_view = wv;",
+    ) orelse return error.TestExpectedEqual;
+    const create_slice = host_source[create_at..assign_at];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        create_slice,
+        "if (win->transparent)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        create_slice,
+        "webkit_web_view_set_background_color(wv, &transparent_color);",
+    ) != null);
+}
+
+test "linux transparent window stylesheet is host-owned and removed" {
+    const host_source = @embedFile("gtk_host.c");
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, host_source, "gtk_style_context_add_provider_for_display("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, host_source, "gtk_style_context_remove_provider_for_display("),
+    );
+
+    const ensure_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "static void native_sdk_ensure_transparent_css",
+    ) orelse return error.TestExpectedEqual;
+    const create_at = std.mem.indexOfPos(
+        u8,
+        host_source,
+        ensure_at,
+        "static native_sdk_gtk_window_t *native_sdk_create_window_internal",
+    ) orelse return error.TestExpectedEqual;
+    const ensure = host_source[ensure_at..create_at];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        ensure,
+        "if (!host || host->transparent_css_provider) return;",
+    ) != null);
+    const create_end = std.mem.indexOfPos(
+        u8,
+        host_source,
+        create_at,
+        "static void on_activate",
+    ) orelse return error.TestExpectedEqual;
+    const create = host_source[create_at..create_end];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        create,
+        "native_sdk_ensure_transparent_css(host);",
+    ) != null);
+
+    const destroy_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "void native_sdk_gtk_destroy",
+    ) orelse return error.TestExpectedEqual;
+    const destroy = host_source[destroy_at..];
+    const remove_at = std.mem.indexOf(
+        u8,
+        destroy,
+        "gtk_style_context_remove_provider_for_display(",
+    ) orelse return error.TestExpectedEqual;
+    const provider_unref_at = std.mem.indexOf(
+        u8,
+        destroy,
+        "g_object_unref(host->transparent_css_provider);",
+    ) orelse return error.TestExpectedEqual;
+    const display_unref_at = std.mem.indexOf(
+        u8,
+        destroy,
+        "g_object_unref(host->transparent_css_display);",
+    ) orelse return error.TestExpectedEqual;
+    const app_unref_at = std.mem.indexOf(
+        u8,
+        destroy,
+        "g_object_unref(host->app);",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(remove_at < provider_unref_at);
+    try std.testing.expect(remove_at < display_unref_at);
+    try std.testing.expect(remove_at < app_unref_at);
+}
+
+test "linux passive show restores minimized windows without presenting them" {
+    const host_source = @embedFile("gtk_host.c");
+    const show_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "int native_sdk_gtk_show_window",
+    ) orelse return error.TestExpectedEqual;
+    const show_end = std.mem.indexOfPos(
+        u8,
+        host_source,
+        show_at,
+        "int native_sdk_gtk_minimize_window",
+    ) orelse return error.TestExpectedEqual;
+    const show = host_source[show_at..show_end];
+    const unminimize_at = std.mem.indexOf(
+        u8,
+        show,
+        "if (!win->activate_on_show) gtk_window_unminimize(win->gtk_window);",
+    ) orelse return error.TestExpectedEqual;
+    const present_at = std.mem.indexOf(
+        u8,
+        show,
+        "native_sdk_show_window_implicit(win);",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(unminimize_at < present_at);
+}
+
+test "linux webview presses report the focused child label" {
+    // The capture-phase observer watches without claiming WebKit's
+    // gesture; it exists solely to mirror the focus edge into runtime
+    // state before the page handles the same press.
+    const host_source = @embedFile("gtk_host.c");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, ".kind = NATIVE_SDK_GTK_EVENT_VIEW_FOCUSED") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_watch_webview_pointer_focus(win, web_view);") != null);
+}
+
+test "linux first-present windows stay unmapped until present with a cancellable fallback" {
+    const host_source = @embedFile("gtk_host.c");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "g_timeout_add(1000, native_sdk_deferred_show_timeout, win)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "native_sdk_cancel_deferred_show(win);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "gtk_widget_set_opacity(GTK_WIDGET(win->gtk_window), 0)",
+    ) == null);
+    const first_present_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "if (first_present && win && !win->shown)",
+    ) orelse return error.TestExpectedEqual;
+    const first_present_tail = host_source[first_present_at..];
+    const cancel_at = std.mem.indexOf(
+        u8,
+        first_present_tail,
+        "native_sdk_cancel_deferred_show(win);",
+    ) orelse return error.TestExpectedEqual;
+    const show_at = std.mem.indexOf(
+        u8,
+        first_present_tail,
+        "native_sdk_show_window_implicit(win);",
+    ) orelse return error.TestExpectedEqual;
+    const queue_draw_at = std.mem.indexOf(
+        u8,
+        first_present_tail,
+        "gtk_widget_queue_draw(view->widget);",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(cancel_at < show_at);
+    try std.testing.expect(show_at < queue_draw_at);
+}
+
+test "linux refuses a .hide main window at platform init instead of a silent quit-on-close" {
+    // The pre-created MAIN window never passes through the runtime's
+    // create gate, so the platform's init gate must hold the same
+    // line. The gate sees exactly the options `initWithOptions`
+    // resolves from the caller's AppInfo.
+    const hide_app: platform_mod.AppInfo = .{ .app_name = "player", .main_window = .{ .close_policy = .hide } };
+    try std.testing.expectError(error.UnsupportedWindowClosePolicy, refuseUnsupportedMainWindowClosePolicy(hide_app.resolvedMainWindow()));
+    // The default (.quit) and every other declaration pass untouched —
+    // the refusal is the .hide declaration's, not the init path's.
+    const quit_app: platform_mod.AppInfo = .{ .app_name = "player" };
+    try refuseUnsupportedMainWindowClosePolicy(quit_app.resolvedMainWindow());
 }

@@ -74,11 +74,15 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
-        // Force the LLVM backend + LLD on x86_64 (LLD only on Linux) to avoid the
-        // .sframe linker crash the self-hosted backend hits; mirrors the generated
-        // app graph so hand-wired examples get the same workaround. See fix/37.
-        .use_llvm = if (target.result.cpu.arch == .x86_64) true else null,
-        .use_lld = if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) true else null,
+        // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
+        // miscompiles the SysV C calling convention for the long
+        // mixed-argument signatures the platform hosts use, shifting
+        // stack-passed pointers by one slot (a Debug run on x86_64 Linux
+        // crashes creating its first shell view). Force LLVM there,
+        // mirroring the Native SDK build graph; Release modes already
+        // use LLVM, so only Debug changes.
+        .use_llvm = useLlvmWorkaround(target),
+        .use_lld = useLldWorkaround(target),
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
@@ -204,6 +208,9 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        // CVPixelBuffer for the video frame path (the AppKit host's
+        // AVPlayerItemVideoOutput frames are real CoreVideo symbols).
+        app_mod.linkFramework("CoreVideo", .{});
         // Spectrum analysis of the app's own playback: the MediaToolbox
         // audio tap hands the player's PCM to the host, and Accelerate
         // (vDSP) turns it into band magnitudes.
@@ -272,10 +279,13 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
             },
         }
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
         app_mod.linkSystemLibrary("c", .{});
         app_mod.linkSystemLibrary("c++", .{});
         app_mod.linkSystemLibrary("user32", .{});
         app_mod.linkSystemLibrary("gdi32", .{});
+        app_mod.linkSystemLibrary("d2d1", .{});
+        app_mod.linkSystemLibrary("dwrite", .{});
         app_mod.linkSystemLibrary("imm32", .{});
         app_mod.linkSystemLibrary("comctl32", .{});
         app_mod.linkSystemLibrary("ole32", .{});
@@ -344,4 +354,21 @@ fn defaultCefDir(platform: PlatformOption, configured: []const u8) []const u8 {
         .windows => "third_party/cef/windows",
         else => configured,
     };
+}
+
+// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
+// convention for long mixed int/pointer/double signatures (the platform
+// hosts' view-create calls) and f32-heavy ones (the embed viewport ABI):
+// stack-passed arguments arrive shifted, so a Debug x86_64 build crashes
+// at the first platform call that passes strings on the stack. Force the
+// LLVM backend on x86_64 until the upstream backend is fixed; Release
+// modes already default to LLVM, so this only changes Debug builds.
+fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64) true else null;
+}
+
+// GCC 15 emits `.sframe` relocations that Zig's self-hosted x86_64 Linux
+// linker cannot handle (Native issue #37), so app executables use LLD there.
+fn useLldWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) true else null;
 }

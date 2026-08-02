@@ -1,0 +1,37 @@
+{
+  "name": "ts-habits-core",
+  "description": "TS-authoring mirror of the habits-tracker case: a fresh habit-tracker app core written from a requirements description in the app-core TypeScript subset.",
+  "prompt": "This workspace holds a TypeScript app core (see README.md; the deliverable is src/core.ts, written in the app-core subset — the authoring guide is .claude/skills/ts-core/SKILL.md). Replace the starter counter with a habit-tracker core.\n\nRequirements:\n- A list of habits. Each habit has a stable numeric id, a name (bytes), a current streak in days, and whether it is done today. Seed exactly three habits, none done today.\n- Marking a habit done today increments its streak; unmarking decrements it back. Other habits are untouched.\n- A draft text entry for adding a habit: edits replace the draft bytes; submitting adds a habit with the space-trimmed draft as its name (streak 0, not done today) and clears the draft; submitting a blank or all-spaces draft does nothing.\n- A filter that is exactly one of \"all\", \"active\" (not done today), or \"done\" (done today).\n\nThe exact contract (the grader compiles against it):\n- export interface Model with fields: habits (readonly array of Habit), nextId (number), filter (Filter), draft (Uint8Array). Habit fields: id (number), name (Uint8Array), streak (number), doneToday (boolean). Filter is the string-literal union \"all\" | \"active\" | \"done\".\n- export type Msg with exactly these arms: { kind: \"toggle_done\", id: number }, { kind: \"draft_edit\", text: Uint8Array }, { kind: \"add\" }, { kind: \"set_filter\", filter: Filter }.\n- export function initialModel(): Model, export function update(model: Model, msg: Msg): Model, export function visibleHabits(model: Model): readonly Habit[] (the habits the current filter shows), export function doneCount(model: Model): number (habits done today).\n\nKeep the core pure: all state transitions in update, derived values computed, not stored. Check your work with the transpiler command in README.md until it exits clean, and make sure the behavior above actually holds (node can import the module directly). When you are done, summarize what you built.",
+  "frontend": "ts-core",
+  "timeoutMs": 900000,
+  "maxTurns": 50,
+  "checks": [
+    {
+      "type": "ts_transpile"
+    },
+    {
+      "type": "ts_harness",
+      "description": "seeded model, toggle streak math, trimmed add path, blank rejection, filters, live counts"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/core.ts",
+      "pattern": "switch \\(msg\\.kind\\)",
+      "expect": true,
+      "description": "update dispatches on the message kind tag"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "Model/Msg/update follow the architecture idiomatically: immutable spread updates, one exhaustive switch, no state that could be derived.",
+        "The habit data model is sound: streak and done-today state cannot drift apart, adding a habit initializes it fully.",
+        "Text is handled in the subset idiom: draft and names are bytes, trimming works on bytes, no string code-unit tricks.",
+        "The code reads like plain idiomatic TypeScript, not like a foreign language transliterated into TS."
+      ],
+      "files": ["src/core.ts"],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the habits core beyond compliance"
+    }
+  ]
+}

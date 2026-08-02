@@ -1,0 +1,76 @@
+.{
+    .id = "dev.native_sdk.soundboard_ts",
+    .name = "soundboard-ts",
+    .display_name = "Soundboard TS",
+    .description = "The soundboard music library authored entirely in TypeScript + Native markup.",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    // The clipboard permission covers the Copy Title context action
+    // (Cmd.clipboardWrite); audio playback rides the platform audio
+    // service and needs no bridge permission.
+    .permissions = .{ "view", "clipboard" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    // The same built-in pack the Zig soundboard's tokens resolve. A TS app
+    // owns no tokens_fn, so this manifest channel IS the theme: the stock
+    // tokens compose the pack with the live system appearance (light/dark
+    // follows the OS with no core code).
+    .theme = "geist",
+    // The Zig original's one brand statement (theme.zig's pink_800,
+    // hsl(336, 74%, 51%)), stated through the manifest accent channel:
+    // the wiring layers the accent identity over the pack — accent +
+    // white knockout ink, the focus ring, and the seek slider's filled
+    // range — and high-contrast requests skip it (accessibility beats
+    // brand), exactly the original's tokens_fn rule.
+    .theme_accent = "#df2670",
+    // The committed album covers, read once at launch and registered on
+    // the installing frame (the generated wiring's asset channel): the id
+    // IS the `ImageId` the markup avatar bindings reference — album ids
+    // here, mirroring the Zig original's registration. JPEG decodes
+    // through the platform codec; codec-less hosts (the null test
+    // platform) skip honestly and every cover keeps its initials.
+    .assets = .{
+        .images = .{
+            .{ .id = 1, .path = "assets/art/exit-signs.jpg" },
+            .{ .id = 2, .path = "assets/art/blue-season.jpg" },
+            .{ .id = 3, .path = "assets/art/second-nature.jpg" },
+            .{ .id = 4, .path = "assets/art/no-good-way-out.jpg" },
+            .{ .id = 5, .path = "assets/art/glass-flowers.jpg" },
+            .{ .id = 6, .path = "assets/art/night-bloom.jpg" },
+            .{ .id = 7, .path = "assets/art/motion-picture.jpg" },
+            .{ .id = 8, .path = "assets/art/channel-surfing.jpg" },
+        },
+    },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Native SDK Soundboard TS",
+                .width = 1080,
+                .height = 720,
+                // The same floor the Zig original's layout audit sweep
+                // proves clean (header, four-column album rack, and the
+                // now-playing bar): the window stops resizing here
+                // instead of clipping the grid.
+                .min_width = 1056,
+                .min_height = 600,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                // Tall hidden-inset titlebar, the Zig original's window
+                // chrome: the markup header is the drag surface and pads
+                // past the traffic lights via the core's chromeMsg
+                // channel.
+                .titlebar = "hidden_inset_tall",
+                .views = .{
+                    .{ .label = "soundboard-canvas", .kind = "gpu_surface", .fill = true, .role = "Music library canvas", .accessibility_label = "Soundboard music library", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+}

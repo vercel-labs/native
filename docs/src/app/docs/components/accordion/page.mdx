@@ -1,0 +1,64 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
+
+# Accordion
+
+A disclosure surface with a header. The header label comes from the `text` attribute, children show while `selected` is true, and a header press dispatches `on-toggle` — the model owns the open state, in the usual [model–message loop](/docs/native-ui). Items render the house accordion look — borderless rows divided by hairline separators, with the chevron on the trailing edge rotating as the item expands — and size themselves: the header band alone while closed, header plus content while open, so a toggle reflows the column with no hand-managed heights.
+
+<ComponentPreview name="accordion" alt="Open and closed accordion items rendered by the engine" caption="an open item and a closed one" />
+
+## Markup
+
+```html
+<column width="380">
+  <accordion text="Is it accessible?" selected="{faq_open}" on-toggle="toggle_faq">
+    <column>
+      <text wrap="true" foreground="text_muted">Yes. Widgets carry semantic roles and one roving focus set.</text>
+    </column>
+  </accordion>
+  <accordion text="Is it styled?" on-toggle="toggle_styling" />
+</column>
+```
+
+The core side is one flag and one arm flipping it:
+
+<CodeToggle>
+
+```ts
+// model: { readonly faq_open: boolean }
+case "toggle_faq":
+  return { ...model, faq_open: !model.faq_open };
+```
+
+```zig
+// model: faq_open: bool = false,
+.toggle_faq => model.faq_open = !model.faq_open,
+```
+
+</CodeToggle>
+
+A one-open-at-a-time group is a model decision: store the open item's id and compute each item's `selected` from an equality, flipping it in `update`.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.column(.{ .width = 380 }, .{
+    ui.el(.accordion, .{
+        .text = "Is it accessible?",
+        .selected = model.faq_open,
+        .on_toggle = .toggle_faq,
+    }, .{
+        ui.column(.{}, .{
+            ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Yes. Widgets carry semantic roles and one roving focus set."),
+        }),
+    }),
+    ui.el(.accordion, .{ .text = "Is it styled?", .on_toggle = .toggle_styling }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["text", "selected", "on-toggle", "height"]} />

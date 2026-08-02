@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 
 /**
  * The "Copy Page" button in every docs page's heading row: fetches the
- * page's clean markdown from /md/<path> and puts it on the clipboard.
+ * page's clean markdown from /<path>.md and puts it on the clipboard.
  * Rendered by the MDX h1 (see mdx-components.tsx), so every content
  * page gets it without opting in.
  *
@@ -32,7 +32,7 @@ export function CopyPage() {
   };
 
   const handleClick = async () => {
-    const markdown = fetch(`/md${pathname}`).then((response) => {
+    const markdown = fetch(`${pathname}.md`).then((response) => {
       if (!response.ok) throw new Error(`copy-page: ${response.status}`);
       return response.text();
     });

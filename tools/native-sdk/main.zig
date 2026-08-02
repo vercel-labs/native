@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.4.2";
+const version = "0.7.1";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -30,18 +30,26 @@ pub fn main(init: std.process.Init) !void {
         // silently drove a days-old dropbox).
         var stdout_buffer: [128]u8 = undefined;
         var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-        try stdout_writer.interface.print("native {s} (commit {s}, automation protocol v{d})\n", .{ version, cli_build_info.build_commit, automation_protocol.version });
+        try stdout_writer.interface.print("native {s} (commit {s}, automation protocol 0x{x:0>16})\n", .{ version, cli_build_info.build_commit, automation_protocol.fingerprint });
         try stdout_writer.interface.flush();
     } else if (std.mem.eql(u8, command, "init")) {
         checkVerbFlags("init", args[2..], .{
-            .usage = "init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]",
-            .value_flags = &.{ "--frontend", "--framework" },
+            .usage = "init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]",
+            .value_flags = &.{ "--frontend", "--framework", "--template" },
             .bool_flags = &.{"--full"},
         });
         const destination = positionalArg(args[2..]) orelse ".";
         const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: native, next, vite, react, svelte, vue") orelse "native";
         const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use native (default), next, vite, react, svelte, or vue");
         const shape: tooling.templates.Shape = if (flagBool(args, "--full")) .full else .slim;
+        // Which core the native template writes (ts-core is the default).
+        // The choice leaves no residue: the tree IS the truth, and the
+        // build graph re-detects it on every build.
+        const core: tooling.templates.CoreTemplate = if (flagValue(args, "--template") catch fail("--template requires a value: ts-core (default) or zig-core")) |value|
+            tooling.templates.CoreTemplate.parse(value) orelse fail("invalid --template value: use ts-core (default) or zig-core")
+        else
+            .ts;
+        if (core == .zig and frontend != .native) fail("--template applies to the native frontend (web frontends have no core tier)");
         const app_name, const free_app_name = try initAppName(allocator, init.io, destination);
         defer if (free_app_name) allocator.free(app_name);
         const explicit_framework = try flagValue(args, "--framework");
@@ -61,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
             }
             std.process.exit(1);
         }
-        try tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend, .shape = shape });
+        tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend, .shape = shape, .core = core }) catch |err| return failVerb(err);
         std.debug.print("created Native SDK app at {s} ({s})\n", .{ destination, frontend_str });
         printInitNextSteps(destination, frontend, shape);
     } else if (std.mem.eql(u8, command, "build") or std.mem.eql(u8, command, "test")) {
@@ -85,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
         });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native check [dir] [--strict]");
         try enterAppDir(init.io, verb_args.dir);
-        runCheck(allocator, init.io, flagBool(args, "--strict")) catch |err| return failVerb(err);
+        runCheck(allocator, init.io, init.environ_map, flagBool(args, "--strict")) catch |err| return failVerb(err);
     } else if (std.mem.eql(u8, command, "eject")) {
         // `eject component <name>` is dispatched before the plain build
         // eject so `component` is never mistaken for an app directory.
@@ -147,8 +155,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
-            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--assets", "--web-engine", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
+            .usage = "package [--target macos] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
+            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
             .bool_flags = &.{ "--cef-auto-install", "--archive" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
@@ -170,6 +178,14 @@ pub fn main(init: std.process.Init) !void {
             .cef_dir = try flagValue(args, "--cef-dir"),
             .cef_auto_install = if (flagBool(args, "--cef-auto-install")) true else null,
         });
+        // `--web-layer` beats app.zon's `.webview_layer` the same way
+        // `-Dweb-layer` beats it in the build graph; the standard build
+        // graphs pass their resolved layer decision through this flag so
+        // the package always agrees with the exe it wraps.
+        const web_layer_setting = if (try flagValue(args, "--web-layer")) |value|
+            tooling.manifest.parseWebViewLayerSetting(value) orelse fail("invalid --web-layer value: use auto, include, or exclude")
+        else
+            null;
         const signing_name = try flagValue(args, "--signing") orelse "none";
         const signing = tooling.package.SigningMode.parse(signing_name) orelse fail("invalid signing mode");
         const default_output = switch (target) {
@@ -208,6 +224,7 @@ pub fn main(init: std.process.Init) !void {
             .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
             .frontend = metadata.frontend,
             .web_engine = web_engine.engine,
+            .web_layer_setting = web_layer_setting,
             .cef_dir = web_engine.cef_dir,
             .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
             .archive = archive,
@@ -216,11 +233,33 @@ pub fn main(init: std.process.Init) !void {
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "dev")) {
         checkVerbFlags("dev", args[2..], .{
-            .usage = "dev [dir] [--yes] [--target ios|android] [--device name] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]\n       native dev [--manifest app.zon] --binary path [--url url] [--command \"npm run dev\"] [--timeout-ms n]",
-            .value_flags = &.{ "--url", "--command", "--timeout-ms", "--binary", "--manifest", "--target", "--device" },
-            .bool_flags = &.{"--yes"},
+            .usage = "dev [dir] [--yes] [--target ios|android] [--device name] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]\n       native dev [dir] --core [--script msgs.ndjson] [--watch]\n       native dev [--manifest app.zon] --binary path [--url url] [--command \"npm run dev\"] [--timeout-ms n]",
+            .value_flags = &.{ "--url", "--command", "--timeout-ms", "--binary", "--manifest", "--target", "--device", "--script" },
+            .bool_flags = &.{ "--yes", "--core", "--watch" },
             .forwards_build_flags = true,
         });
+        if (flagBool(args, "--core")) {
+            // The TypeScript core-logic loop under node (update/effects on a
+            // virtual host) - not a renderer; plain `native dev` runs the app.
+            const verb_args = parseVerbArgs(allocator, args[2..], &.{"--script"}) catch fail("usage: native dev [dir] --core [--script msgs.ndjson] [--watch]");
+            try enterAppDir(init.io, verb_args.dir);
+            const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, init.io, init.environ_map) orelse {
+                std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+                std.process.exit(1);
+            };
+            defer allocator.free(framework_root);
+            // The editor surface rides along with the dev loop too (TS
+            // trees only — never leave node_modules in a non-app dir).
+            if (tooling.ts_core.detect(init.io) == .ts) {
+                tooling.ts_core.selfHealEditorPackage(allocator, init.io, framework_root);
+            }
+            tooling.ts_core.runDevHost(allocator, init.io, framework_root, .{
+                .base_env = init.environ_map,
+                .script = try flagValue(args, "--script"),
+                .watch = flagBool(args, "--watch"),
+            }) catch |err| return failVerb(err);
+            return;
+        }
         if (try flagValue(args, "--target")) |dev_target| {
             // The mobile dev loop: build the embed library for the
             // simulator/emulator, wrap it in the toolkit-owned host,
@@ -336,20 +375,21 @@ fn usage() void {
         \\usage: native <command>
         \\
         \\commands:
-        \\  init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]   (default: native)
+        \\  init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]   (defaults: native + ts-core)
         \\  dev [dir] [--yes] [-D... zig build flags]      build a Debug binary and run it (markup hot reload)
         \\  dev [dir] --target ios [--device name]         build for the iOS simulator, install + launch, stream the log (experimental)
         \\  dev [dir] --target android [--device name]     build a debug APK, install + launch on an emulator via adb, stream the log (experimental)
+        \\  dev [dir] --core [--script msgs.ndjson] [--watch]   run the TypeScript core's logic loop under node (update/effects transcript; not a renderer)
         \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
-        \\  check [dir] [--strict]                         validate src/*.native markup and app.zon (uses zig-out/model-contract.zon when fresh)
+        \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.zon
         \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  eject component <name> [dir]                   write an owned copy of a library composite into src/components/
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
         \\  doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.zon]
         \\  bundle-assets [app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
         \\  dev [--manifest app.zon] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
         \\  package-windows [--output path] [--binary path]
         \\  package-linux [--output path] [--binary path]
@@ -421,6 +461,7 @@ fn failVerb(err: anyerror) anyerror!void {
     switch (err) {
         error.MissingManifest,
         error.MissingFramework,
+        error.CrossVolumeFramework,
         error.ZigUnavailable,
         error.DownloadDeclined,
         error.UnsupportedPlatform,
@@ -428,6 +469,14 @@ fn failVerb(err: anyerror) anyerror!void {
         error.ZigBuildFailed,
         error.InvalidManifest,
         error.MarkupCheckFailed,
+        error.BothCores,
+        error.MissingTsCore,
+        error.MissingNode,
+        error.MissingTranspiler,
+        error.BrokenToolchainInstall,
+        error.ToolchainVersionMismatch,
+        error.CoreCheckFailed,
+        error.DevHostFailed,
         error.HostCompileFailed,
         error.SimulatorUnavailable,
         error.SimulatorCommandFailed,
@@ -471,6 +520,8 @@ fn parseVerbArgs(allocator: std.mem.Allocator, args: []const []const u8, value_f
         }
         // Verb-specific boolean flags read by the caller via flagBool.
         if (std.mem.eql(u8, arg, "--strict")) continue;
+        if (std.mem.eql(u8, arg, "--core")) continue;
+        if (std.mem.eql(u8, arg, "--watch")) continue;
         if (std.mem.startsWith(u8, arg, "-D") or std.mem.startsWith(u8, arg, "--release")) {
             try forwarded.append(allocator, arg);
             continue;
@@ -505,10 +556,29 @@ fn enterAppDir(io: std.Io, dir: []const u8) !void {
 /// bindings, iterables, message tags, and expression types against the
 /// app's actual Model/Msg, and reports unused model state as warnings
 /// (--strict promotes warnings to failures).
-fn runCheck(allocator: std.mem.Allocator, io: std.Io, strict: bool) !void {
+fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, strict: bool) !void {
     if (!tooling.buildgraph.fileExists(io, "app.zon")) {
         std.debug.print("no app.zon here — `native check` runs inside an app directory (or pass one: `native check path/to/app`)\n", .{});
         return error.MissingManifest;
+    }
+
+    // The core tier first: a TypeScript core runs the @native-sdk/core checker
+    // (subset rules + tsc), whose NS diagnostics surface verbatim - the
+    // same teaching UX Zig apps get from `zig build`/`native test`.
+    const core_tree = tooling.ts_core.detect(io);
+    if (core_tree == .both) return tooling.ts_core.failBothCores();
+    if (core_tree == .ts) {
+        const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
+            std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+            return error.MissingFramework;
+        };
+        defer allocator.free(framework_root);
+        // Self-heal the editor surface first: node_modules/@native-sdk/core
+        // (the pre-publish copy stock tsc resolves) refreshes whenever it is
+        // missing or version-skewed vs the SDK — one info line, never a
+        // check failure.
+        tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
+        try tooling.ts_core.checkCore(allocator, io, env_map, framework_root);
     }
 
     var markup_files: std.ArrayList([]const u8) = .empty;
@@ -523,9 +593,21 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, strict: bool) !void {
     const result = try tooling.manifest.validateFile(allocator, io, "app.zon");
     tooling.manifest.printDiagnostic(result);
     if (!result.ok) return error.InvalidManifest;
+    // The build-graph web-layer inference, surfaced where authors look:
+    // whether this app ships the embedded web layer, and why. `check`
+    // takes no engine flag, so the manifest's own engine is the resolved
+    // engine here.
+    const metadata = try tooling.manifest.readMetadata(allocator, io, "app.zon");
+    if (tooling.manifest.webLayerFromManifest(metadata)) |layer| {
+        std.debug.print("web layer: {s} ({s})\n", .{ if (layer.enabled) "included" else "none", layer.sourceText() });
+    } else |_| {
+        // Contradictions and invalid values were already rejected by the
+        // validation pass above; nothing more to add here.
+    }
     const checked_markup = markup_files.items.len;
     const contract_note: []const u8 = if (outcome.contract_checked) " against the model contract" else "";
-    std.debug.print("checked {d} markup file{s}{s} and app.zon\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note });
+    const core_note: []const u8 = if (core_tree == .ts) " and src/core.ts (subset checker clean)" else "";
+    std.debug.print("checked {d} markup file{s}{s}, app.zon{s}\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note, core_note });
     if (strict and outcome.warnings > 0) {
         std.debug.print("{d} warning{s} promoted to errors (--strict)\n", .{ outcome.warnings, if (outcome.warnings == 1) "" else "s" });
         return error.MarkupCheckFailed;
@@ -645,6 +727,11 @@ fn iosPackageLibrary(allocator: std.mem.Allocator, io: std.Io, env_map: *std.pro
                 "  build it first (`zig build lib -Dtarget={s}`) or pass --binary <path>; the app must expose a mobile UiApp (`mobileOptions`)\n", .{tooling.ios.LibSlice.device.zigTriple()});
             return null;
         },
+        // Cross-volume SDK: the junction bridge failed, so the generated
+        // host project could not build against the SDK either — a
+        // libraryless project would ship broken. The teaching message is
+        // already on screen; fail the whole package verb without a trace.
+        error.CrossVolumeFramework => std.process.exit(1),
         else => return err,
     };
 }
@@ -665,6 +752,11 @@ fn androidPackageLibrary(allocator: std.mem.Allocator, io: std.Io, env_map: *std
                 "  build it first (`zig build lib -Dtarget={s}`) or pass --binary <path>; the app must expose a mobile UiApp (`mobileOptions`)\n", .{tooling.android.zig_triple});
             return null;
         },
+        // Cross-volume SDK: the junction bridge failed, so the generated
+        // host project could not build against the SDK either — a
+        // libraryless project would ship broken. The teaching message is
+        // already on screen; fail the whole package verb without a trace.
+        error.CrossVolumeFramework => std.process.exit(1),
         else => return err,
     };
 }
@@ -725,12 +817,15 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
         if (std.mem.startsWith(u8, arg, "--")) {
             if (std.mem.eql(u8, arg, "--frontend") or
                 std.mem.eql(u8, arg, "--framework") or
+                std.mem.eql(u8, arg, "--template") or
+                std.mem.eql(u8, arg, "--script") or
                 std.mem.eql(u8, arg, "--manifest") or
                 std.mem.eql(u8, arg, "--target") or
                 std.mem.eql(u8, arg, "--output") or
                 std.mem.eql(u8, arg, "--binary") or
                 std.mem.eql(u8, arg, "--assets") or
                 std.mem.eql(u8, arg, "--web-engine") or
+                std.mem.eql(u8, arg, "--web-layer") or
                 std.mem.eql(u8, arg, "--cef-dir") or
                 std.mem.eql(u8, arg, "--signing") or
                 std.mem.eql(u8, arg, "--identity") or

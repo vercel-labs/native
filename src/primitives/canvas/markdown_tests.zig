@@ -48,6 +48,42 @@ fn countKind(widget: canvas.Widget, kind: canvas.WidgetKind) usize {
     return count;
 }
 
+fn findKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
+    if (widget.kind == kind) return widget;
+    for (widget.children) |child| {
+        if (findKind(child, kind)) |found| return found;
+    }
+    return null;
+}
+
+fn appendParagraphText(widget: canvas.Widget, out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator) !void {
+    if (widget.kind == .text and widget.spans.len > 0) {
+        try out.appendSlice(allocator, widget.text);
+        return;
+    }
+    for (widget.children) |child| try appendParagraphText(child, out, allocator);
+}
+
+fn hasSpan(widget: canvas.Widget, text: []const u8, color: ?canvas.TextSpanColor) bool {
+    for (widget.spans) |span| {
+        if (std.mem.eql(u8, span.text, text) and span.color == color) return true;
+    }
+    for (widget.children) |child| {
+        if (hasSpan(child, text, color)) return true;
+    }
+    return false;
+}
+
+fn allSpansMonospace(widget: canvas.Widget) bool {
+    for (widget.spans) |span| {
+        if (!span.monospace) return false;
+    }
+    for (widget.children) |child| {
+        if (!allSpansMonospace(child)) return false;
+    }
+    return true;
+}
+
 fn findParagraphContaining(widget: canvas.Widget, fragment: []const u8) ?canvas.Widget {
     if (widget.kind == .text and widget.spans.len > 0 and std.mem.indexOf(u8, widget.text, fragment) != null) return widget;
     for (widget.children) |child| {
@@ -68,6 +104,18 @@ fn findKindLabel(widget: canvas.Widget, kind: canvas.WidgetKind, label: []const 
     if (widget.kind == kind and (std.mem.eql(u8, widget.semantics.label, label) or std.mem.eql(u8, widget.text, label))) return widget;
     for (widget.children) |child| {
         if (findKindLabel(child, kind, label)) |found| return found;
+    }
+    return null;
+}
+
+fn findRowWithDirectParagraph(widget: canvas.Widget, fragment: []const u8) ?canvas.Widget {
+    if (widget.kind == .row) {
+        for (widget.children) |child| {
+            if (child.kind == .text and child.spans.len > 0 and std.mem.indexOf(u8, child.text, fragment) != null) return widget;
+        }
+    }
+    for (widget.children) |child| {
+        if (findRowWithDirectParagraph(child, fragment)) |found| return found;
     }
     return null;
 }
@@ -144,11 +192,103 @@ test "markdown maps lists, task lists, code fences, quotes, and rules" {
     try testing.expect(findParagraphContaining(tree.root, "one") != null);
     try testing.expect(findParagraphContaining(tree.root, "quoted wisdom") != null);
     try testing.expectEqual(@as(usize, 2), countKind(tree.root, .separator));
+    // The row keeps stretch alignment for wrapped paragraph height, while
+    // a leading column pins the marker itself to the first-line edge.
+    const bullet_row = findRowWithDirectParagraph(tree.root, "first").?;
+    const ordered_row = findRowWithDirectParagraph(tree.root, "one").?;
+    try testing.expectEqual(canvas.WidgetCrossAlignment.stretch, bullet_row.layout.cross_alignment);
+    try testing.expectEqual(canvas.WidgetKind.column, bullet_row.children[0].kind);
+    try testing.expectEqualStrings("•", bullet_row.children[0].children[0].text);
+    try testing.expectEqual(canvas.WidgetCrossAlignment.stretch, ordered_row.layout.cross_alignment);
+    try testing.expectEqual(canvas.WidgetKind.column, ordered_row.children[0].kind);
+    try testing.expectEqualStrings("1.", ordered_row.children[0].children[0].text);
 
-    // The fenced block is a panel wrapping a mono paragraph.
-    try testing.expectEqual(@as(usize, 1), countKind(tree.root, .panel));
+    // Fences use the same deliberately bare code component.
+    try testing.expectEqual(@as(usize, 0), countKind(tree.root, .panel));
     const code = findParagraphContaining(tree.root, "const x = 1;").?;
     try testing.expect(code.spans[0].monospace);
+    try testing.expectEqual(@as(?canvas.TextSpanColor, .syntax_keyword), code.spans[0].color);
+}
+
+test "language-tagged code fences highlight tokens and preserve indentation" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\```zig
+        \\pub fn main() void {
+        \\    const message = "hello";
+        \\    // keep this indentation
+        \\    return 42;
+        \\}
+        \\```
+    , .{});
+
+    const code = findParagraphContaining(tree.root, "pub fn main() void").?;
+    var source_text: std.ArrayListUnmanaged(u8) = .empty;
+    defer source_text.deinit(testing.allocator);
+    try appendParagraphText(code, &source_text, testing.allocator);
+    try testing.expectEqualStrings(
+        "pub fn main() void {\n    const message = \"hello\";\n    // keep this indentation\n    return 42;\n}",
+        source_text.items,
+    );
+    try testing.expect(allSpansMonospace(code));
+    try testing.expect(hasSpan(code, "pub", .syntax_keyword));
+    try testing.expect(hasSpan(code, "void", .syntax_literal));
+    try testing.expect(hasSpan(code, "\"hello\"", .syntax_literal));
+    try testing.expect(hasSpan(code, "// keep this indentation", .syntax_comment));
+    try testing.expect(hasSpan(code, "42", .syntax_literal));
+
+    const indented = findParagraphContaining(code, "const message").?;
+    var runs: [text_spans.max_text_span_runs_per_paragraph]text_spans.TextSpanRun = undefined;
+    const layout = text_spans.layoutTextSpans(indented.spans, .{ .size = 14, .max_width = 10_000 }, &runs);
+    var indented_keyword_x: ?f32 = null;
+    for (layout.runs) |run| {
+        if (run.line_index == 1 and std.mem.eql(u8, run.text, "const")) indented_keyword_x = run.x;
+    }
+    // Four source spaces occupy real horizontal advance before `const`.
+    try testing.expect(indented_keyword_x != null);
+    try testing.expectApproxEqAbs(@as(f32, 4 * 14 * 0.6), indented_keyword_x.?, 0.01);
+}
+
+test "unrecognized code-fence languages remain plain monospace" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\```made-up-language
+        \\alpha 42
+        \\```
+    , .{});
+
+    const code = findParagraphContaining(tree.root, "alpha 42").?;
+    try testing.expectEqual(@as(usize, 1), code.spans.len);
+    try testing.expect(code.spans[0].monospace);
+    try testing.expectEqual(@as(?canvas.TextSpanColor, .syntax_plain), code.spans[0].color);
+}
+
+test "per-line syntax highlighting does not drop fenced code" {
+    const code_source =
+        "const a0 = 0;\n" ++
+        "const a1 = 1;\n" ++
+        "const a2 = 2;\n" ++
+        "const a3 = 3;\n" ++
+        "const a4 = 4;\n" ++
+        "const a5 = 5;\n" ++
+        "const a6 = 6;\n" ++
+        "const a7 = 7;\n" ++
+        "const a8 = 8;\n" ++
+        "const a9 = 9;\n" ++
+        "const a10 = 10;\n" ++
+        "const a11 = 11;";
+    const source = "```zig\n" ++ code_source ++ "\n```";
+
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(source, .{});
+    var rendered: std.ArrayListUnmanaged(u8) = .empty;
+    defer rendered.deinit(testing.allocator);
+    try appendParagraphText(tree.root, &rendered, testing.allocator);
+    try testing.expectEqualStrings(code_source, rendered.items);
+    try testing.expect(hasSpan(tree.root, "const", .syntax_keyword));
 }
 
 test "details blocks are caller-controlled collapsibles" {
@@ -339,7 +479,7 @@ test "the README-shaped fixture renders through the mapper and the reference ren
     const cli_link = findRoleLabel(tree.root, .link, "`flg`").?;
     const open_msg = tree.msgForPointer(cli_link.id, .up).?;
     try testing.expectEqualStrings("https://example.com/flg", open_msg.open_url);
-    try testing.expect(countKind(tree.root, .panel) >= 2); // fenced code blocks
+    try testing.expectEqual(@as(usize, 0), countKind(tree.root, .panel));
 
     // Layout + emit + reference-render the document; the pixel signature is
     // the golden. Estimator-driven and provider-free: deterministic.
@@ -391,6 +531,12 @@ test "the README-shaped fixture renders through the mapper and the reference ren
     const surface = try canvas.ReferenceRenderSurface.init(width, height, pixels);
     try surface.renderPass(frame.renderPass(), canvas.Color.rgb8(255, 255, 255));
 
+    // Deliberate golden updates can be reviewed as pixels before pinning
+    // the new signature.
+    if (markdownGoldenDumpRequested()) {
+        try dumpMarkdownGoldenPng("/tmp/markdown-shots/readme.png", width, height, pixels);
+    }
+
     // Golden: byte-identical reference rendering of the README fixture.
     try testing.expectEqual(markdown_document_reference_signature, support.referenceSurfaceSignature(pixels));
     try support.expectVisiblePixel(surface.pixelRgba8(24, 32));
@@ -402,11 +548,27 @@ test "the README-shaped fixture renders through the mapper and the reference ren
 // scales, wrapped bullets and em-dash spacing at the face's real
 // advances, real sans and mono outlines (fixed-pitch runs sit in their
 // 0.6 em cells), GFM tables as borderless cells on hairline row
-// separators, fenced-code panels, and near-black underlined links.
+// separators, bare fenced code with preserved source indentation and
+// language-token colors, and near-black underlined links.
 // Update deliberately when markdown rendering changes, reviewing the
 // rendered pixels first (see reference_tests.zig conventions).
-const markdown_document_reference_signature: u64 = 4124710367581899536;
+const markdown_document_reference_signature: u64 = 5787917808851547223;
 
+fn markdownGoldenDumpRequested() bool {
+    if (comptime !@import("builtin").link_libc) return false;
+    return std.c.getenv("MARKDOWN_GOLDEN_DUMP") != null;
+}
+
+fn dumpMarkdownGoldenPng(path: []const u8, width: usize, height: usize, pixels: []const u8) !void {
+    const io = testing.io;
+    std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path) orelse ".") catch {};
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    var write_buffer: [4096]u8 = undefined;
+    var writer = file.writer(io, &write_buffer);
+    try canvas.png.writeRgba8(&writer.interface, width, height, pixels);
+    try writer.interface.flush();
+}
 
 test "bare URLs autolink at word boundaries with trailing punctuation trimmed" {
     var doc = TestDoc.init();

@@ -2273,6 +2273,57 @@ test "canvas render pass builds gpu packet for backend handoff" {
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"effect\":{\"kind\":\"blur\",\"rect\":[44,36,20,20],\"radius\":4}") != null);
 }
 
+test "gpu packet preserves authoritative text glyph positions" {
+    const glyphs = [_]Glyph{.{
+        .id = 65,
+        .x = 9,
+        .y = 13,
+        .advance = 11,
+        .text_len = 1,
+    }};
+    const bounds = geometry.RectF.init(4, 4, 24, 16);
+    const render_commands = [_]RenderCommand{.{
+        .command = .{ .draw_text = .{
+            .id = 1,
+            .font_id = 7,
+            .size = 12,
+            .origin = geometry.PointF.init(4, 16),
+            .color = Color.rgb8(15, 23, 42),
+            .text = "A",
+            .glyphs = &glyphs,
+        } },
+        .id = 1,
+        .local_bounds = bounds,
+        .bounds = bounds,
+    }};
+
+    var gpu_commands: [1]CanvasGpuCommand = undefined;
+    var planner = CanvasGpuPacketPlanner.init(&gpu_commands);
+    const packet = try planner.build(.{
+        .full_repaint = true,
+        .surface_size = geometry.SizeF.init(32, 24),
+        .commands = &render_commands,
+    });
+
+    try std.testing.expect(packet.fullyRepresentable());
+    try std.testing.expectEqual(@as(usize, 0), packet.unsupported_command_count);
+    try std.testing.expectEqual(CanvasGpuCommandKind.draw_text, packet.commands[0].kind);
+    try std.testing.expectEqualDeep(glyphs[0], packet.commands[0].text.?.glyphs[0]);
+
+    var binary_buffer: [512]u8 = undefined;
+    var binary_writer = std.Io.Writer.fixed(&binary_buffer);
+    try packet.writeBinary(&binary_writer);
+    // id=65, no font override, final pen=(origin.x, origin.y + glyph.y),
+    // advance=11 — the compact v5 record DirectWrite consumes.
+    const positioned_glyph_wire = [_]u8{
+        0x41, 0x00, 0x00,
+        0x00, 0x00, 0x80, 0x40,
+        0x00, 0x00, 0xe8, 0x41,
+        0x00, 0x00, 0x30, 0x41,
+    };
+    try std.testing.expect(std.mem.indexOf(u8, binary_writer.buffered(), &positioned_glyph_wire) != null);
+}
+
 test "canvas gpu packet skips clean passes and reports output overflow" {
     var clean_gpu_commands: [1]CanvasGpuCommand = undefined;
     const clean_packet = try (CanvasRenderPass{}).gpuPacket(&clean_gpu_commands);
@@ -2847,14 +2898,16 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     try std.testing.expectEqual(@as(usize, 1), frame.changes.len);
     try std.testing.expectEqual(DiffKind.changed, frame.changes[0].kind);
     try std.testing.expectEqual(@as(?ObjectId, 1), frame.changes[0].id);
-    try expectRect(geometry.RectF.init(0, 0, 50, 40), frame.dirty_bounds);
+    // Changed extents' union, inflated by the one-device-pixel AA
+    // bleed and clipped to the 50x50 surface.
+    try expectRect(geometry.RectF.init(0, 0, 50, 41), frame.dirty_bounds);
 
     const render_pass = frame.renderPass();
     try std.testing.expect(render_pass.requiresRender());
     try std.testing.expectEqual(CanvasRenderPassLoadAction.load, render_pass.loadAction());
     try std.testing.expectEqual(@as(usize, 2), render_pass.commandCount());
     try std.testing.expectEqual(@as(usize, 1), render_pass.batchCount());
-    try expectRect(geometry.RectF.init(0, 0, 50, 40), render_pass.scissorBounds());
+    try expectRect(geometry.RectF.init(0, 0, 50, 41), render_pass.scissorBounds());
 
     var gpu_commands: [2]CanvasGpuCommand = undefined;
     const packet = try frame.gpuPacket(&gpu_commands);
@@ -2867,28 +2920,70 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     try std.testing.expectEqual(packet.commandCount(), packet_summary.command_count);
     try std.testing.expectEqual(packet.cachedResourceCommandCount(), packet_summary.cached_resource_command_count);
     try std.testing.expectEqual(packet.unsupported_command_count, packet_summary.unsupported_command_count);
-    try expectRect(geometry.RectF.init(0, 0, 50, 40), packet.scissor.?);
+    try expectRect(geometry.RectF.init(0, 0, 50, 41), packet.scissor.?);
     var packet_json_buffer: [2048]u8 = undefined;
     var packet_json_writer = std.Io.Writer.fixed(&packet_json_buffer);
     try packet.writeJson(&packet_json_writer);
     const packet_json = packet_json_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"loadAction\":\"load\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"scissorBounds\":[0,0,50,40]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"scissorBounds\":[0,0,50,41]") != null);
 
     const profile = frame.profile();
     try std.testing.expect(profile.requires_render);
     try std.testing.expect(!profile.full_repaint);
     try std.testing.expectEqual(@as(f32, 2500), profile.surface_area);
-    try std.testing.expectEqual(@as(f32, 2000), profile.dirty_area);
-    try std.testing.expectEqual(@as(f32, 0.8), profile.dirty_ratio);
+    try std.testing.expectEqual(@as(f32, 2050), profile.dirty_area);
+    try std.testing.expectEqual(@as(f32, 2050.0 / 2500.0), profile.dirty_ratio);
     try std.testing.expectEqual(CanvasFrameProfileRisk.high, profile.risk);
 
     var profile_json_buffer: [1024]u8 = undefined;
     var profile_json_writer = std.Io.Writer.fixed(&profile_json_buffer);
     try frame.writeProfileJson(&profile_json_writer);
     const profile_json = profile_json_writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"dirtyArea\":2000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"dirtyArea\":2050") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"risk\":\"high\"") != null);
+}
+
+test "canvas frame plan fully repaints damage inside a backdrop blur apron" {
+    const previous_commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(44, 15, 4, 4), .fill = .{ .color = Color.rgb8(255, 0, 0) } } },
+        .{ .push_clip = .{ .id = 2, .rect = geometry.RectF.init(50, 10, 20, 20) } },
+        .{ .blur = .{ .id = 3, .rect = geometry.RectF.init(50, 10, 20, 20), .radius = 8 } },
+        .pop_clip,
+    };
+    const next_commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(44, 15, 4, 4), .fill = .{ .color = Color.rgb8(0, 0, 255) } } },
+        previous_commands[1],
+        previous_commands[2],
+        previous_commands[3],
+    };
+
+    var render_commands: [2]RenderCommand = undefined;
+    var render_batches: [2]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [2]DiffChange = undefined;
+    const frame = try (DisplayList{ .commands = &next_commands }).framePlan(.{ .commands = &previous_commands }, .{
+        .surface_size = geometry.SizeF.init(100, 40),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    // The changed fill ends at x=48, before the blur output begins at
+    // x=50, but inside its radius-8 read footprint. Incremental replay
+    // cannot reconstruct the pre-blur backdrop outside its scissor.
+    try std.testing.expect(frame.full_repaint);
+    try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
+    try expectRect(geometry.RectF.init(0, 0, 100, 40), frame.dirty_bounds);
+    try std.testing.expectEqual(CanvasRenderPassLoadAction.clear, frame.renderPass().loadAction());
 }
 
 test "canvas frame plan leaves unchanged retained frame clean" {
@@ -2969,7 +3064,8 @@ test "canvas frame plan applies render overrides without display list changes" {
     try std.testing.expect(!frame.full_repaint);
     try std.testing.expect(frame.requiresRender());
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
-    try expectRect(geometry.RectF.init(0, 0, 20, 10), frame.dirty_bounds);
+    // Override extents' union, inflated by the AA bleed and clipped.
+    try expectRect(geometry.RectF.init(0, 0, 21, 11), frame.dirty_bounds);
     try std.testing.expectEqual(@as(usize, 1), frame.render_plan.commandCount());
     try std.testing.expectEqual(@as(f32, 0.5), frame.render_plan.commands[0].opacity);
     try std.testing.expectEqualDeep(Affine.translate(10, 0), frame.render_plan.commands[0].transform);
@@ -2977,7 +3073,7 @@ test "canvas frame plan applies render overrides without display list changes" {
 
     const render_pass = frame.renderPass();
     try std.testing.expectEqual(CanvasRenderPassLoadAction.load, render_pass.loadAction());
-    try expectRect(geometry.RectF.init(0, 0, 20, 10), render_pass.scissorBounds());
+    try expectRect(geometry.RectF.init(0, 0, 21, 11), render_pass.scissorBounds());
 
     var pixels: [40 * 20 * 4]u8 = undefined;
     const surface = try ReferenceRenderSurface.init(40, 20, &pixels);
@@ -3053,7 +3149,7 @@ test "canvas render animations sample overrides for frame planning" {
     });
 
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
-    try expectRect(geometry.RectF.init(0, 0, 20, 10), frame.dirty_bounds);
+    try expectRect(geometry.RectF.init(0, 0, 21, 11), frame.dirty_bounds);
     try std.testing.expectEqual(@as(f32, 0.5), frame.render_plan.commands[0].opacity);
     try std.testing.expectEqualDeep(Affine.translate(10, 0), frame.render_plan.commands[0].transform);
 

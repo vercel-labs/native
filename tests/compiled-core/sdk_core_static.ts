@@ -1,0 +1,556 @@
+// The compiled-core stage's restatement of @native-sdk/core: the SAME
+// inert Cmd/Sub data values the reference module's factories build
+// (packages/core/sdk/core.ts — the transpiler lane lowers references by
+// identity and never runs that module's code), restated inside an
+// external toolchain's static surface: no overloaded members, no
+// generic value instantiation — the routing/arm-name rigor those
+// generics carry is tsc's job in the authoring lane, and the paired
+// e2e batteries hold every produced byte to the transpiler lane's
+// output. Staged as ./sdk/core.ts by tests/compiled-core/build_core.sh.
+
+export function asciiBytes(s: string): Uint8Array {
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+export type Msgish = { readonly kind: string };
+
+export interface EnvMsg<M extends Msgish> {
+  readonly env: string;
+  readonly msg: M["kind"];
+}
+
+export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
+export type ImageState =
+  | "loaded"
+  | "rejected"
+  | "not_found"
+  | "io_failed"
+  | "connect_failed"
+  | "tls_failed"
+  | "protocol_failed"
+  | "timed_out"
+  | "http_status"
+  | "cancelled"
+  | "too_large"
+  | "unsupported"
+  | "decode_failed"
+  | "registry_full"
+  | "alloc_failed";
+export type ChannelState = "data" | "closed" | "rejected";
+export type PtyState = "output" | "exit";
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+
+export type HostScalar = number | boolean | Uint8Array;
+export type HostRecord = { readonly [field: string]: HostScalar };
+
+export interface RequestRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface WriteRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface FetchRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface SpawnRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly stdin?: Uint8Array;
+  readonly line?: M["kind"];
+  readonly exit: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface SpawnCollectRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly stdin?: Uint8Array;
+  readonly collect: true;
+  readonly exit: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface AudioSource {
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly cachePath?: Uint8Array;
+  readonly expectedBytes?: number;
+}
+
+export interface AudioRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
+export interface VideoSource {
+  readonly surface: number;
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly autoplay?: boolean;
+  readonly loop?: boolean;
+  readonly muted?: boolean;
+}
+
+export interface VideoRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
+export interface ImageSource {
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly cachePath?: Uint8Array;
+  readonly expectedBytes?: number;
+}
+
+export interface ImageRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
+export interface ChannelRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
+export interface PtyRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly cols?: number;
+  readonly rows?: number;
+  readonly term?: string;
+  readonly event: M["kind"];
+}
+
+export type FetchMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD";
+
+export interface FetchSpec {
+  readonly url: Uint8Array;
+  readonly method?: FetchMethod;
+  readonly headers?: { readonly [name: string]: string | Uint8Array };
+  readonly body?: Uint8Array;
+  readonly timeoutMs?: number;
+}
+
+/// The inert command data — the reference module's Cmd<M> union with
+/// the type parameter erased (M constrains only the factories' arm-name
+/// checking, never the data).
+export type CmdData =
+  | { readonly op: "none" }
+  | { readonly op: "persist" }
+  | { readonly op: "now"; readonly msgKind: string }
+  | { readonly op: "host"; readonly name: string; readonly args: readonly number[] }
+  | { readonly op: "host_bytes"; readonly name: string; readonly payload: Uint8Array }
+  | {
+      readonly op: "request";
+      readonly name: string;
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly payload: Uint8Array;
+    }
+  | { readonly op: "cancel"; readonly key: string }
+  | {
+      readonly op: "read_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "write_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "fetch";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly method: FetchMethod;
+      readonly timeoutMs: number;
+      readonly url: Uint8Array;
+      readonly headers: readonly { readonly name: string; readonly value: string | Uint8Array }[];
+      readonly body: Uint8Array;
+    }
+  | { readonly op: "clip_write"; readonly bytes: Uint8Array }
+  | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
+  | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
+  | {
+      readonly op: "spawn";
+      readonly key: string;
+      readonly lineKind: string;
+      readonly exitKind: string;
+      readonly errKind: string;
+      readonly collect: boolean;
+      readonly argv: readonly Uint8Array[];
+      readonly stdin: Uint8Array;
+    }
+  | {
+      readonly op: "audio_play";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly cachePath: Uint8Array;
+      readonly expectedBytes: number;
+    }
+  | {
+      readonly op: "audio_ctl";
+      readonly key: string;
+      readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
+      readonly value: number;
+    }
+  | {
+      readonly op: "video_load";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly surface: number;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly autoplay: boolean;
+      readonly loop: boolean;
+      readonly muted: boolean;
+    }
+  | {
+      readonly op: "video_ctl";
+      readonly key: string;
+      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+      readonly value: number;
+    }
+  | { readonly op: "window_show"; readonly label: string }
+  | { readonly op: "quit_app" }
+  | {
+      readonly op: "image_load";
+      readonly id: number;
+      readonly eventKind: string;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly cachePath: Uint8Array;
+      readonly expectedBytes: number;
+    }
+  | { readonly op: "image_cancel"; readonly id: number }
+  | { readonly op: "image_unregister"; readonly id: number }
+  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
+  | { readonly op: "channel_close"; readonly key: number }
+  | {
+      readonly op: "pty_spawn";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly cols: number;
+      readonly rows: number;
+      readonly term: string;
+      readonly argv: readonly Uint8Array[];
+    }
+  | { readonly op: "pty_write"; readonly key: string; readonly bytes: Uint8Array }
+  | { readonly op: "pty_resize"; readonly key: string; readonly cols: number; readonly rows: number }
+  | { readonly op: "pty_kill"; readonly key: string }
+  | { readonly op: "batch"; readonly cmds: readonly CmdData[] };
+
+export type Cmd<M extends Msgish> = CmdData;
+
+/// The wire encoding of a host record payload — byte-identical to the
+/// reference module's hostRecordBytes (fields sorted by name, no field
+/// headers; number -> f64 LE, boolean -> one byte, bytes -> u32 LE
+/// length + bytes).
+export function hostRecordBytes(payload: HostRecord): Uint8Array {
+  const names = Object.keys(payload).sort();
+  let len = 0;
+  for (const n of names) {
+    const v = payload[n]!;
+    if (typeof v === "number") len += 8;
+    else if (typeof v === "boolean") len += 1;
+    else len += 4 + v.length;
+  }
+  const out = new Uint8Array(len);
+  let off = 0;
+  for (const n of names) {
+    const v = payload[n]!;
+    if (typeof v === "number") {
+      const buf = Buffer.alloc(8);
+      buf.writeDoubleLE(v, 0);
+      for (let i = 0; i < 8; i++) out[off + i] = buf[i]!;
+      off += 8;
+    } else if (typeof v === "boolean") {
+      out[off] = v ? 1 : 0;
+      off += 1;
+    } else {
+      out[off] = v.length % 256;
+      out[off + 1] = Math.floor(v.length / 256) % 256;
+      out[off + 2] = Math.floor(v.length / 65536) % 256;
+      out[off + 3] = Math.floor(v.length / 16777216) % 256;
+      off += 4;
+      for (let i = 0; i < v.length; i++) out[off + i] = v[i]!;
+      off += v.length;
+    }
+  }
+  return out;
+}
+
+/// A host command by name — the reference module's overloaded `host`
+/// restated as the raw-bytes form (the whole corpus's usage; overloads,
+/// rest-args, and the `Uint8Array | HostRecord` runtime discrimination
+/// all sit outside the static surface). The record and scalar-args
+/// forms stay reachable through `hostRecord`/`hostArgs`, byte-identical
+/// data either way.
+function hostCmd(name: string, payload: Uint8Array): CmdData {
+  return { op: "host_bytes", name, payload: payload };
+}
+
+export function hostRecord(name: string, payload: HostRecord): CmdData {
+  return { op: "host_bytes", name, payload: hostRecordBytes(payload) };
+}
+
+export function hostArgs(name: string, args: readonly number[]): CmdData {
+  return { op: "host", name, args };
+}
+
+export const Cmd = {
+  none: { op: "none" } as CmdData,
+
+  persist(): CmdData {
+    return { op: "persist" };
+  },
+
+  now(msgKind: string): CmdData {
+    return { op: "now", msgKind };
+  },
+
+  host: hostCmd,
+
+  request(name: string, payload: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return {
+      op: "request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      payload: payload,
+    };
+  },
+
+  cancel(key: string): CmdData {
+    return { op: "cancel", key };
+  },
+
+  readFile(path: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "read_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+
+  writeFile(path: Uint8Array, bytes: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+
+  fetch(spec: FetchSpec, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    const names = Object.keys(spec.headers ?? {}).sort();
+    const headers: { readonly name: string; readonly value: string | Uint8Array }[] = [];
+    for (const n of names) {
+      headers.push({ name: n, value: spec.headers![n]! });
+    }
+    return {
+      op: "fetch",
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      method: spec.method ?? "GET",
+      timeoutMs: spec.timeoutMs ?? 0,
+      url: spec.url,
+      headers: headers,
+      body: spec.body ?? new Uint8Array(0),
+    };
+  },
+
+  clipboardWrite(bytes: Uint8Array): CmdData {
+    return { op: "clip_write", bytes };
+  },
+
+  clipboardRead(route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "clip_read", key: route.key ?? "", okKind: route.ok, errKind: route.err };
+  },
+
+  delay(key: string, ms: number, msgKind: string): CmdData {
+    return { op: "delay", key, afterMs: ms, msgKind };
+  },
+
+  spawn(
+    argv: readonly Uint8Array[],
+    route: { readonly key?: string; readonly stdin?: Uint8Array; readonly line?: string; readonly collect?: boolean; readonly exit: string; readonly err: string },
+  ): CmdData {
+    const collect = route.collect === true;
+    return {
+      op: "spawn",
+      key: route.key ?? "",
+      lineKind: collect ? "" : (route.line ?? ""),
+      exitKind: route.exit,
+      errKind: route.err,
+      collect,
+      argv,
+      stdin: route.stdin ?? new Uint8Array(0),
+    };
+  },
+
+  audioPlay(key: string, source: AudioSource, route: { readonly event: string }): CmdData {
+    return {
+      op: "audio_play",
+      key,
+      eventKind: route.event,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      cachePath: source.cachePath ?? new Uint8Array(0),
+      expectedBytes: source.expectedBytes ?? 0,
+    };
+  },
+
+  audioPause(key: string): CmdData {
+    return { op: "audio_ctl", key, verb: "pause", value: 0 };
+  },
+
+  audioResume(key: string): CmdData {
+    return { op: "audio_ctl", key, verb: "resume", value: 0 };
+  },
+
+  audioStop(key: string): CmdData {
+    return { op: "audio_ctl", key, verb: "stop", value: 0 };
+  },
+
+  audioSeek(key: string, ms: number): CmdData {
+    return { op: "audio_ctl", key, verb: "seek", value: ms };
+  },
+
+  audioSetVolume(key: string, volume: number): CmdData {
+    return { op: "audio_ctl", key, verb: "volume", value: volume };
+  },
+
+  videoLoad(key: string, source: VideoSource, route: { readonly event: string }): CmdData {
+    return {
+      op: "video_load",
+      key,
+      eventKind: route.event,
+      surface: source.surface,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      autoplay: source.autoplay ?? true,
+      loop: source.loop ?? false,
+      muted: source.muted ?? false,
+    };
+  },
+
+  videoPlay(key: string): CmdData {
+    return { op: "video_ctl", key, verb: "play", value: 0 };
+  },
+
+  videoPause(key: string): CmdData {
+    return { op: "video_ctl", key, verb: "pause", value: 0 };
+  },
+
+  videoStop(key: string): CmdData {
+    return { op: "video_ctl", key, verb: "stop", value: 0 };
+  },
+
+  videoSeek(key: string, ms: number): CmdData {
+    return { op: "video_ctl", key, verb: "seek", value: ms };
+  },
+
+  videoSetVolume(key: string, volume: number): CmdData {
+    return { op: "video_ctl", key, verb: "volume", value: volume };
+  },
+
+  videoSetMuted(key: string, muted: boolean): CmdData {
+    return { op: "video_ctl", key, verb: "muted", value: muted ? 1 : 0 };
+  },
+
+  videoSetLoop(key: string, loop: boolean): CmdData {
+    return { op: "video_ctl", key, verb: "loop", value: loop ? 1 : 0 };
+  },
+
+  showWindow(label: string): CmdData {
+    return { op: "window_show", label };
+  },
+
+  quitApp(): CmdData {
+    return { op: "quit_app" };
+  },
+
+  imageLoad(id: number, source: ImageSource, route: { readonly event: string }): CmdData {
+    return {
+      op: "image_load",
+      id,
+      eventKind: route.event,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      cachePath: source.cachePath ?? new Uint8Array(0),
+      expectedBytes: source.expectedBytes ?? 0,
+    };
+  },
+
+  imageCancel(id: number): CmdData {
+    return { op: "image_cancel", id };
+  },
+
+  imageUnregister(id: number): CmdData {
+    return { op: "image_unregister", id };
+  },
+
+  channelOpen(key: number, route: { readonly event: string }): CmdData {
+    return { op: "channel_open", key, eventKind: route.event };
+  },
+
+  channelClose(key: number): CmdData {
+    return { op: "channel_close", key };
+  },
+
+  ptySpawn(argv: readonly Uint8Array[], route: { readonly key?: string; readonly cols?: number; readonly rows?: number; readonly term?: string; readonly event: string }): CmdData {
+    return {
+      op: "pty_spawn",
+      key: route.key ?? "",
+      eventKind: route.event,
+      cols: route.cols ?? 80,
+      rows: route.rows ?? 24,
+      term: route.term ?? "",
+      argv,
+    };
+  },
+
+  ptyWrite(key: string, bytes: Uint8Array): CmdData {
+    return { op: "pty_write", key, bytes };
+  },
+
+  ptyResize(key: string, cols: number, rows: number): CmdData {
+    return { op: "pty_resize", key, cols, rows };
+  },
+
+  ptyKill(key: string): CmdData {
+    return { op: "pty_kill", key };
+  },
+
+  batch(cmds: readonly CmdData[]): CmdData {
+    return { op: "batch", cmds };
+  },
+};
+
+export type SubData =
+  | { readonly op: "none" }
+  | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "batch"; readonly subs: readonly SubData[] };
+
+export type Sub<M extends Msgish> = SubData;
+
+export const Sub = {
+  none: { op: "none" } as SubData,
+
+  timer(key: string, everyMs: number, msgKind: string): SubData {
+    return { op: "timer", key, everyMs, msgKind };
+  },
+
+  batch(subs: readonly SubData[]): SubData {
+    return { op: "batch", subs };
+  },
+};

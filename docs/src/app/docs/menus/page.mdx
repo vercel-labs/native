@@ -1,0 +1,46 @@
+# Menus
+
+The Native SDK can configure native app menus from `app.zon` or typed Zig data. Menu items dispatch through the same command path as shortcuts, native controls, tray actions, and bridge commands.
+
+```zig
+.menus = .{
+    .{
+        .title = "View",
+        .items = .{
+            .{ .label = "Refresh", .command = "app.refresh", .key = "r", .modifiers = .{ "primary" } },
+            .{ .separator = true },
+        },
+    },
+},
+```
+
+Generated runners load `app.zon` menus automatically. Pass `menus` to `runWithOptions` when an app needs to override the manifest at runtime:
+
+```zig
+const view_items = [_]native_sdk.MenuItem{
+    .{
+        .label = "Refresh",
+        .command = "app.refresh",
+        .key = "r",
+        .modifiers = .{ .primary = true },
+    },
+};
+
+const menus = [_]native_sdk.Menu{
+    .{ .title = "View", .items = &view_items },
+};
+
+try runner.runWithOptions(app.app(), .{
+    .app_name = "native-shell",
+    .bundle_id = "dev.native_sdk.native_shell",
+    .menus = &menus,
+}, init);
+```
+
+When a user selects a command-backed menu item, the runtime emits `Event.command` with `source = .menu`, the active native `window_id`, and the item command name.
+
+The macOS, Linux, and Windows system-WebView backends apply configured menus as native app/window menus. Backends that do not implement native menus return `UnsupportedService` for non-empty menu lists.
+
+## Context menus
+
+Per-widget right-click menus are declared once and presented by the platform: the real OS menu opens at the pointer on all three desktops (`NSMenu` on macOS, `TrackPopupMenu` on Windows, `GtkPopoverMenu` on Linux); hosts without a native menu presenter (the mobile toolkit hosts and embed hosts today) mount the same declared items as an anchored canvas surface at the click point automatically. Markup declares them as a `<context-menu>` child of the pressable element; Zig views use `ElementOptions.context_menu`. Selections dispatch typed Msgs — see [Native UI](/docs/native-ui#native-scrolling-and-context-menus) for the authoring shapes and [Automation](/docs/automation) for driving them in tests (`widget-context-menu`).

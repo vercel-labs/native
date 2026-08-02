@@ -123,6 +123,20 @@ test "ui builder emits an engine-compatible widget tree" {
     try testing.expect(saw_button);
 }
 
+test "ui builder distinguishes inherited tab padding from an equal author value" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const inherited = ui.el(.tabs, .{}, .{});
+    try testing.expectEqual(@as(f32, 3), inherited.widget.layout.padding.top);
+    try testing.expect(inherited.widget.layout.padding_is_kind_default);
+
+    const explicit = ui.el(.tabs, .{ .padding = 3 }, .{});
+    try testing.expectEqual(@as(f32, 3), explicit.widget.layout.padding.top);
+    try testing.expect(!explicit.widget.layout.padding_is_kind_default);
+}
+
 test "structural ids are stable across rebuilds" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -321,6 +335,32 @@ test "keyboard events resolve activation and submit messages" {
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(checkbox.id, letter));
 }
 
+test "tree keyboard navigation can select without dispatching pointer activation" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.tree(.{}, .{
+        ui.listItem(.{
+            .on_press = .add,
+            .on_change = .load_more,
+            .semantics = .{ .role = .treeitem },
+        }, "main.zig"),
+    }));
+    const row = tree.root.children[0];
+
+    try testing.expectEqual(Msg.add, tree.msgForPointer(row.id, .up).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(row.id, .{
+        .phase = .key_down,
+        .key = "arrowdown",
+        .focus_moved = true,
+    }).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(row.id, .{
+        .phase = .key_down,
+        .key = "enter",
+    }).?);
+}
+
 test "textarea keyboard: enter edits a newline, submit rides the primary chord" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -352,6 +392,42 @@ test "textarea keyboard: enter edits a newline, submit rides the primary chord" 
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(textarea.id, cmd_shift_enter));
     const alt_enter = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter", .modifiers = .{ .alt = true } };
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(textarea.id, alt_enter));
+}
+
+test "single-line keyboard fallback derivation sanitizes line breaks like the runtime seam" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{ .gap = 8 }, .{
+        ui.el(.text_field, .{ .on_input = InboxUi.inputMsg(.draft) }, .{}),
+        ui.el(.textarea, .{ .on_input = InboxUi.inputMsg(.draft) }, .{}),
+    }));
+    const field = findByKind(tree.root, .text_field).?;
+    const textarea = findByKind(tree.root, .textarea).?;
+
+    // An un-stamped text_input event (a direct Tree consumer — nothing
+    // crossed the runtime) derives its insert locally, and the local
+    // derivation applies the SAME single-line sanitize rule the runtime
+    // seam stamps with: line breaks strip, so a model mirror can never
+    // hear bytes the retained editor would refuse.
+    const multi_line = canvas.WidgetKeyboardEvent{ .phase = .text_input, .text = "a\nb\r\nc" };
+    try testing.expectEqualStrings("abc", tree.msgForKeyboard(field.id, multi_line).?.draft.insert_text);
+    try testing.expectEqualStrings("a\nb\r\nc", tree.msgForKeyboard(textarea.id, multi_line).?.draft.insert_text);
+
+    // An insert that is ONLY breaks suppresses outright.
+    const bare_breaks = canvas.WidgetKeyboardEvent{ .phase = .text_input, .text = "\r\n" };
+    try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(field.id, bare_breaks));
+
+    // A STAMPED edit (the runtime already sanitized it) passes through.
+    const stamped = canvas.WidgetKeyboardEvent{ .phase = .key_down, .edit = .{ .insert_text = "clean" } };
+    try testing.expectEqualStrings("clean", tree.msgForKeyboard(field.id, stamped).?.draft.insert_text);
+
+    // History replay stamps retained bytes, not new input. A raw newline
+    // already present in a controlled single-line value must survive the
+    // app-side mirror unchanged.
+    const stamped_history = canvas.WidgetKeyboardEvent{ .phase = .key_down, .edit = .{ .insert_text = "\n" } };
+    try testing.expectEqualStrings("\n", tree.msgForKeyboard(field.id, stamped_history).?.draft.insert_text);
 }
 
 test "typed handlers imply accessibility actions" {
@@ -446,12 +522,12 @@ test "payload-carrying handlers build messages from edits and values" {
     };
     const feed = findByKind(scroll_tree.root, .scroll_view).?;
     const scrolled = scroll_tree.msgForScroll(feed.id, .{
-        .offset = 64,
-        .viewport_extent = 72,
-        .content_extent = 200,
+        .offset_y = 64,
+        .viewport_extent_y = 72,
+        .content_extent_y = 200,
     }).?.feed_scrolled;
-    try testing.expectEqual(@as(f32, 64), scrolled.offset);
-    try testing.expectEqual(@as(f32, 128), scrolled.maxOffset());
+    try testing.expectEqual(@as(f32, 64), scrolled.offset_y);
+    try testing.expectEqual(@as(f32, 128), scrolled.axis(.vertical).maxOffset());
     try testing.expectEqual(@as(?Msg, null), tree.msgForScroll(slider.id, .{}));
 
     // Widgets without payload handlers dispatch nothing for edits.
@@ -1154,6 +1230,139 @@ test "a bound press handler makes layout containers hit targets" {
     try testing.expectEqual(@as(u32, 7), tree.msgForPointer(row.id, .up).?.toggle);
 }
 
+test "Ui.video records the declaration last-wins, formats times, and disables chrome when inactive" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    // Inactive channel (the default outside an app loop): the chrome
+    // renders disabled at the play glyph with zeroed readouts.
+    const idle = ui.video(.{ .src = "assets/clips/one.mp4", .controls = true, .width = 320, .height = 180 });
+    const idle_surface = idle.nodes[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, idle_surface.widget.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, idle_surface.widget.image_id);
+    const idle_row = idle.nodes[1];
+    const idle_button = idle_row.nodes[0];
+    try testing.expectEqual(canvas.VideoControlVerb.toggle, idle_button.widget.video_control);
+    try testing.expect(idle_button.widget.state.disabled);
+    try testing.expectEqualStrings("play", idle_button.widget.icon);
+    try testing.expectEqualStrings("0:00", idle_row.nodes[1].widget.text);
+    const idle_slider = idle_row.nodes[2];
+    try testing.expectEqual(canvas.VideoControlVerb.scrub, idle_slider.widget.video_control);
+    try testing.expect(idle_slider.widget.state.disabled);
+    try testing.expectEqual(@as(f32, 0), idle_slider.widget.value);
+    try testing.expectEqualStrings("0:00", idle_row.nodes[3].widget.text);
+    try testing.expectEqualStrings("assets/clips/one.mp4", ui.video_declaration.?.src);
+
+    // A live stamped snapshot: the pause glyph, h:mm:ss past the hour,
+    // and the seek fraction from position over duration.
+    ui.video_state = .{ .active = true, .playing = true, .position_ms = 3_725_000, .duration_ms = 7_200_000 };
+    const live = ui.video(.{ .src = "assets/clips/two.mp4", .controls = true, .loop = true });
+    const live_row = live.nodes[1];
+    const live_button = live_row.nodes[0];
+    try testing.expect(!live_button.widget.state.disabled);
+    try testing.expectEqualStrings("pause", live_button.widget.icon);
+    try testing.expectEqualStrings("1:02:05", live_row.nodes[1].widget.text);
+    try testing.expectApproxEqAbs(@as(f32, 3_725_000.0 / 7_200_000.0), live_row.nodes[2].widget.value, 0.0001);
+    try testing.expect(!live_row.nodes[2].widget.state.disabled);
+    try testing.expectEqualStrings("2:00:00", live_row.nodes[3].widget.text);
+
+    // The last declaration wins (loadVideo's replace semantics: one
+    // player is the whole surface).
+    try testing.expectEqualStrings("assets/clips/two.mp4", ui.video_declaration.?.src);
+    try testing.expect(ui.video_declaration.?.loop);
+
+    // A src-less video records nothing: it is surface-only chrome over
+    // whatever playback the app loaded itself.
+    var chrome_ui = InboxUi.init(arena_state.allocator());
+    _ = chrome_ui.video(.{ .controls = true });
+    try testing.expect(chrome_ui.video_declaration == null);
+}
+
+test "Ui stamps contain fit and stream geometry on video-fed media surfaces" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    // The framework `<video>` surface is ALWAYS contain — pre-LOADED it
+    // simply carries no stream geometry yet (no fit math to run).
+    const idle = ui.video(.{ .src = "assets/clips/one.mp4", .controls = true });
+    try testing.expectEqual(canvas.ImageFit.contain, idle.nodes[0].widget.image_fit);
+    try testing.expectEqual(@as(?geometry.SizeF, null), idle.nodes[0].widget.stream_size);
+
+    // The LOADED report stamps the fitted-draw geometry on the surface
+    // the active playback FEEDS — here an app-claimed custom surface.
+    ui.video_state = .{ .active = true, .playing = true, .surface = 0x7601, .width = 427, .height = 240 };
+    const custom = ui.mediaSurface(.{ .image = 0x7601, .grow = 1 });
+    try testing.expectEqual(canvas.ImageFit.contain, custom.widget.image_fit);
+    try testing.expectEqual(
+        @as(?geometry.SizeF, geometry.SizeF.init(427, 240)),
+        custom.widget.stream_size,
+    );
+
+    // A source-less `<video>` shown WHILE that custom playback runs
+    // must not borrow the unrelated stream's geometry: contain (it is
+    // the video surface by convention), but no dimensions — the
+    // placeholder fills the frame.
+    const bystander = ui.video(.{ .controls = true });
+    try testing.expectEqual(canvas.ImageFit.contain, bystander.nodes[0].widget.image_fit);
+    try testing.expectEqual(@as(?geometry.SizeF, null), bystander.nodes[0].widget.stream_size);
+
+    // A producer surface the video channel does NOT feed keeps its own
+    // geometry: no stamp, the default stretch, `image_src` untouched.
+    const camera = ui.mediaSurface(.{ .image = 0x9902, .grow = 1 });
+    try testing.expectEqual(canvas.ImageFit.stretch, camera.widget.image_fit);
+    try testing.expectEqual(@as(?geometry.SizeF, null), camera.widget.stream_size);
+
+    // The declarative playback feeding the framework surface stamps
+    // dimensions on the `<video>` element itself.
+    ui.video_state = .{ .active = true, .playing = true, .surface = canvas.video_playback_surface_id, .width = 1280, .height = 720 };
+    const house = ui.video(.{ .src = "assets/clips/one.mp4", .controls = true });
+    try testing.expectEqual(
+        @as(?geometry.SizeF, geometry.SizeF.init(1280, 720)),
+        house.nodes[0].widget.stream_size,
+    );
+}
+
+test "Ui.video with controls keeps the media surface's zero-intrinsic contract" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    // A hug-sized container and no declared width/height/grow: the
+    // element measures zero exactly like the bare surface — the
+    // transport bar must not size it into a controls-only strip.
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{ .cross = .start }, .{
+        ui.video(.{ .src = "assets/clips/one.mp4", .controls = true }),
+    }));
+    const element = tree.root.children[0];
+    try testing.expect(element.layout.zero_intrinsic);
+    try testing.expect(element.layout.clip_content);
+    var layout_nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 400, 300), &layout_nodes);
+    const frame = layout.findById(element.id).?.frame;
+    try testing.expectEqual(@as(f32, 0), frame.width);
+    try testing.expectEqual(@as(f32, 0), frame.height);
+
+    // Declared sizes stay definite: the same element sized 320x180
+    // carries the surface above the transport bar, which keeps its
+    // intrinsic height inside the declared box.
+    var sized_ui = InboxUi.init(arena_state.allocator());
+    const sized_tree = try sized_ui.finalize(sized_ui.column(.{ .cross = .start }, .{
+        sized_ui.video(.{ .src = "assets/clips/one.mp4", .controls = true, .width = 320, .height = 180 }),
+    }));
+    const sized_element = sized_tree.root.children[0];
+    var sized_nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const sized_layout = try canvas.layoutWidgetTree(sized_tree.root, geometry.RectF.init(0, 0, 400, 300), &sized_nodes);
+    const sized_frame = sized_layout.findById(sized_element.id).?.frame;
+    try testing.expectEqual(@as(f32, 320), sized_frame.width);
+    try testing.expectEqual(@as(f32, 180), sized_frame.height);
+    const surface_frame = sized_layout.findById(sized_element.children[0].id).?.frame;
+    const bar_frame = sized_layout.findById(sized_element.children[1].id).?.frame;
+    try testing.expect(bar_frame.height > 0);
+    try testing.expectApproxEqAbs(@as(f32, 180), surface_frame.height + bar_frame.height, 0.5);
+}
+
 test "chart builder copies, downsamples, and summarizes series" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1278,8 +1487,8 @@ test "virtualWindow resolves the runtime state and virtualList builds only the w
 
     // Typed dispatch: the scroll observation and the approach-end signal
     // both resolve through the container's handlers.
-    const state = canvas.ScrollState{ .offset = 25_000, .viewport_extent = 90, .content_extent = 2_499_975 };
-    try testing.expectEqual(@as(f32, 25_000), tree.msgForScroll(tree.root.id, state).?.feed_scrolled.offset);
+    const state = canvas.ScrollState{ .offset_y = 25_000, .viewport_extent_y = 90, .content_extent_y = 2_499_975 };
+    try testing.expectEqual(@as(f32, 25_000), tree.msgForScroll(tree.root.id, state).?.feed_scrolled.offset_y);
     try testing.expectEqual(Msg.load_more, tree.msgForReachEnd(tree.root.id).?);
 }
 
@@ -1329,7 +1538,6 @@ test "virtualWindow without a source falls back to the request viewport" {
     options.viewport_fallback = 0;
     try testing.expect(ui.virtualWindow(options).isEmpty());
 }
-
 
 test "widget kind codes are pinned: assigned at birth, declaration-order-independent" {
     // The FULL golden table. `structuralId` hashes `widgetKindCode`, so
@@ -1402,6 +1610,8 @@ test "widget kind codes are pinned: assigned at birth, declaration-order-indepen
         .{ .kind = .split_divider, .code = 58 },
         .{ .kind = .tree, .code = 59 },
         .{ .kind = .input_group, .code = 60 },
+        .{ .kind = .media_surface, .code = 61 },
+        .{ .kind = .terminal, .code = 62 },
     };
     try testing.expectEqual(std.enums.values(canvas.WidgetKind).len, expected.len);
     for (expected) |entry| {
@@ -1429,4 +1639,3 @@ test "structural id goldens: the id algorithm is pinned end to end" {
     try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
     try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
 }
-

@@ -8,6 +8,7 @@ const effects_mod = @import("effects.zig");
 const automation = @import("../automation/root.zig");
 const zero_platform = @import("../platform/root.zig");
 const null_platform_mod = @import("../platform/null_platform.zig");
+const canvas_frame_helpers = @import("canvas_frame_helpers.zig");
 
 const canvas_label = "counter-canvas";
 
@@ -63,6 +64,25 @@ fn counterOptions() CounterApp.Options {
         .view = counterView,
         .on_command = counterCommand,
     };
+}
+
+const software_counter_views = [_]app_manifest.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .software },
+};
+const software_counter_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Software Counter",
+    .width = 400,
+    .height = 300,
+    .views = &software_counter_views,
+}};
+const software_counter_scene: app_manifest.ShellConfig = .{ .windows = &software_counter_windows };
+
+fn softwareCounterOptions() CounterApp.Options {
+    var options = counterOptions();
+    options.name = "ui-app-software-counter";
+    options.scene = software_counter_scene;
+    return options;
 }
 
 fn findWidgetIdByText(tree: anytype, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
@@ -191,8 +211,9 @@ test "a declared context menu presents as the anchored fallback surface on prese
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    // A host without a native menu presenter (Linux GTK, Windows Win32
-    // today). Service pointers are captured at init, so re-capture.
+    // A host without a native menu presenter (the mobile toolkit hosts
+    // and embed hosts today). Service pointers are captured at init, so
+    // re-capture.
     harness.null_platform.context_menus = false;
     harness.runtime.options.platform = harness.null_platform.platform();
 
@@ -261,6 +282,65 @@ test "a declared context menu presents as the anchored fallback surface on prese
     try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
 }
 
+test "the fallback surface mounts at the click point, not the wide row's edge" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.context_menus = false;
+    harness.runtime.options.platform = harness.null_platform.platform();
+
+    const app_state = try std.testing.allocator.create(TaskRowApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = TaskRowApp.init(std.heap.page_allocator, .{}, taskRowOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // Secondary-click the full-width row far from its left edge: the
+    // click point rides the request into the mounted surface's anchor.
+    const layout_before = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_id = findWidgetIdByText(app_state.tree.?, .list_item, "Task").?;
+    const row_frame = blk: {
+        for (layout_before.nodes) |node| {
+            if (node.widget.id == row_id) break :blk node.frame;
+        }
+        return error.TestUnexpectedResult;
+    };
+    const click = geometry.PointF.init(row_frame.x + 150, row_frame.y + row_frame.height / 2);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = click.x,
+        .y = click.y,
+        .timestamp_ns = 1_000_000_000,
+    } });
+
+    try std.testing.expect(app_state.tree.?.context_menu_fallback != null);
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const surface_frame = blk: {
+        for (layout.nodes) |node| {
+            if (node.widget.kind == .dropdown_menu) break :blk node.frame;
+        }
+        return error.TestUnexpectedResult;
+    };
+    // The surface corner sits at the pointer (space permits below and to
+    // the right here), NOT at the row's bottom-left corner.
+    try std.testing.expectEqual(click.x, surface_frame.x);
+    try std.testing.expectEqual(click.y, surface_frame.y);
+    try std.testing.expect(surface_frame.x != row_frame.x);
+}
+
 // ------------------------------------------------- scroll event fixture
 
 const FeedModel = struct {
@@ -284,9 +364,9 @@ const FeedApp = ui_app_model.UiApp(FeedModel, FeedMsg);
 fn feedUpdate(model: *FeedModel, msg: FeedMsg) void {
     switch (msg) {
         .feed_scrolled => |scroll_state| {
-            model.offset = scroll_state.offset;
-            model.viewport_extent = scroll_state.viewport_extent;
-            model.content_extent = scroll_state.content_extent;
+            model.offset = scroll_state.offset_y;
+            model.viewport_extent = scroll_state.viewport_extent_y;
+            model.content_extent = scroll_state.content_extent_y;
             model.scroll_events += 1;
         },
     }
@@ -417,6 +497,205 @@ test "ui app presents pixels when the packet service is unsupported" {
     try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_present_count);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+}
+
+test "ui app explicit software canvas bypasses the production packet path" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.pixel_present_retained_baseline = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.testing.allocator, .{}, softwareCounterOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // Packet services are available and would accept this frame. The
+    // immutable software request must still send it directly to the
+    // reference renderer without recording a packet fallback.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(zero_platform.GpuSurfaceBackend.software, harness.runtime.views[0].gpu_requested_backend);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqual(zero_platform.GpuPresentPath.pixels, harness.runtime.views[0].gpu_present_path);
+    try std.testing.expectEqual(zero_platform.GpuPresentFallbackReason.none, harness.runtime.views[0].info().gpu_present_fallback_reason);
+
+    // A changed follow-up frame remains incremental. Treating the central
+    // software-policy rejection as a failed packet attempt would force this
+    // pixel present back to the full surface.
+    try app_state.dispatch(&harness.runtime, 1, .increment);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 2,
+        .timestamp_ns = 17_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_present_count);
+    const dirty = harness.null_platform.gpu_surface_present_dirty_bounds orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dirty.width < 400 or dirty.height < 300);
+}
+
+// ---------------------------------- reflow stale-pixel oracle fixture
+
+const ReflowRow = struct {
+    id: u32,
+    open: bool,
+    in_progress: bool,
+    urgent: bool,
+    high: bool,
+    title: []const u8,
+};
+
+const reflow_rows_a = [_]ReflowRow{.{ .id = 1, .open = false, .in_progress = false, .urgent = true, .high = false, .title = "Login fails on retry" }};
+const reflow_rows_b = [_]ReflowRow{.{ .id = 2, .open = false, .in_progress = true, .urgent = false, .high = true, .title = "Sync is slow" }};
+// Same for-key as rows_a: the `<if>` arms swap INSIDE a stable keyed
+// subtree (a status change on the selected item, not a reselection).
+const reflow_rows_a_started = [_]ReflowRow{.{ .id = 1, .open = false, .in_progress = true, .urgent = false, .high = true, .title = "Login fails on retry" }};
+
+const ReflowModel = struct {
+    selected: []const ReflowRow = &reflow_rows_a,
+};
+
+const ReflowMsg = union(enum) {
+    select_second,
+    start_first,
+};
+
+const ReflowApp = ui_app_model.UiApp(ReflowModel, ReflowMsg);
+
+fn reflowUpdate(model: *ReflowModel, msg: ReflowMsg) void {
+    switch (msg) {
+        .select_second => model.selected = &reflow_rows_b,
+        .start_first => model.selected = &reflow_rows_a_started,
+    }
+}
+
+// The list-detail detail pane shape: a keyed subtree per selection
+// wrapping conditional badges plus trailing text, so switching the
+// selection removes pills, shrinks the row, and moves what remains.
+const reflow_markup =
+    \\<column grow="1" background="surface">
+    \\  <for each="selected" key="id" as="s">
+    \\    <column gap="14" padding="24">
+    \\      <text size="heading" wrap="true">{s.title}</text>
+    \\      <row gap="8" cross="center">
+    \\        <if test="{s.open}"><badge foreground="info">Open</badge></if>
+    \\        <if test="{s.in_progress}"><badge foreground="warning">In progress</badge></if>
+    \\        <if test="{s.urgent}"><badge foreground="destructive">Urgent priority</badge></if>
+    \\        <if test="{s.high}"><badge foreground="warning">High priority</badge></if>
+    \\        <text foreground="text_muted">#{s.id} · reported by a user</text>
+    \\      </row>
+    \\    </column>
+    \\  </for>
+    \\</column>
+;
+
+fn reflowOptions() ReflowApp.Options {
+    return .{
+        .name = "ui-app-reflow-oracle",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = reflowUpdate,
+        .markup = .{ .source = reflow_markup },
+    };
+}
+
+test "selection-change reflow leaves no stale pixels on the ui app pixel path" {
+    const surface = geometry.SizeF.init(400, 300);
+    const scale: f32 = 2;
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = surface });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    // Pixel-only host shape (a platform with no packet presenter wired,
+    // like the embed hosts): presents ride the CPU pixel path
+    // incrementally instead of forcing packet-fallback full repaints.
+    harness.runtime.options.platform.services.present_gpu_surface_packet_fn = null;
+    harness.runtime.options.platform.services.present_gpu_surface_packet_binary_fn = null;
+    // The refined dirty-bounds path: a Msg rebuild derives its damage
+    // from the retained key+fingerprint edit script — the derivation
+    // packet hosts and embed hosts consume — instead of degrading to
+    // the window.
+    harness.runtime.options.pixel_present_retained_baseline = true;
+
+    const app_state = try std.testing.allocator.create(ReflowApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ReflowApp.init(std.heap.page_allocator, .{}, reflowOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // Installing frame: full repaint of selection A through the CPU
+    // pixel path into the app's retained pixel buffer.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = surface,
+        .scale_factor = scale,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+
+    const byte_len = (try canvas_frame_helpers.canvasSurfacePixelSize(surface, scale)).byte_len;
+    const after_swap = try std.testing.allocator.alloc(u8, byte_len);
+    defer std.testing.allocator.free(after_swap);
+    const full = try std.testing.allocator.alloc(u8, byte_len);
+    defer std.testing.allocator.free(full);
+    const full_scratch = try std.testing.allocator.alloc(u8, byte_len);
+    defer std.testing.allocator.free(full_scratch);
+
+    // Two reflows: the `<if>` arms swapping inside a stable keyed
+    // subtree (status change), then the keyed subtree replaced whole
+    // (reselection). Each presents incrementally and must leave the
+    // retained buffer byte-identical to a full repaint of the same
+    // scene.
+    const steps = [_]struct { msg: ReflowMsg, frame_index: u64 }{
+        .{ .msg = .start_first, .frame_index = 2 },
+        .{ .msg = .select_second, .frame_index = 3 },
+    };
+    var present_count: usize = 1;
+    for (steps) |step| {
+        try app_state.dispatch(&harness.runtime, 1, step.msg);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = surface,
+            .scale_factor = scale,
+            .frame_index = step.frame_index,
+            .timestamp_ns = step.frame_index * 17_000_000,
+        } });
+        present_count += 1;
+        try std.testing.expectEqual(present_count, harness.null_platform.gpu_surface_present_count);
+        // Proof the reflow rode the incremental path: the present's
+        // dirty bounds are a sub-window region.
+        const swap_dirty = harness.null_platform.gpu_surface_present_dirty_bounds.?;
+        try std.testing.expect(swap_dirty.width < surface.width or swap_dirty.height < surface.height);
+        @memcpy(after_swap, app_state.pixel_buffer[0..byte_len]);
+
+        // Ground truth: the same scene fully repainted into a fresh
+        // buffer (a direct render, so the app's incremental buffer
+        // stays untouched).
+        _ = try harness.runtime.presentNextCanvasFramePixels(1, canvas_label, .{
+            .frame_index = step.frame_index + 100,
+            .timestamp_ns = (step.frame_index + 100) * 17_000_000,
+            .surface_size = surface,
+            .scale = scale,
+            .full_repaint = true,
+        }, harness.runtime.canvasFrameScratchStorage(), full, full_scratch, app_state.effectiveTokens().colors.background);
+        present_count += 1;
+        try std.testing.expectEqualSlices(u8, full, after_swap);
+    }
 }
 
 const counter_markup =
@@ -1986,6 +2265,466 @@ test "automation set_text routes through the input path so the elm mirror stays 
     }
 }
 
+// -------------------------------------------- edit-derivation choke point
+
+const search_mirror_canvas_label = "search-mirror-canvas";
+
+const SearchMirrorModel = struct {
+    query: canvas.TextBuffer(64) = .{},
+    edit_count: u32 = 0,
+};
+
+const SearchMirrorMsg = union(enum) {
+    query_edit: canvas.TextInputEvent,
+};
+
+const SearchMirrorApp = ui_app_model.UiApp(SearchMirrorModel, SearchMirrorMsg);
+
+fn searchMirrorUpdate(model: *SearchMirrorModel, msg: SearchMirrorMsg) void {
+    switch (msg) {
+        .query_edit => |edit| {
+            model.query.apply(edit);
+            model.edit_count += 1;
+        },
+    }
+}
+
+fn searchMirrorView(ui: *SearchMirrorApp.Ui, model: *const SearchMirrorModel) SearchMirrorApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.search_field, .{
+            .text = model.query.text(),
+            .placeholder = "Search",
+            .on_input = SearchMirrorApp.Ui.inputMsg(.query_edit),
+        }, .{}),
+        ui.text(.{}, if (model.query.len == 0) "Unfiltered" else "Filtered"),
+    });
+}
+
+const search_mirror_views = [_]app_manifest.ShellView{
+    .{ .label = search_mirror_canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const search_mirror_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "SearchMirror",
+    .width = 400,
+    .height = 300,
+    .views = &search_mirror_views,
+}};
+const search_mirror_scene: app_manifest.ShellConfig = .{ .windows = &search_mirror_windows };
+
+fn startSearchMirror(harness: *core.TestHarness(), app_state: *SearchMirrorApp) !void {
+    app_state.* = SearchMirrorApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-search-mirror",
+        .scene = search_mirror_scene,
+        .canvas_label = search_mirror_canvas_label,
+        .update = searchMirrorUpdate,
+        .view = searchMirrorView,
+    });
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = search_mirror_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+}
+
+fn searchMirrorHasText(app_state: *const SearchMirrorApp, text: []const u8) bool {
+    const tree = app_state.tree orelse return false;
+    return widgetTreeHasText(tree.root, text);
+}
+
+fn widgetTreeHasText(widget: canvas.Widget, text: []const u8) bool {
+    if (widget.kind == .text and std.mem.eql(u8, widget.text, text)) return true;
+    for (widget.children) |child| {
+        if (widgetTreeHasText(child, text)) return true;
+    }
+    return false;
+}
+
+test "Escape's search-field clear reaches the model through the edit-derivation seam" {
+    // The post-launch live-GUI bug: Escape made the runtime editor clear
+    // the field VISUALLY while the model's `on_input` mirror never heard
+    // anything — the list stayed filtered against a query the screen no
+    // longer showed, and the next keystroke dispatched against the stale
+    // term. The keyboard derivation now stamps the edit it applies onto
+    // the dispatched event, so every formerly runtime-only edit (the
+    // Escape clear, the composition cancel, the single-line ArrowUp/Down
+    // caret jumps) reaches the model exactly as applied.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(SearchMirrorApp);
+    defer std.testing.allocator.destroy(app_state);
+    try startSearchMirror(harness, app_state);
+    defer app_state.deinit();
+    const app = app_state.app();
+
+    const field_id = findWidgetIdByKind(app_state.tree.?.root, .search_field).?;
+    const field_frame = (try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label)).findById(field_id).?.frame;
+
+    // Click into the (empty) field to focus it and type through the
+    // platform text channel.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .pointer_down,
+        .x = field_frame.x + field_frame.width * 0.5,
+        .y = field_frame.y + field_frame.height * 0.5,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .text_input,
+        .text = "glass",
+    } });
+    try std.testing.expectEqualStrings("glass", app_state.model.query.text());
+    try std.testing.expect(searchMirrorHasText(app_state, "Filtered"));
+
+    // ArrowUp jumps the caret to the start in a single-line field — a
+    // runtime-only derivation before the stamp; the model's selection
+    // mirror must follow so its next splice lands where the editor's
+    // does.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "arrowup",
+    } });
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), app_state.model.query.selection);
+
+    // THE pin: Escape clears the field AND the model hears it.
+    const edits_before_escape = app_state.model.edit_count;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expect(app_state.model.edit_count > edits_before_escape);
+    try std.testing.expectEqualStrings("", app_state.model.query.text());
+    try std.testing.expect(searchMirrorHasText(app_state, "Unfiltered"));
+
+    // The visual state agrees with the model: the retained editor and
+    // the automation snapshot both show the cleared field.
+    const cleared_layout = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings("", cleared_layout.findById(field_id).?.widget.text);
+    const snapshot = harness.runtime.automationSnapshot("SearchMirror");
+    for (snapshot.widgets) |widget| {
+        if (widget.id == field_id) try std.testing.expectEqualStrings("", widget.text_value);
+    }
+
+    // Escape during composition cancels the composition FIRST — and the
+    // model hears that too (the second formerly runtime-only arm).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .ime_set_composition,
+        .text = "ne",
+    } });
+    try std.testing.expectEqualStrings("ne", app_state.model.query.text());
+    try std.testing.expect(app_state.model.query.composition != null);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqualStrings("", app_state.model.query.text());
+    try std.testing.expect(app_state.model.query.composition == null);
+    const canceled_layout = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings("", canceled_layout.findById(field_id).?.widget.text);
+}
+
+test "automation composition and selection verbs keep the model mirror consistent" {
+    // The automation/accessibility text verbs (`widget-action ...
+    // set_composition/commit_composition/cancel_composition`) used to
+    // write the runtime editor directly — on-screen composition the
+    // model never heard, the `set_text` bug's composition twin. They
+    // now ride the SAME ime input events a real IME session produces
+    // (journaled, stamped, dispatched); `set_selection` synthesizes the
+    // stamped keyboard event the clipboard edits use.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(SearchMirrorApp);
+    defer std.testing.allocator.destroy(app_state);
+    try startSearchMirror(harness, app_state);
+    defer app_state.deinit();
+    const app = app_state.app();
+
+    const field_id = findWidgetIdByKind(app_state.tree.?.root, .search_field).?;
+
+    // Compose marked text: the editor shows it AND the model hears it.
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = search_mirror_canvas_label,
+        .id = field_id,
+        .action = .set_composition,
+        .value = "ing",
+    });
+    try std.testing.expectEqualStrings("ing", app_state.model.query.text());
+    try std.testing.expectEqualDeep(@as(?canvas.TextRange, canvas.TextRange.init(0, 3)), app_state.model.query.composition);
+    const composing_layout = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings("ing", composing_layout.findById(field_id).?.widget.text);
+
+    // Commit: composition resolves to plain text in both.
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = search_mirror_canvas_label,
+        .id = field_id,
+        .action = .commit_composition,
+    });
+    try std.testing.expectEqualStrings("ing", app_state.model.query.text());
+    try std.testing.expect(app_state.model.query.composition == null);
+
+    // Select a range: the model's selection mirror follows.
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = search_mirror_canvas_label,
+        .id = field_id,
+        .action = .set_selection,
+        .value = "0 3",
+    });
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 3 }, app_state.model.query.selection);
+
+    // Cancel a fresh composition: the marked run vanishes from both.
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = search_mirror_canvas_label,
+        .id = field_id,
+        .action = .set_composition,
+        .value = "aro",
+    });
+    try std.testing.expectEqualStrings("aro", app_state.model.query.text());
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = search_mirror_canvas_label,
+        .id = field_id,
+        .action = .cancel_composition,
+    });
+    try std.testing.expectEqualStrings("", app_state.model.query.text());
+    try std.testing.expect(app_state.model.query.composition == null);
+    const canceled_layout = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings("", canceled_layout.findById(field_id).?.widget.text);
+}
+
+// --------------------------------- combobox open-arrow (mirror invariant)
+
+const combo_mirror_canvas_label = "combo-mirror-canvas";
+
+const ComboMirrorModel = struct {
+    query: canvas.TextBuffer(64) = .{},
+    note: canvas.TextBuffer(64) = .{},
+    open: bool = false,
+    opens: u32 = 0,
+    query_edits: u32 = 0,
+};
+
+const ComboMirrorMsg = union(enum) {
+    open_picker,
+    close_picker,
+    query_edit: canvas.TextInputEvent,
+    note_edit: canvas.TextInputEvent,
+};
+
+const ComboMirrorApp = ui_app_model.UiApp(ComboMirrorModel, ComboMirrorMsg);
+
+fn comboMirrorUpdate(model: *ComboMirrorModel, msg: ComboMirrorMsg) void {
+    switch (msg) {
+        .open_picker => {
+            model.open = true;
+            model.opens += 1;
+        },
+        .close_picker => model.open = false,
+        .query_edit => |edit| {
+            model.query.apply(edit);
+            model.query_edits += 1;
+        },
+        .note_edit => |edit| model.note.apply(edit),
+    }
+}
+
+fn comboMirrorView(ui: *ComboMirrorApp.Ui, model: *const ComboMirrorModel) ComboMirrorApp.Ui.Node {
+    const trigger = ui.el(.combobox, .{
+        .text = model.query.text(),
+        .placeholder = "Filter",
+        .width = 200,
+        .expanded = model.open,
+        .on_press = .open_picker,
+        .on_input = ComboMirrorApp.Ui.inputMsg(.query_edit),
+    }, .{});
+    const picker = if (model.open) ui.stack(.{ .height = 28 }, .{
+        trigger,
+        ui.el(.dropdown_menu, .{
+            .anchor = .below,
+            .anchor_alignment = .stretch,
+            .width = 200,
+            .height = 60,
+            .on_dismiss = .close_picker,
+        }, .{
+            ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "glass bead", .height = 26, .on_press = .close_picker }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 1 }, .text = "glass jar", .height = 26, .on_press = .close_picker }, .{}),
+        }),
+    }) else ui.stack(.{ .height = 28 }, .{trigger});
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        picker,
+        ui.el(.text_field, .{
+            .text = model.note.text(),
+            .placeholder = "Note",
+            .width = 200,
+            .on_input = ComboMirrorApp.Ui.inputMsg(.note_edit),
+        }, .{}),
+    });
+}
+
+const combo_mirror_views = [_]app_manifest.ShellView{
+    .{ .label = combo_mirror_canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const combo_mirror_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "ComboMirror",
+    .width = 400,
+    .height = 300,
+    .views = &combo_mirror_views,
+}};
+const combo_mirror_scene: app_manifest.ShellConfig = .{ .windows = &combo_mirror_windows };
+
+fn comboMirrorKey(harness: *core.TestHarness(), app: core.App, key: []const u8) !void {
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = combo_mirror_canvas_label,
+        .kind = .key_down,
+        .key = key,
+    } });
+}
+
+fn comboMirrorRetainedSelection(harness: *core.TestHarness(), id: canvas.ObjectId) !?canvas.TextSelection {
+    const layout = try harness.runtime.canvasWidgetLayout(1, combo_mirror_canvas_label);
+    return layout.findById(id).?.widget.text_selection;
+}
+
+test "a closed combobox's open arrows move neither the retained caret nor the model mirror" {
+    // The split-brain escapee: a CLOSED combobox maps ArrowUp/Down to
+    // BOTH its open press (`widgetKeyboardControlIntent`'s menu-open
+    // keys) and — through the single-line caret derivation — a stamped
+    // caret jump. The app dispatch resolves the press FIRST, so the
+    // runtime editor moved its caret while the model's mirror heard
+    // nothing, and the next insert landed at two different offsets.
+    // Opening wins (the platform convention): the derivation yields no
+    // edit, and BOTH sides agree the arrow moved no caret.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ComboMirrorApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ComboMirrorApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-combo-mirror",
+        .scene = combo_mirror_scene,
+        .canvas_label = combo_mirror_canvas_label,
+        .update = comboMirrorUpdate,
+        .view = comboMirrorView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = combo_mirror_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const combo_id = findWidgetIdByKind(app_state.tree.?.root, .combobox).?;
+
+    // Focus WITHOUT pressing (a click on a combobox IS its open press),
+    // type, and walk the caret off the end so a divergence would show.
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = combo_mirror_canvas_label,
+        .id = combo_id,
+        .action = .focus,
+    });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = combo_mirror_canvas_label,
+        .kind = .text_input,
+        .text = "glass",
+    } });
+    try comboMirrorKey(harness, app, "arrowleft");
+    try comboMirrorKey(harness, app, "arrowleft");
+    try std.testing.expectEqualStrings("glass", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
+
+    // THE pin: ArrowDown on the closed trigger opens the picker and
+    // both carets stay at 3 — no query edit is heard or applied.
+    const edits_before_open = app_state.model.query_edits;
+    try comboMirrorKey(harness, app, "arrowdown");
+    try std.testing.expect(app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.opens);
+    try std.testing.expectEqual(edits_before_open, app_state.model.query_edits);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
+
+    // The OPEN-picker truth, pinned as-is: the next arrow walks the
+    // keyboard INTO the mounted menu (the focus step consumes it before
+    // routing reaches the trigger), so it is no caret edit either.
+    const first_item_id = findWidgetIdByText(app_state.tree.?, .menu_item, "glass bead").?;
+    try comboMirrorKey(harness, app, "arrowdown");
+    try std.testing.expectEqual(first_item_id, harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(edits_before_open, app_state.model.query_edits);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
+
+    // Escape is consumed by the DISMISSAL pass while the menu floats:
+    // the picker closes through `on_dismiss` and the combobox's
+    // Escape-clear never runs — the query survives.
+    try comboMirrorKey(harness, app, "escape");
+    try std.testing.expect(!app_state.model.open);
+    try std.testing.expectEqualStrings("glass", app_state.model.query.text());
+    try std.testing.expectEqual(combo_id, harness.runtime.views[0].canvas_widget_focused_id);
+
+    // ArrowUp on the closed trigger is the same open key: opens, and
+    // both carets stay put again.
+    try comboMirrorKey(harness, app, "arrowup");
+    try std.testing.expect(app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.opens);
+    try std.testing.expectEqual(edits_before_open, app_state.model.query_edits);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
+    try comboMirrorKey(harness, app, "escape");
+    try std.testing.expect(!app_state.model.open);
+
+    // The suppression is combobox-only: a plain text field keeps the
+    // single-line ArrowUp/Down caret jumps, and the model mirror hears
+    // them through the stamped edit (the #129 seam, unregressed).
+    const note_id = findWidgetIdByKind(app_state.tree.?.root, .text_field).?;
+    const note_frame = (try harness.runtime.canvasWidgetLayout(1, combo_mirror_canvas_label)).findById(note_id).?.frame;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = combo_mirror_canvas_label,
+        .kind = .pointer_down,
+        .x = note_frame.x + note_frame.width * 0.5,
+        .y = note_frame.y + note_frame.height * 0.5,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = combo_mirror_canvas_label,
+        .kind = .text_input,
+        .text = "abc",
+    } });
+    try comboMirrorKey(harness, app, "arrowup");
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), app_state.model.note.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(0)), try comboMirrorRetainedSelection(harness, note_id));
+    try comboMirrorKey(harness, app, "arrowdown");
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.note.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, note_id));
+}
+
 // ------------------------------------------------- autofocus (notes flow)
 
 const autofocus_canvas_label = "autofocus-canvas"; // shell scene label below
@@ -2201,7 +2940,7 @@ test "an effects-wake rebuild past the widget budget fails tests loudly and degr
     );
     // Recording still happened before the propagate.
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.dispatchErrors().len);
-    try std.testing.expectEqualStrings("effects_wake", harness.runtime.dispatchErrors()[0].event);
+    try std.testing.expectEqualStrings("effects_wake", harness.runtime.dispatchErrors()[0].event());
     try std.testing.expectEqualStrings("WidgetLayoutListFull", harness.runtime.dispatchErrors()[0].error_name);
 
     // Production policy: the same failure degrades — recorded in the
@@ -2260,7 +2999,7 @@ test "a stale automation widget click degrades instead of killing the frame call
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
     const errors = harness.runtime.dispatchErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
-    try std.testing.expectEqualStrings("automation.widget_click", errors[0].event);
+    try std.testing.expectEqualStrings("automation.widget_click", errors[0].event());
     try std.testing.expectEqualStrings("InvalidCommand", errors[0].error_name);
 
     // The app is still alive: a real click keeps dispatching.
@@ -2886,7 +3625,9 @@ test "ui app dispatches native context menu selections as typed messages" {
         .timestamp_ns = 2_000_000,
     } });
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
-    try std.testing.expectEqual(@as(u64, row_id), harness.null_platform.context_menu_token);
+    // The request carries a minted per-request token (opaque to the
+    // platform, which only echoes it back on the action event).
+    try std.testing.expect(harness.null_platform.context_menu_token != 0);
     try std.testing.expectEqual(@as(usize, 3), harness.null_platform.contextMenuItems().len);
 
     // Selecting "Delete" (item id 3 = third declared entry) dispatches
@@ -2894,11 +3635,1002 @@ test "ui app dispatches native context menu selections as typed messages" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
         .window_id = 1,
         .view_label = canvas_label,
-        .token = row_id,
+        .token = harness.null_platform.context_menu_token,
         .item_id = 3,
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.deleted);
     try std.testing.expectEqual(@as(u32, 0), app_state.model.completed);
+}
+
+// --------------------------------------- context-menu rebuild-race fixture
+
+const ReorderModel = struct {
+    reordered: bool = false,
+    completed: u32 = 0,
+    deleted: u32 = 0,
+};
+
+const ReorderMsg = union(enum) {
+    reorder,
+    complete,
+    delete,
+};
+
+const ReorderApp = ui_app_model.UiApp(ReorderModel, ReorderMsg);
+
+fn reorderUpdate(model: *ReorderModel, msg: ReorderMsg) void {
+    switch (msg) {
+        .reorder => model.reordered = true,
+        .complete => model.completed += 1,
+        .delete => model.deleted += 1,
+    }
+}
+
+fn reorderView(ui: *ReorderApp.Ui, model: *const ReorderModel) ReorderApp.Ui.Node {
+    // The conditional-menu shape the rebuild race exists for: an effect
+    // (here a button press standing in for a timer) reorders the row's
+    // declared items while the OS menu is open.
+    const before = [_]ReorderApp.Ui.ContextMenuItem{
+        .{ .label = "Complete", .msg = .complete },
+        .{ .separator = true },
+        .{ .label = "Delete", .msg = .delete },
+    };
+    const after = [_]ReorderApp.Ui.ContextMenuItem{
+        .{ .label = "Delete", .msg = .delete },
+        .{ .separator = true },
+        .{ .label = "Complete", .msg = .complete },
+    };
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Ship the release",
+            .context_menu = if (model.reordered) &after else &before,
+        }, .{}),
+        ui.button(.{ .on_press = .reorder }, "Reorder"),
+    });
+}
+
+test "a rebuild while the native menu is open never redirects the visible selection" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ReorderApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ReorderApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-context-menu-race",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = reorderUpdate,
+        .view = reorderView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // Right-click the row: the platform presents [Complete, —, Delete]
+    // and the pending request is armed with a minted token.
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var row_frame: geometry.RectF = .{};
+    var button_frame: geometry.RectF = .{};
+    for (layout.nodes) |node| {
+        if (node.widget.id == row_id) row_frame = node.frame;
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+    try std.testing.expect(!row_frame.isEmpty());
+    try std.testing.expect(!button_frame.isEmpty());
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    const shown_token = harness.null_platform.context_menu_token;
+    const recorded = harness.null_platform.contextMenuItems();
+    try std.testing.expectEqualStrings("Complete", recorded[0].label);
+
+    // The GTK popover is asynchronous: while it is open, a press
+    // rebuilds the tree with the items REVERSED (a timer or effect
+    // reordering conditional items behaves identically).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 3_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 4_000_000,
+    } });
+    try std.testing.expect(app_state.model.reordered);
+
+    // The user picks the FIRST visible item — the menu still shows
+    // "Complete" there. Resolution must come from the presented menu's
+    // snapshot, never the rebuilt live tree (whose index 0 is now
+    // "Delete").
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.deleted);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.completed);
+
+    // Dismissal after a rebuild stays inert, and the consumed token
+    // cannot resolve again.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 0,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.completed);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.deleted);
+}
+
+// ------------------------------------- context-menu arena-payload fixture
+
+const ArenaPayloadModel = struct {
+    generation: u32 = 0,
+    sends: u32 = 0,
+    received_storage: [64]u8 = undefined,
+    received_len: usize = 0,
+    /// Address of the dispatched payload's first byte: the pinned-arena
+    /// design promises the ORIGINAL slice, so native selection carries
+    /// the same pointer identity the fallback surface and the
+    /// automation verb dispatch.
+    received_ptr: usize = 0,
+};
+
+const ArenaPayloadMsg = union(enum) {
+    bump,
+    send: []const u8,
+    /// The error-union shape: pinning is shape-blind (the ORIGINAL
+    /// value dispatches), so a payload behind an error union needs no
+    /// special handling — this arm proves it end to end.
+    send_result: error{Overloaded}![]const u8,
+};
+
+const ArenaPayloadApp = ui_app_model.UiApp(ArenaPayloadModel, ArenaPayloadMsg);
+
+fn arenaPayloadUpdate(model: *ArenaPayloadModel, msg: ArenaPayloadMsg) void {
+    switch (msg) {
+        .bump => model.generation += 1,
+        .send => |bytes| recordArenaPayload(model, bytes),
+        .send_result => |result| recordArenaPayload(model, result catch &.{}),
+    }
+}
+
+fn recordArenaPayload(model: *ArenaPayloadModel, bytes: []const u8) void {
+    const len = @min(bytes.len, model.received_storage.len);
+    @memcpy(model.received_storage[0..len], bytes[0..len]);
+    model.received_len = len;
+    model.received_ptr = @intFromPtr(bytes.ptr);
+    model.sends += 1;
+}
+
+fn arenaPayloadView(ui: *ArenaPayloadApp.Ui, model: *const ArenaPayloadModel) ArenaPayloadApp.Ui.Node {
+    // Keep the build arena a single address-stable chunk: the first
+    // allocation of every build is a slab larger than the whole build,
+    // filled with sentinel bytes, so every later allocation lands at
+    // the same offset build after build. Under the pinned-arena design
+    // nothing here is ever overwritten while the menu is open; if the
+    // pin regresses, this determinism makes the failure exact — the
+    // reset arena rewrites the payload's storage with the next
+    // generation's bytes.
+    const slab = ui.arena.alloc(u8, 256 * 1024) catch @panic("arena slab");
+    @memset(slab, '!');
+    // The documented Msg-payload shape: a display string formatted into
+    // the BUILD ARENA and carried by a context-menu item's Msg. Every
+    // build formats a same-length, generation-stamped payload, so after
+    // the arena reset the next build's bytes land exactly where a stale
+    // present-time slice points.
+    const payload = ui.fmt("payload-gen-{d:0>4}", .{model.generation});
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Ship the release",
+            .context_menu = &.{
+                .{ .label = "Send", .msg = .{ .send = payload } },
+                .{ .label = "Send result", .msg = .{ .send_result = payload } },
+            },
+        }, .{}),
+        ui.button(.{ .on_press = .bump }, "Rebuild"),
+        ui.el(.text_field, .{ .text = "notes", .width = 200 }, .{}),
+    });
+}
+
+test "context menu selection dispatches the original arena payload across rebuilds (pinned build arena)" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    // The leak-detecting backing allocator is part of the assertion:
+    // every snapshot copy must be freed — superseded, dismissed, or
+    // still armed at teardown.
+    const app_state = try std.testing.allocator.create(ArenaPayloadApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ArenaPayloadApp.init(std.testing.allocator, .{}, .{
+        .name = "ui-app-context-menu-arena",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = arenaPayloadUpdate,
+        .view = arenaPayloadView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var row_frame: geometry.RectF = .{};
+    var button_frame: geometry.RectF = .{};
+    for (layout.nodes) |node| {
+        if (node.widget.id == row_id) row_frame = node.frame;
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+    try std.testing.expect(!row_frame.isEmpty());
+    try std.testing.expect(!button_frame.isEmpty());
+
+    // Round 1 — the plain const slice. Present the menu (GTK popovers
+    // are asynchronous: it stays on the glass while the app keeps
+    // rebuilding underneath), then rebuild TWICE: view builds
+    // double-buffer two arenas, so the second rebuild resets the arena
+    // the presented tree was built in and overwrites the payload's
+    // storage with the next generation's bytes.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    const shown_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(shown_token != 0);
+    // The presented build's arena is pinned while the request is
+    // pending, so the eventual dispatch is the ORIGINAL Msg value —
+    // capture its payload address at present time.
+    try std.testing.expect(app_state.context_menu_pin != null);
+    const presented_send = app_state.tree.?.msgForContextMenu(row_id, 0).?;
+    const presented_send_ptr = @intFromPtr(presented_send.send.ptr);
+
+    for (0..2) |press| {
+        const base: u64 = 3_000_000 + @as(u64, @intCast(press)) * 2_000_000;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_down,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_up,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base + 1_000_000,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.generation);
+
+    // The user picks "Send": the dispatched Msg must carry the bytes
+    // the user SAW at present time, never whatever the reset build
+    // arena holds at selection time.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-gen-0000", app_state.model.received_storage[0..app_state.model.received_len]);
+    // Pointer identity: the dispatched slice IS the presented slice —
+    // the same value the fallback surface or the automation verb would
+    // have dispatched — and the resolved request released the pin.
+    try std.testing.expectEqual(presented_send_ptr, app_state.model.received_ptr);
+    try std.testing.expect(app_state.context_menu_pin == null);
+
+    // Round 2 — the error-union payload: pinning is shape-blind, so
+    // the same two-rebuild race dispatches the presented generation's
+    // bytes (and address), not the arena's current ones.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 8_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    const result_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(result_token != shown_token);
+    const presented_result = app_state.tree.?.msgForContextMenu(row_id, 1).?;
+    const presented_result_ptr = @intFromPtr((presented_result.send_result catch unreachable).ptr);
+
+    for (0..2) |press| {
+        const base: u64 = 9_000_000 + @as(u64, @intCast(press)) * 2_000_000;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_down,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_up,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base + 1_000_000,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 4), app_state.model.generation);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = result_token,
+        .item_id = 2,
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-gen-0002", app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expectEqual(presented_result_ptr, app_state.model.received_ptr);
+    try std.testing.expect(app_state.context_menu_pin == null);
+
+    // Round 3 — supersession and dismissal: a re-presented menu
+    // replaces the previous snapshot and pin, and the runtime's
+    // dismissed notice releases the successor's — an abandoned menu
+    // must not exempt an arena generation from resets forever.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 15_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 16_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 4), harness.null_platform.context_menu_request_count);
+    const superseding_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(app_state.context_menu_pin != null);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = superseding_token,
+        .item_id = 0,
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.sends);
+    try std.testing.expect(app_state.context_menu_pin == null);
+}
+
+test "any superseding presentation or dispatch releases the app menu's snapshot and pin" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ArenaPayloadApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ArenaPayloadApp.init(std.testing.allocator, .{}, .{
+        .name = "ui-app-context-menu-supersede",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = arenaPayloadUpdate,
+        .view = arenaPayloadView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var row_frame: geometry.RectF = .{};
+    var field_frame: geometry.RectF = .{};
+    for (layout.nodes) |node| {
+        if (node.widget.id == row_id) row_frame = node.frame;
+        if (node.widget.kind == .text_field) field_frame = node.frame;
+    }
+    try std.testing.expect(!row_frame.isEmpty());
+    try std.testing.expect(!field_frame.isEmpty());
+
+    // Present the row's app menu: snapshot armed, build generation
+    // pinned.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    try std.testing.expect(app_state.context_menu_pin != null);
+    try std.testing.expect(app_state.context_menu_shown_token != 0);
+
+    // A right-click on the editable field presents the DEFAULT edit
+    // menu — a different pending kind, but it supersedes the app
+    // menu's request all the same, so the snapshot and pin release.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = field_frame.x + 4,
+        .y = field_frame.y + 4,
+        .timestamp_ns = 3_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    try std.testing.expect(app_state.context_menu_pin == null);
+    try std.testing.expectEqual(@as(u64, 0), app_state.context_menu_shown_token);
+
+    // Re-present the app menu, then drive the item through the
+    // automation verb: its direct dispatch supersedes the open
+    // presentation (releasing snapshot and pin) and resolves against
+    // the live tree.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 4_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.context_menu_request_count);
+    try std.testing.expect(app_state.context_menu_pin != null);
+    var command_buffer: [96]u8 = undefined;
+    const command = try std.fmt.bufPrint(&command_buffer, "widget-context-menu {s} {d} 0", .{ canvas_label, row_id });
+    try harness.runtime.dispatchAutomationCommand(app, command);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-gen-0000", app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expect(app_state.context_menu_pin == null);
+    try std.testing.expectEqual(@as(u64, 0), app_state.context_menu_shown_token);
+}
+
+test "rebuilds under an open menu stay bounded at two trees" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ArenaPayloadApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ArenaPayloadApp.init(std.testing.allocator, .{}, .{
+        .name = "ui-app-context-menu-bounded",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = arenaPayloadUpdate,
+        .view = arenaPayloadView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var row_frame: geometry.RectF = .{};
+    var button_frame: geometry.RectF = .{};
+    for (layout.nodes) |node| {
+        if (node.widget.id == row_id) row_frame = node.frame;
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+
+    // Present the menu and hold it open for the whole test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    try std.testing.expect(app_state.context_menu_pin != null);
+
+    const press = struct {
+        fn once(h: *core.TestHarness(), a: core.App, frame: geometry.RectF, base: u64) !void {
+            try h.runtime.dispatchPlatformEvent(a, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = canvas_label,
+                .kind = .pointer_down,
+                .x = frame.x + 4,
+                .y = frame.y + 4,
+                .timestamp_ns = base,
+            } });
+            try h.runtime.dispatchPlatformEvent(a, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = canvas_label,
+                .kind = .pointer_up,
+                .x = frame.x + 4,
+                .y = frame.y + 4,
+                .timestamp_ns = base + 1_000_000,
+            } });
+        }
+    };
+
+    // Warm the partner arena's capacity to its fixed point, then drive
+    // many more rebuilds: while the pin freezes the presented
+    // generation, every rebuild routes through the partner with its
+    // normal reset cadence, so total build storage holds at exactly
+    // two trees — capacity must not grow with the rebuild count.
+    for (0..4) |index| {
+        try press.once(harness, app, button_frame, 3_000_000 + @as(u64, @intCast(index)) * 2_000_000);
+    }
+    const warmed = app_state.arenas[0].queryCapacity() + app_state.arenas[1].queryCapacity();
+    for (0..10) |index| {
+        try press.once(harness, app, button_frame, 20_000_000 + @as(u64, @intCast(index)) * 2_000_000);
+    }
+    try std.testing.expectEqual(@as(u32, 14), app_state.model.generation);
+    try std.testing.expectEqual(warmed, app_state.arenas[0].queryCapacity() + app_state.arenas[1].queryCapacity());
+    try std.testing.expect(app_state.context_menu_pin != null);
+}
+
+// ---------------------------------------- pinned rebuild failure recovery
+
+const PinFailureModel = struct {
+    row_count: usize = 4,
+    sends: u32 = 0,
+    received_storage: [64]u8 = undefined,
+    received_len: usize = 0,
+
+    pub fn rows(model: *const PinFailureModel, arena: std.mem.Allocator) []const usize {
+        const out = arena.alloc(usize, model.row_count) catch return &.{};
+        for (out, 0..) |*slot, index| slot.* = index;
+        return out;
+    }
+};
+
+const PinFailureMsg = union(enum) {
+    set_rows: usize,
+    send: []const u8,
+};
+
+const PinFailureApp = ui_app_model.UiApp(PinFailureModel, PinFailureMsg);
+
+fn pinFailureUpdate(model: *PinFailureModel, msg: PinFailureMsg) void {
+    switch (msg) {
+        .set_rows => |count| model.row_count = count,
+        .send => |bytes| {
+            const len = @min(bytes.len, model.received_storage.len);
+            @memcpy(model.received_storage[0..len], bytes[0..len]);
+            model.received_len = len;
+            model.sends += 1;
+        },
+    }
+}
+
+fn pinFailureKey(index: *const usize) canvas.UiKey {
+    return canvas.uiKey(@as(u64, index.*));
+}
+
+fn pinFailureRow(ui: *PinFailureApp.Ui, index: *const usize) PinFailureApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Row {d}", .{index.*}));
+}
+
+fn pinFailureView(ui: *PinFailureApp.Ui, model: *const PinFailureModel) PinFailureApp.Ui.Node {
+    const payload = ui.fmt("payload-rows-{d:0>4}", .{model.row_count});
+    return ui.column(.{ .gap = 2, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Ship the release",
+            .context_menu = &.{
+                .{ .label = "Send", .msg = .{ .send = payload } },
+                // The poison item: its update pushes the roster far past
+                // the per-view widget budget, so the selection's rebuild
+                // fails.
+                .{ .label = "Grow", .msg = .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 } },
+            },
+        }, .{}),
+        ui.button(.{ .on_press = PinFailureMsg{ .set_rows = 4 } }, "Shrink"),
+        ui.column(.{ .gap = 2 }, ui.each(model.rows(ui.arena), pinFailureKey, pinFailureRow)),
+    });
+}
+
+test "a failing rebuild routed into the live arena under an open menu drops the tree instead of dangling" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-rebuild-failure",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+
+    // Present the row's menu: the presenting build's arena is pinned.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    const shown_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(app_state.context_menu_pin != null);
+
+    // One successful rebuild under the open menu lands in the partner
+    // arena; from here every rebuild reuses that LIVE side (the pinned
+    // side stays frozen).
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+    try std.testing.expect(app_state.tree != null);
+
+    // The over-budget rebuild resets the live arena and fails mid-pass
+    // under the harness's `.propagate` policy: the tree reference must
+    // drop with it — a handler table dangling into reset, partially
+    // rewritten storage must never stay dispatchable.
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        app_state.dispatch(&harness.runtime, 1, .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 }),
+    );
+    try std.testing.expect(app_state.tree == null);
+
+    // Recovery: the next in-budget rebuild restores the tree.
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 4 });
+    try std.testing.expect(app_state.tree != null);
+
+    // The pinned presentation rode through the failure untouched: the
+    // user's pick still dispatches the presented generation's payload
+    // from the frozen arena.
+    try std.testing.expect(app_state.context_menu_pin != null);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-rows-0004", app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expect(app_state.context_menu_pin == null);
+}
+
+test "dismissing the menu after a failed pinned rebuild restores the dropped tree" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-dismiss-restore",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+
+    // Present the menu, rebuild once under it, then fail the rebuild
+    // routed into the live arena: the tree reference drops.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    const shown_token = harness.null_platform.context_menu_token;
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        app_state.dispatch(&harness.runtime, 1, .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 }),
+    );
+    try std.testing.expect(app_state.tree == null);
+
+    // The model comes back in budget WITHOUT a Msg (an effect result,
+    // or the failing state was transient) — no rebuild has run yet.
+    app_state.model.row_count = 4;
+
+    // The user dismisses the open menu. Its resolution dispatches no
+    // Msg, so the release itself must restore the dropped tree —
+    // otherwise every handler no-ops (no tree, no Msgs) until an
+    // unrelated resize or effect happens to rebuild.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 0,
+    } });
+    try std.testing.expect(app_state.tree != null);
+    try std.testing.expect(app_state.context_menu_pin == null);
+}
+
+test "a selection whose update breaks the build budget keeps the live tree and input alive" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-selection-failure",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+
+    // Present the menu, then rebuild once under it: the live tree moves
+    // to the partner arena, adjacent to the pinned generation.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    const shown_token = harness.null_platform.context_menu_token;
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+
+    // Selecting "Grow" dispatches from the snapshot; its update pushes
+    // the model past the widget budget and the rebuild fails. The pin
+    // released before the dispatch, so the rebuild routed into the
+    // partner arena — the LIVE tree survives the failure and input
+    // keeps working (production's degraded contract; the harness's
+    // `.propagate` policy surfaces the recorded error here).
+    try std.testing.expectError(error.WidgetLayoutListFull, harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 2,
+    } }));
+    try std.testing.expect(app_state.tree != null);
+    try std.testing.expect(app_state.context_menu_pin == null);
+
+    // The app's own controls recover the model THROUGH the surviving
+    // handler table: a real pointer click on "Shrink" (still routed by
+    // the retained layout of the last successful build) dispatches its
+    // Msg and the next rebuild succeeds.
+    const retained = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var button_frame: geometry.RectF = .{};
+    for (retained.nodes) |node| {
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+    try std.testing.expect(!button_frame.isEmpty());
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 3_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 4_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 4), app_state.model.row_count);
+    try std.testing.expect(app_state.tree != null);
+}
+
+test "a menu presented while the tree is dropped still resolves once the model recovers" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-shown-recovery",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+    const right_click: zero_platform.Event = .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } };
+
+    // Menu A is open when a rebuild routed into the live arena fails:
+    // the tree drops while the model stays unbuildable.
+    try harness.runtime.dispatchPlatformEvent(app, right_click);
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        app_state.dispatch(&harness.runtime, 1, .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 }),
+    );
+    try std.testing.expect(app_state.tree == null);
+
+    // Superseding A with menu B: A's dismissal releases the snapshot
+    // and its restore attempt fails loudly (the model is still past the
+    // budget under the harness's `.propagate` policy). B commits
+    // runtime-side, but no snapshot could arm for it.
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        harness.runtime.dispatchPlatformEvent(app, right_click),
+    );
+    const b_token = harness.null_platform.context_menu_token;
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+
+    // The model recovers WITHOUT a rebuild (an effect result fixed it).
+    app_state.model.row_count = 4;
+
+    // Selecting from menu B resolves snapshot-less: the handler
+    // restores the dropped tree before resolving, so the selection
+    // dispatches its Msg instead of falling through a null tree.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = b_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-rows-0004", app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expect(app_state.tree != null);
 }
 
 // ------------------------------------------------- press fall-through fixture
@@ -3185,6 +4917,227 @@ test "ui app delivers chrome overlay geometry before install and on change" {
     try std.testing.expect(try retainedTextExists(&harness.runtime, "leading 0"));
 }
 
+// ---------------------------------- window-control clearance fixtures
+
+const CaptionModel = struct {
+    /// The trailing chrome reservation the CONTRACT app consumes (the
+    /// soundboard pattern: a spacer sized to `insets.right`); the naive
+    /// app leaves it unwired at 0, exactly like an app that never
+    /// subscribed to the chrome channel.
+    trailing: f32 = 0,
+};
+
+const CaptionMsg = union(enum) {
+    chrome: zero_platform.WindowChrome,
+};
+
+const CaptionApp = ui_app_model.UiApp(CaptionModel, CaptionMsg);
+
+fn captionUpdate(model: *CaptionModel, msg: CaptionMsg) void {
+    switch (msg) {
+        .chrome => |chrome| model.trailing = chrome.insets.right,
+    }
+}
+
+/// A hidden-titlebar header that never consumed the chrome channel:
+/// title leading, status text trailing — the system-monitor shape whose
+/// status line rendered UNDER the Windows caption buttons.
+fn captionNaiveView(ui: *CaptionApp.Ui, model: *const CaptionModel) CaptionApp.Ui.Node {
+    _ = model;
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{}, "Monitor"),
+            ui.el(.stack, .{ .grow = 1 }, .{}),
+            ui.text(.{}, "sampling"),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
+/// The documented contract shape (the soundboard pattern): the header
+/// ends with a spacer sized to `insets.right`, so its own content
+/// already clears the caption cluster and the runtime reservation must
+/// stay out of the way.
+fn captionContractView(ui: *CaptionApp.Ui, model: *const CaptionModel) CaptionApp.Ui.Node {
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{}, "Monitor"),
+            ui.el(.stack, .{ .grow = 1 }, .{}),
+            ui.text(.{}, "sampling"),
+            ui.el(.stack, .{ .width = model.trailing }, .{}),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
+/// The centered-title pattern: ONE grow text spanning the header row.
+/// Its FRAME runs under the caption cluster, but the centered glyphs
+/// sit well clear of it — nothing here needs (or may pay for) the
+/// clearance retry.
+fn captionCenteredView(ui: *CaptionApp.Ui, model: *const CaptionModel) CaptionApp.Ui.Node {
+    _ = model;
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{ .grow = 1, .text_alignment = .center }, "Monitor"),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
+fn captionChromeMap(chrome: zero_platform.WindowChrome) ?CaptionMsg {
+    return .{ .chrome = chrome };
+}
+
+fn captionTextFrame(runtime: *core.Runtime, text: []const u8) !geometry.RectF {
+    const layout = try runtime.canvasWidgetLayout(1, canvas_label);
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .text and std.mem.eql(u8, node.widget.text, text)) return node.frame;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "drag header trailing content stays clear of the Windows caption cluster" {
+    // Windows-shaped hidden-titlebar chrome on a 400pt window: the DWM
+    // caption cluster overlays the trailing 138pt of the top band, and
+    // the platform reports it through the same chrome channel macOS
+    // reports the traffic lights on. The app never consumed the
+    // channel, so its right-aligned header status would lay out flush
+    // to the window edge — UNDER the min/max/close buttons. The runtime
+    // detects the collision after layout and re-lays the drag header
+    // with the cluster reserved, so the status text ends at the
+    // cluster's leading edge instead.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_chrome = .{
+        .insets = .{ .top = 32, .right = 138 },
+        .buttons = geometry.RectF.init(262, 0, 138, 32),
+    };
+
+    const app_state = try std.testing.allocator.create(CaptionApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptionApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-caption-naive",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = captionUpdate,
+        .view = captionNaiveView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // The trailing status text ends at (or before) the cluster's
+    // leading edge; without the reservation it ended at the window's
+    // right edge, inside the cluster.
+    const status = try captionTextFrame(&harness.runtime, "sampling");
+    try std.testing.expect(status.maxX() <= 262 + 0.01);
+    // The leading title and the body below the band are untouched.
+    const title = try captionTextFrame(&harness.runtime, "Monitor");
+    try std.testing.expectEqual(@as(f32, 0), title.x);
+}
+
+test "drag header that already pads the caption cluster keeps its layout" {
+    // The contract app (the soundboard shape): its header ends with a
+    // spacer consuming `insets.right`, so nothing collides and the
+    // runtime reservation must NOT fire — a double reservation would
+    // shove the status text a full cluster-width further left.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_chrome = .{
+        .insets = .{ .top = 32, .right = 138 },
+        .buttons = geometry.RectF.init(262, 0, 138, 32),
+    };
+
+    const app_state = try std.testing.allocator.create(CaptionApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptionApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-caption-contract",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = captionUpdate,
+        .view = captionContractView,
+        .on_chrome = captionChromeMap,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(@as(f32, 138), app_state.model.trailing);
+
+    // The app's own spacer puts the status text at the cluster's edge;
+    // the runtime must not reserve on top of it (a double reservation
+    // would land it near 262 - 138 = 124).
+    const status = try captionTextFrame(&harness.runtime, "sampling");
+    try std.testing.expect(@abs(status.maxX() - 262) < 0.5);
+}
+
+test "drag header centered title never pays the clearance retry" {
+    // The false positive the painted-bounds scan removes: a grow text
+    // spanning the header row with centered glyphs. Its FRAME runs
+    // under the caption cluster, but nothing inked does — a frame-based
+    // scan paid the one retry here, and the remedy's trimmed content
+    // box then visibly shifted the centered title left. The scan judges
+    // aligned painted bounds, so no retry fires and the layout is
+    // byte-identical to an unstamped build: the title's grow frame
+    // still spans the full row, cluster and all.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_chrome = .{
+        .insets = .{ .top = 32, .right = 138 },
+        .buttons = geometry.RectF.init(262, 0, 138, 32),
+    };
+
+    const app_state = try std.testing.allocator.create(CaptionApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptionApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-caption-centered",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = captionUpdate,
+        .view = captionCenteredView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // No reservation fired: the title's frame still spans the whole
+    // row. A paid retry would have trimmed the drag row's content box
+    // at the cluster's leading edge (262) and re-centered the glyphs
+    // inside the trimmed frame — the visible title shift.
+    const title = try captionTextFrame(&harness.runtime, "Monitor");
+    try std.testing.expectEqual(@as(f32, 0), title.x);
+    try std.testing.expectEqual(@as(f32, 400), title.maxX());
+}
+
 // -------------------------------------- windowed virtual list fixture
 
 const VirtualFeedModel = struct {
@@ -3340,7 +5293,7 @@ test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fi
     const final_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try std.testing.expect(final_layout.nodes.len < 40);
     const scroll_state = harness.runtime.views[0].canvasWidgetScrollStateById(list_id).?;
-    try std.testing.expectEqual(@as(f32, 600 * virtual_row_extent), scroll_state.content_extent);
+    try std.testing.expectEqual(@as(f32, 600 * virtual_row_extent), scroll_state.content_extent_y);
 
     // A window-growing resize converges within ONE rebuild: the first
     // build pass reads the stale 300pt viewport, the coverage check sees
@@ -3360,4 +5313,1560 @@ test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fi
     try std.testing.expect(first_index <= 575);
     try std.testing.expectEqual(@as(usize, 600), first_index + mounted);
     try std.testing.expect(mounted >= 25);
+}
+
+// ------------------------------------------------------- pinch channel
+
+const ZoomModel = struct {
+    /// Cumulative gesture scale: the running product of `1 + delta`
+    /// across change events — the semantics the channel documents.
+    scale: f32 = 1,
+    begins: u32 = 0,
+    ends: u32 = 0,
+    anchor_x: f32 = 0,
+    anchor_y: f32 = 0,
+    /// Source-identity mirrors: the window and view the last pinch
+    /// event named (x/y are view-local, so a coordinate without its
+    /// view is not a position — multi-window apps tell pinches apart
+    /// by these).
+    window_id: u64 = 0,
+    label: []const u8 = "",
+};
+
+const ZoomMsg = union(enum) {
+    pinch: zero_platform.PinchEvent,
+};
+
+const ZoomApp = ui_app_model.UiApp(ZoomModel, ZoomMsg);
+
+fn zoomUpdate(model: *ZoomModel, msg: ZoomMsg) void {
+    switch (msg) {
+        .pinch => |pinch| {
+            model.window_id = pinch.window_id;
+            model.label = pinch.label;
+            switch (pinch.phase) {
+                .begin => {
+                    model.begins += 1;
+                    model.anchor_x = pinch.x;
+                    model.anchor_y = pinch.y;
+                },
+                .change => model.scale *= (1 + pinch.scale),
+                .end => model.ends += 1,
+            }
+        },
+    }
+}
+
+fn zoomView(ui: *ZoomApp.Ui, model: *const ZoomModel) ZoomApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, ui.fmt("Zoom {d:.2}", .{model.scale})),
+    });
+}
+
+fn zoomPinch(pinch: zero_platform.PinchEvent) ?ZoomMsg {
+    return .{ .pinch = pinch };
+}
+
+test "trackpad pinch reaches the app through on_pinch with product-of-deltas scale" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ZoomApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ZoomApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-zoom",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = zoomUpdate,
+        .view = zoomView,
+        .on_pinch = zoomPinch,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // begin -> change -> change -> change -> end, the host's phase
+    // stream: the model hears every phase, the pointer anchor rides
+    // x/y, and the cumulative scale is the PRODUCT of (1 + delta) —
+    // two +25% steps land on 1.5625, never the 1.45 a sum-of-deltas
+    // would produce (deltas are raw NSEvent.magnification, the
+    // multiplicative per-event delta per the engine convention; see
+    // the doctrine note in appkit_host.m).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_begin,
+        .x = 120,
+        .y = 80,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.begins);
+    try std.testing.expectEqual(@as(f32, 120), app_state.model.anchor_x);
+    try std.testing.expectEqual(@as(f32, 80), app_state.model.anchor_y);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 120,
+        .y = 80,
+        .scale = 0.25,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 120,
+        .y = 80,
+        .scale = 0.25,
+    } });
+    try std.testing.expectEqual(@as(f32, 1.5625), app_state.model.scale);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.ends);
+    // A terminal-delta Ended: AppKit's Ended/Cancelled event still
+    // carries the magnification since the previous event, so the host
+    // forwards it as one last change BEFORE the end marker — the
+    // product folds it in (1.5625 * 1.25 = 1.953125, binary-exact).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 120,
+        .y = 80,
+        .scale = 0.25,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_end,
+        .x = 120,
+        .y = 80,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.ends);
+    try std.testing.expectEqual(@as(f32, 1.953125), app_state.model.scale);
+    // The dispatched Msgs rebuilt the view from the model.
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Zoom 1.95"));
+
+    // A zero-delta Ended is just the end marker: begin then end moves
+    // no scale.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_begin,
+        .x = 120,
+        .y = 80,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_end,
+        .x = 120,
+        .y = 80,
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.ends);
+    try std.testing.expectEqual(@as(f32, 1.953125), app_state.model.scale);
+
+    // Non-pinch raw input never leaks into the channel: a scroll leaves
+    // the model untouched.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .scroll,
+        .delta_y = 24,
+    } });
+    try std.testing.expectEqual(@as(f32, 1.953125), app_state.model.scale);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
+
+    // The automation verb drives the same real events: one full gesture
+    // whose change carries scale - 1, anchor defaulting to the view
+    // center, so tests and users can pinch without a trackpad.
+    app_state.model = .{};
+    var command_buffer: [96]u8 = undefined;
+    const pinch_default = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 1.5", .{canvas_label});
+    try harness.runtime.dispatchAutomationCommand(app, pinch_default);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.begins);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.ends);
+    try std.testing.expectEqual(@as(f32, 1.5), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 200), app_state.model.anchor_x);
+    try std.testing.expectEqual(@as(f32, 150), app_state.model.anchor_y);
+
+    // An explicit anchor point rides through; the cumulative scale keeps
+    // compounding across gestures exactly as deltas compound within one.
+    const pinch_at = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 0.5 40 60", .{canvas_label});
+    try harness.runtime.dispatchAutomationCommand(app, pinch_at);
+    try std.testing.expectEqual(@as(f32, 0.75), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 40), app_state.model.anchor_x);
+    try std.testing.expectEqual(@as(f32, 60), app_state.model.anchor_y);
+
+    // A malformed scale is loud driver misuse, not a dispatched gesture
+    // (the product of 1 + delta can never reach a non-positive scale).
+    const pinch_bad = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 0", .{canvas_label});
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, pinch_bad));
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
+
+    // The f32 wire can betray the parser's `scale > 0` guard: a tiny
+    // positive scale rounds `scale - 1` to exactly -1 — factor 0 on the
+    // wire — so the dispatch refuses it with the wire-minimum teaching
+    // instead of emitting a zoom through zero scale. Nothing dispatches:
+    // no begin, no journaled partial gesture.
+    const pinch_tiny = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 1e-20", .{canvas_label});
+    try std.testing.expectError(error.PinchScaleBelowWireMinimum, harness.runtime.dispatchAutomationCommand(app, pinch_tiny));
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
+    try std.testing.expectEqual(@as(f32, 0.75), app_state.model.scale);
+
+    // The smallest accepted scale — the first f32 above 2^-25 — round-
+    // trips with a positive factor: its delta rounds to -1 + 2^-24, so
+    // the factor is exactly 2^-24 and the model's product stays > 0
+    // (0.75 * 2^-24 = 0x1.8p-25, binary-exact).
+    const pinch_min = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 2.9802326e-8", .{canvas_label});
+    try harness.runtime.dispatchAutomationCommand(app, pinch_min);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.begins);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.ends);
+    try std.testing.expect(app_state.model.scale > 0);
+    try std.testing.expectEqual(@as(f32, 0x1.8p-25), app_state.model.scale);
+}
+
+const zoom_pair_main_views = [_]app_manifest.ShellView{
+    .{ .label = "zoom-main-canvas", .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const zoom_pair_inspector_views = [_]app_manifest.ShellView{
+    .{ .label = "zoom-inspector-canvas", .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const zoom_pair_windows = [_]app_manifest.ShellWindow{ .{
+    .label = "main",
+    .title = "Zoom",
+    .width = 400,
+    .height = 300,
+    .views = &zoom_pair_main_views,
+}, .{
+    .label = "inspector",
+    .title = "Zoom Inspector",
+    .width = 300,
+    .height = 300,
+    .views = &zoom_pair_inspector_views,
+} };
+const zoom_pair_scene: app_manifest.ShellConfig = .{ .windows = &zoom_pair_windows };
+
+test "pinch identity distinguishes windows and views in the Msg" {
+    // Two windows, two gpu-surface views: the pinch channel forwards
+    // the source identity (window_id + view label) the journaled
+    // platform event already carries, so a multi-window app hears WHICH
+    // view a gesture zoomed — x/y are view-local, and a coordinate
+    // without its view is not a position.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ZoomApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ZoomApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-zoom-pair",
+        .scene = zoom_pair_scene,
+        .canvas_label = "zoom-main-canvas",
+        .update = zoomUpdate,
+        .view = zoomView,
+        .on_pinch = zoomPinch,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = "zoom-main-canvas",
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // A gesture on the main window's canvas names its source on every
+    // phase.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "zoom-main-canvas",
+        .kind = .pinch_begin,
+        .x = 100,
+        .y = 50,
+    } });
+    try std.testing.expectEqual(@as(u64, 1), app_state.model.window_id);
+    try std.testing.expectEqualStrings("zoom-main-canvas", app_state.model.label);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "zoom-main-canvas",
+        .kind = .pinch_change,
+        .x = 100,
+        .y = 50,
+        .scale = 0.25,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "zoom-main-canvas",
+        .kind = .pinch_end,
+        .x = 100,
+        .y = 50,
+    } });
+    try std.testing.expectEqual(@as(f32, 1.25), app_state.model.scale);
+
+    // A gesture on the second window's view is distinguishable: same
+    // channel, different identity in the Msg.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 2,
+        .label = "zoom-inspector-canvas",
+        .kind = .pinch_begin,
+        .x = 10,
+        .y = 20,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 2,
+        .label = "zoom-inspector-canvas",
+        .kind = .pinch_change,
+        .x = 10,
+        .y = 20,
+        .scale = -0.5,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 2,
+        .label = "zoom-inspector-canvas",
+        .kind = .pinch_end,
+        .x = 10,
+        .y = 20,
+    } });
+    try std.testing.expectEqual(@as(u64, 2), app_state.model.window_id);
+    try std.testing.expectEqualStrings("zoom-inspector-canvas", app_state.model.label);
+    // Both gestures compounded the one model's zoom (1.25 * 0.5,
+    // binary-exact) and every phase was heard.
+    try std.testing.expectEqual(@as(f32, 0.625), app_state.model.scale);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.ends);
+}
+
+// ------------------------------------------------------------ hover fixture
+
+const HoverEntry = union(enum) {
+    outer_enter,
+    outer_leave,
+    row_enter: u32,
+    row_leave: u32,
+    vanish_enter,
+    vanish_leave,
+};
+
+const HoverModel = struct {
+    log: [24]HoverEntry = undefined,
+    log_len: usize = 0,
+    show_vanish: bool = true,
+    outer_bound: bool = true,
+
+    fn push(model: *HoverModel, entry: HoverEntry) void {
+        if (model.log_len >= model.log.len) return;
+        model.log[model.log_len] = entry;
+        model.log_len += 1;
+    }
+
+    fn entries(model: *const HoverModel) []const HoverEntry {
+        return model.log[0..model.log_len];
+    }
+};
+
+const HoverMsg = union(enum) {
+    outer_enter,
+    outer_leave,
+    row_enter: u32,
+    row_leave: u32,
+    vanish_enter,
+    vanish_leave,
+    unbind_outer,
+};
+
+const HoverApp = ui_app_model.UiApp(HoverModel, HoverMsg);
+
+fn hoverUpdate(model: *HoverModel, msg: HoverMsg) void {
+    switch (msg) {
+        .outer_enter => model.push(.outer_enter),
+        .outer_leave => model.push(.outer_leave),
+        .row_enter => |id| model.push(.{ .row_enter = id }),
+        .row_leave => |id| model.push(.{ .row_leave = id }),
+        .vanish_enter => {
+            // The enter handler unmounts the hovered element: the very
+            // next drain pass owes (and delivers) the captured leave.
+            model.push(.vanish_enter);
+            model.show_vanish = false;
+        },
+        .vanish_leave => model.push(.vanish_leave),
+        .unbind_outer => model.outer_bound = false,
+    }
+}
+
+/// A listening panel (y 0..120) holding two listening rows (y 0..40 and
+/// 40..80; the band at 80..120 is the panel's own), then a listening row
+/// (y 120..160) whose ENTER unmounts it. Dead space below. Fixed heights
+/// so the tests probe laid-out geometry deterministically.
+fn hoverView(ui: *HoverApp.Ui, model: *const HoverModel) HoverApp.Ui.Node {
+    const rows = ui.column(.{ .gap = 0 }, .{
+        ui.row(.{ .height = 40, .on_hover_enter = .{ .row_enter = 1 }, .on_hover_leave = .{ .row_leave = 1 } }, .{
+            ui.text(.{}, "Row one"),
+        }),
+        ui.row(.{ .height = 40, .on_hover_enter = .{ .row_enter = 2 }, .on_hover_leave = .{ .row_leave = 2 } }, .{
+            ui.text(.{}, "Row two"),
+        }),
+    });
+    const outer = if (model.outer_bound)
+        ui.panel(.{ .height = 120, .on_hover_enter = .outer_enter, .on_hover_leave = .outer_leave }, .{rows})
+    else
+        ui.panel(.{ .height = 120 }, .{rows});
+    if (model.show_vanish) {
+        return ui.column(.{ .gap = 0 }, .{
+            outer,
+            ui.row(.{ .height = 40, .on_hover_enter = .vanish_enter, .on_hover_leave = .vanish_leave }, .{
+                ui.text(.{}, "Vanish"),
+            }),
+        });
+    }
+    return ui.column(.{ .gap = 0 }, .{outer});
+}
+
+const hover_views = [_]app_manifest.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const hover_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Hover",
+    .width = 400,
+    .height = 300,
+    .views = &hover_views,
+}};
+const hover_scene: app_manifest.ShellConfig = .{ .windows = &hover_windows };
+
+fn hoverOptions() HoverApp.Options {
+    return .{
+        .name = "ui-app-hover",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = hoverUpdate,
+        .view = hoverView,
+    };
+}
+
+fn hoverMove(harness: anytype, app: anytype, x: f32, y: f32) !void {
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = x,
+        .y = y,
+    } });
+}
+
+fn expectHoverLog(model: *const HoverModel, expected: []const HoverEntry) !void {
+    try std.testing.expectEqualSlices(HoverEntry, expected, model.entries());
+}
+
+test "hover msgs dispatch containment edges: nested listeners, cancel, and coalesced moves" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Dead space: nothing listens, nothing dispatches, and the runtime
+    // holds no standing chain (unbound surfaces pay nothing).
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // Onto row one (over its plain TEXT child — containment falls
+    // through to the listeners): enters fire outermost first.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // Row one to row two: the shared panel ancestor stays entered — the
+    // pointer never left it, the DOM mouseenter/mouseleave rule.
+    try hoverMove(harness, app, 50, 60);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 } });
+
+    // Onto the panel's own band below the rows: only the row leaves.
+    try hoverMove(harness, app, 50, 100);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 }, .{ .row_leave = 2 } });
+
+    // Off the panel entirely.
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 }, .{ .row_leave = 2 }, .outer_leave });
+
+    // Back inside, then the pointer LEAVES THE VIEW (the pointer-cancel
+    // hosts emit on window exit): leaves fire innermost first.
+    app_state.model = .{};
+    try hoverMove(harness, app, 50, 60);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 2 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 60,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 2 }, .{ .row_leave = 2 }, .outer_leave });
+}
+
+test "unbinding an outer listener leaves it alone: the standing inner row never flickers" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Inside row one: panel and row both stand.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A rebuild removes only the PANEL's hover bindings: the panel's
+    // leave dispatches, and the row — whose containment never changed —
+    // dispatches NOTHING (per-listener containment, not a positional
+    // chain).
+    try app_state.dispatch(&harness.runtime, 1, .unbind_outer);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .outer_leave });
+
+    // The row's own exit still delivers its captured leave.
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .outer_leave, .{ .row_leave = 1 } });
+}
+
+test "hover enter that unmounts its element still delivers the captured leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The enter handler hides the row; the rebuild prunes it from the
+    // standing chain and the SAME event's drain delivers the leave Msg
+    // captured when the enter dispatched — the live tree can no longer
+    // resolve it. No enter without its eventual leave.
+    try hoverMove(harness, app, 50, 140);
+    try expectHoverLog(&app_state.model, &.{ .vanish_enter, .vanish_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // The pointer now stands over dead space (the row is gone); moving
+    // again dispatches nothing further.
+    try hoverMove(harness, app, 50, 141);
+    try expectHoverLog(&app_state.model, &.{ .vanish_enter, .vanish_leave });
+}
+
+// ------------------------------------------------- hover-under-scroll fixture
+
+const ScrollHoverModel = struct {
+    log: [24]HoverEntry = undefined,
+    log_len: usize = 0,
+
+    fn push(model: *ScrollHoverModel, entry: HoverEntry) void {
+        if (model.log_len >= model.log.len) return;
+        model.log[model.log_len] = entry;
+        model.log_len += 1;
+    }
+
+    fn entries(model: *const ScrollHoverModel) []const HoverEntry {
+        return model.log[0..model.log_len];
+    }
+};
+
+const ScrollHoverApp = ui_app_model.UiApp(ScrollHoverModel, HoverMsg);
+
+fn scrollHoverUpdate(model: *ScrollHoverModel, msg: HoverMsg) void {
+    switch (msg) {
+        .row_enter => |id| model.push(.{ .row_enter = id }),
+        .row_leave => |id| model.push(.{ .row_leave = id }),
+        else => {},
+    }
+}
+
+/// Ten listening rows of 40 points inside a 120-point scroll viewport:
+/// scrolling moves rows under a stationary pointer.
+fn scrollHoverView(ui: *ScrollHoverApp.Ui, model: *const ScrollHoverModel) ScrollHoverApp.Ui.Node {
+    _ = model;
+    var rows: [10]ScrollHoverApp.Ui.Node = undefined;
+    for (&rows, 0..) |*node, index| {
+        const id: u32 = @intCast(index + 1);
+        node.* = ui.row(.{
+            .height = 40,
+            .key = canvas.uiKey(@as(u64, id)),
+            .on_hover_enter = .{ .row_enter = id },
+            .on_hover_leave = .{ .row_leave = id },
+        }, .{ui.text(.{}, ui.fmt("Row {d}", .{id}))});
+    }
+    const row_nodes: []const ScrollHoverApp.Ui.Node = rows[0..];
+    return ui.scroll(.{ .height = 120 }, .{ui.column(.{ .gap = 0 }, row_nodes)});
+}
+
+fn scrollHoverOptions() ScrollHoverApp.Options {
+    return .{
+        .name = "ui-app-scroll-hover",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = scrollHoverUpdate,
+        .view = scrollHoverView,
+    };
+}
+
+test "hover msgs re-resolve when content scrolls under a stationary pointer" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ScrollHoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ScrollHoverApp.init(std.heap.page_allocator, .{}, scrollHoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Park the pointer on row 1.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = 50,
+        .y = 20,
+    } });
+    try std.testing.expectEqualSlices(HoverEntry, &.{.{ .row_enter = 1 }}, app_state.model.entries());
+
+    // A wheel scroll of 80 points slides row 3 under the stationary
+    // pointer: the same leave/enter a real move off row 1 onto row 3
+    // would dispatch — content moved, containment followed.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .scroll,
+        .timestamp_ns = 2_000_000,
+        .x = 50,
+        .y = 20,
+        .delta_y = 80,
+    } });
+    try std.testing.expectEqualSlices(HoverEntry, &.{ .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 3 } }, app_state.model.entries());
+}
+
+test "touch-shaped input (down/up/drag without hover) never synthesizes hover msgs" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // A tap (down/up) and a scrub (drag) over a listening row — the
+    // touch input shape, which never includes a hover-phase move —
+    // dispatch no hover Msgs and leave no standing containment: touch
+    // cannot hover, mechanically.
+    for ([_]zero_platform.GpuSurfaceInputKind{ .pointer_down, .pointer_drag, .pointer_up }) |kind| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = kind,
+            .x = 50,
+            .y = 20,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // A TOUCH-STAMPED hover-phase move (the mouse-shaped float Windows
+    // synthesizes for taps, marked by the host with the reserved
+    // pointer-id bit) earns no proof either: the fake float dispatches
+    // nothing and leaves no standing containment.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .pointer_id = zero_platform.touch_pointer_id_bit | 1,
+        .x = 50,
+        .y = 20,
+    } });
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // A hover-phase move proves a hover-capable pointer; from then on
+    // clicks and drags keep full mouse fidelity.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_drag,
+        .x = 50,
+        .y = 220,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+}
+
+// ------------------------------------------------ hover capture fixture
+
+const CaptureModel = struct {
+    churns: u32 = 0,
+    show_row: bool = true,
+    bind_leave: bool = true,
+    exploded: bool = false,
+    two_entered: u32 = 0,
+    two_left: u32 = 0,
+    field: canvas.TextBuffer(16) = .{},
+    left_storage: [32]u8 = [_]u8{0} ** 32,
+    left_len: usize = 0,
+
+    fn leftText(model: *const CaptureModel) []const u8 {
+        return model.left_storage[0..model.left_len];
+    }
+
+    pub fn fieldText(model: *const CaptureModel) []const u8 {
+        return model.field.text();
+    }
+};
+
+const CaptureMsg = union(enum) {
+    churn,
+    hide_row,
+    entered,
+    left: []const u8,
+    entered_two,
+    left_two,
+    bind_leave_now,
+    explode,
+    calm,
+    field_edit: canvas.TextInputEvent,
+};
+
+const CaptureApp = ui_app_model.UiApp(CaptureModel, CaptureMsg);
+
+fn captureUpdate(model: *CaptureModel, msg: CaptureMsg) void {
+    switch (msg) {
+        .churn => model.churns += 1,
+        .hide_row => model.show_row = false,
+        .entered => {},
+        .left => |text| {
+            const len = @min(text.len, model.left_storage.len);
+            @memcpy(model.left_storage[0..len], text[0..len]);
+            model.left_len = len;
+        },
+        .entered_two => model.two_entered += 1,
+        .left_two => model.two_left += 1,
+        .bind_leave_now => model.bind_leave = true,
+        .explode => model.exploded = true,
+        .calm => model.exploded = false,
+        .field_edit => |edit| {
+            // Any edit — the standalone accessibility selection verb
+            // included — unmounts the hovered row, the shape that
+            // strands a leave if the standalone event skips the drain.
+            model.field.apply(edit);
+            model.show_row = false;
+        },
+    }
+}
+
+/// The leave Msg's payload is a `ui.fmt` slice — build-arena bytes that
+/// the arena pair recycles two builds later. The capture must own them.
+/// `exploded` renders a view past the per-view widget-node budget, so
+/// its rebuild FAILS AT PUBLICATION — `self.tree` moved to a build the
+/// runtime never adopted, the exact stale-tree seam the hover drain's
+/// currency invariant covers.
+fn captureView(ui: *CaptureApp.Ui, model: *const CaptureModel) CaptureApp.Ui.Node {
+    if (model.exploded) {
+        var rows: [1100]CaptureApp.Ui.Node = undefined;
+        for (&rows, 0..) |*node, index| {
+            node.* = ui.text(.{ .key = canvas.uiKey(@as(u64, index)) }, "x");
+        }
+        const row_nodes: []const CaptureApp.Ui.Node = rows[0..];
+        return ui.column(.{ .gap = 0 }, row_nodes);
+    }
+    if (!model.show_row) {
+        return ui.column(.{ .gap = 0 }, .{ui.text(.{}, ui.fmt("churn {d}", .{model.churns}))});
+    }
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = if (model.bind_leave) CaptureMsg{ .left = ui.fmt("left-after-{d}-churns", .{model.churns}) } else null,
+        }, .{ui.text(.{}, "Capture row")}),
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered_two,
+            .on_hover_leave = .left_two,
+        }, .{ui.text(.{}, "Second row")}),
+        ui.el(.text_field, .{
+            .height = 30,
+            .text = model.fieldText(),
+            .placeholder = "notes",
+            .on_input = CaptureApp.Ui.inputMsg(.field_edit),
+        }, .{}),
+        ui.text(.{}, ui.fmt("churn {d}", .{model.churns})),
+    });
+}
+
+fn captureCommand(name: []const u8) ?CaptureMsg {
+    if (std.mem.eql(u8, name, "capture.churn")) return .churn;
+    if (std.mem.eql(u8, name, "capture.hide")) return .hide_row;
+    return null;
+}
+
+fn captureOptions() CaptureApp.Options {
+    return .{
+        .name = "ui-app-hover-capture",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = captureUpdate,
+        .view = captureView,
+        .on_command = captureCommand,
+    };
+}
+
+test "a captured hover-leave msg owns its arena payload across rebuilds and unmount" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter the row: its leave Msg carries a `ui.fmt` payload built in
+    // THIS build's arena.
+    try hoverMove(harness, app, 50, 20);
+
+    // Churn rebuilds until the arena pair has recycled the bytes the
+    // enter-time payload lived in. The capture deep-copies each build's
+    // LATEST binding (kept fresh as the trees change), so the payload
+    // is always owned bytes, never a pointer into a recycled arena.
+    for (0..3) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.churn", .window_id = 1 } });
+    }
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.churns);
+
+    // Unmount the row under the stationary pointer: the captured leave
+    // dispatches the last build's binding, bytes intact.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.hide", .window_id = 1 } });
+    try std.testing.expectEqualStrings("left-after-3-churns", app_state.model.leftText());
+}
+
+test "a direct dispatch that unmounts the hovered element delivers its leave immediately" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // A DIRECT dispatch (a command handler, an embedder, a test) that
+    // unmounts the hovered row settles the leave at its own tail — no
+    // later platform event required.
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "another pointer's contact never rides a mouse's hover proof" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The mouse (pointer 0) proves hover over row one.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A touch contact (another pointer id) taps row two and lifts with
+    // a cancel: on a host that distinguishes pointers, none of it moves
+    // the mouse's standing containment.
+    for ([_]zero_platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up, .pointer_cancel }) |kind| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 7,
+            .x = 50,
+            .y = 60,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // The mouse's own departure retires it.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 20,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+}
+
+test "a leave handler added while the listener stands is captured before the unmount needs it" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    app_state.model.bind_leave = false;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter with NO leave handler bound: nothing to capture yet.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqualStrings("", app_state.model.leftText());
+
+    // A rebuild ADDS the leave binding while the listener stands: the
+    // capture refresh picks it up (id-identical chains included), so
+    // the later unmount can still deliver the pair.
+    try app_state.dispatch(&harness.runtime, 1, .bind_leave_now);
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "hover edges defer while a tree is stale and deliver after recovery" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // White-box: mark the main tree stale, the state a failure INSIDE
+    // the install window leaves behind (publication adopted, handler
+    // tree not yet) — the narrow seam no budget lever reaches
+    // deterministically from outside. An enter-only transition then
+    // has nothing deliverable: the enter DEFERS rather than resolving
+    // through the stale tree (any owed leave would still dispatch and
+    // its rebuild would heal the staleness — the pure-enter case is
+    // the one that must wait).
+    app_state.main_tree_current = false;
+    try hoverMove(harness, app, 50, 60);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.two_entered);
+
+    // Recovery: the next successful rebuild restores currency at the
+    // install seam, and its own drain delivers the deferred enter.
+    try app_state.dispatch(&harness.runtime, 1, .churn);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // Leaves never wait on currency: stale again, moving off the row
+    // still delivers the captured leave — and that dispatch's own
+    // successful rebuild heals the flag at the install seam.
+    app_state.main_tree_current = false;
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_left);
+    try std.testing.expect(app_state.main_tree_current);
+}
+
+test "a failed build keeps the still-matching pair live: edges flow through it" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // The explode rebuild fails at LAYOUT — before publication, before
+    // `self.tree` moves — so the OLD handler tree still matches the
+    // runtime's retained state and stays CURRENT: a failure outside
+    // the install window must never defer hover edges (an idle app
+    // might perform no further rebuild to lift the deferral).
+    if (app_state.dispatch(&harness.runtime, 1, .explode)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expect(app_state.model.exploded);
+
+    // The pointer moves to the second row (hit-tested against the
+    // retained tree the failed build never replaced): row one's
+    // captured leave AND row two's enter both flow through the
+    // still-matching pair. Each edge's own dispatch rebuild fails (the
+    // model remains exploded), so the event ERRORS after the Msgs
+    // landed — the degradation contract: edges delivered, failures
+    // loud.
+    if (hoverMove(harness, app, 50, 60)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // Recovery is clean: a successful rebuild changes nothing owed.
+    try app_state.dispatch(&harness.runtime, 1, .calm);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // And the pair completes on exit.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 60,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_left);
+}
+
+// -------------------------------------------- over-aligned payload probe
+
+const AlignedModel = struct {
+    bytes: [64]u8 align(64) = [_]u8{'a'} ** 64,
+    show_row: bool = true,
+    left_len: usize = 0,
+    z_payload: [4]u8 = [_]u8{0} ** 4,
+
+    fn payload(model: *const AlignedModel) []align(64) const u8 {
+        return @alignCast(model.bytes[0..8]);
+    }
+};
+
+const AlignedMsg = union(enum) {
+    entered,
+    left: []align(64) const u8,
+    left_z: [3:0]u8,
+    hide,
+};
+
+/// Markup-free on purpose: the runtime markup interpreter's coercion
+/// vocabulary is plain `[]const u8`, so the over-aligned payload rides a
+/// builder-only app — which is exactly where such a payload can exist.
+const AlignedApp = ui_app_model.UiAppWithFeatures(AlignedModel, AlignedMsg, .{ .runtime_markup = false });
+
+fn alignedUpdate(model: *AlignedModel, msg: AlignedMsg) void {
+    switch (msg) {
+        .entered => {},
+        .left => |bytes| model.left_len = bytes.len,
+        .left_z => |arr| {
+            // Record the declared elements AND the sentinel storage the
+            // copy must have stamped.
+            model.z_payload = .{ arr[0], arr[1], arr[2], arr[3] };
+        },
+        .hide => model.show_row = false,
+    }
+}
+
+fn alignedView(ui: *AlignedApp.Ui, model: *const AlignedModel) AlignedApp.Ui.Node {
+    if (!model.show_row) return ui.column(.{}, .{ui.text(.{}, "empty")});
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left = model.payload() },
+        }, .{ui.text(.{}, "Aligned row")}),
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left_z = .{ 'x', 'y', 'z' } },
+        }, .{ui.text(.{}, "Sentinel row")}),
+    });
+}
+
+fn alignedOptions() AlignedApp.Options {
+    return .{
+        .name = "ui-app-hover-aligned",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = alignedUpdate,
+        .view = alignedView,
+    };
+}
+
+test "an over-aligned slice leave payload captures, survives unmount, and delivers" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(AlignedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = AlignedApp.init(std.heap.page_allocator, .{}, alignedOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The capture deep-copies a `[]align(64) const u8` payload (the
+    // alignment-preserving allocation path), and the unmount-driven
+    // leave delivers it.
+    try hoverMove(harness, app, 50, 20);
+    try app_state.dispatch(&harness.runtime, 1, .hide);
+    try std.testing.expectEqual(@as(usize, 8), app_state.model.left_len);
+}
+
+test "a standalone accessibility edit that unmounts the hovered listener drains its leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // The accessibility selection edit dispatches a STANDALONE keyboard
+    // event — no gpu-surface input cycle follows it — and its Msg
+    // unmounts the hovered row: the drain must run at the standalone
+    // event's own tail, or the leave strands until an unrelated event.
+    const field_id = findWidgetIdByText(app_state.tree.?, .text_field, "").?;
+    var command_buffer: [96]u8 = undefined;
+    const command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} set-selection 0 0", .{ canvas_label, field_id });
+    try harness.runtime.dispatchAutomationCommand(app, command);
+    try std.testing.expect(!app_state.model.show_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "two dispatches in one cycle deliver the LATEST leave binding on unmount" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // White-box cycle shape: two dispatches with the drain deferred to
+    // the cycle's end (an event handler dispatching twice). The first
+    // moves the leave payload, the second unmounts — the capture must
+    // refresh at EACH rebuild commit, not just at drain time against
+    // the final (unmounted) tree.
+    app_state.hover_msg_event_depth = 1;
+    try app_state.dispatch(&harness.runtime, 1, .churn);
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    app_state.hover_msg_event_depth = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqualStrings("left-after-1-churns", app_state.model.leftText());
+}
+
+test "a secondary drag released outside the view retires the entered chain" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A right-drag: the consumed secondary stream freezes containment
+    // through the gesture (a menu gesture is not hovering) — but a
+    // release OUTSIDE the view is the pointer already gone, the leave
+    // the freeze suppressed. No motion-leave will fire (the implicit
+    // grab held it), so the release itself must retire the chain.
+    for ([_]struct { kind: zero_platform.GpuSurfaceInputKind, x: f32, y: f32 }{
+        .{ .kind = .pointer_down, .x = 50, .y = 20 },
+        .{ .kind = .pointer_drag, .x = 450, .y = 320 },
+        .{ .kind = .pointer_up, .x = 450, .y = 320 },
+    }) |step| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = step.kind,
+            .button = 1,
+            .x = step.x,
+            .y = step.y,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+}
+
+test "repeated re-entry with rebuilding edge handlers never exhausts capture slots" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Every edge Msg rebuilds, and each rebuild's capture refresh can
+    // fill a mid-transition slot the enter loop then replaces: cycling
+    // far past the slot budget proves replacement always releases —
+    // a leaked claim per cycle would exhaust the slots and trap.
+    for (0..40) |_| {
+        try hoverMove(harness, app, 50, 60);
+        try hoverMove(harness, app, 50, 220);
+    }
+    var used: usize = 0;
+    for (app_state.hover_msg_slot_used) |slot_used| used += @intFromBool(slot_used);
+    try std.testing.expectEqual(@as(usize, 0), used);
+}
+
+// ---------------------------------------------- unownable payload probe
+
+const PtrModel = struct {
+    entered: u32 = 0,
+    anchor: u32 = 7,
+    bind_ptr: bool = true,
+};
+
+const PtrMsg = union(enum) {
+    entered,
+    left_ptr: *const u32,
+    bind_ptr_now,
+};
+
+/// Markup-free like the aligned probe: a single-item-pointer payload is
+/// builder-only territory.
+const PtrApp = ui_app_model.UiAppWithFeatures(PtrModel, PtrMsg, .{ .runtime_markup = false });
+
+fn ptrUpdate(model: *PtrModel, msg: PtrMsg) void {
+    switch (msg) {
+        .entered => model.entered += 1,
+        .left_ptr => {},
+        .bind_ptr_now => model.bind_ptr = true,
+    }
+}
+
+fn ptrView(ui: *PtrApp.Ui, model: *const PtrModel) PtrApp.Ui.Node {
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = if (model.bind_ptr) PtrMsg{ .left_ptr = &model.anchor } else null,
+        }, .{ui.text(.{}, "Pointer row")}),
+    });
+}
+
+fn ptrOptions() PtrApp.Options {
+    return .{
+        .name = "ui-app-hover-ptr",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = ptrUpdate,
+        .view = ptrView,
+    };
+}
+
+test "an unownable leave payload disables the pair: no enter, no dangling leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PtrApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PtrApp.init(std.heap.page_allocator, .{}, ptrOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The leave payload is a single-item pointer no copy can own: the
+    // PAIR is refused — the enter never dispatches (no enter without a
+    // deliverable leave), the exit owes nothing, and the refusal
+    // settles instead of retrying every event.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+
+    // Re-entry retries the refusal (a rebind could have made the
+    // payload ownable); with the same binding it refuses identically.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+}
+
+test "a sentinel-terminated array payload captures with its sentinel stamped" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(AlignedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = AlignedApp.init(std.heap.page_allocator, .{}, alignedOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Hover the sentinel row, unmount, and read the delivered array's
+    // FULL storage: the declared elements and the zero sentinel one
+    // past them — never undefined bytes.
+    try hoverMove(harness, app, 50, 60);
+    try app_state.dispatch(&harness.runtime, 1, .hide);
+    try std.testing.expectEqualSlices(u8, &.{ 'x', 'y', 'z', 0 }, &app_state.model.z_payload);
+}
+
+test "an unownable leave rebind on a standing element degrades loudly, never traps" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PtrApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PtrApp.init(std.heap.page_allocator, .{}, ptrOptions());
+    defer app_state.deinit();
+    app_state.model.bind_ptr = false;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter with NO leave bound: the enter dispatches (an ownable-free
+    // pair is fine).
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+
+    // A rebuild BINDS an unownable leave while the element stands: the
+    // refresh degrades with a warning (once) and the mirror settles —
+    // subsequent rebuilds and moves neither trap nor re-enter.
+    try app_state.dispatch(&harness.runtime, 1, .bind_ptr_now);
+    try hoverMove(harness, app, 55, 20);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+
+    // The exit resolves the leave from the live tree (the element still
+    // stands), so the standing pair still closes — through live
+    // resolution rather than a capture.
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+}
+
+test "a primary drag released outside the view retires containment and its proof" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A primary drag released beyond the surface: hosts held a grab
+    // through it (no motion-leave fired) and send no later cancel, so
+    // the release itself retires containment AND the hover proof — an
+    // overflowing listener can never stay entered off-view, and no
+    // rebuild can re-enter one at a parked off-view anchor.
+    for ([_]struct { kind: zero_platform.GpuSurfaceInputKind, x: f32, y: f32 }{
+        .{ .kind = .pointer_down, .x = 50, .y = 20 },
+        .{ .kind = .pointer_drag, .x = 450, .y = 320 },
+        .{ .kind = .pointer_up, .x = 450, .y = 320 },
+    }) |step| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = step.kind,
+            .button = 0,
+            .x = step.x,
+            .y = step.y,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+    try std.testing.expect(!harness.runtime.views[0].canvas_widget_hover_pointer_live);
 }

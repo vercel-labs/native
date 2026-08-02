@@ -1,0 +1,430 @@
+// The end-to-end fixture core: a small status poller exercising every
+// v2 effect record — an init-command request, keyed replace and cancel,
+// a fire-and-forget bytes command, Cmd.now, a model-gated timer
+// subscription, the named engine ops (readFile/writeFile/fetch/
+// clipboard) plus the one-shot delay, and the streaming ops (a real
+// subprocess spawn with line/exit routing and mid-stream cancel, and
+// the audio and video event streams with their control verbs).
+// Transpiled at build time by the repo's own transpiler (never committed
+// as Zig) and driven through the real runtime by
+// tests/ts-core/host_e2e_tests.zig.
+
+import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
+
+export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
+
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
+
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
+
+export type ChannelState = "data" | "closed" | "rejected";
+
+export interface Model {
+  readonly polling: boolean;
+  readonly ticks: number;
+  readonly lastTickAt: number;
+  readonly stampMs: number;
+  readonly failures: number;
+  readonly status: Uint8Array;
+  readonly lastErr: Uint8Array;
+  readonly saved: number;
+  readonly code: number;
+  readonly firedAt: number;
+  readonly lines: number;
+  readonly lastLine: Uint8Array;
+  readonly exitCode: number;
+  readonly audioState: AudioState;
+  readonly posMs: number;
+  readonly durMs: number;
+  readonly playing: boolean;
+  readonly bands: Uint8Array;
+  readonly audioEvents: number;
+  readonly videoState: VideoState;
+  readonly vPosMs: number;
+  readonly vDurMs: number;
+  readonly vPlaying: boolean;
+  readonly vW: number;
+  readonly vH: number;
+  readonly videoEvents: number;
+  readonly cover: number;
+  readonly coverW: number;
+  readonly coverH: number;
+  readonly imageState: ImageState;
+  readonly imageStatus: number;
+  readonly imageResults: number;
+  // The echoed ImageId of the last image result — how concurrent loads
+  // sharing the one event arm stay distinguishable in update.
+  readonly lastImageId: number;
+  // Model-owned dynamic ImageIds: the bridge validates these at
+  // runtime (the emitter's NS1030 gate covers literals only).
+  readonly nextCover: number;
+  readonly topId: number;
+  // Model-owned expectedBytes values the emitter's literal gate never
+  // sees: a fractional count the bridge must map to "unknown size"
+  // (never truncate into a wrong verification size), and a whole one
+  // it must carry through exactly.
+  readonly fracBytes: number;
+  readonly wholeBytes: number;
+  // The expectedBytes wire boundary, model-owned like topId: 2^53 - 1
+  // is the last exactly-carried count, and 2^53 (which 2^53 + 1
+  // aliases on the f64 wire) must map to "unknown size" — there is no
+  // one honest count to verify against.
+  readonly topBytes: number;
+  // Holds 2^53 by design — past the i64 class's provable ±(2^53 − 1)
+  // window, so this slot stays f64-classed in every contract.
+  readonly pastBytes: number;
+  readonly chanState: ChannelState;
+  readonly chanEvents: number;
+  // Rejection delivery-order probe for the mixed refused batches: each
+  // rejection Msg takes the next sequence number, so assertions read
+  // which family's rejection reached update first — Cmd.batch's
+  // performed-in-order contract, pinned across effect families.
+  readonly rejectSeq: number;
+  readonly chanRejectAt: number;
+  readonly imgRejectAt: number;
+}
+
+export type Msg =
+  | { readonly kind: "toggle" }
+  | { readonly kind: "refresh" }
+  | { readonly kind: "abort" }
+  | { readonly kind: "stamp" }
+  | { readonly kind: "note" }
+  | { readonly kind: "loaded"; readonly body: Uint8Array }
+  | { readonly kind: "failed"; readonly why: Uint8Array }
+  | { readonly kind: "tick"; readonly at: number }
+  | { readonly kind: "stamped"; readonly at: number }
+  | { readonly kind: "save" }
+  | { readonly kind: "load" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "get" }
+  | { readonly kind: "fetched"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "share" }
+  | { readonly kind: "paste" }
+  | { readonly kind: "later" }
+  | { readonly kind: "halt" }
+  | { readonly kind: "boomed"; readonly at: number }
+  | { readonly kind: "run" }
+  | { readonly kind: "hang" }
+  | { readonly kind: "kill" }
+  | { readonly kind: "lined"; readonly text: Uint8Array }
+  | { readonly kind: "ended"; readonly code: number }
+  | { readonly kind: "play" }
+  | { readonly kind: "pause_music" }
+  | { readonly kind: "set_volume" }
+  | { readonly kind: "stop_music" }
+  | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
+  | { readonly kind: "play_clip" }
+  | { readonly kind: "pause_clip" }
+  | { readonly kind: "stop_clip" }
+  | { readonly kind: "video_evt"; readonly state: VideoState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly width: number; readonly height: number }
+  | { readonly kind: "show_cover" }
+  | { readonly kind: "show_cover_again" }
+  | { readonly kind: "load_next" }
+  | { readonly kind: "load_top" }
+  | { readonly kind: "load_past" }
+  | { readonly kind: "load_flood" }
+  | { readonly kind: "load_frac" }
+  | { readonly kind: "load_sized" }
+  | { readonly kind: "load_top_bytes" }
+  | { readonly kind: "load_past_bytes" }
+  | { readonly kind: "cancel_cover" }
+  | { readonly kind: "cancel_missing" }
+  | { readonly kind: "evict_first" }
+  | { readonly kind: "evict_cover" }
+  | { readonly kind: "evict_missing" }
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number }
+  | { readonly kind: "watch" }
+  | { readonly kind: "mix_reject" }
+  | { readonly kind: "mix_reject_flip" }
+  | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [
+    {
+      polling: true,
+      ticks: 0,
+      lastTickAt: -1,
+      stampMs: -1,
+      failures: 0,
+      status: new Uint8Array(0),
+      lastErr: new Uint8Array(0),
+      saved: 0,
+      code: -1,
+      firedAt: -1,
+      lines: 0,
+      lastLine: new Uint8Array(0),
+      exitCode: -1,
+      audioState: "rejected",
+      posMs: -1,
+      durMs: -1,
+      playing: false,
+      bands: new Uint8Array(0),
+      audioEvents: 0,
+      videoState: "rejected",
+      vPosMs: -1,
+      vDurMs: -1,
+      vPlaying: false,
+      vW: -1,
+      vH: -1,
+      videoEvents: 0,
+      cover: 0,
+      coverW: -1,
+      coverH: -1,
+      imageState: "rejected",
+      imageStatus: -1,
+      imageResults: 0,
+      lastImageId: -1,
+      nextCover: 100,
+      topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
+      fracBytes: 1.5,
+      wholeBytes: 4096,
+      topBytes: 9007199254740991, // 2^53 - 1, the last exactly-carried count
+      pastBytes: 9007199254740992, // 2^53 — 2^53 + 1 is this same wire value
+      chanState: "closed",
+      chanEvents: 0,
+      rejectSeq: 0,
+      chanRejectAt: -1,
+      imgRejectAt: -1,
+    },
+    Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
+  ];
+}
+
+export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "toggle":
+      return [{ ...model, polling: !model.polling }, Cmd.none];
+    case "refresh":
+      return [model, Cmd.request("status.read", model.status, { key: "status", ok: "loaded", err: "failed" })];
+    case "abort":
+      return [model, Cmd.cancel("status")];
+    case "stamp":
+      return [model, Cmd.now("stamped")];
+    case "note":
+      return [model, Cmd.host("blob.put", asciiBytes("hi"))];
+    case "loaded":
+      return [{ ...model, status: msg.body }, Cmd.none];
+    case "failed":
+      return [{ ...model, failures: (model.failures < 9007199254740991 ? model.failures + 1 : 9007199254740991), lastErr: msg.why }, Cmd.none];
+    case "tick":
+      return [{ ...model, ticks: (model.ticks < 9007199254740991 ? model.ticks + 1 : 9007199254740991), lastTickAt: msg.at }, Cmd.none];
+    case "stamped":
+      return [{ ...model, stampMs: msg.at }, Cmd.none];
+    case "save":
+      // The e2e suite runs with the repo root as cwd; the store lives
+      // under the zig cache like every tmp-dir test artifact.
+      return [model, Cmd.writeFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
+    case "load":
+      return [model, Cmd.readFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), { key: "file", ok: "loaded", err: "failed" })];
+    case "wrote":
+      return [{ ...model, saved: (model.saved < 9007199254740991 ? model.saved + 1 : 9007199254740991) }, Cmd.none];
+    case "get":
+      return [
+        model,
+        Cmd.fetch(
+          { url: asciiBytes("https://status.test/feed"), method: "POST", headers: { accept: "text/plain" }, body: model.status, timeoutMs: 750 },
+          { key: "get", ok: "fetched", err: "failed" },
+        ),
+      ];
+    case "fetched":
+      return [{ ...model, code: msg.status, status: msg.body }, Cmd.none];
+    case "share":
+      return [model, Cmd.clipboardWrite(model.status)];
+    case "paste":
+      return [model, Cmd.clipboardRead({ key: "clip", ok: "loaded", err: "failed" })];
+    case "later":
+      return [model, Cmd.delay("boom", 150, "boomed")];
+    case "halt":
+      return [model, Cmd.cancel("boom")];
+    case "boomed":
+      return [{ ...model, firedAt: msg.at }, Cmd.none];
+    case "run":
+      // A real, hermetic child: two stdout lines, then a clean exit.
+      return [model, Cmd.spawn([asciiBytes("/bin/sh"), asciiBytes("-c"), asciiBytes("printf 'one\\ntwo\\n'")], { key: "job", line: "lined", exit: "ended", err: "failed" })];
+    case "hang":
+      // A child that outlives the test unless cancelled mid-stream.
+      return [model, Cmd.spawn([asciiBytes("/bin/sh"), asciiBytes("-c"), asciiBytes("sleep 30")], { key: "job", line: "lined", exit: "ended", err: "failed" })];
+    case "kill":
+      return [model, Cmd.cancel("job")];
+    case "lined":
+      return [{ ...model, lines: (model.lines < 9007199254740991 ? model.lines + 1 : 9007199254740991), lastLine: msg.text }, Cmd.none];
+    case "ended":
+      return [{ ...model, exitCode: msg.code }, Cmd.none];
+    case "play":
+      return [model, Cmd.audioPlay("track", { path: asciiBytes("music/track.mp3") }, { event: "audio_evt" })];
+    case "pause_music":
+      return [model, Cmd.audioPause("track")];
+    case "set_volume":
+      // The engine's remembered volume verb (0..1), on the fixture's
+      // test-only path: the soundboard example carries no volume control
+      // (parity with its Zig original), so the capability stays proven
+      // here.
+      return [model, Cmd.audioSetVolume("track", 0.8)];
+    case "stop_music":
+      return [model, Cmd.audioStop("track")];
+    case "audio_evt":
+      return [{
+        ...model,
+        audioState: msg.state,
+        posMs: msg.positionMs,
+        durMs: msg.durationMs,
+        playing: msg.playing,
+        bands: msg.bands,
+        audioEvents: (model.audioEvents < 9007199254740991 ? model.audioEvents + 1 : 9007199254740991),
+      }, Cmd.none];
+    case "play_clip":
+      // The media-surface id a video widget would bind: the decoded
+      // frames feed that texture channel platform-side; only the
+      // transport events below reach the core.
+      return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("media/clip.mp4") }, { event: "video_evt" })];
+    case "pause_clip":
+      return [model, Cmd.videoPause("clip")];
+    case "stop_clip":
+      return [model, Cmd.videoStop("clip")];
+    case "video_evt":
+      return [{
+        ...model,
+        videoState: msg.state,
+        vPosMs: msg.positionMs,
+        vDurMs: msg.durationMs,
+        vPlaying: msg.playing,
+        vW: msg.width,
+        vH: msg.height,
+        videoEvents: (model.videoEvents < 9007199254740991 ? model.videoEvents + 1 : 9007199254740991),
+      }, Cmd.none];
+    case "show_cover":
+      // The runtime ImageId the views bind; the model only adopts it
+      // on a loaded result (the store-the-id-on-success discipline).
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png"), url: asciiBytes("https://cdn.test/cover.png") }, { event: "image_done" })];
+    case "show_cover_again":
+      // A duplicate live id: the bridge rejects it (state "rejected")
+      // — one load per id at a time, the spawn discipline.
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+    case "load_next":
+      // Dynamic ids straight off the model: each dispatch parks one
+      // more in-flight load, so the e2e suite can fill the bridge's
+      // 16-entry image table and prove the 17th answers "rejected"
+      // (never a crash) while the 16 live loads stay healthy.
+      return [{ ...model, nextCover: (model.nextCover < 9007199254740991 ? model.nextCover + 1 : 9007199254740991) }, Cmd.imageLoad(model.nextCover, { path: asciiBytes("art/flood.png") }, { event: "image_done" })];
+    case "load_top":
+      // 2^53 - 1 reaching the bridge as a DYNAMIC value the emitter's
+      // literal gate never sees: the last id every tier carries
+      // exactly, so it must park a live load.
+      return [model, Cmd.imageLoad(model.topId, { path: asciiBytes("art/top.png") }, { event: "image_done" })];
+    case "load_past":
+      // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot
+      // carry exactly. Dynamic values answer "rejected" at runtime, the
+      // runtime twin of the emitter's compile-time literal gate.
+      return [model, Cmd.imageLoad(model.topId + 1, { path: asciiBytes("art/past.png") }, { event: "image_done" })];
+    case "load_flood":
+      // Seventeen loads in ONE command value: against a full image
+      // table every one must answer "rejected" at the post-cycle
+      // boundary — one result per load, however many one batch stages.
+      return [model, Cmd.batch([
+        Cmd.imageLoad(200, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(201, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(202, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(203, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(204, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(205, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(206, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(207, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(208, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(209, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(210, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(211, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(212, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(213, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(214, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(215, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(216, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+      ])];
+    case "load_frac":
+      // A fractional expectedBytes reaching the bridge as a DYNAMIC
+      // value the emitter's literal gate never sees: not a
+      // representable whole byte count, so the bridge hands the engine
+      // "unknown size" (0) — truncating to 1 would make the cache
+      // verify against a size the app never declared.
+      return [model, Cmd.imageLoad(61, { url: asciiBytes("https://cdn.test/frac.png"), cachePath: asciiBytes("cache/frac.png"), expectedBytes: model.fracBytes }, { event: "image_done" })];
+    case "load_sized":
+      // The whole-number control: a dynamic representable count rides
+      // the wire into the engine exactly.
+      return [model, Cmd.imageLoad(62, { url: asciiBytes("https://cdn.test/sized.png"), cachePath: asciiBytes("cache/sized.png"), expectedBytes: model.wholeBytes }, { event: "image_done" })];
+    case "load_top_bytes":
+      // 2^53 - 1 as a DYNAMIC count: the last one the f64 wire carries
+      // exactly, so it must install as the verification size verbatim.
+      return [model, Cmd.imageLoad(63, { url: asciiBytes("https://cdn.test/top.png"), cachePath: asciiBytes("cache/top.png"), expectedBytes: model.topBytes }, { event: "image_done" })];
+    case "load_past_bytes":
+      // 2^53 as a DYNAMIC count — and 2^53 + 1 arrives as this exact
+      // wire value (the f64 grid steps by 2 there), so there is no one
+      // honest count to verify against. The bridge maps it to "unknown
+      // size" (0), joining the fractionals: installing it would make
+      // every real download miss verification and re-fetch on launch.
+      return [model, Cmd.imageLoad(64, { url: asciiBytes("https://cdn.test/past.png"), cachePath: asciiBytes("cache/past.png"), expectedBytes: model.pastBytes }, { event: "image_done" })];
+    case "cancel_cover":
+      // The numeric-id cancel: ends the in-flight load under id 21
+      // loudly (its own event arm delivers state "cancelled") and
+      // frees the id for a same-id retry.
+      return [model, Cmd.imageCancel(21)];
+    case "cancel_missing":
+      // An id with no live load: the documented no-op — no result, no
+      // crash, nothing to report on.
+      return [model, Cmd.imageCancel(555)];
+    case "evict_first":
+      // The gallery eviction move: free the registry slot under the
+      // first dynamic id, so a full 16-slot registry accepts one more
+      // image. Synchronous registry surgery — no result Msg.
+      return [model, Cmd.imageUnregister(100)];
+    case "evict_cover":
+      // Unregister aimed at the cover id — in the e2e it lands both
+      // while a load is IN FLIGHT (a registry miss: no-op, and the
+      // load's terminal still registers) and while the id is
+      // registered under a live reload (the slot frees now, and the
+      // reload's terminal re-registers it).
+      return [model, Cmd.imageUnregister(21)];
+    case "evict_missing":
+      // An id with no registration: the documented no-op — no result,
+      // no crash, nothing to report on.
+      return [model, Cmd.imageUnregister(888)];
+    case "image_done":
+      // The echoed id IS the adopted id — the store-the-id-on-success
+      // discipline reads it off the result instead of hardcoding it.
+      if (msg.state === "loaded")
+        return [{ ...model, cover: msg.id, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: (model.imageResults < 9007199254740991 ? model.imageResults + 1 : 9007199254740991), lastImageId: msg.id }, Cmd.none];
+      if (msg.state === "rejected")
+        return [{ ...model, imageState: msg.state, imageStatus: msg.status, imageResults: (model.imageResults < 9007199254740991 ? model.imageResults + 1 : 9007199254740991), lastImageId: msg.id, rejectSeq: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991), imgRejectAt: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991) }, Cmd.none];
+      return [{ ...model, imageState: msg.state, imageStatus: msg.status, imageResults: (model.imageResults < 9007199254740991 ? model.imageResults + 1 : 9007199254740991), lastImageId: msg.id }, Cmd.none];
+    case "watch":
+      return [model, Cmd.channelOpen(41, { event: "chan_evt" })];
+    case "mix_reject":
+      // The mixed refused batch: BOTH records are refused (duplicate
+      // live key/id), and Cmd.batch's performed-in-order contract
+      // extends to the rejections — the channel rejection dispatches
+      // first because its record comes first.
+      return [model, Cmd.batch([
+        Cmd.channelOpen(41, { event: "chan_evt" }),
+        Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" }),
+      ])];
+    case "mix_reject_flip":
+      // The reverse order, so the pin is stream order — never one
+      // family blocked ahead of the other.
+      return [model, Cmd.batch([
+        Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" }),
+        Cmd.channelOpen(41, { event: "chan_evt" }),
+      ])];
+    case "chan_evt":
+      if (msg.state === "rejected")
+        return [{ ...model, chanState: msg.state, chanEvents: (model.chanEvents < 9007199254740991 ? model.chanEvents + 1 : 9007199254740991), rejectSeq: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991), chanRejectAt: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991) }, Cmd.none];
+      return [{ ...model, chanState: msg.state, chanEvents: (model.chanEvents < 9007199254740991 ? model.chanEvents + 1 : 9007199254740991) }, Cmd.none];
+  }
+}
+
+export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.polling) return Sub.none;
+  return Sub.timer("tick", 100, "tick");
+}

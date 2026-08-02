@@ -78,6 +78,9 @@ pub const environment_menu_id: canvas.ObjectId = 216;
 pub const environment_stack_id: canvas.ObjectId = 217;
 pub const environment_option_base_id: canvas.ObjectId = 21601;
 pub const content_scroll_id: canvas.ObjectId = 90;
+pub const component_tree_scroll_id: canvas.ObjectId = 89;
+pub const component_tree_id: canvas.ObjectId = 91;
+pub const component_tree_item_base_id: canvas.ObjectId = 300;
 pub const canvas_sidebar_id: canvas.ObjectId = 92;
 pub const canvas_sidebar_title_id: canvas.ObjectId = 93;
 pub const section_nav_base_id: canvas.ObjectId = 94;
@@ -127,6 +130,8 @@ pub const section_nav_commands = [_][]const u8{
 pub const ComponentVirtualScroll = struct {
     page: f32 = 0,
     page_velocity: f32 = 0,
+    tree: f32 = 0,
+    tree_velocity: f32 = 0,
     nav: f32 = 0,
     nav_velocity: f32 = 0,
     behavior: f32 = 28,
@@ -141,6 +146,7 @@ pub const ComponentUiState = struct {
     environment_index: usize = 0,
     surface_overlay: ComponentSurfaceOverlay = .none,
     section: ComponentSection = .controls,
+    selected_component: usize = 0,
     sidebar_width: f32 = canvas_sidebar_width,
     status_text: []const u8 = initial_component_status_text,
 };
@@ -236,6 +242,32 @@ pub fn componentSectionFromCommand(command_name: []const u8) ?ComponentSection {
 
 pub fn componentSectionNavId(section: ComponentSection) canvas.ObjectId {
     return section_nav_base_id + @as(canvas.ObjectId, @intFromEnum(section));
+}
+
+pub fn componentTreeItemId(index: usize) canvas.ObjectId {
+    return component_tree_item_base_id + @as(canvas.ObjectId, @intCast(index));
+}
+
+pub fn componentTreeItemIndex(id: canvas.ObjectId) ?usize {
+    if (id < component_tree_item_base_id) return null;
+    const index = id - component_tree_item_base_id;
+    if (index >= canvas.builtin_component_names.len) return null;
+    return @intCast(index);
+}
+
+/// The built-in component names are stable, static command payloads, so
+/// the explorer needs no generated command buffer or parallel string
+/// table. Section commands retain their namespaced form and cannot
+/// collide with these title-cased labels.
+pub fn componentTreeItemCommand(index: usize) []const u8 {
+    return canvas.builtin_component_names[@min(index, canvas.builtin_component_names.len - 1)];
+}
+
+pub fn componentTreeItemIndexFromCommand(command_name: []const u8) ?usize {
+    for (canvas.builtin_component_names, 0..) |name, index| {
+        if (std.mem.eql(u8, command_name, name)) return index;
+    }
+    return null;
 }
 
 pub fn surfaceOverlayLabel(overlay: ComponentSurfaceOverlay) []const u8 {

@@ -220,6 +220,13 @@ pub fn shellTitlebarStyle(style: app_manifest.WindowTitlebarStyle) platform.Wind
     };
 }
 
+pub fn shellClosePolicy(policy: app_manifest.WindowClosePolicy) platform.WindowClosePolicy {
+    return switch (policy) {
+        .quit => .quit,
+        .hide => .hide,
+    };
+}
+
 /// Present-before-show policy for a shell window: a window whose content
 /// is a canvas (any `gpu_surface` view) is created ordered-out and shown
 /// only after its first canvas frame has completed presentation, so the
@@ -232,19 +239,33 @@ pub fn shellWindowShowMode(shell_window: app_manifest.ShellWindow) platform.Wind
     return .immediate;
 }
 
-/// Whether loading this scene must materialize the app's webview source
-/// into a window's main webview. Only a `main`-labeled webview view needs
-/// that; child webviews (a preview pane next to a gpu_surface canvas, an
-/// inspector split) are standalone platform webviews created from their
-/// own `url`, so a canvas-first app with the default empty source never
-/// grows an implicit full-window main webview behind its canvas. Apps
-/// that provide a real source keep loading it regardless (their child
-/// webviews may reference `zero://` origins served from it).
+/// Whether this window declares the app source as its `main` WebView.
+pub fn shellWindowNeedsMainWebView(window: app_manifest.ShellWindow) bool {
+    for (window.views) |view| {
+        if (view.kind == .webview and validation.isMainWebViewLabel(view.label)) return true;
+    }
+    return false;
+}
+
+/// A canvas-owned window has no WebView content of its own. It must stay
+/// sourceless even when another scene window loads the app source: otherwise
+/// the source silently materializes a full-window main WebView behind the
+/// canvas (and transparent Windows windows reject creation altogether).
+pub fn shellWindowUsesSourcelessCanvas(window: app_manifest.ShellWindow) bool {
+    var has_gpu_surface = false;
+    for (window.views) |view| {
+        if (view.kind == .webview) return false;
+        if (view.kind == .gpu_surface) has_gpu_surface = true;
+    }
+    return has_gpu_surface;
+}
+
+/// Whether loading this scene must copy the app's WebView source at all.
+/// Per-window routing happens in `loadScene`: a scene may need the source
+/// for one WebView window while keeping a canvas overlay sourceless.
 pub fn sceneNeedsMainWebView(scene: app_manifest.ShellConfig) bool {
     for (scene.windows) |window| {
-        for (window.views) |view| {
-            if (view.kind == .webview and validation.isMainWebViewLabel(view.label)) return true;
-        }
+        if (shellWindowNeedsMainWebView(window)) return true;
     }
     return false;
 }

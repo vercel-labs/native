@@ -78,6 +78,64 @@ pub const max_curve_segments: usize = 48;
 pub const max_stroke_subpath_points: usize = 512;
 const max_piece_points: usize = 4 * max_curve_segments + 4;
 
+// ---------------------------------------------------------------------------
+// Glyph-fill raster budgets
+// ---------------------------------------------------------------------------
+//
+// Font registration promises that a registered face ALWAYS resolves at
+// render time — the glyph-budget gate (`font_ttf.Face.parse`) refuses
+// over-budget faces loudly at registration so render never degrades a
+// glyph to a block fallback. That promise is only true if the raster
+// capacities cover the worst load the outline budgets admit, so these
+// budgets are DERIVED from them instead of trusting real faces to be
+// polite (`font_ttf` cannot be imported here — it imports this module —
+// so the arithmetic is written out and lockstep-pinned by a test in
+// font_ttf_tests.zig against the source constants).
+//
+// Worst admitted glyph (1024 points / 128 contours, simple and
+// flattened-composite maxima are gated equal; glyph outlines emit only
+// move/line/quad/close):
+//
+//   quads <= points + contours          = 1024 + 128 = 1152
+//     (each point emits at most one line or quad; each contour adds at
+//     most one closing quad — the same walk the glyph path capacity in
+//     reference.zig is derived from)
+//   edges <= quads * segments + contours = 1152 * 16 + 128 = 18,560
+//     (each quad flattens to at most `max_glyph_curve_segments` line
+//     segments, lines and the per-contour close edge are one each)
+//   scanline crossings <= edges          = 18,560
+//     (an edge crosses a scanline at most once — the half-open span
+//     test in `sweep` — so the edge bound is also the airtight crossing
+//     bound, with no reliance on curve monotonicity under float
+//     sampling)
+//
+// The flattening multiplier is the honest quality decision. Nothing in
+// the pipeline bounds text size (`max_raster_width` bounds the clipped
+// sweep window, not the accumulated edges), so tolerance-exact
+// flattening has no finite bound at all — a full-em quad at an
+// S-pixel em wants ceil(sqrt((S/2) / 0.25)) segments (128 at S = 8192)
+// — and even the generic `max_curve_segments` cap of 48 would put the
+// worst case at 1152 * 48 + 128 = 55,424 edges = 1.06 MiB of edge
+// storage plus 433 KiB of crossings per rasterizer: memory-unreasonable
+// for a per-thread buffer. Flattening tolerance is a quality knob, not
+// correctness, so glyph fills clamp subdivision instead: at 16 segments
+// the clamp only binds when a curve's flatness deviation exceeds
+// 0.25 * 16^2 = 64 px — a worst-case full-em quad only reaches that
+// above a 128-px em — and past it the polyline deviates at most
+// deviation / 16^2 <= (em/2) / 256 = em/512 from the true curve, 0.2%
+// of the em at every size (0.5 px on a 256-px em). Real faces' quads
+// span fractions of the em, so everything the golden suite renders
+// stays below the clamp and byte-identical.
+//
+// Storage: 18,560 edges * 20 B = 362.5 KiB plus 18,560 crossings * 8 B
+// = 145 KiB, ~508 KiB per `GlyphRasterizer`. The glyph raster caller
+// (reference.zig) keeps ONE per render thread behind a lazily
+// heap-allocated pointer (`canvas.lazy_tls`), so it costs neither stack
+// nor static TLS, and threads that never ink a glyph never allocate it.
+pub const max_glyph_curve_segments: usize = 16;
+pub const max_glyph_fill_edges: usize = 18_560;
+pub const max_glyph_scanline_crossings: usize = max_glyph_fill_edges;
+
 /// Half-open device-pixel clip window: pixels with `x0 <= x < x1` and
 /// `y0 <= y < y1` may be emitted.
 pub const ClipRect = struct {
@@ -327,29 +385,37 @@ fn rotate90(v: PointF, sweep: bool) PointF {
 /// the chord from the curve is bounded by the second difference over 4,
 /// and subdividing into n segments divides it by n^2.
 pub fn quadSegmentCount(p0: PointF, p1: PointF, p2: PointF, tolerance: f32) usize {
+    return quadSegmentCountLimited(p0, p1, p2, tolerance, max_curve_segments);
+}
+
+fn quadSegmentCountLimited(p0: PointF, p1: PointF, p2: PointF, tolerance: f32, segment_limit: usize) usize {
     const dx = @abs(p0.x - 2 * p1.x + p2.x);
     const dy = @abs(p0.y - 2 * p1.y + p2.y);
     const deviation = @max(dx, dy) * 0.25;
-    return segmentCountForDeviation(deviation, tolerance);
+    return segmentCountForDeviation(deviation, tolerance, segment_limit);
 }
 
 /// Deterministic segment count for a cubic from the larger of its two
 /// second differences (conservative flatness bound).
 pub fn cubicSegmentCount(p0: PointF, p1: PointF, p2: PointF, p3: PointF, tolerance: f32) usize {
+    return cubicSegmentCountLimited(p0, p1, p2, p3, tolerance, max_curve_segments);
+}
+
+fn cubicSegmentCountLimited(p0: PointF, p1: PointF, p2: PointF, p3: PointF, tolerance: f32, segment_limit: usize) usize {
     const d1x = @abs(p0.x - 2 * p1.x + p2.x);
     const d1y = @abs(p0.y - 2 * p1.y + p2.y);
     const d2x = @abs(p1.x - 2 * p2.x + p3.x);
     const d2y = @abs(p1.y - 2 * p2.y + p3.y);
     const deviation = @max(@max(d1x, d1y), @max(d2x, d2y)) * 0.75;
-    return segmentCountForDeviation(deviation, tolerance);
+    return segmentCountForDeviation(deviation, tolerance, segment_limit);
 }
 
-fn segmentCountForDeviation(deviation: f32, tolerance: f32) usize {
+fn segmentCountForDeviation(deviation: f32, tolerance: f32, segment_limit: usize) usize {
     const tol = @max(0.01, tolerance);
     if (!(deviation > tol)) return 1;
     const count = @ceil(@sqrt(deviation / tol));
     if (!(count > 1)) return 1;
-    if (count >= @as(f32, @floatFromInt(max_curve_segments))) return max_curve_segments;
+    if (count >= @as(f32, @floatFromInt(segment_limit))) return segment_limit;
     return @intFromFloat(count);
 }
 
@@ -372,7 +438,10 @@ fn cubicPoint(a: PointF, b: PointF, c: PointF, d: PointF, t: f32) PointF {
 /// Walk a path in device space (transform applied), flattening curves to
 /// line segments within `tolerance`, reporting subpaths to `sink`:
 /// `subpathBegin(point)`, `subpathPoint(point)`, `subpathEnd(closed)`.
-fn walkPath(elements: []const PathElement, transform: Affine, tolerance: f32, sink: anytype) Error!void {
+/// `segment_limit` caps the per-curve flattening count
+/// (`max_curve_segments` generically; `max_glyph_curve_segments` for
+/// glyph fills — see the glyph budget derivation above).
+fn walkPath(elements: []const PathElement, transform: Affine, tolerance: f32, segment_limit: usize, sink: anytype) Error!void {
     var has_current = false;
     var active = false;
     var current = PointF.zero();
@@ -406,7 +475,7 @@ fn walkPath(elements: []const PathElement, transform: Affine, tolerance: f32, si
                 const control = transform.transformPoint(element.points[0]);
                 const end = transform.transformPoint(element.points[1]);
                 try ensureActive(sink, &active, current);
-                const segments = quadSegmentCount(current, control, end, tolerance);
+                const segments = quadSegmentCountLimited(current, control, end, tolerance, segment_limit);
                 var index: usize = 1;
                 while (index <= segments) : (index += 1) {
                     const t = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(segments));
@@ -420,7 +489,7 @@ fn walkPath(elements: []const PathElement, transform: Affine, tolerance: f32, si
                 const control_b = transform.transformPoint(element.points[1]);
                 const end = transform.transformPoint(element.points[2]);
                 try ensureActive(sink, &active, current);
-                const segments = cubicSegmentCount(current, control_a, control_b, end, tolerance);
+                const segments = cubicSegmentCountLimited(current, control_a, control_b, end, tolerance, segment_limit);
                 var index: usize = 1;
                 while (index <= segments) : (index += 1) {
                     const t = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(segments));
@@ -459,134 +528,153 @@ const Edge = struct {
     dir: f32,
 };
 
-/// Fixed-capacity edge accumulator plus the anti-aliased scanline sweep.
-/// Instantiate on the stack (`var raster: Rasterizer = .{};`); it holds
-/// no pointers and is reusable via `resetEdges`.
-pub const Rasterizer = struct {
-    edges: [max_edges]Edge = undefined,
-    edge_count: usize = 0,
-    min_x: f32 = 0,
-    min_y: f32 = 0,
-    max_x: f32 = 0,
-    max_y: f32 = 0,
+/// Fixed-capacity edge accumulator plus the anti-aliased scanline sweep,
+/// generic over its edge/crossing budgets: `Rasterizer` (the generic
+/// path/icon budgets, stack-sized) and `GlyphRasterizer` (the derived
+/// glyph budgets above, sized for a per-thread heap slot) are the two
+/// instantiations. It holds no pointers and is reusable via `resetEdges`.
+pub fn RasterizerType(comptime edge_capacity: usize, comptime crossing_capacity: usize) type {
+    return struct {
+        edges: [edge_capacity]Edge = undefined,
+        edge_count: usize = 0,
+        min_x: f32 = 0,
+        min_y: f32 = 0,
+        max_x: f32 = 0,
+        max_y: f32 = 0,
+        /// Scanline scratch for `sweep`, in the struct rather than its
+        /// stack frame so the glyph instantiation's 145 KiB rides the
+        /// same per-thread heap slot as its edges.
+        crossings: [crossing_capacity]Crossing = undefined,
 
-    pub fn resetEdges(self: *Rasterizer) void {
-        self.edge_count = 0;
-    }
+        const Self = @This();
 
-    pub fn addEdge(self: *Rasterizer, a: PointF, b: PointF) Error!void {
-        if (a.y == b.y) return;
-        if (!std.math.isFinite(a.x) or !std.math.isFinite(a.y) or !std.math.isFinite(b.x) or !std.math.isFinite(b.y)) return;
-        if (self.edge_count >= max_edges) return error.VectorPathTooComplex;
-        if (self.edge_count == 0) {
-            self.min_x = @min(a.x, b.x);
-            self.max_x = @max(a.x, b.x);
-            self.min_y = @min(a.y, b.y);
-            self.max_y = @max(a.y, b.y);
-        } else {
-            self.min_x = @min(self.min_x, @min(a.x, b.x));
-            self.max_x = @max(self.max_x, @max(a.x, b.x));
-            self.min_y = @min(self.min_y, @min(a.y, b.y));
-            self.max_y = @max(self.max_y, @max(a.y, b.y));
+        pub fn resetEdges(self: *Self) void {
+            self.edge_count = 0;
         }
-        self.edges[self.edge_count] = .{ .x0 = a.x, .y0 = a.y, .x1 = b.x, .y1 = b.y, .dir = if (b.y > a.y) 1 else -1 };
-        self.edge_count += 1;
-    }
 
-    /// Append a closed polygon ring with canonical orientation (pieces of
-    /// a stroke union must all wind the same way for the nonzero rule).
-    pub fn addPolygon(self: *Rasterizer, points: []const PointF) Error!void {
-        if (points.len < 3) return;
-        var area: f32 = 0;
-        var index: usize = 0;
-        while (index < points.len) : (index += 1) {
-            const a = points[index];
-            const b = points[(index + 1) % points.len];
-            area += a.x * b.y - b.x * a.y;
+        pub fn addEdge(self: *Self, a: PointF, b: PointF) Error!void {
+            if (a.y == b.y) return;
+            if (!std.math.isFinite(a.x) or !std.math.isFinite(a.y) or !std.math.isFinite(b.x) or !std.math.isFinite(b.y)) return;
+            if (self.edge_count >= edge_capacity) return error.VectorPathTooComplex;
+            if (self.edge_count == 0) {
+                self.min_x = @min(a.x, b.x);
+                self.max_x = @max(a.x, b.x);
+                self.min_y = @min(a.y, b.y);
+                self.max_y = @max(a.y, b.y);
+            } else {
+                self.min_x = @min(self.min_x, @min(a.x, b.x));
+                self.max_x = @max(self.max_x, @max(a.x, b.x));
+                self.min_y = @min(self.min_y, @min(a.y, b.y));
+                self.max_y = @max(self.max_y, @max(a.y, b.y));
+            }
+            self.edges[self.edge_count] = .{ .x0 = a.x, .y0 = a.y, .x1 = b.x, .y1 = b.y, .dir = if (b.y > a.y) 1 else -1 };
+            self.edge_count += 1;
         }
-        if (@abs(area) <= 0.000000001) return;
-        if (area >= 0) {
-            index = 0;
+
+        /// Append a closed polygon ring with canonical orientation (pieces of
+        /// a stroke union must all wind the same way for the nonzero rule).
+        pub fn addPolygon(self: *Self, points: []const PointF) Error!void {
+            if (points.len < 3) return;
+            var area: f32 = 0;
+            var index: usize = 0;
             while (index < points.len) : (index += 1) {
-                try self.addEdge(points[index], points[(index + 1) % points.len]);
+                const a = points[index];
+                const b = points[(index + 1) % points.len];
+                area += a.x * b.y - b.x * a.y;
             }
-        } else {
-            index = points.len;
-            while (index > 0) : (index -= 1) {
-                try self.addEdge(points[index % points.len], points[index - 1]);
-            }
-        }
-    }
-
-    /// Sweep the accumulated edges, emitting `sink.pixel(x, y, coverage)`
-    /// for every pixel inside `clip` with coverage > 0. Coverage is in
-    /// (0, 1]; `sub_samples` vertical subsamples, exact horizontal spans.
-    pub fn sweep(self: *const Rasterizer, rule: FillRule, clip: ClipRect, sink: anytype) Error!void {
-        if (self.edge_count == 0) return;
-        const y_begin = @max(clip.y0, floorI(self.min_y));
-        const y_end = @min(clip.y1, ceilI(self.max_y));
-        const x_begin = @max(clip.x0, floorI(self.min_x));
-        const x_end = @min(clip.x1, ceilI(self.max_x));
-        if (x_end <= x_begin or y_end <= y_begin) return;
-        const width: usize = @intCast(x_end - x_begin);
-        if (width > max_raster_width) return error.VectorRasterTooWide;
-
-        const x_origin = @as(f32, @floatFromInt(x_begin));
-        const weight = 1.0 / @as(f32, @floatFromInt(sub_samples));
-        var row: [max_raster_width]f32 = undefined;
-
-        var y = y_begin;
-        while (y < y_end) : (y += 1) {
-            @memset(row[0..width], 0);
-            var sub: usize = 0;
-            while (sub < sub_samples) : (sub += 1) {
-                const sy = @as(f32, @floatFromInt(y)) +
-                    (@as(f32, @floatFromInt(sub)) + 0.5) / @as(f32, @floatFromInt(sub_samples));
-                var crossings: [max_scanline_crossings]Crossing = undefined;
-                var crossing_count: usize = 0;
-                for (self.edges[0..self.edge_count]) |edge| {
-                    const top = @min(edge.y0, edge.y1);
-                    const bottom = @max(edge.y0, edge.y1);
-                    if (!(sy >= top and sy < bottom)) continue;
-                    const x = edge.x0 + (sy - edge.y0) * (edge.x1 - edge.x0) / (edge.y1 - edge.y0);
-                    if (crossing_count >= max_scanline_crossings) return error.VectorPathTooComplex;
-                    crossings[crossing_count] = .{ .x = x, .dir = edge.dir };
-                    crossing_count += 1;
+            if (@abs(area) <= 0.000000001) return;
+            if (area >= 0) {
+                index = 0;
+                while (index < points.len) : (index += 1) {
+                    try self.addEdge(points[index], points[(index + 1) % points.len]);
                 }
-                if (crossing_count == 0) continue;
-                sortCrossings(crossings[0..crossing_count]);
-
-                var winding: f32 = 0;
-                var parity = false;
-                var inside = false;
-                var span_start: f32 = 0;
-                for (crossings[0..crossing_count]) |crossing| {
-                    const was_inside = inside;
-                    switch (rule) {
-                        .nonzero => {
-                            winding += crossing.dir;
-                            inside = winding != 0;
-                        },
-                        .even_odd => {
-                            parity = !parity;
-                            inside = parity;
-                        },
-                    }
-                    if (!was_inside and inside) {
-                        span_start = crossing.x;
-                    } else if (was_inside and !inside) {
-                        accumulateSpan(row[0..width], x_origin, span_start, crossing.x, weight);
-                    }
-                }
-            }
-            for (row[0..width], 0..) |coverage, i| {
-                if (coverage > 0.0009) {
-                    sink.pixel(x_begin + @as(i32, @intCast(i)), y, @min(1, coverage));
+            } else {
+                index = points.len;
+                while (index > 0) : (index -= 1) {
+                    try self.addEdge(points[index % points.len], points[index - 1]);
                 }
             }
         }
-    }
-};
+
+        /// Sweep the accumulated edges, emitting `sink.pixel(x, y, coverage)`
+        /// for every pixel inside `clip` with coverage > 0. Coverage is in
+        /// (0, 1]; `sub_samples` vertical subsamples, exact horizontal spans.
+        pub fn sweep(self: *Self, rule: FillRule, clip: ClipRect, sink: anytype) Error!void {
+            if (self.edge_count == 0) return;
+            const y_begin = @max(clip.y0, floorI(self.min_y));
+            const y_end = @min(clip.y1, ceilI(self.max_y));
+            const x_begin = @max(clip.x0, floorI(self.min_x));
+            const x_end = @min(clip.x1, ceilI(self.max_x));
+            if (x_end <= x_begin or y_end <= y_begin) return;
+            const width: usize = @intCast(x_end - x_begin);
+            if (width > max_raster_width) return error.VectorRasterTooWide;
+
+            const x_origin = @as(f32, @floatFromInt(x_begin));
+            const weight = 1.0 / @as(f32, @floatFromInt(sub_samples));
+            var row: [max_raster_width]f32 = undefined;
+
+            var y = y_begin;
+            while (y < y_end) : (y += 1) {
+                @memset(row[0..width], 0);
+                var sub: usize = 0;
+                while (sub < sub_samples) : (sub += 1) {
+                    const sy = @as(f32, @floatFromInt(y)) +
+                        (@as(f32, @floatFromInt(sub)) + 0.5) / @as(f32, @floatFromInt(sub_samples));
+                    var crossing_count: usize = 0;
+                    for (self.edges[0..self.edge_count]) |edge| {
+                        const top = @min(edge.y0, edge.y1);
+                        const bottom = @max(edge.y0, edge.y1);
+                        if (!(sy >= top and sy < bottom)) continue;
+                        const x = edge.x0 + (sy - edge.y0) * (edge.x1 - edge.x0) / (edge.y1 - edge.y0);
+                        if (crossing_count >= crossing_capacity) return error.VectorPathTooComplex;
+                        self.crossings[crossing_count] = .{ .x = x, .dir = edge.dir };
+                        crossing_count += 1;
+                    }
+                    if (crossing_count == 0) continue;
+                    sortCrossings(self.crossings[0..crossing_count]);
+
+                    var winding: f32 = 0;
+                    var parity = false;
+                    var inside = false;
+                    var span_start: f32 = 0;
+                    for (self.crossings[0..crossing_count]) |crossing| {
+                        const was_inside = inside;
+                        switch (rule) {
+                            .nonzero => {
+                                winding += crossing.dir;
+                                inside = winding != 0;
+                            },
+                            .even_odd => {
+                                parity = !parity;
+                                inside = parity;
+                            },
+                        }
+                        if (!was_inside and inside) {
+                            span_start = crossing.x;
+                        } else if (was_inside and !inside) {
+                            accumulateSpan(row[0..width], x_origin, span_start, crossing.x, weight);
+                        }
+                    }
+                }
+                for (row[0..width], 0..) |coverage, i| {
+                    if (coverage > 0.0009) {
+                        sink.pixel(x_begin + @as(i32, @intCast(i)), y, @min(1, coverage));
+                    }
+                }
+            }
+        }
+    };
+}
+
+/// The stack-friendly instantiation every generic path/icon fill and
+/// stroke uses (~82 KiB).
+pub const Rasterizer = RasterizerType(max_edges, max_scanline_crossings);
+
+/// The glyph-fill instantiation, sized by the derived budgets above so
+/// any outline the font registration gate admits rasterizes (~508 KiB —
+/// callers keep one per thread on the heap, never on the stack; see
+/// `fillGlyphPath`).
+pub const GlyphRasterizer = RasterizerType(max_glyph_fill_edges, max_glyph_scanline_crossings);
 
 const Crossing = struct {
     x: f32,
@@ -648,6 +736,31 @@ pub fn fillPath(
     try raster.sweep(rule, clip, sink);
 }
 
+/// Rasterize one glyph outline's fill through the derived glyph budgets
+/// (see their derivation above): flattening clamps at
+/// `max_glyph_curve_segments` and the edge/crossing capacities cover the
+/// densest outline the font registration gate admits, so a
+/// budget-admitted glyph NEVER fails with `VectorPathTooComplex` — the
+/// registration promise ("a registered face always resolves at render
+/// time") holds at the raster layer too. `raster` is caller-owned
+/// storage (~508 KiB: keep one per thread on the heap, e.g. behind
+/// `canvas.lazy_tls`, never on the stack); it is reset here, so it needs
+/// no initialization beyond existing.
+pub fn fillGlyphPath(
+    raster: *GlyphRasterizer,
+    elements: []const PathElement,
+    transform: Affine,
+    rule: FillRule,
+    tolerance: f32,
+    clip: ClipRect,
+    sink: anytype,
+) Error!void {
+    raster.resetEdges();
+    var edge_sink = FillEdgeSink(GlyphRasterizer){ .raster = raster };
+    try walkPath(elements, transform, tolerance, max_glyph_curve_segments, &edge_sink);
+    try raster.sweep(rule, clip, sink);
+}
+
 /// Accumulate a filled path's edges into an existing rasterizer (lets a
 /// caller union several paths — e.g. all glyph contours of one text run —
 /// before one sweep).
@@ -657,31 +770,35 @@ pub fn accumulateFillEdges(
     transform: Affine,
     tolerance: f32,
 ) Error!void {
-    var sink = FillEdgeSink{ .raster = raster };
-    try walkPath(elements, transform, tolerance, &sink);
+    var sink = FillEdgeSink(Rasterizer){ .raster = raster };
+    try walkPath(elements, transform, tolerance, max_curve_segments, &sink);
 }
 
-const FillEdgeSink = struct {
-    raster: *Rasterizer,
-    start: PointF = PointF.zero(),
-    current: PointF = PointF.zero(),
+fn FillEdgeSink(comptime Raster: type) type {
+    return struct {
+        raster: *Raster,
+        start: PointF = PointF.zero(),
+        current: PointF = PointF.zero(),
 
-    fn subpathBegin(self: *FillEdgeSink, point: PointF) Error!void {
-        self.start = point;
-        self.current = point;
-    }
+        const Self = @This();
 
-    fn subpathPoint(self: *FillEdgeSink, point: PointF) Error!void {
-        try self.raster.addEdge(self.current, point);
-        self.current = point;
-    }
+        fn subpathBegin(self: *Self, point: PointF) Error!void {
+            self.start = point;
+            self.current = point;
+        }
 
-    fn subpathEnd(self: *FillEdgeSink, closed: bool) Error!void {
-        _ = closed;
-        // Fill semantics always close the contour.
-        try self.raster.addEdge(self.current, self.start);
-    }
-};
+        fn subpathPoint(self: *Self, point: PointF) Error!void {
+            try self.raster.addEdge(self.current, point);
+            self.current = point;
+        }
+
+        fn subpathEnd(self: *Self, closed: bool) Error!void {
+            _ = closed;
+            // Fill semantics always close the contour.
+            try self.raster.addEdge(self.current, self.start);
+        }
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Stroke
@@ -719,7 +836,7 @@ pub fn accumulateStrokeEdges(
         .style = style,
         .tolerance = @max(0.01, tolerance),
     };
-    try walkPath(elements, transform, tolerance, &sink);
+    try walkPath(elements, transform, tolerance, max_curve_segments, &sink);
 }
 
 const StrokeSink = struct {

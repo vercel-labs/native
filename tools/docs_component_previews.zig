@@ -192,6 +192,8 @@ fn writeVocabJson(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     try js.beginObject();
     try js.objectField("markdown");
     try writeDocList(&js, &markup_docs.markdown_attr_docs);
+    try js.objectField("code");
+    try writeDocList(&js, &markup_docs.code_attr_docs);
     try js.objectField("stepper");
     try writeDocList(&js, &markup_docs.stepper_attr_docs);
     try js.objectField("timeline");
@@ -200,6 +202,10 @@ fn writeVocabJson(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     try writeDocList(&js, &markup_docs.timeline_item_attr_docs);
     try js.objectField("avatar");
     try writeDocList(&js, &markup_docs.avatar_attr_docs);
+    try js.objectField("media-surface");
+    try writeDocList(&js, &markup_docs.media_surface_attr_docs);
+    try js.objectField("video");
+    try writeDocList(&js, &markup_docs.video_attr_docs);
     try js.objectField("chart");
     try writeDocList(&js, &markup_docs.chart_attr_docs);
     try js.objectField("series");
@@ -213,6 +219,10 @@ fn writeVocabJson(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     try js.objectField("reactions");
     try writeDocList(&js, &markup_docs.reactions_attr_docs);
     try js.objectField("dropdown-menu");
+    try writeDocList(&js, &markup_docs.anchor_attr_docs);
+    // Tooltip shares the anchor attribute family (the second anchorable
+    // element), so its page resolves the same scoped rows.
+    try js.objectField("tooltip");
     try writeDocList(&js, &markup_docs.anchor_attr_docs);
     try js.objectField("template");
     try writeDocList(&js, &markup_docs.template_attr_docs);

@@ -1,0 +1,74 @@
+# Keyboard Shortcuts
+
+The Native SDK can register app-level keyboard shortcuts and deliver them to both Zig and JavaScript. Shortcuts are matched by key plus modifiers and are scoped to the native window that receives the key event.
+
+## Manifest
+
+Declare shortcuts in `app.zon`:
+
+```zig
+.shortcuts = .{
+    .{ .id = "command.palette", .key = "p", .modifiers = .{ "primary", "shift" } },
+    .{ .id = "reload", .key = "r", .modifiers = .{ "primary" } },
+},
+```
+
+`primary` maps to Command on macOS and Control on Windows/Linux. Use `command`, `control`, `option` or `alt`, and `shift` when a platform-specific modifier is required.
+
+An app can define up to 64 shortcuts. Shortcut ids can be up to 64 bytes and keys can be up to 32 bytes.
+
+Chromium builds are currently macOS-only. Use the system WebView backend on Linux when an app needs native shortcut events.
+
+## Runtime
+
+Generated runners read `app.zon` and register the manifest shortcuts automatically. Use `RunOptions.shortcuts` only when an app needs to override the manifest with a list built in Zig.
+
+Apps that construct a runtime directly can pass shortcuts in `Runtime.init`:
+
+```zig
+const shortcuts = [_]native_sdk.Shortcut{
+    .{ .id = "command.palette", .key = "p", .modifiers = .{ .primary = true, .shift = true } },
+};
+
+var runtime = native_sdk.Runtime.init(.{
+    .platform = platform,
+    .shortcuts = &shortcuts,
+});
+```
+
+## Events
+
+Zig apps receive `Event.shortcut`:
+
+```zig
+fn event(context: *anyopaque, runtime: *Runtime, ev: Event) anyerror!void {
+    _ = context;
+    _ = runtime;
+    switch (ev) {
+        .shortcut => |shortcut| {
+            if (std.mem.eql(u8, shortcut.id, "command.palette")) {
+                // Open palette
+            }
+        },
+        else => {},
+    }
+}
+```
+
+The JavaScript bridge emits a `shortcut` event on `window.zero`:
+
+```ts
+window.zero.on("shortcut", (event) => {
+  if (event.id === "command.palette") {
+    openCommandPalette();
+  }
+});
+```
+
+The event detail includes `id`, `command`, `key`, `windowId`, and `modifiers`. `command` is an alias for `id`.
+
+## Keys
+
+Portable single-character keys are letters, digits, and the unshifted punctuation keys `=`, `-`, `,`, `.`, `/`, `;`, `'`, `[`, `]`, `\`, and `` ` ``. Named keys are `escape`, `enter`, `tab`, `space`, `backspace`, `arrowleft`, `arrowright`, `arrowup`, `arrowdown`, `delete`, `home`, `end`, `pageup`, `pagedown`, `insert`, and `f1` through `f12`.
+
+Single-character keys and text-entry keys (`enter`, `tab`, `space`, and `backspace`) require at least one modifier so shortcuts do not intercept normal typing by default.

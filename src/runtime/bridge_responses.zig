@@ -275,6 +275,11 @@ pub fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !vo
     try writer.writeAll(if (window.open) "true" else "false");
     try writer.writeAll(",\"focused\":");
     try writer.writeAll(if (window.focused) "true" else "false");
+    // Alive-but-policy-hidden rides beside open/focused: without it a JS
+    // consumer cannot tell a close_policy = "hide" window (open:true,
+    // focused:false) from a visible unfocused one.
+    try writer.writeAll(",\"hidden\":");
+    try writer.writeAll(if (window.hidden) "true" else "false");
     try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"scale\":{d}", .{
         window.frame.x,
         window.frame.y,
@@ -288,6 +293,7 @@ pub fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !vo
 pub fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.UnsupportedService => "Native service is not available on this platform",
+        error.UnsupportedWindowTransparency => "This backend cannot make window content transparent",
         error.WindowNotFound => "Window was not found",
         error.WindowLimitReached => "Window limit reached",
         error.DuplicateWindowLabel => "Window id or label already exists",
@@ -299,6 +305,7 @@ pub fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
         error.CrossWindowWebViewDenied => "WebView windowId must match the calling window",
         error.InvalidWebViewOptions => "WebView options are invalid",
         error.WebViewNotFound => "WebView was not found",
+        error.WebViewLayerNotBuilt => "this app was built without the web layer because nothing in app.zon declared web use; add \"webview\" to .capabilities (or a .frontend block / a .shell webview view) and rebuild",
         error.WebViewLimitReached => "WebView limit reached",
         error.DuplicateWebViewLabel => "WebView label already exists",
         error.ReservedWebViewLabel => "WebView label \"main\" is reserved for the startup WebView",
@@ -355,6 +362,7 @@ pub fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
 pub fn builtinBridgeErrorCode(err: anyerror) bridge.ErrorCode {
     return switch (err) {
         error.UnsupportedService,
+        error.UnsupportedWindowTransparency,
         error.InvalidWindowOptions,
         error.WindowNotFound,
         error.WindowLimitReached,
@@ -367,6 +375,7 @@ pub fn builtinBridgeErrorCode(err: anyerror) bridge.ErrorCode {
         error.CrossWindowWebViewDenied,
         error.InvalidWebViewOptions,
         error.WebViewNotFound,
+        error.WebViewLayerNotBuilt,
         error.WebViewLimitReached,
         error.DuplicateWebViewLabel,
         error.ReservedWebViewLabel,

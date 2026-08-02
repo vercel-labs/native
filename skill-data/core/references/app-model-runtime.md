@@ -111,6 +111,7 @@ Use `EmbeddedApp` when another host owns the main loop:
 
 ```zig
 var embedded = native_sdk.embed.EmbeddedApp.init(my_app.app(), my_platform);
+defer embedded.deinit();
 try embedded.start();
 try embedded.frame();
 try embedded.resize(new_surface);
@@ -118,6 +119,8 @@ try embedded.stop();
 ```
 
 This is useful for mobile hosts, game engines, custom render loops, and headless tests. The repository includes iOS and Android examples that link `libnative-sdk.a` through Swift/Kotlin host apps.
+
+`stop()` tells the app it is shutting down; `deinit()` releases what the embedded runtime owns on the heap (registered canvas font bytes). It is idempotent, so `defer embedded.deinit()` right after `init` is the idiom — an embedder that creates and destroys apps in one process leaks the font registry per cycle without it. The C ABI's `native_sdk_app_destroy` runs the same deinit through its host wrapper.
 
 ## Headless tests
 

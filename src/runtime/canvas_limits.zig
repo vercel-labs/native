@@ -1,3 +1,5 @@
+const canvas = @import("canvas");
+
 // Per-view canvas budgets. Fixed, documented, loud: capacities are compile
 // time constants sized for a dense desktop view, overflow errors name the
 // budget, and the automation snapshot reports headroom (widget_nodes=N/MAX).
@@ -105,6 +107,31 @@ pub const max_canvas_text_layout_lines_per_view: usize = 8192;
 pub const max_registered_canvas_images: usize = 16;
 pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 
+// Media-surface texture channels (media_surface.zig): producer-pushed
+// dynamic textures composited by media_surface widgets. Sized at video
+// scale, not avatar scale — one 1080p RGBA8 frame is ~7.9 MiB, so the
+// per-channel bound fits it exactly (8 MiB) and refuses 4K until the
+// format axis grows real zero-copy paths; 4 concurrent channels covers
+// a player plus a camera preview plus headroom, and a fifth acquire
+// fails loudly (`error.MediaSurfaceChannelsExhausted`). Both bounds are
+// VALIDATION bounds plus per-USE allocation sizes, never Runtime-struct
+// reservations: an ADOPTED texture's buffer is one lazy frame-budget
+// allocation from the runtime's `owned_allocator` (frozen from
+// `Options.allocator` at init) at the entry's first adoption (freed by
+// `Runtime.deinit`), so a runtime with no
+// media producers carries zero media-texture bytes — an embedded pool
+// at this bound put 4 x 8 MiB = 32 MiB in EVERY Runtime, measured on
+// the docs wasm preview host (one Runtime per component tile, wasm
+// linear memory never overcommits) as 137.5 -> 169.5 MB per instance
+// before any producer existed, the registered-font-pool regression's
+// twin. The producer-side STAGING buffers are allocated at first claim
+// into process-lived module state and kept for the process's life —
+// the mailbox a producer thread may touch after its runtime died,
+// which is why they can never be freed (the effects executor's
+// process-lifetime doctrine).
+pub const max_media_surface_channels: usize = 4;
+pub const max_media_surface_pixel_bytes: usize = 8 * 1024 * 1024;
+
 // Runtime-registered font faces: TrueType bytes apps register under a
 // caller-chosen FontId (>= canvas.min_registered_font_id) so their own
 // typefaces resolve everywhere a font id rides — token overrides, text
@@ -116,15 +143,26 @@ pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 // so re-registering an id with different bytes would serve stale glyphs —
 // re-use of a registered id fails loudly instead (`error.FontIdInUse`).
 // The slot count covers a real brand set (a text family in 2-3 weights
-// plus a display and a mono face); the per-font bound fits full
-// static-instance UI faces (the bundled faces are 71/116 KB; a large
-// Latin+Cyrillic+Greek UI face is a few hundred KB) while refusing
-// multi-megabyte CJK/variable fonts the glyph pipeline is not sized for.
-// Memory is fixed-capacity address space in the Runtime: 8 x 2 MiB =
-// 16 MiB, pages touched only as fonts register; oversized files and a
-// ninth font fail loudly (`error.FontTooLarge` / `error.FontRegistryFull`).
+// plus a display and a mono face); the per-font bound fits full CJK
+// faces — the glyph pipeline is sized for them (canvas.font_ttf budgets)
+// and the canonical Google Fonts TrueType builds measure 9.6 MB (Noto
+// Sans JP), 10.4 (KR), 11.9 (TC), 13.6 (Noto Serif JP), and 17.8 (Noto
+// Sans SC), so 24 MiB covers the largest measured with ~1.4x headroom.
+// Latin UI faces stay a few hundred KB (the bundled faces are 71/116 KB).
+// Both bounds are VALIDATION bounds, not storage reservations: the
+// registry heap-allocates each font's exact file size from the
+// allocator the runtime froze at init (`Options.allocator`, captured
+// into `Runtime.owned_allocator`) at registration (canvas_fonts.zig), so
+// a runtime with no registered fonts carries zero font bytes. An
+// embedded slot pool at this bound would put 8 x 24 MiB = 192 MiB in
+// EVERY Runtime — measured on the docs wasm preview host (one Runtime
+// per component tile, wasm linear memory never overcommits) as 137.5 ->
+// 313.5 MB per instance before any font registered. Oversized files and
+// a ninth font fail loudly (`error.FontTooLarge` /
+// `error.FontRegistryFull`). The gpu-surface registration side-channel
+// bound (`platform.max_gpu_surface_font_bytes`) pins the same value.
 pub const max_registered_canvas_fonts: usize = 8;
-pub const max_registered_canvas_font_bytes: usize = 2 * 1024 * 1024;
+pub const max_registered_canvas_font_bytes: usize = 24 * 1024 * 1024;
 
 // The retained widget-tree budgets (raised 256 -> 1024; see the header
 // comment). `automation.snapshot.max_widgets_per_view`
@@ -133,13 +171,25 @@ pub const max_registered_canvas_font_bytes: usize = 2 * 1024 * 1024;
 // lockstep.
 pub const max_canvas_widget_nodes_per_view: usize = 1024;
 pub const max_canvas_widget_semantics_per_view: usize = 1024;
-// Raised from 2048 with the inline-span/markdown work: a rendered document
-// retains its full plain text (paragraph bytes are stored once; span slices
-// rebase into them) plus link payloads, and 2048 bytes could not hold a
-// README-sized document. Raised again with the node-budget raise:
-// a 1024-node view retains proportionally more text.
-pub const max_canvas_widget_text_bytes_per_view: usize = 65536;
+// Raised from 2048 with the inline-span/markdown work, then from 64 KiB for
+// editable code surfaces: a simple editor must retain a practical source
+// file (roughly 10k ordinary code lines) plus the surrounding view chrome.
+// Syntax paint remains viewport-bounded, so this larger SOURCE budget does
+// not enlarge the display list or retained span pools.
+pub const max_canvas_widget_text_bytes_per_view: usize = canvas.max_widget_text_bytes_per_view;
+/// Ordinary views retain the historical 64 KiB pools inline. A view upgrades
+/// to the practical source-file ceiling above only when its adopted layout
+/// actually needs it, so empty/ordinary view creation remains allocation-free.
+pub const max_canvas_widget_inline_text_bytes_per_view: usize = 64 * 1024;
 pub const max_canvas_widget_source_text_entries_per_view: usize = 256;
+/// Retained editor undo/redo is delta-based: changed bytes share this
+/// per-view pool and metadata stays bounded independently. Matching the
+/// live text budget guarantees that clearing a maximal editor can still
+/// be undone; an unusually large whole-document replacement whose removed
+/// plus inserted bytes exceed the pool simply starts a fresh history.
+pub const max_canvas_widget_text_history_bytes_per_view: usize = max_canvas_widget_text_bytes_per_view;
+pub const max_canvas_widget_inline_text_history_bytes_per_view: usize = 64 * 1024;
+pub const max_canvas_widget_text_history_entries_per_view: usize = 128;
 // Inline styled runs retained across all `.text` widgets of a view. Each
 // span is a small struct (style flags + slices into the widget text
 // bytes); per-paragraph capacity is `canvas.max_text_spans_per_paragraph`.

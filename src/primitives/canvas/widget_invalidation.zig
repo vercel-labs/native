@@ -37,6 +37,7 @@ const strokeBounds = drawing_model.strokeBounds;
 const shadowBounds = drawing_model.shadowBounds;
 const rectsEqual = equality_model.rectsEqual;
 const optionalRectsEqual = equality_model.optionalRectsEqual;
+const optionalSizesEqual = equality_model.optionalSizesEqual;
 const sizesEqual = equality_model.sizesEqual;
 const insetsEqual = equality_model.insetsEqual;
 const optionalColorsEqual = equality_model.optionalColorsEqual;
@@ -94,9 +95,10 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
         next.nodes.len >= plan_key_index.min_entries_for_index) and
         plan_key_index.fitsHashSlots(diff_widget_id_index_slots, previous.nodes.len) and
         plan_key_index.fitsHashSlots(diff_widget_id_index_slots, next.nodes.len);
-    if (use_index) {
-        try buildDiffWidgetIdIndex(previous, &diff_previous_widget_id_index);
-        try buildDiffWidgetIdIndex(next, &diff_next_widget_id_index);
+    const id_scratch: ?*DiffWidgetIdScratch = if (use_index) diff_widget_id_scratch.get() else null;
+    if (id_scratch) |scratch| {
+        try buildDiffWidgetIdIndex(previous, &scratch.previous);
+        try buildDiffWidgetIdIndex(next, &scratch.next);
     } else {
         try validateUniqueWidgetIds(previous);
         try validateUniqueWidgetIds(next);
@@ -106,7 +108,7 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     for (previous.nodes, 0..) |previous_node, previous_index| {
         const id = previous_node.widget.id;
         if (id == 0) continue;
-        const next_lookup = if (use_index) findWidgetNodeByIdIndexed(next, &diff_next_widget_id_index, id) else findWidgetNodeById(next, id);
+        const next_lookup = if (id_scratch) |scratch| findWidgetNodeByIdIndexed(next, &scratch.next, id) else findWidgetNodeById(next, id);
         const next_ref = next_lookup orelse {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .removed,
@@ -157,7 +159,7 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     for (next.nodes, 0..) |next_node, next_index| {
         const id = next_node.widget.id;
         if (id == 0) continue;
-        const previous_lookup = if (use_index) findWidgetNodeByIdIndexed(previous, &diff_previous_widget_id_index, id) else findWidgetNodeById(previous, id);
+        const previous_lookup = if (id_scratch) |scratch| findWidgetNodeByIdIndexed(previous, &scratch.previous, id) else findWidgetNodeById(previous, id);
         if (previous_lookup == null) {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .added,
@@ -201,8 +203,14 @@ fn findWidgetNodeById(layout: anytype, id: ObjectId) ?WidgetNodeRef {
 /// bound; small or oversized trees keep the linear scans.
 const diff_widget_id_index_slots = 2048;
 const DiffWidgetIdIndex = plan_key_index.HashSlots(diff_widget_id_index_slots);
-threadlocal var diff_previous_widget_id_index: DiffWidgetIdIndex = .{};
-threadlocal var diff_next_widget_id_index: DiffWidgetIdIndex = .{};
+// Lazily heap-allocated per thread (16 KiB of probe tables): reset per
+// diff, so first-use init on the diffing thread is the only contract —
+// threads that never diff widget trees never allocate it.
+const DiffWidgetIdScratch = struct {
+    previous: DiffWidgetIdIndex = .{},
+    next: DiffWidgetIdIndex = .{},
+};
+const diff_widget_id_scratch = @import("lazy_tls.zig").LazyTls(DiffWidgetIdScratch);
 
 /// Fill `table` with the keyed nodes' id->index mapping, erroring on the
 /// duplicate ids `validateUniqueWidgetIds` rejects — one pass does both
@@ -239,26 +247,46 @@ fn validateUniqueWidgetIds(layout: anytype) Error!void {
     }
 }
 
+/// Terminal bindings compare clean only while UNBOUND (matching pty and
+/// scrollback, no grid on either side): a bound grid is live emulator
+/// content whose snapshot may be republished at a new address or
+/// refreshed in place between diffs, so it always reports paint damage —
+/// conservative, never stale terminal pixels for partial-invalidation
+/// consumers; the command-level retained diff downstream still keeps the
+/// actual repaint row-shaped.
+fn terminalBindingClean(previous: widget_model.TerminalBinding, next: widget_model.TerminalBinding) bool {
+    if (previous.pty != next.pty or previous.scrollback != next.scrollback) return false;
+    return previous.grid == null and next.grid == null;
+}
+
 fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_index: usize, next_index: usize, tokens: DesignTokens) WidgetInvalidation {
     const layout_dirty =
         previous.widget.kind != next.widget.kind or
         previous.depth != next.depth or
         previous.parent_index != next.parent_index or
         !rectsEqual(previous.frame, next.frame) or
+        previous.widget.code_line_number_digits != next.widget.code_line_number_digits or
         !widgetLayoutStylesEqual(previous.widget.layout, next.widget.layout);
     const content_dirty = !std.mem.eql(u8, previous.widget.text, next.widget.text) or
         !textSpansEqual(previous.widget.spans, next.widget.spans) or
+        previous.widget.code_language != next.widget.code_language or
+        previous.widget.static_text_group_id != next.widget.static_text_group_id or
+        previous.widget.static_text_group_offset != next.widget.static_text_group_offset or
         !chartDataEqual(previous.widget.chart, next.widget.chart) or
         !std.mem.eql(u8, previous.widget.placeholder, next.widget.placeholder) or
         !std.mem.eql(u8, previous.widget.icon, next.widget.icon) or
         previous.widget.value != next.widget.value or
+        previous.widget.value_x != next.widget.value_x or
+        previous.widget.scroll_axes != next.widget.scroll_axes or
         previous.widget.image_id != next.widget.image_id or
         !optionalRectsEqual(previous.widget.image_src, next.widget.image_src) or
         previous.widget.image_fit != next.widget.image_fit or
         previous.widget.image_sampling != next.widget.image_sampling or
         previous.widget.image_opacity != next.widget.image_opacity or
+        !optionalSizesEqual(previous.widget.stream_size, next.widget.stream_size) or
         !optionalTextSelectionsEqual(previous.widget.text_selection, next.widget.text_selection) or
-        !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
+        !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition) or
+        !terminalBindingClean(previous.widget.terminal, next.widget.terminal);
     const behavior_dirty = !std.mem.eql(u8, previous.widget.command, next.widget.command);
     const visual_dirty = previous.widget.opacity != next.widget.opacity or
         !affinesEqual(previous.widget.transform, next.widget.transform) or
@@ -308,6 +336,10 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         appendOptionalObjectId(&ids, &id_len, previous.focused_id);
         appendOptionalObjectId(&ids, &id_len, next.focused_id);
     }
+    if (previous.keyboard_active != next.keyboard_active) {
+        appendOptionalObjectId(&ids, &id_len, previous.focused_id);
+        appendOptionalObjectId(&ids, &id_len, next.focused_id);
+    }
     if (previous.focus_visible_id != next.focus_visible_id) {
         appendOptionalObjectId(&ids, &id_len, previous.focus_visible_id);
         appendOptionalObjectId(&ids, &id_len, next.focus_visible_id);
@@ -329,8 +361,40 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         const base = widgetWithFrame(node.widget, node.frame);
         const previous_widget = widgetWithRenderState(base, previous);
         const next_widget = widgetWithRenderState(base, next);
+        // A terminal's cursor follows LOGICAL focus (`focused_id`), not
+        // the focus-visible state projected into `WidgetState.focused`.
+        // Dirtiness has to mirror that extra render dependency or a
+        // quiet pointer-focus/window-focus transition can change the
+        // cursor from hollow to filled while this API reports no pixels.
+        if (terminalLogicalFocusPaintChanged(base, previous, next)) {
+            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(
+                layout,
+                index,
+                widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens),
+            ));
+        }
         if (widgetStatesEqual(previous_widget.state, next_widget.state)) continue;
         bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(previous_widget, next_widget, tokens)));
+    }
+    // With no runtime focus ids, baked `WidgetState.focused` is the
+    // renderer's source of truth. A keyboard-active transition still
+    // changes a baked-focused terminal cursor, but the targeted id list
+    // above is empty in exactly that state. Walk the layout only for
+    // this rare window/app activity edge so the dirty-bounds API mirrors
+    // the pixels without taxing ordinary hover/press/focus changes.
+    if (previous.keyboard_active != next.keyboard_active and
+        renderStateUsesBakedFocus(previous) and
+        renderStateUsesBakedFocus(next))
+    {
+        for (layout.nodes, 0..) |node, index| {
+            const base = widgetWithFrame(node.widget, node.frame);
+            if (!terminalLogicalFocusPaintChanged(base, previous, next)) continue;
+            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(
+                layout,
+                index,
+                widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens),
+            ));
+        }
     }
     // Focus-within chrome: an `.input_group` ancestor wears the focus
     // ring FOR its focused descendant, so a focus-visible change dirties
@@ -349,6 +413,29 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, next, tokens));
     }
     return bounds;
+}
+
+/// Whether a live, visible terminal cursor changes fill-vs-outline
+/// because logical keyboard focus moved. Ended sessions are always
+/// hollow and a grid without a cursor paints no focus-dependent pixels.
+fn terminalLogicalFocusPaintChanged(widget: Widget, previous: WidgetRenderState, next: WidgetRenderState) bool {
+    if (widget.kind != .terminal) return false;
+    const grid = widget.terminal.grid orelse return false;
+    if (!grid.running or grid.cursor == null) return false;
+    return widgetHasLogicalFocus(widget, previous) != widgetHasLogicalFocus(widget, next);
+}
+
+fn widgetHasLogicalFocus(widget: Widget, state: WidgetRenderState) bool {
+    if (!state.keyboard_active) return false;
+    if (state.focused_id != null or state.focus_visible_id != null) {
+        const focused_id = state.focused_id orelse return false;
+        return widget.id != 0 and widget.id == focused_id;
+    }
+    return widget.state.focused;
+}
+
+fn renderStateUsesBakedFocus(state: WidgetRenderState) bool {
+    return state.focused_id == null and state.focus_visible_id == null;
 }
 
 fn optionalPointsEqual(a: ?geometry.PointF, b: ?geometry.PointF) bool {
@@ -625,6 +712,10 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .switch_control,
         .toggle,
         .slider,
+        // The terminal wears the same ring-offset focus stroke, so a
+        // focus enter/leave must reserve the same outside-the-frame
+        // damage or a retained renderer leaves the ring stale.
+        .terminal,
         => tokens.stroke.focus,
         else => 0,
     };
@@ -680,6 +771,7 @@ fn widgetStatesEqual(a: WidgetState, b: WidgetState) bool {
 
 fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
     return insetsEqual(a.padding, b.padding) and
+        a.padding_is_kind_default == b.padding_is_kind_default and
         a.gap == b.gap and
         a.grow == b.grow and
         a.main_alignment == b.main_alignment and

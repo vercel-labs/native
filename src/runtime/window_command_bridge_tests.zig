@@ -79,6 +79,13 @@ test "runtime creates lists focuses and closes windows" {
 
     const info = try harness.runtime.createWindow(.{ .label = "tools", .title = "Tools" });
     try std.testing.expectEqual(@as(platform.WindowId, 2), info.id);
+    try std.testing.expect(info.focused);
+    try std.testing.expect(!harness.runtime.windows[0].info.focused);
+    try std.testing.expect(harness.runtime.windows[1].info.focused);
+    // Ordinary source-less options keep the established inheritance:
+    // this secondary window hosts the app's loaded WebView source.
+    try std.testing.expect(harness.runtime.windows[1].source != null);
+    try std.testing.expect(harness.null_platform.window_sources[1] != null);
     var output: [platform.max_windows]platform.WindowInfo = undefined;
     const windows = harness.runtime.listWindows(&output);
     try std.testing.expectEqual(@as(usize, 2), windows.len);
@@ -87,6 +94,51 @@ test "runtime creates lists focuses and closes windows" {
     try std.testing.expect(harness.runtime.windows[1].info.focused);
     try harness.runtime.closeWindow(info.id);
     try std.testing.expect(!harness.runtime.windows[1].info.open);
+}
+
+test "transparent imperative window without explicit source stays canvas-only" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "imperative-overlay", .source = platform.WebViewSource.html("<p>Main</p>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    const overlay = try harness.runtime.createWindow(.{
+        .label = "overlay",
+        .title = "Overlay",
+        .default_frame = geometry.RectF.init(0, 0, 320, 180),
+        .titlebar = .chromeless,
+        .transparent = true,
+        .always_on_top = true,
+        .click_through = true,
+        .activate_on_show = false,
+    });
+    try std.testing.expect(harness.runtime.windows[1].source == null);
+    try std.testing.expectEqual(.never_source, harness.runtime.windows[1].source_policy);
+    try std.testing.expect(harness.null_platform.window_sources[1] == null);
+
+    const canvas_view = try harness.runtime.createView(.{
+        .window_id = overlay.id,
+        .label = "overlay-canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+        .gpu_surface = .{ .alpha_mode = .premultiplied },
+    });
+    try std.testing.expectEqual(platform.ViewKind.gpu_surface, canvas_view.kind);
+    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, canvas_view.gpu_alpha_mode);
+
+    // Reloading the app source must not materialize a main WebView into
+    // the deliberately canvas-only overlay.
+    try reloadWindows(&harness.runtime, app);
+    try std.testing.expect(harness.runtime.windows[1].source == null);
+    try std.testing.expect(harness.null_platform.window_sources[1] == null);
 }
 
 test "runtime handles built-in JavaScript window bridge commands" {
@@ -105,13 +157,28 @@ test "runtime handles built-in JavaScript window bridge commands" {
     try harness.start(app_state.app());
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"1\",\"command\":\"native-sdk.window.create\",\"payload\":{\"label\":\"palette\",\"title\":\"Palette\",\"width\":320,\"height\":240}}",
+        .bytes = "{\"id\":\"1\",\"command\":\"native-sdk.window.create\",\"payload\":{\"label\":\"palette\",\"title\":\"Palette\",\"width\":320,\"height\":240,\"titlebar\":\"chromeless\",\"transparent\":true,\"alwaysOnTop\":true,\"clickThrough\":true,\"activateOnShow\":false}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"label\":\"palette\"") != null);
     try std.testing.expectEqual(@as(platform.WindowId, 1), harness.null_platform.lastBridgeResponseWindowId());
+    try std.testing.expect(harness.null_platform.window_transparent[1]);
+    try std.testing.expect(harness.null_platform.window_always_on_top[1]);
+    try std.testing.expect(harness.null_platform.window_click_through[1]);
+    try std.testing.expect(!harness.null_platform.window_activate_on_show[1]);
+    try std.testing.expectEqual(platform.WindowTitlebarStyle.chromeless, harness.null_platform.window_titlebar[1]);
+    try std.testing.expect(harness.runtime.windows[1].source == null);
+    try std.testing.expectEqual(.never_source, harness.runtime.windows[1].source_policy);
+    try std.testing.expect(harness.null_platform.window_sources[1] == null);
+
+    // The bridge-created overlay is protected from later app-source
+    // reloads by the same never-source policy as a declarative canvas
+    // overlay.
+    try reloadWindows(&harness.runtime, app_state.app());
+    try std.testing.expect(harness.runtime.windows[1].source == null);
+    try std.testing.expect(harness.null_platform.window_sources[1] == null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"duplicate\",\"command\":\"native-sdk.window.create\",\"payload\":{\"label\":\"palette\"}}",
@@ -130,6 +197,16 @@ test "runtime handles built-in JavaScript window bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "Window options are invalid") != null);
     var invalid_frame_windows: [platform.max_windows]platform.WindowInfo = undefined;
     try std.testing.expectEqual(@as(usize, 2), harness.runtime.listWindows(&invalid_frame_windows).len);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"bad-titlebar\",\"command\":\"native-sdk.window.create\",\"payload\":{\"label\":\"bad-titlebar\",\"titlebar\":\"glass\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "Window options are invalid") != null);
+    var invalid_titlebar_windows: [platform.max_windows]platform.WindowInfo = undefined;
+    try std.testing.expectEqual(@as(usize, 2), harness.runtime.listWindows(&invalid_titlebar_windows).len);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"2\",\"command\":\"native-sdk.window.list\",\"payload\":null}",
@@ -153,12 +230,87 @@ test "runtime handles built-in JavaScript window bridge commands" {
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"focused\":true") != null);
 
+    // The window JSON must expose alive-but-policy-hidden: open:true /
+    // focused:false alone cannot distinguish a close_policy = "hide"
+    // window from a visible unfocused one, so "hidden" rides every
+    // window response. Visible window first...
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":false") != null);
+    // ...then the host reports the palette window policy-hidden (still
+    // open) and the bridge list reflects it.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .window_frame_changed = .{
+        .id = 2,
+        .label = "palette",
+        .title = "Palette",
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .scale_factor = 1,
+        .open = true,
+        .focused = false,
+        .hidden = true,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"hidden\",\"command\":\"native-sdk.window.list\",\"payload\":null}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":true") != null);
+
+    // Focusing the policy-hidden window rides the runtime's ONE
+    // hidden-then-focus rule: the show verb runs first (the platform
+    // mirror counts it — the seam that clears the hosts' policy-hidden
+    // bookkeeping), so the response never reports a focused window
+    // that is still hidden.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"5\",\"command\":\"native-sdk.window.focus\",\"payload\":{\"label\":\"palette\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"focused\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":false") != null);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(2));
+
+    // This window opted out of implicit activation, so a runtime show
+    // (a tray "Open", Cmd.showWindow) makes it visible without moving
+    // focus. Explicit focus above still activates it.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .window_frame_changed = .{
+        .id = 2,
+        .label = "palette",
+        .title = "Palette",
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .scale_factor = 1,
+        .open = true,
+        .focused = false,
+        .hidden = true,
+    } });
+    try harness.runtime.showWindow(2);
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"shown\",\"command\":\"native-sdk.window.list\",\"payload\":null}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"label\":\"palette\",\"title\":\"Palette\",\"open\":true,\"focused\":false,\"hidden\":false") != null);
+
+    // Closing a POLICY-HIDDEN window through the bridge answers with
+    // the post-close table state: hidden clears with open (a closed
+    // window is gone, not "hidden"), so JS must never receive
+    // {open:false, hidden:true} — the shape a pre-close snapshot with
+    // hand-cleared fields would serialize.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .window_frame_changed = .{
+        .id = 2,
+        .label = "palette",
+        .title = "Palette",
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .scale_factor = 1,
+        .open = true,
+        .focused = false,
+        .hidden = true,
+    } });
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"4\",\"command\":\"native-sdk.window.close\",\"payload\":{\"label\":\"palette\"}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"open\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":false") != null);
 }
 
 test "runtime handles built-in JavaScript command bridge commands" {
@@ -382,6 +534,47 @@ test "runtime handles built-in JavaScript platform support commands" {
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"result\":false") != null);
+
+    // Both spellings of window_hide_on_close answer the same seam: the null
+    // platform models full hide-on-close support by default, and flipping the
+    // seam off (the GTK model) flips both spellings together.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"hide-snake\",\"command\":\"native-sdk.platform.supports\",\"payload\":{\"feature\":\"window_hide_on_close\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"result\":true") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"hide-camel\",\"command\":\"native-sdk.platform.supports\",\"payload\":{\"feature\":\"windowHideOnClose\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"result\":true") != null);
+
+    harness.null_platform.window_hide_on_close = false;
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"hide-snake-off\",\"command\":\"native-sdk.platform.supports\",\"payload\":{\"feature\":\"window_hide_on_close\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"result\":false") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"hide-camel-off\",\"command\":\"native-sdk.platform.supports\",\"payload\":{\"feature\":\"windowHideOnClose\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"result\":false") != null);
+
+    // Camel-cohort spot check: the backfilled audioSpectrum alias resolves to
+    // audio_spectrum, which the default null platform supports.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"spectrum-camel\",\"command\":\"native-sdk.platform.supports\",\"payload\":{\"feature\":\"audioSpectrum\"}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"result\":true") != null);
 
     var chromium_platform = platform.NullPlatform.initWithEngine(.{}, .chromium);
     harness.runtime.options.platform = chromium_platform.platform();

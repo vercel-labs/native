@@ -17,13 +17,45 @@
 
 const std = @import("std");
 const templates = @import("templates.zig");
+const junction = @import("junction.zig");
 
 pub const generated_dir = ".native/build";
+
+/// Where the cross-volume junction lives, relative to the app dir: a
+/// directory junction `.native/sdk` -> framework root lets the generated
+/// build graph reference an SDK on another Windows volume through a
+/// relative zon path (`../sdk` from the `.native/build` build root), since
+/// build.zig.zon rejects absolute paths and no `..` chain crosses volumes.
+pub const sdk_junction_dir = ".native/sdk";
+const junction_dependency_path = "../sdk";
 
 pub const Error = error{
     MissingFramework,
     AlreadyEjected,
+    CrossVolumeFramework,
 };
+
+/// How the framework path dependency reaches the zon file. Pure decision
+/// over the `std.fs.path.relative` result, so the cross-volume case is
+/// testable with fabricated drive-letter paths on every host.
+pub const DependencyRoute = union(enum) {
+    /// Same volume (or any non-Windows host): the computed relative path
+    /// goes into the zon verbatim, exactly as before.
+    relative: []const u8,
+    /// The framework sits on another Windows volume, where no relative
+    /// path exists: the zon gets `../sdk` and the caller must create or
+    /// refresh the `.native/sdk` junction.
+    junction,
+};
+
+pub fn routeDependencyPath(dependency_path: []const u8) DependencyRoute {
+    if (junction.crossesVolumes(dependency_path)) return .junction;
+    return .{ .relative = if (dependency_path.len == 0) "." else dependency_path };
+}
+
+/// The two user-level ways out when the junction bridge is unavailable
+/// (appended to every cross-volume teaching error).
+pub const cross_volume_ways_out = junction.cross_volume_ways_out;
 
 /// Where the `native_sdk` framework checkout lives, for wiring the path
 /// dependency of a generated or ejected build graph. Resolution order:
@@ -35,7 +67,13 @@ pub fn resolveFrameworkRoot(allocator: std.mem.Allocator, io: std.Io, env_map: *
     if (env_map.get("NATIVE_SDK_PATH")) |path| {
         if (path.len > 0 and hasFrameworkRoot(allocator, io, path)) {
             if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
-            return try std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator);
+            // realPathFileAlloc returns a sentinel-terminated allocation
+            // (length + 1 bytes); this function's contract is a plain
+            // slice the caller frees, so re-dupe without the sentinel or
+            // that free is off by one byte.
+            const real_path = try std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator);
+            defer allocator.free(real_path);
+            return try allocator.dupe(u8, real_path);
         }
     }
 
@@ -112,9 +150,40 @@ pub fn ensureGeneratedBuild(allocator: std.mem.Allocator, io: std.Io, app_dir: [
     const dependency_path = try std.fs.path.relative(allocator, cwd, null, gen_real, framework_real);
     defer allocator.free(dependency_path);
 
+    const zon_dependency_path: []const u8 = switch (routeDependencyPath(dependency_path)) {
+        .relative => |path| path,
+        .junction => bridge: {
+            // Cross-volume (drive letters or UNC shares): wire the zon
+            // through a `.native/sdk` junction instead of the absolute
+            // path Zig rejects. Refreshed on every generation, so an SDK
+            // that moved or was reinstalled elsewhere is retargeted here.
+            const native_dir_real = std.fs.path.dirname(gen_real).?;
+            const app_real = std.fs.path.dirname(native_dir_real) orelse native_dir_real;
+            const junction_path = try std.fs.path.join(allocator, &.{ native_dir_real, "sdk" });
+            defer allocator.free(junction_path);
+            junction.ensure(allocator, io, junction_path, framework_real) catch |err| switch (err) {
+                error.OutOfMemory, error.Canceled => |e| return e,
+                else => {
+                    std.debug.print(
+                        \\cannot wire this app to the Native SDK: the app ({s})
+                        \\and the SDK ({s})
+                        \\sit on different Windows volumes, and build.zig.zon path
+                        \\dependencies must be relative — no relative path crosses
+                        \\volumes. The CLI bridges that with a directory junction at
+                        \\{s}, but creating it failed ({t}).
+                        \\
+                    , .{ app_real, framework_real, sdk_junction_dir, err });
+                    std.debug.print(cross_volume_ways_out, .{});
+                    return error.CrossVolumeFramework;
+                },
+            };
+            break :bridge junction_dependency_path;
+        },
+    };
+
     const build_zig = try renderBuildZig(allocator, options.app_name, .generated);
     defer allocator.free(build_zig);
-    const build_zon = try renderBuildZon(allocator, options.app_name, if (dependency_path.len == 0) "." else dependency_path, .generated);
+    const build_zon = try renderBuildZon(allocator, options.app_name, zon_dependency_path, .generated);
     defer allocator.free(build_zon);
 
     var dir = try std.Io.Dir.cwd().openDir(io, gen_path, .{});
@@ -149,9 +218,30 @@ pub fn eject(allocator: std.mem.Allocator, io: std.Io, app_dir: []const u8, opti
     const dependency_path = try std.fs.path.relative(allocator, cwd, null, app_real, framework_real);
     defer allocator.free(dependency_path);
 
+    const zon_dependency_path: []const u8 = switch (routeDependencyPath(dependency_path)) {
+        .relative => |path| path,
+        // No junction bridge for eject: the ejected build belongs to the
+        // user and is driven by plain `zig build`, so the CLI would never
+        // refresh a `.native/sdk` junction again — it would silently rot
+        // the first time the SDK moves. Teach the constraint instead.
+        .junction => {
+            std.debug.print(
+                \\cannot eject: the app ({s})
+                \\and the Native SDK ({s})
+                \\sit on different Windows volumes, and the ejected
+                \\build.zig.zon needs a relative SDK path — no relative path
+                \\crosses volumes, and an ejected build is user-owned, so the
+                \\CLI cannot keep a junction bridge fresh for it.
+                \\
+            , .{ app_real, framework_real });
+            std.debug.print(cross_volume_ways_out, .{});
+            return error.CrossVolumeFramework;
+        },
+    };
+
     const build_zig = try renderBuildZig(allocator, options.app_name, .ejected);
     defer allocator.free(build_zig);
-    const build_zon = try renderBuildZon(allocator, options.app_name, if (dependency_path.len == 0) "." else dependency_path, .ejected);
+    const build_zon = try renderBuildZon(allocator, options.app_name, zon_dependency_path, .ejected);
     defer allocator.free(build_zon);
 
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = build_zig });
@@ -281,6 +371,32 @@ test "generated build.zig.zon wires the framework path dependency" {
     try std.testing.expect(std.mem.indexOf(u8, text, ".name = .my_app") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, ".native_sdk = .{ .path = \"../../../framework\" }") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, ".paths = .{ \"build.zig\", \"build.zig.zon\" }") != null);
+}
+
+test "dependency routing keeps relative paths and bridges cross-volume ones" {
+    // Same volume (and every non-Windows host): verbatim, zero change.
+    try std.testing.expectEqualStrings("../../../framework", routeDependencyPath("../../../framework").relative);
+    try std.testing.expectEqualStrings("..\\..\\sdk", routeDependencyPath("..\\..\\sdk").relative);
+    // Build root == framework root: relative() returns "", the zon gets ".".
+    try std.testing.expectEqualStrings(".", routeDependencyPath("").relative);
+    // Cross-volume: std.fs.path.relative degrades to the absolute target
+    // (drive letters or UNC shares), which must route through the junction.
+    try std.testing.expect(routeDependencyPath("C:\\Users\\alpha\\AppData\\Roaming\\npm\\node_modules\\@native-sdk\\cli") == .junction);
+    try std.testing.expect(routeDependencyPath("\\\\server\\share\\native-sdk") == .junction);
+}
+
+test "the junction route renders a relative zon path through .native/sdk" {
+    const text = try renderBuildZon(std.testing.allocator, "my-app", junction_dependency_path, .generated);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, ".native_sdk = .{ .path = \"../sdk\" }") != null);
+    // Never an absolute path in the zon, junction route included.
+    try std.testing.expect(std.mem.indexOf(u8, text, ".path = \"C:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, ".path = \"\\\\") == null);
+}
+
+test "the cross-volume teaching text names both user-level ways out" {
+    try std.testing.expect(std.mem.indexOf(u8, cross_volume_ways_out, "same volume") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cross_volume_ways_out, "npm config set prefix") != null);
 }
 
 /// Path equality where '/' in the expected value also matches the

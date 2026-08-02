@@ -1,0 +1,1 @@
+fix: **Quiet Windows subprocesses**: `Effects.spawn` no longer opens or flashes a console window when a GUI or tray app launches a console-subsystem helper such as `node.exe`; interactive terminal children remain on the separate PTY API.

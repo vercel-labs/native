@@ -58,6 +58,43 @@ pub const ObjectId = u64;
 pub const ImageId = u64;
 pub const FontId = u64;
 
+/// Reserved namespace bit for MEDIA-SURFACE textures inside the ImageId
+/// value space: a media surface bound to `surface_id` composites the
+/// texture registered under `surface_id | media_surface_image_id_bit`,
+/// so producer-pushed textures and app-registered canvas images can
+/// never collide in the one flat id space draw commands reference.
+/// Surface ids and registered canvas image ids must both stay BELOW the
+/// bit — `Runtime.acquireMediaSurfaceProducer` and
+/// `Runtime.registerCanvasImage` reject ids with it set, loudly.
+pub const media_surface_image_id_bit: ImageId = 1 << 63;
+
+/// The texture image id a media surface's draw command references for a
+/// bound surface id (see `media_surface_image_id_bit`).
+pub fn mediaSurfaceTextureImageId(surface_id: u64) ImageId {
+    return surface_id | media_surface_image_id_bit;
+}
+
+/// The framework-owned media-surface id the SINGLE video playback
+/// channel feeds (`fx.loadVideo` — one player is the whole surface) and
+/// every `<video>` element composites. The `<video>` element always
+/// binds this reserved id; apps composing custom video UI from the fx
+/// vocabulary target it via `<media-surface surface={id}>` only when
+/// they manage their own surface. A valid producer id: bit 63
+/// (`media_surface_image_id_bit`) stays clear, so the id claims and
+/// composites like any app surface — it is merely reserved by
+/// convention for the declarative playback. BELOW 2^53 deliberately:
+/// surface ids ride the TS wire as f64, and a source-less `<video>`
+/// with custom controls is fed by the app's own `Cmd.videoLoad`
+/// naming exactly this id — an id outside the exact-integer window
+/// could never arrive intact.
+pub const video_playback_surface_id: u64 = 0x0001_7669_6465_6f5f;
+
+/// The media surface's deterministic id-derived placeholder color
+/// (widget_render.zig): what the reference renderer — goldens,
+/// screenshots, replay pixel marks — shows for a bound surface, live
+/// texture or not. Exported so tests pin the placeholder policy.
+pub const mediaSurfacePlaceholderColor = @import("widget_render.zig").mediaSurfacePlaceholderColor;
+
 pub const default_sans_font_id: FontId = 1;
 pub const default_mono_font_id: FontId = 2;
 // Reserved sans variant ids for inline span styling. The deterministic
@@ -102,6 +139,7 @@ pub const PathElement = drawing_model.PathElement;
 pub const FillPath = drawing_model.FillPath;
 pub const StrokePath = drawing_model.StrokePath;
 pub const ImageFit = drawing_model.ImageFit;
+pub const containDestinationRect = drawing_model.containDestinationRect;
 pub const ImageSampling = drawing_model.ImageSampling;
 pub const DrawImage = drawing_model.DrawImage;
 pub const Shadow = drawing_model.Shadow;
@@ -160,10 +198,13 @@ pub const TextLayoutCachePlanner = text_model.TextLayoutCachePlanner;
 pub const TextRange = text_model.TextRange;
 pub const TextSelectionRect = text_model.TextSelectionRect;
 pub const TextSelection = text_model.TextSelection;
+pub const TextCaretAffinity = text_model.TextCaretAffinity;
+pub const TextCaretPosition = text_model.TextCaretPosition;
 pub const TextCaretDirection = text_model.TextCaretDirection;
 pub const TextCaretMove = text_model.TextCaretMove;
 pub const TextCompositionUpdate = text_model.TextCompositionUpdate;
 pub const TextInputEvent = text_model.TextInputEvent;
+pub const max_widget_text_bytes_per_view = text_model.max_widget_text_bytes_per_view;
 pub const TextEditState = text_model.TextEditState;
 pub const TextBuffer = text_model.TextBuffer;
 
@@ -172,6 +213,7 @@ pub const CommandRef = command_model.CommandRef;
 pub const DiffKind = command_model.DiffKind;
 pub const DiffChange = command_model.DiffChange;
 pub const Builder = command_model.Builder;
+pub const max_display_list_text_bytes = command_model.max_display_list_text_bytes;
 
 // Canvas render data and cache plans live in `render.zig`; root keeps the public API stable.
 pub const max_render_state_stack = render_model.max_render_state_stack;
@@ -256,6 +298,7 @@ pub const CanvasRenderPass = frame_model.CanvasRenderPass;
 pub const CanvasFrame = frame_model.CanvasFrame;
 pub const max_canvas_frame_dirty_rects = frame_model.max_canvas_frame_dirty_rects;
 pub const buildCanvasFrame = frame_model.buildCanvasFrame;
+pub const incrementalDamageIntersectsBackdropBlur = frame_model.incrementalDamageIntersectsBackdropBlur;
 
 // Canvas GPU packet and encoder data live in `gpu.zig`; root keeps the public API stable.
 pub const CanvasRenderPassLoadAction = gpu_model.CanvasRenderPassLoadAction;
@@ -316,6 +359,7 @@ pub const ColorContrast = token_model.ColorContrast;
 pub const ThemeOptions = token_model.ThemeOptions;
 pub const ThemePack = token_model.ThemePack;
 pub const ColorTokens = token_model.ColorTokens;
+pub const colorTokenValue = token_model.colorTokenValue;
 pub const FontFamily = token_model.FontFamily;
 pub const TypographyTokens = token_model.TypographyTokens;
 pub const SpacingTokens = token_model.SpacingTokens;
@@ -332,6 +376,9 @@ pub const BlurTokenRef = token_model.BlurTokenRef;
 pub const ScrollPhysics = token_model.ScrollPhysics;
 pub const ScrollOverscroll = token_model.ScrollOverscroll;
 pub const ScrollState = token_model.ScrollState;
+pub const ScrollAxisState = token_model.ScrollAxisState;
+pub const ScrollAxis = token_model.ScrollAxis;
+pub const ScrollAxes = token_model.ScrollAxes;
 pub const VirtualListOptions = token_model.VirtualListOptions;
 pub const VirtualListRange = token_model.VirtualListRange;
 pub const virtualListRange = token_model.virtualListRange;
@@ -370,6 +417,8 @@ pub const PixelSnapTokenOverrides = token_model.PixelSnapTokenOverrides;
 pub const ControlVisualTokenOverrides = token_model.ControlVisualTokenOverrides;
 pub const ControlTokenOverrides = token_model.ControlTokenOverrides;
 pub const DesignTokenOverrides = token_model.DesignTokenOverrides;
+pub const accentOverrides = token_model.accentOverrides;
+pub const accentFocusRing = token_model.accentFocusRing;
 pub const DesignTokens = token_model.DesignTokens;
 
 // Canvas widget model and built-in factories live in `widgets.zig`; root keeps the public API stable.
@@ -386,6 +435,7 @@ pub const WidgetAnchorAlignment = widget_model.WidgetAnchorAlignment;
 pub const WidgetStyle = widget_model.WidgetStyle;
 pub const WidgetVariant = widget_model.WidgetVariant;
 pub const WidgetOverscroll = widget_model.WidgetOverscroll;
+pub const VideoControlVerb = widget_model.VideoControlVerb;
 pub const WidgetIconPlacement = widget_model.WidgetIconPlacement;
 pub const WidgetSize = widget_model.WidgetSize;
 pub const WidgetRole = widget_model.WidgetRole;
@@ -437,6 +487,28 @@ pub const max_text_spans_per_paragraph = text_spans.max_text_spans_per_paragraph
 pub const max_text_span_runs_per_paragraph = text_spans.max_text_span_runs_per_paragraph;
 pub const max_text_span_lines_per_paragraph = text_spans.max_text_span_lines_per_paragraph;
 
+// The terminal grid — the `.terminal` widget's resolved cell model and
+// painter (real text runs, geometric box drawing, selection, cursor,
+// scrollback indicator) — lives in `terminal_grid.zig`; the box-drawing
+// geometry in `terminal_box.zig`.
+pub const terminal_grid = @import("terminal_grid.zig");
+pub const terminal_box = @import("terminal_box.zig");
+pub const TerminalGrid = terminal_grid.TerminalGrid;
+pub const TerminalRow = terminal_grid.TerminalRow;
+pub const TerminalCell = terminal_grid.TerminalCell;
+pub const TerminalWide = terminal_grid.TerminalWide;
+pub const TerminalCursor = terminal_grid.TerminalCursor;
+pub const TerminalCursorShape = terminal_grid.TerminalCursorShape;
+pub const TerminalCellPos = terminal_grid.TerminalCellPos;
+pub const TerminalScrollbar = terminal_grid.TerminalScrollbar;
+pub const TerminalState = terminal_grid.TerminalState;
+pub const TerminalCellMetrics = terminal_grid.TerminalCellMetrics;
+pub const terminalCellMetrics = terminal_grid.cellMetrics;
+pub const clampTerminalGrid = terminal_grid.clampGrid;
+pub const max_terminal_cols = terminal_grid.max_cols;
+pub const max_terminal_rows = terminal_grid.max_rows;
+pub const max_terminal_cells = terminal_grid.max_cells;
+
 // Chart plot data for the `.chart` widget kind (series, downsampling,
 // domain) lives in `chart.zig`.
 pub const chart = @import("chart.zig");
@@ -461,13 +533,19 @@ pub const max_chart_axis_ticks = chart.max_chart_axis_ticks;
 pub const chartPointCount = chart.chartPointCount;
 pub const chartHoverIndex = chart.chartHoverIndex;
 
-// GitHub-flavored-markdown mapper (markdown source -> widget tree + span
-// model) lives in `markdown.zig`; also exported as `native_sdk.markdown`.
+// Shared source-code lexer/presentation model and GitHub-flavored-markdown
+// mapper. Markdown fenced blocks lower through `Ui.code`.
+pub const code = @import("code.zig");
 pub const markdown = @import("markdown.zig");
 
 // Deterministic key-lookup scratch shared by the per-frame planners and
 // the runtime's keyed diffs (see plan_key_index.zig).
 pub const plan_key_index = @import("plan_key_index.zig");
+
+// Lazily heap-allocated per-thread scratch: keeps the large planner
+// buffers out of the static TLS template every OS thread must clone
+// (see lazy_tls.zig for the working-set numbers).
+pub const lazy_tls = @import("lazy_tls.zig");
 
 // Experimental markup front-end lives in `ui_markup.zig` / `ui_markup_view.zig`
 // (runtime parse + interpret: the dev/hot-reload engine) and
@@ -493,6 +571,7 @@ pub const MarkupFragment = ui_markup.MarkupFragment;
 pub const markup_contract_specials = ui_markup.contract.Specials{
     .TextInputEvent = TextInputEvent,
     .ScrollState = ScrollState,
+    .TerminalState = TerminalState,
 };
 
 /// Reflect an app's Model/Msg into a markup contract (see
@@ -530,6 +609,7 @@ pub const StyleTokenRefs = ui_builder.StyleTokenRefs;
 /// The fragment hot-reload seam between the app loop and compiled
 /// markup fragments (Debug dev runs only; see `ui_builder`).
 pub const MarkupFragmentHost = ui_builder.MarkupFragmentHost;
+pub const TerminalGridLookup = ui_builder.TerminalGridLookup;
 pub const MarkupFragmentDiagnostic = ui_builder.MarkupFragmentDiagnostic;
 
 // Canvas widget event and semantics data lives in `events.zig`; root keeps the public API stable.
@@ -559,6 +639,9 @@ pub const WidgetInvalidation = event_model.WidgetInvalidation;
 pub const WidgetClipboardAction = event_model.WidgetClipboardAction;
 pub const widgetKeyboardClipboardAction = event_model.widgetKeyboardClipboardAction;
 pub const widgetKeyboardNewlineTextEditEvent = event_model.widgetKeyboardNewlineTextEditEvent;
+pub const widgetCodeTabTextEditEvent = event_model.widgetCodeTabTextEditEvent;
+pub const widgetKindSingleLineTextEntry = event_model.widgetKindSingleLineTextEntry;
+pub const sanitizedSingleLineTextInputEvent = event_model.sanitizedSingleLineTextInputEvent;
 pub const widgetKeyboardControlIntent = event_model.widgetKeyboardControlIntent;
 pub const semanticActions = event_model.semanticActions;
 pub const widgetSemanticControlIntent = event_model.widgetSemanticControlIntent;
@@ -585,17 +668,25 @@ pub const layoutWidgetTreeWithTokens = widget_runtime.layoutWidgetTreeWithTokens
 pub const layoutTextRun = text_model.layoutTextRun;
 pub const layoutTextRunPlan = text_model.layoutTextRunPlan;
 pub const layoutTextCaretRect = text_model.layoutTextCaretRect;
+pub const layoutTextCaretRectWithAffinity = text_model.layoutTextCaretRectWithAffinity;
 pub const textCaretRectForLayout = text_model.textCaretRectForLayout;
+pub const textCaretRectForLayoutWithAffinity = text_model.textCaretRectForLayoutWithAffinity;
 pub const layoutTextSelectionRects = text_model.layoutTextSelectionRects;
 pub const textSelectionRectsForLayout = text_model.textSelectionRectsForLayout;
 pub const layoutTextOffsetForPoint = text_model.layoutTextOffsetForPoint;
+pub const layoutTextCaretPositionForPoint = text_model.layoutTextCaretPositionForPoint;
 pub const textOffsetForLayoutPoint = text_model.textOffsetForLayoutPoint;
+pub const textCaretPositionForLayoutPoint = text_model.textCaretPositionForLayoutPoint;
 pub const applyTextInputEvent = text_model.applyTextInputEvent;
 pub const snapTextOffset = text_model.snapTextOffset;
 pub const snapTextRange = text_model.snapTextRange;
 pub const snapTextSelection = text_model.snapTextSelection;
+pub const snapTextCaretPosition = text_model.snapTextCaretPosition;
+pub const snapTextCaretSelection = text_model.snapTextCaretSelection;
 pub const textWordSelectionAtOffset = text_model.textWordSelectionAtOffset;
 pub const textLineSelectionAtOffset = text_model.textLineSelectionAtOffset;
+pub const textLineStartOffset = text_model.textLineStartOffset;
+pub const textLineEndOffset = text_model.textLineEndOffset;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 
@@ -613,6 +704,7 @@ pub const textSelectionCommandId = widget_runtime.textSelectionCommandId;
 pub const toggleWidgetKnobTravel = widget_runtime.toggleWidgetKnobTravel;
 pub const widgetControlAimPoint = widget_runtime.widgetControlAimPoint;
 pub const textSelectionForWidgetPoint = widget_runtime.textSelectionForWidgetPoint;
+pub const textCaretPositionForWidgetPoint = widget_runtime.textCaretPositionForWidgetPoint;
 pub const textOffsetForWidgetPoint = widget_runtime.textOffsetForWidgetPoint;
 
 // Static text selection (click-drag select + copy in `.text` widgets;
@@ -629,8 +721,13 @@ pub const textInputViewportForWidget = widget_runtime.textInputViewportForWidget
 pub const textInputClearButtonRect = widget_runtime.textInputClearButtonRect;
 pub const textInputClearButtonHitRect = widget_runtime.textInputClearButtonHitRect;
 pub const textInputContentExtentForWidget = widget_runtime.textInputContentExtentForWidget;
+pub const textInputContentWidthForWidget = widget_runtime.textInputContentWidthForWidget;
+pub const cacheTextInputContentWidthForWidget = widget_runtime.cacheTextInputContentWidthForWidget;
 pub const textInputMaxScrollOffsetForWidget = widget_runtime.textInputMaxScrollOffsetForWidget;
 pub const clampedTextInputScrollOffsetForWidget = widget_runtime.clampedTextInputScrollOffsetForWidget;
+pub const textInputMaxHorizontalScrollOffsetForWidget = widget_runtime.textInputMaxHorizontalScrollOffsetForWidget;
+pub const clampedTextInputHorizontalScrollOffsetForWidget = widget_runtime.clampedTextInputHorizontalScrollOffsetForWidget;
+pub const textInputCaretVisibleScrollOffsetForWidget = widget_runtime.textInputCaretVisibleScrollOffsetForWidget;
 pub const intrinsicWidgetSize = widget_runtime.intrinsicWidgetSize;
 pub const cursorForWidgetHit = widget_runtime.cursorForWidgetHit;
 pub const cursorForWidgetTarget = widget_runtime.cursorForWidgetTarget;
@@ -644,6 +741,8 @@ pub const widgetKindHitTarget = @import("widget_access.zig").widgetKindHitTarget
 /// any widget with a bound press/toggle handler (stamped into
 /// `semantics.actions` by the builder and both markup engines).
 pub const widgetIsHitTarget = @import("widget_access.zig").isHitTarget;
+pub const widgetIsHoverMsgHitTarget = @import("widget_access.zig").isHoverMsgHitTarget;
+pub const widgetListensForHoverMsgs = @import("widget_access.zig").widgetListensForHoverMsgs;
 /// Press-claiming predicates (widget_access.zig): where a press gesture
 /// stops instead of falling through to the nearest pressable ancestor.
 pub const widgetKindClaimsPress = @import("widget_access.zig").widgetKindClaimsPress;
@@ -676,6 +775,8 @@ pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
 /// and whose children are the built window, not the full item set.
 pub const widgetVirtualRuntimeScrolled = @import("widget_tree.zig").widgetVirtualRuntimeScrolled;
 pub const widgetScrollPhysics = @import("widget_tree.zig").widgetScrollPhysics;
+pub const widgetScrollsAxis = @import("widget_tree.zig").widgetScrollsAxis;
+pub const widgetScrollAxisMetrics = @import("widget_semantics.zig").widgetScrollAxisMetrics;
 pub const isWidgetHiddenInAncestors = @import("widget_tree.zig").isWidgetHiddenInAncestors;
 /// The disclosure family (widget_tree.zig): collapsible widgets whose
 /// content lays out at full size and REVEALS, plus the settled/concealed
@@ -686,6 +787,11 @@ pub const disclosureSettledOpen = @import("widget_tree.zig").disclosureSettledOp
 pub const disclosureContentBottom = @import("widget_tree.zig").disclosureContentBottom;
 pub const isWidgetConcealedByDisclosure = @import("widget_tree.zig").isWidgetConcealedByDisclosure;
 pub const anchoredWidgetFrame = @import("widget_layout.zig").anchoredWidgetFrame;
+/// Window-control reservation trigger (widget_layout.zig): true when a
+/// laid-out tree left drag-header CONTENT under the OS window-control
+/// cluster, so runtimes know to stamp `DesignTokens.window_controls`
+/// and re-lay the view clear of it.
+pub const windowDragContentUnderWindowControls = @import("widget_layout.zig").windowDragContentUnderWindowControls;
 /// Split-pane geometry (widget_layout.zig): divider band width, the
 /// fraction clamp band from the panes' min widths, and the in-place
 /// subtree re-layout the runtime reconcile uses when it restores a

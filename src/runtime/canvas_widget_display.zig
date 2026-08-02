@@ -5,6 +5,7 @@ const platform = @import("../platform/root.zig");
 const validation = @import("validation.zig");
 const runtime_api = @import("api.zig");
 const runtime_view = @import("view.zig");
+const view_widget_text = @import("view_widget_text.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
@@ -41,6 +42,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (!std.meta.eql(self.views[index].widget_tokens, tokens)) {
+                self.views[index].clearCanvasWidgetTextVerticalGoal();
                 self.views[index].widget_tokens = tokens;
                 self.views[index].widget_revision += 1;
             }
@@ -213,6 +215,14 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             const semantics = view.widgetSemantics();
             const count = @min(semantics.len, nodes.len);
             for (semantics[0..count], 0..) |node, index| {
+                const focused = node.state.focused or (view.keyboard_active and view.focused and node.id == view.canvas_widget_focused_id);
+                // Native menu validation only consults the focused editor.
+                // Resolving history for that one node also avoids searching
+                // the retained layout once per accessibility node.
+                const history = if (focused)
+                    view.canvasWidgetTextHistoryAvailability(node.id)
+                else
+                    view_widget_text.CanvasWidgetTextHistoryAvailability{};
                 nodes[index] = .{
                     .id = node.id,
                     .parent_id = canvasWidgetSemanticParentId(semantics, node.parent_index),
@@ -234,7 +244,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     .scroll_viewport_extent = if (node.scroll.present) node.scroll.viewport_extent else null,
                     .scroll_content_extent = if (node.scroll.present) node.scroll.content_extent else null,
                     .enabled = !node.state.disabled,
-                    .focused = node.state.focused or (view.focused and node.id == view.canvas_widget_focused_id),
+                    .focused = focused,
                     .hovered = node.state.hovered or (node.id != 0 and node.id == view.canvas_widget_hovered_id),
                     .pressed = node.state.pressed or (node.id != 0 and node.id == view.canvas_widget_pressed_id),
                     .selected = canvasWidgetSelectedState(node),
@@ -242,6 +252,8 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     .required = node.state.required,
                     .read_only = node.state.read_only,
                     .invalid = node.state.invalid,
+                    .can_undo = history.can_undo,
+                    .can_redo = history.can_redo,
                     .focusable = node.focusable,
                     .actions = platformWidgetAccessibilityActions(node.actions),
                 };
@@ -594,6 +606,8 @@ fn hashWidgetAccessibilityNodes(nodes: []const platform.WidgetAccessibilityNode)
         hashAccessibilityValue(&hasher, node.required);
         hashAccessibilityValue(&hasher, node.read_only);
         hashAccessibilityValue(&hasher, node.invalid);
+        hashAccessibilityValue(&hasher, node.can_undo);
+        hashAccessibilityValue(&hasher, node.can_redo);
         hashAccessibilityValue(&hasher, node.focusable);
         inline for (comptime std.meta.fieldNames(platform.WidgetAccessibilityActions)) |field_name| {
             hashAccessibilityValue(&hasher, @field(node.actions, field_name));

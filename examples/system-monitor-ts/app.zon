@@ -1,0 +1,45 @@
+.{
+    .id = "dev.native_sdk.system_monitor_ts",
+    .name = "system-monitor-ts",
+    .display_name = "System Monitor TS",
+    .description = "Live CPU, memory, and process sampling authored entirely in TypeScript + Native markup.",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    // The clipboard permission covers the Copy Name context action
+    // (Cmd.clipboardWrite); command covers the sampler spawns (`ps`,
+    // `vm_stat`/`meminfo`, the boot probe, and the confirmed SIGTERM).
+    .permissions = .{ "view", "command", "clipboard" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "System Monitor TS",
+                .width = 1144,
+                .height = 720,
+                // The tile grid is machined for exactly this content
+                // size; the floor stops the resize where clipping would
+                // begin (the Zig original's rule).
+                .min_width = 1144,
+                .min_height = 720,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                // The header bar IS the titlebar: the core's chromeMsg
+                // channel delivers the band geometry, and the header row
+                // pads past the traffic lights and matches the band's
+                // height (see src/app.native).
+                .titlebar = "hidden_inset_tall",
+                .views = .{
+                    .{ .label = "monitor-canvas", .kind = "gpu_surface", .fill = true, .role = "System monitor canvas", .accessibility_label = "System monitor", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+}

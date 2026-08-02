@@ -13,6 +13,18 @@
 // artifacts, not repo files), and the agent skills. With the payload in
 // the package, `native init && native dev` work offline right after
 // install.
+//
+// packages/core/ ships too, selectively: TypeScript app cores need the
+// @native-sdk/core transpiler (src/, run under node at build time), the
+// SDK library modules cores import (sdk/, also the editor package the CLI
+// materializes into apps), the rt kernel the emitted core pairs with
+// (rt/rt.zig), package.json (the bundled version every scaffold pin
+// follows), and package-lock.json (npm only strips the tarball ROOT
+// lockfile; nested ones ship). The transpiler's TypeScript toolchain
+// itself does NOT ride in the payload: @typescript/typescript6 is a
+// regular dependency of @native-sdk/cli, installed by npm in the same
+// transaction and resolved from packages/core by node's ancestor walk.
+// test/ and scripts/ stay out: repo-dev surface, never build inputs.
 
 import { cpSync, copyFileSync, rmSync } from 'fs';
 import { dirname, join } from 'path';
@@ -36,6 +48,23 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
   rmSync(join(projectRoot, 'third_party'), { recursive: true, force: true });
   cpSync(source, target, { recursive: true });
   console.log(`✓ Copied third_party/webview2/ to ${target}`);
+}
+
+// The @native-sdk/core closure a TS app build needs (see the header note).
+{
+  rmSync(join(projectRoot, 'packages'), { recursive: true, force: true });
+  for (const dir of ['src', 'sdk', 'rt']) {
+    const source = join(repoRoot, 'packages', 'core', dir);
+    const target = join(projectRoot, 'packages', 'core', dir);
+    cpSync(source, target, { recursive: true });
+    console.log(`✓ Copied packages/core/${dir}/ to ${target}`);
+  }
+  for (const file of ['package.json', 'package-lock.json']) {
+    const source = join(repoRoot, 'packages', 'core', file);
+    const target = join(projectRoot, 'packages', 'core', file);
+    copyFileSync(source, target);
+    console.log(`✓ Copied packages/core/${file} to ${target}`);
+  }
 }
 
 for (const file of ['build.zig', 'build.zig.zon', 'app.zon', 'LICENSE']) {

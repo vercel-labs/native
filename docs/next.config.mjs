@@ -1,5 +1,8 @@
 import createMDX from "@next/mdx";
 import { createRequire } from "node:module";
+import { readdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Resolve the plugin to an absolute path (still a string, so the config
 // stays serializable for Turbopack). A bare "remark-gfm" is require()d
@@ -7,6 +10,19 @@ import { createRequire } from "node:module";
 // module isolation cannot see this app's dependencies — production
 // builds resolved it, the Turbopack dev server did not.
 const require = createRequire(import.meta.url);
+const docsContentDir = fileURLToPath(new URL("./src/app/docs", import.meta.url));
+
+function docsSlugs(dir = docsContentDir, segments = []) {
+  const slugs = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      slugs.push(...docsSlugs(path.join(dir, entry.name), [...segments, entry.name]));
+    } else if (entry.name === "page.mdx" && segments.length > 0) {
+      slugs.push(segments.join("/"));
+    }
+  }
+  return slugs;
+}
 
 const withMDX = createMDX({
   options: {
@@ -30,9 +46,19 @@ const nextConfig = {
     ignored: ["**/.next-gate/**", "**/.next-check/**"],
   },
   async redirects() {
+    // Config redirects preserve the request query string. Keeping these out
+    // of the prerendered catch-all route avoids baking a query-less Location
+    // header into every legacy URL's static response.
+    const legacyDocsRedirects = docsSlugs().flatMap((slug) => [
+      { source: `/${slug}`, destination: `/docs/${slug}`, permanent: true },
+      { source: `/${slug}.md`, destination: `/docs/${slug}.md`, permanent: true },
+      { source: `/md/${slug}`, destination: `/docs/${slug}.md`, permanent: true },
+    ]);
+
     return [
       // The Philosophy page became the Introduction, the opening page of the docs.
-      { source: "/philosophy", destination: "/introduction", permanent: true },
+      { source: "/philosophy", destination: "/docs/introduction", permanent: true },
+      ...legacyDocsRedirects,
     ];
   },
 };

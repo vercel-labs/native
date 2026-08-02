@@ -278,7 +278,7 @@ pub fn update(model: *Model, msg: Msg) void {
         // runtime already applied, so echoing it back through
         // `.value = model.activity_scroll` on the next rebuild never
         // fights the scroll reconcile rule.
-        .activity_scrolled => |scroll_state| model.activity_scroll = scroll_state.offset,
+        .activity_scrolled => |scroll_state| model.activity_scroll = scroll_state.offset_y,
         .submit_forecast => model.setStatus("Forecast amount submitted."),
         .submit_search => model.setStatus("Segment search submitted."),
         .chrome_changed => |chrome| model.chrome_leading = chrome.insets.left,

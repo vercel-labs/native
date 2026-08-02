@@ -111,8 +111,8 @@ pub const AttrInfo = struct {
 /// How an event's payload reaches the Msg: `message` events take a tag
 /// with an optional `{binding}` payload; the others require a bare tag
 /// whose payload the RUNTIME supplies (TextInputEvent, ScrollState, the
-/// split fraction).
-pub const EventPayload = enum { message, text_input, scroll_state, fraction };
+/// split fraction, TerminalState).
+pub const EventPayload = enum { message, text_input, scroll_state, fraction, terminal_state };
 
 pub const EventInfo = struct {
     /// Stable code, assigned at birth, never reused. Nonzero.
@@ -249,7 +249,13 @@ pub const elements = [_]ElementInfo{
     .{ .code = 36, .name = "switch", .widget_kind = "switch_control", .takes_text = true, .a11y_name = .control },
     .{ .code = 37, .name = "table-cell", .widget_kind = "data_cell", .takes_text = true },
     .{ .code = 38, .name = "toggle-button", .widget_kind = "toggle_button", .takes_text = true, .icon_attr = true, .a11y_name = .control },
-    .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false },
+    // Tooltip is anchorable: `anchor="above|below"` floats it against
+    // its PARENT's frame (the trigger, or the stack wrapping trigger +
+    // tooltip), and the RUNTIME owns its visibility — hidden until the
+    // hover-intent delay on the trigger fires (see `tooltip-delay`).
+    // Without `anchor` it stays the classic static text leaf that
+    // paints whenever the view renders it.
+    .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false, .anchorable = true },
     // Value controls and text entry.
     .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox", .a11y_name = .control },
     .{ .code = 41, .name = "radio", .widget_kind = "radio", .a11y_name = .control },
@@ -306,6 +312,52 @@ pub const elements = [_]ElementInfo{
     // end, the reference's trailing dock), so the element mints ONE
     // code and no attribute codes at all.
     .{ .code = 65, .name = "reactions", .rule_hook = "reactions" },
+    // The media surface: a leaf compositing a texture PRODUCED OUTSIDE
+    // the widget tree (video decoder, camera preview, an external
+    // renderer like mpv) into the layout like any widget. Its `surface`
+    // attribute binds the model-owned u64 surface id a producer targets
+    // (`Runtime.acquireMediaSurfaceProducer`) — the runtime-image-id
+    // binding shape, never a markup literal. Display-only like image
+    // and chart (presses fall through); pictorial for the a11y lint.
+    .{ .code = 66, .name = "media-surface", .widget_kind = "media_surface", .hit_target = false, .a11y_name = .image },
+    // The image leaf: draws a RUNTIME-REGISTERED image by its
+    // model-owned u64 ImageId — the id `Cmd.imageLoad` /
+    // `fx.loadImage` / `fx.registerImageBytes` registered pixels
+    // under. Its `image` attribute is the avatar binding shape exactly
+    // (attr 38, scope broadened): one {binding}, never a markup
+    // literal; 0 draws nothing (the image-leaf convention — an avatar
+    // falls back to initials instead). Display-only like media-surface
+    // and chart (presses fall through); pictorial for the a11y lint.
+    .{ .code = 67, .name = "image", .widget_kind = "image", .hit_target = false, .a11y_name = .image },
+    // The video playback element: a leaf compositing the app's SINGLE
+    // video playback (decoded platform-side into the framework-owned
+    // playback surface, `canvas.video_playback_surface_id`) with
+    // optional house transport chrome. `src` declares the source — an
+    // app-assets path or an http(s) URL, the loadVideo cascade's
+    // resolution order — `controls` composes the house chrome
+    // (play/pause, elapsed, seek, duration), and autoplay/loop/muted
+    // shape the fresh playback. A composite: it lowers through
+    // `Ui.video` to existing widgets (media-surface plus the chrome
+    // row), so its rule hook owns the closed attribute set. Pictorial
+    // for the a11y lint, like media-surface and image.
+    .{ .code = 68, .name = "video", .rule_hook = "video", .hit_target = false, .a11y_name = .image },
+    // The terminal leaf: paints the framework-owned emulator session
+    // behind a MODEL-OWNED pty effect key and routes input to it when
+    // focused. Its `pty` attribute is the runtime-id binding shape
+    // (surface/image precedent): one {binding} to the u64 key the app's
+    // ptySpawn named — ids are model data, never markup literals; 0 is
+    // the unbound sentinel (an empty surface). `scrollback` echoes the
+    // app-visible view state back (the scroll `value` source-wins
+    // precedent) and `on-terminal` delivers it (a TerminalState
+    // record). An interactive control for the a11y lint: focused, it
+    // owns the keyboard, so it must carry a name — the runtime then
+    // announces the live screen text as its content.
+    .{ .code = 69, .name = "terminal", .widget_kind = "terminal", .a11y_name = .control },
+    // The reusable code surface: a source-bound composite that lowers
+    // through `Ui.code` to a highlighted panel, optionally with logical
+    // line numbers or one horizontal scroll region for unwrapped lines.
+    // Markdown fences use the same builder component.
+    .{ .code = 70, .name = "code", .rule_hook = "code", .hit_target = false },
 };
 
 // ------------------------------------------------------------- attributes
@@ -357,6 +409,10 @@ pub const attrs = [_]AttrInfo{
     // Element-scoped specials.
     .{ .code = 36, .name = "name", .class = .icon, .group = .element },
     .{ .code = 37, .name = "icon", .class = .icon, .group = .element },
+    // The runtime-image binding (avatar and image; the validator
+    // scopes it): one {binding} to the model-owned u64 ImageId the app
+    // registered at runtime — ids are model data, never markup
+    // literals; 0 is the no-image sentinel.
     .{ .code = 38, .name = "image", .class = .binding_only, .group = .element },
     .{ .code = 39, .name = "anchor", .class = .option, .group = .element },
     .{ .code = 40, .name = "anchor-alignment", .class = .option, .group = .element },
@@ -377,6 +433,10 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 53, .name = "test", .class = .flag, .group = .structure },
     .{ .code = 54, .name = "template", .class = .text, .group = .structure },
     .{ .code = 55, .name = "args", .class = .text, .group = .structure },
+    // Attribute NAMES are unique by registry law, so `src` is stated
+    // once and scoped per element: `<import src>` names the imported
+    // markup file, and the video element's rule hook reuses it for the
+    // playback's source string (an app-assets path or http(s) URL).
     .{ .code = 56, .name = "src", .class = .text, .group = .structure },
     .{ .code = 57, .name = "kind", .class = .text, .group = .structure },
     // Chart composite attributes (fresh codes, assigned at birth).
@@ -442,6 +502,75 @@ pub const attrs = [_]AttrInfo{
     // (absent) declares no origin, so every existing document keeps
     // its mount-never-animates behavior.
     .{ .code = 78, .name = "resize-origin", .class = .number, .group = .option, .field = "resize_origin" },
+    // The quiet-surface knob (`WidgetStyle.quiet_hover`) for
+    // image-forward content tiles: opts a pressable element out of the
+    // HOVER wash only — press/selection fills, the focus ring, cursor
+    // intent, and hit testing keep their own channels. Hit-target
+    // elements only (the validator scopes it; anywhere else it would be
+    // silently inert). No `field`: the engines apply it to
+    // `ElementOptions.style`, not a flat option field.
+    .{ .code = 79, .name = "quiet-hover", .class = .flag, .group = .option },
+    // Hover-intent show delay for ANCHORED tooltips (tooltip only, and
+    // only beside `anchor`; the validator scopes both), in whole
+    // milliseconds. The runtime shows an anchored tooltip after its
+    // trigger has been hovered this long on the recorded frame clock —
+    // 0 shows the instant the trigger is hovered. Negative is
+    // unreachable from markup; absent keeps the token default
+    // (`ControlMetricTokens.tooltip_show_delay_ms`).
+    .{ .code = 80, .name = "tooltip-delay", .class = .whole, .group = .option, .field = "tooltip_delay" },
+    // The media-surface producer rendezvous (media-surface only; the
+    // validator scopes it): one {binding} to the model-owned u64 surface
+    // id a producer targets (`Runtime.acquireMediaSurfaceProducer`) —
+    // ids are model data in the runtime-image-id spirit, never markup
+    // literals; 0 is the unbound sentinel (the surface draws nothing,
+    // like an image leaf with id 0), and usable ids stay below the
+    // reserved namespace bit (bit 63), which acquire refuses.
+    .{ .code = 81, .name = "surface", .class = .binding_only, .group = .element },
+    // Video element attributes (the <video> composite; its rule hook
+    // owns the closed set): controls composes the house transport
+    // chrome, autoplay/loop/muted shape the fresh playback the
+    // element's src declares. All flags — bare presence, a literal
+    // true/false, or a {binding} to a bool.
+    .{ .code = 82, .name = "controls", .class = .flag, .group = .composite },
+    .{ .code = 83, .name = "autoplay", .class = .flag, .group = .composite },
+    .{ .code = 84, .name = "loop", .class = .flag, .group = .composite },
+    .{ .code = 85, .name = "muted", .class = .flag, .group = .composite },
+    // Scroll axis declaration (scroll only; the validator scopes it):
+    // vertical (the default — every pre-axis document keeps its exact
+    // behavior), horizontal, or both. A closed vocabulary mirroring
+    // `canvas.ScrollAxes`, the overscroll pattern.
+    .{ .code = 86, .name = "axis", .class = .option, .group = .option, .field = "axis" },
+    // The horizontal scroll offset (scroll only, and only beside a
+    // horizontal-capable axis; the validator scopes both): the sideways
+    // counterpart of `value`, following the same source-wins reconcile
+    // rule — echo `on-scroll`'s offset_x back here and user scrolling
+    // survives rebuilds; move it model-side to scroll programmatically.
+    .{ .code = 87, .name = "value-x", .class = .number, .group = .option, .field = "value_x" },
+    // The terminal's pty rendezvous (terminal only; the validator
+    // scopes and REQUIRES it): one {binding} to the model-owned u64 pty
+    // effect key `ptySpawn` named — the media-surface `surface` shape
+    // exactly. A terminal without it is dead markup, taught rather than
+    // rendered inert.
+    .{ .code = 88, .name = "pty", .class = .binding_only, .group = .element },
+    // The terminal's scrollback offset in rows above the live screen
+    // (terminal only; the validator scopes it): the scroll `value`
+    // source-wins reconcile rule — echo `on-terminal`'s `scrollback`
+    // back here and user scrollback survives rebuilds; move it
+    // model-side to scroll programmatically. 0 is pinned to the bottom.
+    .{ .code = 89, .name = "scrollback", .class = .whole, .group = .option, .field = "scrollback" },
+    // Code-surface declarations (the <code> composite; its rule hook
+    // owns the closed set). Language is a literal lexer name and line
+    // numbers are opt-in; wrapping reuses generic attr code 16.
+    .{ .code = 90, .name = "language", .class = .option, .group = .composite },
+    .{ .code = 91, .name = "line-numbers", .class = .flag, .group = .composite },
+    // Editable code is a composite-only opt-in: the default code surface
+    // remains selectable/read-only, while `editable` lowers it through
+    // the textarea behavior with code-specific bare rendering.
+    .{ .code = 92, .name = "editable", .class = .flag, .group = .composite },
+    // Flat loop-rendered tree rows can declare their one-based logical
+    // hierarchy without manufacturing nested layout containers. Zero (the
+    // default when absent) keeps structural widget nesting as the source.
+    .{ .code = 93, .name = "tree-level", .class = .whole, .group = .option, .field = "tree_level" },
 };
 
 // ----------------------------------------------------------------- events
@@ -457,6 +586,29 @@ pub const events = [_]EventInfo{
     .{ .code = 8, .name = "hold" },
     .{ .code = 9, .name = "resize", .payload = .fraction, .only_on_element = "split" },
     .{ .code = 10, .name = "reach-end", .only_on_element = "scroll" },
+    // The pointer-hover pair (the Elm onMouseEnter/onMouseLeave
+    // convention): hover-enter dispatches when the pointer enters a
+    // bound element's hit region, hover-leave when it exits — discrete
+    // containment edges, never per-move. Binding either makes the
+    // element hover-hittable the way a bound press makes any element
+    // pressable (so both stay legal everywhere, like the press family)
+    // WITHOUT claiming presses, painting a wash, or adding an
+    // accessibility action. Hover comes from mouse/trackpad pointers
+    // only — touch input never synthesizes it.
+    .{ .code = 11, .name = "hover-enter" },
+    .{ .code = 12, .name = "hover-leave" },
+    // The terminal's view-state echo: dispatched with a TerminalState
+    // record (scrollback, history, cols, rows) after every
+    // runtime-applied view-state change — wheel and keyboard scrollback,
+    // and the layout-derived grid resize — so the model can echo
+    // `scrollback` back (the on-scroll reconcile shape) and render
+    // honest status. Emulator internals never ride it.
+    .{ .code = 13, .name = "terminal", .payload = .terminal_state, .only_on_element = "terminal" },
+    // Double press is the second half of the desktop select-then-act
+    // gesture. The first release still dispatches `press`; a release
+    // whose runtime-derived click count reached two dispatches this
+    // channel in place of a second press.
+    .{ .code = 14, .name = "double-press" },
 };
 
 // ------------------------------------------------------- token vocabulary
@@ -468,12 +620,13 @@ pub const events = [_]EventInfo{
 // tests in ui_markup_view_tests.zig hold them equal to the live structs).
 
 pub const color_token_names = [_][]const u8{
-    "background",   "surface",     "surface_subtle",   "surface_pressed",
-    "text",         "text_muted",  "border",           "accent",
-    "accent_text",  "destructive", "destructive_text", "success",
-    "success_text", "warning",     "warning_text",     "info",
-    "info_text",    "focus_ring",  "shadow",           "scrim",
-    "disabled",
+    "background",      "surface",          "surface_subtle",  "surface_pressed",
+    "text",            "text_muted",       "syntax_plain",    "syntax_comment",
+    "syntax_keyword",  "syntax_literal",   "syntax_function", "syntax_property",
+    "syntax_constant", "border",           "accent",          "accent_text",
+    "destructive",     "destructive_text", "success",         "success_text",
+    "warning",         "warning_text",     "info",            "info_text",
+    "focus_ring",      "shadow",           "scrim",           "disabled",
 };
 
 pub const radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl" };
@@ -492,16 +645,16 @@ pub const control_size_value_names = [_][]const u8{ "default", "sm", "lg", "icon
 pub const text_size_value_names = [_][]const u8{ "heading", "display" };
 
 pub const icon_names = [_][]const u8{
-    "alert",       "archive",       "arrow-down",   "arrow-right",      "arrow-up",
-    "check",       "check-circle",  "chevron-down", "chevron-left",     "chevron-right",
-    "chevron-up",  "circle-dot",    "clock",        "copy",             "download",
-    "edit",        "ellipsis",      "external-link", "eye",             "file-text",
-    "folder",      "folder-open",   "git-branch",    "git-merge",       "git-pull-request",
-    "info",        "menu",          "moon",          "music",           "panel-left",
-    "panel-right", "pause",         "play",          "plus",            "refresh-cw",
-    "repeat",      "save",          "search",        "send",            "settings",
-    "shuffle",     "skip-back",     "skip-forward",  "sun",             "terminal",
-    "trash",       "volume",        "wrench",        "x",               "x-circle",
+    "alert",       "archive",      "arrow-down",    "arrow-right",  "arrow-up",
+    "check",       "check-circle", "chevron-down",  "chevron-left", "chevron-right",
+    "chevron-up",  "circle-dot",   "clock",         "copy",         "download",
+    "edit",        "ellipsis",     "external-link", "eye",          "file-text",
+    "folder",      "folder-open",  "git-branch",    "git-merge",    "git-pull-request",
+    "info",        "menu",         "moon",          "music",        "panel-left",
+    "panel-right", "pause",        "play",          "plus",         "refresh-cw",
+    "repeat",      "save",         "search",        "send",         "settings",
+    "shuffle",     "skip-back",    "skip-forward",  "sun",          "terminal",
+    "trash",       "volume",       "wrench",        "x",            "x-circle",
 };
 
 /// The semantic role vocabulary the `role` attribute accepts: the field
@@ -526,14 +679,16 @@ pub const container_role_names = [_][]const u8{
 };
 
 /// Whether markup can put element children inside this element: text
-/// leaves hold a single text run and the icon leaf holds nothing (both
-/// enforced by the validator), so a container role there is provably
-/// misuse. Other leaves (separator, value controls) structurally accept
-/// children, so the lint stays quiet about them.
+/// leaves hold a single text run, and the icon and terminal leaves hold
+/// nothing (all enforced by the validator), so a container role there is
+/// provably misuse. Other leaves (separator, value controls)
+/// structurally accept children, so the lint stays quiet about them.
 pub fn elementHoldsChildren(entry: *const ElementInfo) bool {
     if (entry.takes_children) return true;
     if (entry.takes_text) return false;
-    return !std.mem.eql(u8, entry.name, "icon");
+    if (std.mem.eql(u8, entry.name, "icon")) return false;
+    if (std.mem.eql(u8, entry.name, "terminal")) return false;
+    return true;
 }
 
 // ---------------------------------------------------------------- lookups

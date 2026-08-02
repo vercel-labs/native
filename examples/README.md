@@ -22,12 +22,14 @@ native build   # produce a ReleaseFast binary in zig-out/bin/
 | `soundboard` | Album grid with decoded cover art, context menus, timers, and a custom theme. |
 | `deck` | Two model-declared windows and a dense track ledger. |
 | `markdown-viewer` | Real file I/O through effects, hidden-inset titlebar retrofit, preview + editor. |
+| `code-editor` | Platform folder picker, bounded filesystem tree, and syntax-highlighted source editor. |
 | `system-monitor` | Live process sampling, confirmation dialogs, a settings window. |
 | `gpu-surface` | A Metal-backed GPU surface composed beside native controls and WebView content. |
 | `gpu-dashboard` | Native chrome, a GPU surface, and a retained canvas display list. |
 | `gpu-components` | The retained GPU widget controls in one native-first component lab. |
 | `canvas-preview` | Canvas + WebView in one window, panes snapped to canvas anchors, a status item. |
 | `effects-probe` | The effect system live: spawn/fetch/file effects, cancellation, worker wakes. |
+| `menu-bar` | The menu-bar app lifecycle: `close_policy = "hide"`, a status item whose Open/Quit rows drive `fx.showWindow`/`fx.quitApp`, Dock reopen. |
 
 ## Examples that own their build
 

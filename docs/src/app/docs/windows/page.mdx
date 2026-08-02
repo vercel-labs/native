@@ -1,0 +1,248 @@
+# Windows
+
+The Native SDK supports multiple windows. A native-rendered app declares its windows as a scene — `ShellWindow` entries carrying titles, sizes, restore behavior, and view trees, the shape [`UiApp`](/docs/app-model) takes through its `scene` option and `app.zon` takes through the [`shell` block](/docs/app-zon#shell):
+
+```zig
+const shell_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "My App",
+    .width = 480,
+    .height = 320,
+    .restore_state = false,
+    .views = &shell_views,
+}};
+const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
+```
+
+The first scene window adopts the startup window; additional scene windows are created through the window service. Secondary windows can also be created imperatively from Zig — or, in apps that [embed web content](/docs/frontend), from trusted JavaScript.
+
+## Overlay windows
+
+Window creation accepts four overlay controls:
+
+- `transparent` makes the top-level window and its render surface alpha-capable. A raw scene canvas must also use a non-opaque `gpu_alpha_mode`, and its clear/content alpha determines what reaches the desktop. `UiApp.WindowDescriptor` selects premultiplied alpha and an alpha-zero canvas clear automatically.
+- `always_on_top` selects the platform's floating/topmost level.
+- `click_through` removes the whole window from pointer hit testing, so clicks, motion, and scrolling reach the window underneath.
+- `activate_on_show = false` orders the window front without activating the app or taking keyboard focus. This governs initial creation, the first-present reveal, and `showWindow`; an explicit `focusWindow` remains a deliberate activation request.
+
+The usual heads-up overlay combines all four with a chromeless canvas window:
+
+```zig
+const overlay: native_sdk.ShellWindow = .{
+    .label = "overlay",
+    .titlebar = .chromeless,
+    .transparent = true,
+    .always_on_top = true,
+    .click_through = true,
+    .activate_on_show = false,
+    .restore_state = false,
+    .views = &.{.{
+        .label = "overlay-canvas",
+        .kind = .gpu_surface,
+        .fill = true,
+        .gpu_alpha_mode = .premultiplied,
+    }},
+};
+```
+
+Canvas windows are created hidden and become visible after their first completed present. A short safety deadline reveals the window if rendering wedges. The overlay flags are installed before either reveal, so no opaque, focus-taking intermediate window flashes on screen.
+
+On macOS these map to an alpha-capable floating `NSWindow`, ignored mouse events, and passive `orderFront`. The system WebView engine can participate in that alpha window; the Chromium engine rejects `transparent` because its windowed CEF browser cannot expose alpha to the parent window. Windows uses a layered topmost window with per-pixel alpha, transparent hit testing, a non-activating initial reveal, and normal activation if the user later clicks an interactive overlay. Its layered presenter composites multiple canvas surfaces in layer order. Because Win32 cannot redirect non-client chrome or child surfaces into the top-level alpha bitmap, a transparent Windows window must use `titlebar = .chromeless`, cannot be combined with application menus, and rejects WebViews and other native views. Linux provides transparency, input regions, and passive show on GTK; topmost is honored on X11 through `_NET_WM_STATE_ABOVE`. Wayland intentionally gives the compositor—not clients—control of topmost placement, so the GTK host reports that limitation and cannot guarantee `always_on_top` there.
+
+## Creating windows from Zig
+
+```zig
+const info = try runtime.createWindow(.{
+    .label = "tools",
+    .title = "Tools",
+    .default_frame = native_sdk.geometry.RectF.init(80, 80, 420, 320),
+});
+try runtime.focusWindow(info.id);
+```
+
+A transparent imperative window with no explicit `source` is deliberately canvas-only: it does not inherit the app's main WebView source, and hot reload will not add one later. Attach a premultiplied GPU surface to make a Windows-compatible overlay:
+
+```zig
+const overlay = try runtime.createWindow(.{
+    .label = "overlay",
+    .title = "Overlay",
+    .default_frame = native_sdk.geometry.RectF.init(80, 80, 420, 160),
+    .titlebar = .chromeless,
+    .transparent = true,
+    .always_on_top = true,
+    .click_through = true,
+    .activate_on_show = false,
+});
+_ = try runtime.createView(.{
+    .window_id = overlay.id,
+    .label = "overlay-canvas",
+    .kind = .gpu_surface,
+    .frame = native_sdk.geometry.RectF.init(0, 0, 420, 160),
+    .gpu_surface = .{ .alpha_mode = .premultiplied },
+});
+```
+
+Supplying an explicit `source` keeps the WebView-window behavior. Windows rejects that combination when `transparent = true` because a child WebView cannot participate in the layered alpha bitmap.
+
+## Creating windows from JavaScript
+
+`js_window_api` exposes the `window.zero.windows.*` helper in JavaScript. Window commands still require an allowed origin and the `window` permission when runtime permissions are configured:
+
+```zig
+const app_permissions = [_][]const u8{native_sdk.security.permission_window};
+
+.security = .{
+    .permissions = &app_permissions,
+    .navigation = .{ .allowed_origins = &.{ "zero://app" } },
+},
+.js_window_api = true,
+```
+
+Then JavaScript can call the helper from an allowed origin:
+
+```javascript
+const win = await window.zero.windows.create({
+  label: "tools",
+  title: "Tools",
+  width: 420,
+  height: 320,
+});
+
+const all = await window.zero.windows.list();
+await window.zero.windows.focus(win.id);
+await window.zero.windows.close(win.id);
+```
+
+JavaScript creation also accepts `titlebar: "standard" | "hidden_inset" | "hidden_inset_tall" | "chromeless"`. A transparent Windows window requires `"chromeless"`. Omitting `url` makes that transparent window source-less instead of inheriting the calling WebView; a transparent WebView-backed window remains unsupported on Windows.
+
+## Window types
+
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>WindowId</code></td>
+      <td>Opaque identifier (<code>u64</code>)</td>
+    </tr>
+    <tr>
+      <td><code>WindowCreateOptions</code></td>
+      <td>Options for <code>runtime.createWindow()</code>: label, title, frame, and overlay presentation</td>
+    </tr>
+    <tr>
+      <td><code>WindowInfo</code></td>
+      <td>Returned after creation: id, label, title, frame</td>
+    </tr>
+    <tr>
+      <td><code>WindowState</code></td>
+      <td>Persisted state: id, label, title, frame, open, focused, maximized, fullscreen, scale (the type also carries <code>hidden</code>, deliberately session-transient — it never persists, so every launch starts shown)</td>
+    </tr>
+    <tr>
+      <td><code>WindowRestorePolicy</code></td>
+      <td>How restored frames are placed, such as clamping to the visible screen or centering on the primary display</td>
+    </tr>
+    <tr>
+      <td><code>WindowClosePolicy</code></td>
+      <td>What the user's close affordance does: <code>quit</code> (the default — really close) or <code>hide</code> (the menu-bar-app shape)</td>
+    </tr>
+  </tbody>
+</table>
+
+## Close policy
+
+Each window declares what the user's close affordance (the red traffic light, cmd+W, the caption X) does, via `close_policy`:
+
+- `"quit"` — the default and the classic behavior, unchanged for every existing app: the window really closes, and closing the last one follows the host's exit semantics.
+- `"hide"` — the menu-bar/tray-app shape: the close affordance hides the window (it stays alive with its views; `WindowState.hidden` flips true on the frame channel, in the session journal, and in the `hidden` field of the window JSON the `window.zero.windows.*` bridge returns — `open` stays true, so `hidden` is what distinguishes a policy-hidden window from a visible unfocused one) and the app keeps running behind its status item. `fx.showWindow(label)` brings it back — a tray "Open" row's natural consequence — and on macOS the Dock-icon reopen re-shows it on its own. Runtime-initiated closes (`fx.closeWindow`, reconcile closes) still really close: the policy governs the USER's affordance, not the app's own decisions.
+
+`hide` is supported where the host can re-show a hidden window: macOS (`windowShouldClose` orders the window out; the Dock reopen path always exists) and Windows (`WM_CLOSE` hides via `SW_HIDE`; the tray icon is the ONLY re-show affordance, so on Windows `close_policy = "hide"` additionally requires the `"tray"` capability in app.zon — hiding removes the taskbar entry and Windows has no Dock-style reopen, so a declaration without the tray is refused at build time and at window create, exactly like Linux's refusal below; and if the declared tray fails to install at runtime, the first hide-close downgrades to a real close with a loud log rather than stranding an invisible process). Linux has no status item in this toolkit yet, so nothing could bring a hidden window back — the declaration is refused loudly at build time (a compile error for manifest windows) and at window create (`error.UnsupportedWindowClosePolicy`), never a silent no-op. The hidden state is session-transient: it never persists to the window-state store, so every launch starts shown.
+
+A policy-hidden window is occluded for pacing, exactly like a minimized one: its canvas frame completions drop to the ~1 Hz occluded heartbeat instead of the display grid (a menu-bar app parks hidden for days — full-rate frames there would be pure background CPU burn), and it does not count as a visible display for `.spectrum` emissions. `fx.showWindow` restores full cadence with the window.
+
+See the [tray page's lifecycle recipe](/docs/tray#the-menu-bar-app-lifecycle) and `examples/menu-bar` for the whole pattern. A future `event` tier (the model receives the close request and decides) is deliberately left room for and is not implemented yet.
+
+## Platform limits
+
+<table>
+  <thead>
+    <tr>
+      <th>Constant</th>
+      <th>Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>max_windows</code></td>
+      <td>16</td>
+    </tr>
+    <tr>
+      <td><code>max_window_label_bytes</code></td>
+      <td>64</td>
+    </tr>
+    <tr>
+      <td><code>max_window_title_bytes</code></td>
+      <td>128</td>
+    </tr>
+  </tbody>
+</table>
+
+## Window state persistence
+
+The `window_state.Store` persists geometry to `windows.zon` in the app's state directory. Startup restore uses the window `label` from the manifest and applies the saved frame; titles continue to come from `app.zon` or runtime window creation options.
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>id</code></td>
+      <td>Window ID</td>
+    </tr>
+    <tr>
+      <td><code>label</code></td>
+      <td>Window label (used for merge matching)</td>
+    </tr>
+    <tr>
+      <td><code>frame</code></td>
+      <td>Position and size (x, y, width, height)</td>
+    </tr>
+    <tr>
+      <td><code>maximized</code></td>
+      <td>Whether the window was maximized</td>
+    </tr>
+    <tr>
+      <td><code>fullscreen</code></td>
+      <td>Whether the window was fullscreen</td>
+    </tr>
+    <tr>
+      <td><code>scale</code></td>
+      <td>Display scale factor</td>
+    </tr>
+  </tbody>
+</table>
+
+When `saveWindow` is called, the store merges by matching on `label` or `id`, so secondary windows are preserved alongside the main window. Records with missing, malformed, or empty labels are ignored on load and omitted the next time the file is rewritten.
+
+## Declaring windows in app.zon
+
+```zig
+.windows = .{
+    .{ .label = "main", .title = "native-sdk", .width = 720, .height = 480, .restore_state = true },
+},
+```
+
+A menu-bar app's window adds the [close policy](#close-policy):
+
+```zig
+.windows = .{
+    .{ .label = "main", .title = "Player", .width = 420, .height = 260, .close_policy = "hide" },
+},
+```

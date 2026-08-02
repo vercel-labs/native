@@ -477,7 +477,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // Echo the applied scroll offset back through the model: the next
         // rebuild lays the preview at exactly this value, so scrolling
         // never fights the reconcile.
-        .doc_scrolled => |state| model.doc_scroll = state.offset,
+        .doc_scrolled => |state| model.doc_scroll = state.offset_y,
         .chrome_changed => |chrome| {
             model.chrome_leading = chrome.insets.left;
             model.chrome_trailing = chrome.insets.right;
@@ -561,6 +561,13 @@ pub fn viewerTokens(model: *const Model) canvas.DesignTokens {
             .surface_pressed = canvas.Color.rgb8(231, 229, 228),
             .text = canvas.Color.rgb8(12, 10, 9),
             .text_muted = canvas.Color.rgb8(121, 113, 107),
+            .syntax_plain = canvas.Color.rgb8(23, 23, 23),
+            .syntax_comment = canvas.Color.rgb8(77, 77, 77),
+            .syntax_keyword = canvas.Color.rgb8(189, 40, 100),
+            .syntax_literal = canvas.Color.rgb8(41, 122, 58),
+            .syntax_function = canvas.Color.rgb8(120, 32, 188),
+            .syntax_property = canvas.Color.rgb8(203, 42, 47),
+            .syntax_constant = canvas.Color.rgb8(0, 104, 214),
             .border = canvas.Color.rgb8(231, 229, 228),
             .accent = canvas.Color.rgb8(67, 45, 215),
             .accent_text = canvas.Color.rgb8(238, 242, 255),
@@ -581,6 +588,13 @@ pub fn viewerTokens(model: *const Model) canvas.DesignTokens {
             .surface_pressed = canvas.Color.rgba8(255, 255, 255, 38),
             .text = canvas.Color.rgb8(250, 250, 249),
             .text_muted = canvas.Color.rgb8(166, 160, 155),
+            .syntax_plain = canvas.Color.rgb8(237, 237, 237),
+            .syntax_comment = canvas.Color.rgb8(161, 161, 161),
+            .syntax_keyword = canvas.Color.rgb8(247, 95, 143),
+            .syntax_literal = canvas.Color.rgb8(98, 192, 115),
+            .syntax_function = canvas.Color.rgb8(191, 122, 240),
+            .syntax_property = canvas.Color.rgb8(255, 97, 102),
+            .syntax_constant = canvas.Color.rgb8(82, 168, 255),
             .border = canvas.Color.rgba8(255, 255, 255, 26),
             .accent = canvas.Color.rgb8(124, 134, 255),
             .accent_text = canvas.Color.rgb8(12, 10, 9),

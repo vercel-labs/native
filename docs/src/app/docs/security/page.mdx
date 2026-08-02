@@ -1,0 +1,395 @@
+# Security
+
+Every app declares `permissions` and `capabilities` in `app.zon` — the runtime grants checked before native services run. Apps that [embed web content](/docs/frontend) get further layers: the Native SDK treats the WebView as untrusted by default, and web content opts into native power only through explicit command policies and navigation rules. A native-rendered app with no WebView needs only the first section of this page.
+
+## Permissions and capabilities
+
+`capabilities` describe broad features an app uses. `permissions` are the runtime grants checked before native commands run.
+
+```zig
+.permissions = .{ "command", "view", "dialog", "window", "filesystem" },
+.capabilities = .{ "webview", "js_bridge", "native_views", "dialog", "filesystem" },
+```
+
+### Available permissions
+
+<table>
+  <thead>
+    <tr>
+      <th>Permission</th>
+      <th>Grants</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>window</code></td>
+      <td>Window create/focus/close operations and layered WebView management</td>
+    </tr>
+    <tr>
+      <td><code>command</code></td>
+      <td>App command routing from trusted WebView bridge calls</td>
+    </tr>
+    <tr>
+      <td><code>view</code></td>
+      <td>Generic native view create/list/update/focus/close operations</td>
+    </tr>
+    <tr>
+      <td><code>dialog</code></td>
+      <td>Native file and message dialogs from explicit builtin bridge policies</td>
+    </tr>
+    <tr>
+      <td><code>filesystem</code></td>
+      <td>File system access from bridge commands</td>
+    </tr>
+    <tr>
+      <td><code>clipboard</code></td>
+      <td>Clipboard read/write</td>
+    </tr>
+    <tr>
+      <td><code>credentials</code></td>
+      <td>Credential store read/write/delete operations</td>
+    </tr>
+    <tr>
+      <td><code>network</code></td>
+      <td>Network requests from native code</td>
+    </tr>
+    <tr>
+      <td><code>camera</code></td>
+      <td>Camera access</td>
+    </tr>
+    <tr>
+      <td><code>microphone</code></td>
+      <td>Microphone access</td>
+    </tr>
+    <tr>
+      <td><code>location</code></td>
+      <td>Location services</td>
+    </tr>
+    <tr>
+      <td><code>notifications</code></td>
+      <td>System notifications</td>
+    </tr>
+  </tbody>
+</table>
+
+Custom permissions use reverse-DNS names (e.g. `com.example.my-permission`). Use the smallest set that covers your app.
+
+### Available capabilities
+
+<table>
+  <thead>
+    <tr>
+      <th>Capability</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>webview</code></td>
+      <td>WebView rendering</td>
+    </tr>
+    <tr>
+      <td><code>js_bridge</code></td>
+      <td>JavaScript bridge</td>
+    </tr>
+    <tr>
+      <td><code>native_module</code></td>
+      <td>Native Zig extension modules</td>
+    </tr>
+    <tr>
+      <td><code>native_views</code></td>
+      <td>Native shell views, chrome, controls, and utility panels</td>
+    </tr>
+    <tr>
+      <td><code>menus</code></td>
+      <td>Native app and window menus</td>
+    </tr>
+    <tr>
+      <td><code>shortcuts</code></td>
+      <td>Keyboard shortcut registration</td>
+    </tr>
+    <tr>
+      <td><code>tray</code></td>
+      <td>System tray integration</td>
+    </tr>
+    <tr>
+      <td><code>filesystem</code></td>
+      <td>File system access</td>
+    </tr>
+    <tr>
+      <td><code>network</code></td>
+      <td>Network access</td>
+    </tr>
+    <tr>
+      <td><code>notifications</code></td>
+      <td>System notification access</td>
+    </tr>
+    <tr>
+      <td><code>dialog</code></td>
+      <td>Native file and message dialog access</td>
+    </tr>
+    <tr>
+      <td><code>clipboard</code></td>
+      <td>Clipboard access</td>
+    </tr>
+    <tr>
+      <td><code>credentials</code></td>
+      <td>Credential store access</td>
+    </tr>
+    <tr>
+      <td><code>open_url</code></td>
+      <td>Open URLs with the system browser</td>
+    </tr>
+    <tr>
+      <td><code>reveal_path</code></td>
+      <td>Reveal local paths in the platform file manager</td>
+    </tr>
+    <tr>
+      <td><code>recent_documents</code></td>
+      <td>Platform recent document registration</td>
+    </tr>
+    <tr>
+      <td><code>file_drops</code></td>
+      <td>Native file drop events</td>
+    </tr>
+    <tr>
+      <td><code>app_activation_events</code></td>
+      <td>App activate and deactivate lifecycle events</td>
+    </tr>
+    <tr>
+      <td><code>file_associations</code></td>
+      <td>Package metadata for file type registration</td>
+    </tr>
+    <tr>
+      <td><code>url_schemes</code></td>
+      <td>Package metadata for URL scheme registration</td>
+    </tr>
+  </tbody>
+</table>
+
+## Native commands
+
+Native bridge commands are default-deny. A command must be registered by native code **and** allowed by policy before the runtime invokes it.
+
+```zig
+.bridge = .{
+    .commands = .{
+        .{
+            .name = "native.ping",
+            .origins = .{ "zero://app" },
+        },
+        .{
+            .name = "native-sdk.window.create",
+            .permissions = .{ "window" },
+            .origins = .{ "zero://app" },
+        },
+    },
+},
+```
+
+Prefer exact origins over `"*"`. Use `"*"` only for local development or commands that do not expose native state.
+
+## Builtin bridge policy
+
+The Native SDK provides built-in commands for app command routing (`native-sdk.command.*`), windows (`native-sdk.window.*`), generic native views (`native-sdk.view.*`), layered WebViews (`native-sdk.webview.*`), platform support queries (`native-sdk.platform.*`), dialogs (`native-sdk.dialog.*`), selected OS capabilities (`native-sdk.os.*`), clipboard access (`native-sdk.clipboard.*`), and credential storage (`native-sdk.credentials.*`). These are controlled separately from app-defined commands via the `builtin_bridge` field in `RuntimeOptions`.
+
+`js_window_api` exposes the JavaScript command, window, view, WebView, and platform support helpers, but it does not bypass security. Command routing (`native-sdk.command.invoke`) must come from an allowed origin and have the `command` permission when runtime permissions are configured. Generic native view commands (`native-sdk.view.create`, `list`, `update`, `setFrame`, `setVisible`, `focus`, `focusNext`, `focusPrevious`, `close`) require the `view` permission. Platform support queries, window commands (`native-sdk.window.list`, `create`, `focus`, `close`), and WebView commands (`native-sdk.webview.create`, `list`, `setFrame`, `navigate`, `setZoom`, `setLayer`, `close`) require the `window` permission. The legacy `window` grant is still accepted for command and view helpers for compatibility. View and WebView commands can only target the window that sent the bridge message. WebView URLs must also be allowed by `security.navigation.allowed_origins`, and child WebViews receive `window.zero` only when created with `bridge: true`.
+
+For broader control, use an explicit `builtin_bridge` policy. When you choose this path, list every built-in command your app calls. Dialog commands (`native-sdk.dialog.openFile`, `saveFile`, `showMessage`), OS commands (`native-sdk.os.openUrl`, `showNotification`, `revealPath`, `addRecentDocument`, `clearRecentDocuments`), clipboard commands (`native-sdk.clipboard.readText`, `writeText`, `read`, `write`), and credential commands (`native-sdk.credentials.set`, `get`, `delete`) are **always default-deny** and require an explicit `builtin_bridge` policy with the command listed. `native-sdk.os.openUrl` also requires `security.navigation.external_links` to allow the target URL:
+
+```zig
+.builtin_bridge = .{
+    .enabled = true,
+    .commands = &.{
+        .{ .name = "native-sdk.command.invoke", .permissions = .{ "command" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.platform.supports", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.window.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.create", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.list", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.update", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.setFrame", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.setVisible", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.focus", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.focusNext", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.focusPrevious", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.close", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.list", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.setFrame", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.navigate", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.setZoom", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.setLayer", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.close", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.openFile", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.saveFile", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.showMessage", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.openUrl", .permissions = .{ "network" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.showNotification", .permissions = .{ "notifications" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.revealPath", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.addRecentDocument", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.readText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.writeText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.read", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.write", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.set", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.get", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.delete", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+    },
+},
+```
+
+## Bridge error codes
+
+When a bridge call fails, the JavaScript promise rejects with an error containing a `code` field:
+
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Cause</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>invalid_request</code></td>
+      <td>Malformed input, unsupported built-in operation, denied navigation URL, missing window/WebView, duplicate or reserved WebView label, or another caller-fixable request problem</td>
+    </tr>
+    <tr>
+      <td><code>unknown_command</code></td>
+      <td>No handler registered for this command</td>
+    </tr>
+    <tr>
+      <td><code>permission_denied</code></td>
+      <td>Origin or permission check failed</td>
+    </tr>
+    <tr>
+      <td><code>handler_failed</code></td>
+      <td>Handler returned an error</td>
+    </tr>
+    <tr>
+      <td><code>payload_too_large</code></td>
+      <td>Message exceeds 16 KiB limit</td>
+    </tr>
+    <tr>
+      <td><code>internal_error</code></td>
+      <td>Unexpected runtime error</td>
+    </tr>
+  </tbody>
+</table>
+
+Handle errors in JavaScript:
+
+```javascript
+try {
+  const result = await window.zero.invoke("native.ping", {});
+} catch (error) {
+  console.error(error.code, error.message);
+}
+```
+
+## Navigation policy
+
+Main-frame navigation is allowlisted. Packaged assets normally use `zero://app`, inline examples use `zero://inline`, and dev servers should list their exact local origin.
+
+```zig
+.security = .{
+    .navigation = .{
+        .allowed_origins = .{
+            "zero://app",
+            "zero://inline",
+            "http://127.0.0.1:5173",
+        },
+    },
+},
+```
+
+Unknown main-frame navigations are blocked unless the external-link policy explicitly handles them.
+
+## External links
+
+External links are denied by default. To open links in the system browser, opt in and list URL prefixes:
+
+```zig
+.security = .{
+    .navigation = .{
+        .external_links = .{
+            .action = "open_system_browser",
+            .allowed_urls = .{ "https://example.com/docs/*" },
+        },
+    },
+},
+```
+
+Do not allow broad external patterns for pages that can be influenced by remote content.
+
+The same policy gates `runtime.openExternalUrl(...)` and `window.zero.os.openUrl(...)`. A bridge grant for `native-sdk.os.openUrl` is not enough by itself; the URL must also match `external_links.allowed_urls`.
+
+## CSP guidance
+
+For packaged assets, start with a strict Content Security Policy:
+
+```html
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'">
+```
+
+For inline Zig examples that embed scripts or styles, add only the minimum inline allowances:
+
+```html
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+```
+
+For dev servers, extend `connect-src` only to the local dev origin and WebSocket endpoint required by the framework. Keep production CSP separate from development CSP.
+
+## Security model summary
+
+<table>
+  <thead>
+    <tr>
+      <th>Layer</th>
+      <th>Default</th>
+      <th>Opt-in</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>App bridge commands</td>
+      <td>Denied</td>
+      <td>Per-command policy with origin and permission checks</td>
+    </tr>
+    <tr>
+      <td>Builtin bridge (commands, windows, views, and WebViews)</td>
+      <td>Denied unless <code>js_window_api</code> or explicit policy allows the helper and origin/permission checks pass</td>
+      <td><code>command</code>, <code>view</code>, or <code>window</code> permission plus exact allowed origins</td>
+    </tr>
+    <tr>
+      <td>Builtin bridge (dialogs and OS capabilities)</td>
+      <td>Denied</td>
+      <td>Explicit <code>builtin_bridge</code> policy with matching permissions required</td>
+    </tr>
+    <tr>
+      <td>Navigation</td>
+      <td>Blocked</td>
+      <td>Allowlisted origins</td>
+    </tr>
+    <tr>
+      <td>External links</td>
+      <td>Denied</td>
+      <td>Explicit action + URL prefix list</td>
+    </tr>
+    <tr>
+      <td>Permissions</td>
+      <td>None granted</td>
+      <td>Declared in <code>app.zon</code>, checked at runtime</td>
+    </tr>
+    <tr>
+      <td>CSP</td>
+      <td>Not enforced by the Native SDK</td>
+      <td>Set in your HTML <code>&lt;meta&gt;</code> tag</td>
+    </tr>
+  </tbody>
+</table>
+
+The goal is defense in depth: even if a command is registered in Zig, it won't execute unless the policy allows it from the requesting origin with the required permissions.

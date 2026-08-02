@@ -474,6 +474,68 @@ test "runtime presents next canvas frame through packet presenter when available
     try std.testing.expect(!presented_frame.canvas_frame_requires_render);
 }
 
+test "runtime explicit software canvas bypasses packet encoding and image upload" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-explicit-software", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 4, 4),
+        .gpu_surface = .{ .backend = .software },
+    });
+
+    const red = [4]u8{ 255, 0, 0, 255 };
+    try harness.runtime.registerCanvasImage(7, 1, 1, &red);
+    const commands = [_]canvas.CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 7,
+        .dst = geometry.RectF.init(0, 0, 4, 4),
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    var packet_json_buffer: [16 * 1024]u8 = undefined;
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    var scratch: [4 * 4 * 4]u8 = undefined;
+
+    // The direct packet-present entry point enforces the same policy as
+    // automatic presentation and exits before packet image upload.
+    try std.testing.expectError(error.UnsupportedService, harness.runtime.presentNextCanvasGpuPacket(1, "canvas", .{
+        .frame_index = 21,
+        .timestamp_ns = 88_000,
+        .surface_size = geometry.SizeF.init(4, 4),
+        .scale = 1,
+    }, canvasFrameScratchStorage(&harness.runtime), canvas.Color.rgb8(0, 0, 0), &gpu_commands, &packet_json_buffer));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(platform.GpuPresentFallbackReason.none, harness.runtime.views[0].info().gpu_present_fallback_reason);
+
+    const result = try harness.runtime.presentNextCanvasFrame(1, "canvas", .{
+        .frame_index = 22,
+        .timestamp_ns = 89_000,
+        .surface_size = geometry.SizeF.init(4, 4),
+        .scale = 1,
+    }, canvasFrameScratchStorage(&harness.runtime), &gpu_commands, &packet_json_buffer, &pixels, &scratch, canvas.Color.rgb8(0, 0, 0), null);
+
+    try std.testing.expectEqual(platform.GpuSurfaceBackend.software, harness.runtime.views[0].gpu_requested_backend);
+    try std.testing.expectEqual(CanvasPresentationMode.pixels, result.mode);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqual(platform.GpuPresentFallbackReason.none, harness.runtime.views[0].info().gpu_present_fallback_reason);
+}
+
 test "runtime auto-present packet honors presentation scale without invalidating retained frame" {
     const TestApp = struct {
         fn app(self: *@This()) App {
@@ -829,19 +891,31 @@ test "runtime re-registration and unregister drive the image upload side-channel
     try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_image_upload_count);
     try std.testing.expectEqualDeep([4]u8{ 0, 0, 255, 255 }, harness.null_platform.gpuSurfaceImage(9).?.sample_rgba);
 
-    // Unregister drops the platform-side entry; the next frame (stale
-    // tree still referencing the id) stays on the packet path with the
-    // absent-image skip and uploads nothing new.
+    // Unregister drops the platform-side entry. Re-registering the SAME
+    // content before another frame must still upload: the platform
+    // resource is gone even though the image fingerprint matches the
+    // last presented cache key.
     try std.testing.expect(harness.runtime.unregisterCanvasImage(9));
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_remove_count);
     try std.testing.expect(harness.null_platform.gpuSurfaceImage(9) == null);
-    const after = try present.frame(harness, &gpu_commands, &packet_json_buffer, &pixels, &scratch, 43);
+    try harness.runtime.registerCanvasImage(9, 1, 1, &blue);
+    const restored = try present.frame(harness, &gpu_commands, &packet_json_buffer, &pixels, &scratch, 43);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, restored.mode);
+    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqualDeep([4]u8{ 0, 0, 255, 255 }, harness.null_platform.gpuSurfaceImage(9).?.sample_rgba);
+
+    // A later unregister with no replacement keeps the stale tree on
+    // the packet path with the absent-image skip and no new upload.
+    try std.testing.expect(harness.runtime.unregisterCanvasImage(9));
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_image_remove_count);
+    try std.testing.expect(harness.null_platform.gpuSurfaceImage(9) == null);
+    const after = try present.frame(harness, &gpu_commands, &packet_json_buffer, &pixels, &scratch, 44);
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, after.mode);
-    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.gpu_surface_image_upload_count);
 
     // Unregistering an absent id never reaches the platform.
     try std.testing.expect(!harness.runtime.unregisterCanvasImage(9));
-    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_remove_count);
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_image_remove_count);
 }
 
 test "runtime falls back to pixels when the platform lacks the image upload seam" {
@@ -1193,9 +1267,9 @@ test "chat-transcript-shaped heavy frame stays on the packet path through the bi
     const binary_len = harness.null_platform.gpu_surface_packet_present_binary_len;
     try std.testing.expect(binary_len > 0);
     try std.testing.expect(binary_len <= platform.max_gpu_surface_packet_binary_bytes);
-    // The size win that makes the ceiling real: >=5x denser than the
-    // JSON encoding on this text-heavy frame.
-    try std.testing.expect(binary_len * 5 <= json_needed_bytes);
+    // Positioned glyphs now ride the correctness-preserving v5 wire, while
+    // compact fields still keep it >=3x denser than JSON on this shaped frame.
+    try std.testing.expect(binary_len * 3 <= json_needed_bytes);
     try std.testing.expectEqual(platform.GpuPresentPath.packet, harness.runtime.views[0].gpu_present_path);
     try std.testing.expectEqual(platform.GpuPresentFallbackReason.none, harness.runtime.views[0].info().gpu_present_fallback_reason);
 

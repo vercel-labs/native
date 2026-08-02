@@ -36,6 +36,15 @@ pub fn viewKindFromString(value: []const u8) ?platform.ViewKind {
     return null;
 }
 
+pub fn windowTitlebarStyleFromString(value: []const u8) ?platform.WindowTitlebarStyle {
+    inline for (@typeInfo(platform.WindowTitlebarStyle).@"enum".fields) |field| {
+        if (std.mem.eql(u8, value, field.name)) return @field(platform.WindowTitlebarStyle, field.name);
+    }
+    if (std.mem.eql(u8, value, "hiddenInset")) return .hidden_inset;
+    if (std.mem.eql(u8, value, "hiddenInsetTall")) return .hidden_inset_tall;
+    return null;
+}
+
 pub fn gpuSurfaceOptionsFromJson(payload: []const u8, storage: *json.StringStorage) !platform.GpuSurfaceOptions {
     var options = platform.GpuSurfaceOptions{};
     if (jsonStringField(payload, "gpuBackend", storage) orelse jsonStringField(payload, "gpu_backend", storage)) |value| {
@@ -110,6 +119,14 @@ pub fn platformFeatureFromString(value: []const u8) ?platform.PlatformFeature {
     if (std.mem.eql(u8, value, "fileDrops")) return .file_drops;
     if (std.mem.eql(u8, value, "appActivationEvents")) return .app_activation_events;
     if (std.mem.eql(u8, value, "gpuSurfaces")) return .gpu_surfaces;
+    if (std.mem.eql(u8, value, "gpuSurfaceScrollDrivers")) return .gpu_surface_scroll_drivers;
+    if (std.mem.eql(u8, value, "contextMenus")) return .context_menus;
+    if (std.mem.eql(u8, value, "viewSurfaceAdoption")) return .view_surface_adoption;
+    if (std.mem.eql(u8, value, "audioPlayback")) return .audio_playback;
+    if (std.mem.eql(u8, value, "audioStreaming")) return .audio_streaming;
+    if (std.mem.eql(u8, value, "audioSpectrum")) return .audio_spectrum;
+    if (std.mem.eql(u8, value, "windowHideOnClose")) return .window_hide_on_close;
+    if (std.mem.eql(u8, value, "videoPlayback")) return .video_playback;
     return null;
 }
 

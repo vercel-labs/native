@@ -213,6 +213,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (std.mem.eql(u8, node.name, "markdown")) {
                 return self.buildMarkdown(ui, scope, node);
             }
+            if (std.mem.eql(u8, node.name, "code")) {
+                return self.buildCode(ui, scope, node);
+            }
             if (std.mem.eql(u8, node.name, "stepper")) {
                 return self.buildStepper(ui, scope, node);
             }
@@ -232,6 +235,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (std.mem.eql(u8, node.name, "series")) {
                 // Series inside a chart are consumed by buildChart.
                 return self.failNode(node, markup.series_parent_message);
+            }
+            if (std.mem.eql(u8, node.name, "video")) {
+                return self.buildVideo(ui, scope, node);
             }
             if (std.mem.eql(u8, node.name, "context-menu")) {
                 // Direct context-menu children are consumed by their host
@@ -397,6 +403,37 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     }
                 }
                 if (pane_count != 2) return self.failNode(node, markup.split_children_message);
+            }
+            // The image leaf's static shape, mirroring the validator and
+            // the compiled engine's compile error. Without its id binding
+            // the leaf can never draw - statically dead markup, refused
+            // here too so markup that skipped validation (hot reload)
+            // fails the build instead of silently rendering nothing. And
+            // it takes no children at all (icon's leaf policy): checked
+            // on the ORIGINAL node, so an extracted context-menu still
+            // counts as a child exactly like the validator's raw-node
+            // check.
+            if (kind == .image) {
+                if (node.attr("image") == null) {
+                    return self.failNode(node, markup.image_missing_image_message);
+                }
+                if (node.children.len > 0) {
+                    return self.failNode(node, markup.image_children_message);
+                }
+            }
+            // The terminal leaf's static shape, the image policy exactly:
+            // without its pty binding it can never attach a session, and
+            // its widget has no child slots — both refused at build so
+            // markup that skipped validation (hot reload) fails instead
+            // of silently rendering an unbound surface or dropping the
+            // child.
+            if (kind == .terminal) {
+                if (node.attr("pty") == null) {
+                    return self.failNode(node, markup.terminal_missing_pty_message);
+                }
+                if (node.children.len > 0) {
+                    return self.failNode(node, markup.terminal_children_message);
+                }
             }
             // The a11y lint's error half: an unnamed interactive control
             // or a misused role ships a view a screen reader user cannot
@@ -764,6 +801,90 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             return Md.view(ui, source_value, options);
         }
 
+        // ----------------------------------------------------------- code
+
+        fn buildCode(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            if (node.children.len != 0) return self.failNode(node.children[0], markup.code_children_message);
+            var options: Ui.CodeOptions = .{};
+            var source_text: ?[]const u8 = null;
+            for (node.attrs) |attribute| {
+                if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                if (std.mem.eql(u8, attribute.name, "source")) {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .binding) return self.failNode(node, markup.code_source_message);
+                    source_text = switch (try self.evalBinding(scope, node, typed.binding, true)) {
+                        .string => |text| text,
+                        else => return self.failNode(node, markup.code_source_message),
+                    };
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "language")) {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .literal) return self.failNode(node, markup.code_language_message);
+                    if (!canvas.code.isLanguageName(typed.literal)) return self.failNode(node, markup.code_language_message);
+                    options.language = canvas.code.languageFromName(typed.literal);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "line-numbers")) {
+                    options.line_numbers = try self.codeFlagAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "editable")) {
+                    options.editable = try self.codeFlagAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "on-input")) {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .message) {
+                        return self.failNode(node, "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")");
+                    }
+                    options.on_input = inputConstructor(typed.message.tag) orelse {
+                        return self.failNode(node, "on-input tag must carry a TextInputEvent payload");
+                    };
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "wrap")) {
+                    options.wrap = try self.codeFlagAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "width")) {
+                    options.width = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "height")) {
+                    options.height = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "min-width")) {
+                    options.min_width = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "grow")) {
+                    options.grow = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "key")) {
+                    options.key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "global-key")) {
+                    options.global_key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "label")) {
+                    options.semantics.label = try self.stringAttr(scope, node, attribute, "label expects text");
+                    continue;
+                }
+                return self.failNode(node, markup.code_attr_message);
+            }
+            return ui.code(options, source_text orelse return self.failNode(node, markup.code_source_message));
+        }
+
+        fn codeFlagAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!bool {
+            if (attribute.value.len == 0) return true;
+            return (try self.evalAttrExpression(scope, node, attribute)).truthy();
+        }
+
         // ------------------------------------------------ stepper/timeline
 
         /// `<stepper active="{stage_index}"><step>Work</step>...</stepper>`:
@@ -1119,6 +1240,74 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             return ui.chart(options, series);
         }
 
+        // ---------------------------------------------------------- video
+
+        /// `<video src="assets/clips/intro.mp4" controls autoplay/>`:
+        /// the video playback composite, lowered through `Ui.video` so
+        /// markup videos get the same playback surface, house chrome,
+        /// and declaration recording as Zig-built ones. A leaf with a
+        /// closed attribute set; flags accept bare presence (the
+        /// boolean-attribute convention), literals, and bindings.
+        fn buildVideo(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            if (node.children.len > 0) {
+                return self.failNode(node.children[0], markup.video_children_message);
+            }
+            var options: Ui.VideoOptions = .{};
+            for (node.attrs) |attribute| {
+                if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                if (std.mem.eql(u8, attribute.name, "src")) {
+                    options.src = try self.stringAttr(scope, node, attribute, markup.video_src_message);
+                    continue;
+                }
+                if (markup.videoFlagAttrName(attribute.name)) {
+                    const value = try self.videoFlagAttr(scope, node, attribute);
+                    if (std.mem.eql(u8, attribute.name, "controls")) {
+                        options.controls = value;
+                    } else if (std.mem.eql(u8, attribute.name, "autoplay")) {
+                        options.autoplay = value;
+                    } else if (std.mem.eql(u8, attribute.name, "loop")) {
+                        options.loop = value;
+                    } else {
+                        options.muted = value;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "width")) {
+                    options.width = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "height")) {
+                    options.height = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "grow")) {
+                    options.grow = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "label")) {
+                    options.label = try self.stringAttr(scope, node, attribute, "label expects text");
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "key")) {
+                    options.key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "global-key")) {
+                    options.global_key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                return self.failNode(node, markup.video_attr_message);
+            }
+            return ui.video(options);
+        }
+
+        /// One video flag's value: bare presence declares true, a
+        /// valued flag evaluates truthy like every other flag attr.
+        fn videoFlagAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!bool {
+            if (attribute.value.len == 0) return true;
+            return (try self.evalAttrExpression(scope, node, attribute)).truthy();
+        }
+
         fn buildSeries(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!canvas.ChartSeries {
             if (node.children.len != 0) {
                 return self.failVoid(node.children[0], markup.series_children_message);
@@ -1171,13 +1360,26 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         /// Resolve a series `values` binding to an f32 slice through the
         /// same sources `for each` accepts (scope slice args shadow model
-        /// fields, pub decls, and fns).
+        /// fields, pub decls, and fns). f64 iterables resolve too, copied
+        /// down into the build arena per sample: the chart pipeline is
+        /// f32, but transpiled TS cores carry every number array as f64
+        /// (the subset's one float class), and refusing them would leave
+        /// markup charts unreachable from a TS model.
         fn f32Items(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, path: []const u8) BuildError![]const f32 {
             @setEvalBranchQuota(scan_quota);
             inline for (item_types, 0..) |Item, type_index| {
                 if (comptime (Item == f32)) {
                     if (try self.iterateItems(ui, f32, type_index, scope, path)) |items| {
                         return items;
+                    }
+                }
+                if (comptime (Item == f64)) {
+                    if (try self.iterateItems(ui, f64, type_index, scope, path)) |items| {
+                        const narrowed = ui.arena.alloc(f32, items.len) catch {
+                            return self.failText(node, markup.series_values_message);
+                        };
+                        for (narrowed, items) |*slot, value| slot.* = @floatCast(value);
+                        return narrowed;
                     }
                 }
             }
@@ -1436,7 +1638,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 return self.failKey(node, "key does not name a field on the item");
             };
             return switch (value) {
-                .integer => |int| canvas.uiKey(@as(u64, @intCast(int))),
+                // Keys are identity, not quantities: a negative integer
+                // id (an i64 database id, a -1 sentinel) is a distinct,
+                // legitimate identity, so it maps bijectively into the
+                // u64 key space instead of trapping in a signed cast.
+                .integer => |int| canvas.uiKey(@as(u64, @bitCast(int))),
                 .string => |text| canvas.uiKey(text),
                 else => self.failKey(node, "key fields must be integers or strings"),
             };
@@ -1482,6 +1688,33 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applyImageAttr(scope, node, options, attribute);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "surface")) {
+                    try self.applySurfaceAttr(scope, node, options, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "pty")) {
+                    try self.applyPtyAttr(scope, node, options, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "scrollback") and !std.mem.eql(u8, node.name, "terminal")) {
+                    // Terminal-scoped (the validator's rule, enforced
+                    // here too for unvalidated paths): anywhere else the
+                    // option would be silently inert data.
+                    return self.failVoid(node, markup.scrollback_element_message);
+                }
+                if (std.mem.eql(u8, attribute.name, "text") and std.mem.eql(u8, node.name, "terminal")) {
+                    // The terminal's text channel is runtime-owned (the
+                    // live screen); an authored value would clobber it
+                    // and rename the control every frame.
+                    return self.failVoid(node, markup.terminal_text_attr_message);
+                }
+                if (markup.videoFlagAttrName(attribute.name)) {
+                    // The video element's flags, video-scoped (its own
+                    // build consumed them): anywhere else they would be
+                    // silently inert. Mirrors the validator and the
+                    // compiled engine.
+                    return self.failVoid(node, markup.video_flag_element_message);
+                }
                 if (std.mem.eql(u8, attribute.name, "name")) {
                     // Consumed by the icon branch in buildElement.
                     if (!std.mem.eql(u8, node.name, "icon")) {
@@ -1503,6 +1736,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
                 if (std.mem.eql(u8, attribute.name, "anchor-offset")) {
                     try self.applyAnchorOffsetAttr(node, options, attribute.value);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "quiet-hover")) {
+                    try self.applyQuietHoverAttr(scope, node, options, attribute);
                     continue;
                 }
                 if (try self.applyStyleTokenAttr(node, options, attribute)) continue;
@@ -1542,22 +1779,77 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             };
         }
 
-        /// `image="{binding}"` on avatar: one binding producing a `u64`
-        /// `canvas.ImageId` the app registered at runtime
-        /// (`fx.registerImageBytes`) — the id is model data, never a
-        /// markup literal, and 0 keeps the initials fallback. Scoped to
-        /// avatar; the other image-bearing widgets (image, icon,
-        /// icon-button) stay Zig views.
+        /// `image="{binding}"` on avatar and image: one binding
+        /// producing a `u64` `canvas.ImageId` the app registered at
+        /// runtime (`Cmd.imageLoad`, `fx.loadImage`,
+        /// `fx.registerImageBytes`) — the id is model data, never a
+        /// markup literal, and 0 draws nothing (an avatar keeps its
+        /// initials fallback). The remaining image-bearing widget
+        /// (icon-button) stays a Zig view.
         fn applyImageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
-            if (!std.mem.eql(u8, node.name, "avatar")) {
-                return self.failVoid(node, markup.avatar_image_element_message);
+            if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                return self.failVoid(node, markup.image_binding_element_message);
             }
             const typed = markup.attrTyped(attribute);
-            if (typed != .binding) return self.failVoid(node, markup.avatar_image_message);
+            if (typed != .binding) return self.failVoid(node, markup.image_binding_message);
             const value = try self.evalBinding(scope, node, typed.binding, true);
+            // Range-checked before the u64 cast: expression values are
+            // i64, so a signed model field (`image: i64 = -1`) can
+            // deliver a negative — the teaching failure, never a trap.
             options.image = switch (value) {
-                .integer => |int| @intCast(int),
-                else => return self.failVoid(node, markup.avatar_image_message),
+                .integer => |int| if (int < 0)
+                    return self.failVoid(node, markup.image_binding_message)
+                else
+                    @intCast(int),
+                else => return self.failVoid(node, markup.image_binding_message),
+            };
+        }
+
+        /// `surface="{binding}"` on media-surface: the model-owned u64
+        /// surface id a producer targets — media-surface-only,
+        /// binding-only, integer-valued (the runtime-image-id grammar
+        /// exactly). The id rides `options.image` into
+        /// `Widget.image_id`, the media surface's surface-id channel.
+        fn applySurfaceAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
+            if (!std.mem.eql(u8, node.name, "media-surface")) {
+                return self.failVoid(node, markup.media_surface_surface_element_message);
+            }
+            const typed = markup.attrTyped(attribute);
+            if (typed != .binding) return self.failVoid(node, markup.media_surface_surface_message);
+            const value = try self.evalBinding(scope, node, typed.binding, true);
+            // Range-checked before the u64 cast: expression values are
+            // i64, so a signed model field (`surface: i64 = -1`) can
+            // deliver a negative — the teaching failure, never a trap.
+            options.image = switch (value) {
+                .integer => |int| if (int < 0)
+                    return self.failVoid(node, markup.media_surface_surface_message)
+                else
+                    @intCast(int),
+                else => return self.failVoid(node, markup.media_surface_surface_message),
+            };
+        }
+
+        /// `pty="{binding}"` on terminal: the model-owned u64 pty effect
+        /// key whose session the terminal renders — terminal-only,
+        /// binding-only, integer-valued (the media-surface `surface`
+        /// grammar exactly). The key rides `options.pty` into
+        /// `Widget.terminal.pty`.
+        fn applyPtyAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
+            if (!std.mem.eql(u8, node.name, "terminal")) {
+                return self.failVoid(node, markup.terminal_pty_element_message);
+            }
+            const typed = markup.attrTyped(attribute);
+            if (typed != .binding) return self.failVoid(node, markup.terminal_pty_message);
+            const value = try self.evalBinding(scope, node, typed.binding, true);
+            // Range-checked before the u64 cast: expression values are
+            // i64, so a signed model field can deliver a negative — the
+            // teaching failure, never a trap.
+            options.pty = switch (value) {
+                .integer => |int| if (int < 0)
+                    return self.failVoid(node, markup.terminal_pty_message)
+                else
+                    @intCast(int),
+                else => return self.failVoid(node, markup.terminal_pty_message),
             };
         }
 
@@ -1612,6 +1904,20 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             };
         }
 
+        /// `quiet-hover="true"` on a hit-target element: the quiet-surface
+        /// knob (`WidgetStyle.quiet_hover`) for image-forward content
+        /// tiles — silences ONLY the hover wash; press/selection fills,
+        /// the focus ring, cursor intent, and hit testing keep their own
+        /// channels. Applied to `options.style`, so no flat option field
+        /// backs it (mirrors the validator and the compiled engine).
+        fn applyQuietHoverAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
+            if (!markup.hitTargetElement(node.name)) {
+                return self.failVoid(node, markup.quiet_hover_element_message);
+            }
+            const value = try self.evalAttrExpression(scope, node, attribute);
+            options.style.quiet_hover = value.truthy();
+        }
+
         fn applyOptionAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!bool {
             inline for (attr_names) |name| {
                 if (std.mem.eql(u8, attribute.name, name.markup)) {
@@ -1635,8 +1941,17 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // Optional bools (`expanded`): the attribute's PRESENCE
                 // makes the state non-null; the value sets it.
                 .optional => @field(options, field) = value.truthy(),
+                // Range-checked against the FIELD's own integer type
+                // before the cast (the grid-lines teaching, generalized):
+                // expression values are i64, so a literal or model
+                // binding can deliver 2147483648 to the i32
+                // tooltip-delay — an unchecked @intCast TRAPPED on it
+                // instead of failing the build. The field type is the
+                // honest upper bound: no semantic millisecond cap is
+                // invented on top of it, matching resize-duration, whose
+                // only bound is likewise its u32.
                 .int => @field(options, field) = switch (value) {
-                    .integer => |int| if (int < 0)
+                    .integer => |int| if (int < 0 or int > std.math.maxInt(FieldType))
                         return self.failVoid(node, "expected a non-negative whole number")
                     else
                         @intCast(int),
@@ -1662,7 +1977,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         fn attrKey(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!canvas.UiKey {
             const value = try self.evalAttrExpression(scope, node, attribute);
             return switch (value) {
-                .integer => |int| canvas.uiKey(@as(u64, @intCast(int))),
+                // Bijective like itemKey: a negative integer key is a
+                // distinct identity, never a trap.
+                .integer => |int| canvas.uiKey(@as(u64, @bitCast(int))),
                 .string => |text| canvas.uiKey(text),
                 else => self.failKey(node, "keys must be integers or strings"),
             };
@@ -1686,7 +2003,25 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     return self.failVoid(node, markup.on_scroll_element_message);
                 }
                 options.on_scroll = scrollConstructor(expression.tag) orelse {
+                    // The retired one-axis record gets the migration
+                    // teaching (it names the new per-axis fields) instead
+                    // of the generic payload rejection.
+                    if (legacyScrollTag(expression.tag)) {
+                        return self.failVoid(node, markup.on_scroll_legacy_payload_message);
+                    }
                     return self.failVoid(node, markup.on_scroll_payload_message);
+                };
+                return;
+            }
+            if (std.mem.eql(u8, event, "terminal")) {
+                if (!std.mem.eql(u8, node.name, "terminal")) {
+                    return self.failVoid(node, markup.on_terminal_element_message);
+                }
+                // Bare tag only: the runtime supplies the TerminalState,
+                // so an authored payload would be silently discarded.
+                if (expression.payload.len > 0) return self.failVoid(node, markup.on_terminal_payload_message);
+                options.on_terminal = terminalConstructor(expression.tag) orelse {
+                    return self.failVoid(node, markup.on_terminal_payload_message);
                 };
                 return;
             }
@@ -1699,9 +2034,24 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 };
                 return;
             }
+            // The value-payload change event: a slider's `on-change` with a
+            // bare tag naming a value-carrying arm dispatches the APPLIED
+            // value through the `on_value` constructor (the `on-resize`
+            // fraction mechanism) instead of a static Msg. Void arms keep
+            // the static form below, so `on-change="volume_changed"` on a
+            // slider still means "something changed" when the arm carries
+            // nothing.
+            if (std.mem.eql(u8, event, "change") and std.mem.eql(u8, node.name, "slider") and expression.payload.len == 0) {
+                if (valueConstructor(expression.tag)) |make| {
+                    options.on_value = make;
+                    return;
+                }
+            }
             const msg = try self.constructMessage(scope, node, expression);
             if (std.mem.eql(u8, event, "press")) {
                 options.on_press = msg;
+            } else if (std.mem.eql(u8, event, "double-press")) {
+                options.on_double_press = msg;
             } else if (std.mem.eql(u8, event, "toggle")) {
                 options.on_toggle = msg;
             } else if (std.mem.eql(u8, event, "change")) {
@@ -1719,6 +2069,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // Press family: like on-press, a bound hold makes any
                 // element pressable.
                 options.on_hold = msg;
+            } else if (std.mem.eql(u8, event, "hover-enter")) {
+                // Hover family: binding either edge makes any element
+                // hover-hittable (never pressable), so both are legal
+                // everywhere like the press family.
+                options.on_hover_enter = msg;
+            } else if (std.mem.eql(u8, event, "hover-leave")) {
+                options.on_hover_leave = msg;
             } else if (std.mem.eql(u8, event, "reach-end")) {
                 // The approach-end signal (infinite-scroll fetch) is
                 // emitted for scroll containers only.
@@ -1753,8 +2110,17 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         fn coerce(self: *Self, comptime T: type, node: markup.MarkupNode, value: Value) BuildError!T {
             return switch (@typeInfo(T)) {
+                // Range-checked against the payload's own integer type
+                // before the cast (the option-attribute pattern): a
+                // binding's i64 can deliver a negative to an unsigned
+                // payload or overflow a small one — the teaching
+                // failure, never a trap. Signed payloads keep their
+                // negative range (minInt is the honest lower bound).
                 .int => switch (value) {
-                    .integer => |int| @intCast(int),
+                    .integer => |int| if (int < std.math.minInt(T) or int > std.math.maxInt(T))
+                        self.failCoerce(T, node)
+                    else
+                        @intCast(int),
                     else => self.failCoerce(T, node),
                 },
                 .float => switch (value) {
@@ -1787,6 +2153,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Ui.inputMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                } else if (comptime reflect.declaredTextInputUnion(field.type)) {
+                    // A declared mirror of the event union (transpiled
+                    // cores): translated at dispatch, same handler shape.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedInputMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
                 }
             }
             return null;
@@ -1799,9 +2171,48 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Ui.scrollMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                } else if (comptime reflect.declaredScrollStateRecord(field.type)) {
+                    // A declared mirror of the scroll-state record
+                    // (transpiled cores): translated at dispatch, same
+                    // handler shape.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedScrollMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
                 }
             }
             return null;
+        }
+
+        fn terminalConstructor(tag: []const u8) ?Ui.TerminalMsgFn {
+            @setEvalBranchQuota(scan_quota);
+            inline for (@typeInfo(MsgT).@"union".fields) |field| {
+                if (field.type == canvas.TerminalState) {
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.terminalMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                } else if (comptime reflect.declaredTerminalStateRecord(field.type)) {
+                    // A declared mirror of the terminal-state record
+                    // (transpiled cores): translated at dispatch, same
+                    // handler shape.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedTerminalMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// Whether `tag` names an arm carrying the RETIRED one-axis
+        /// scroll record — recognized only so the on-scroll rejection
+        /// can teach the two-axis migration by field name.
+        fn legacyScrollTag(tag: []const u8) bool {
+            @setEvalBranchQuota(scan_quota);
+            inline for (@typeInfo(MsgT).@"union".fields) |field| {
+                if (comptime reflect.declaredLegacyScrollStateRecord(field.type)) {
+                    if (std.mem.eql(u8, field.name, tag)) return true;
+                }
+            }
+            return false;
         }
 
         fn resizeConstructor(tag: []const u8) ?Ui.ValueMsgFn {
@@ -1810,6 +2221,34 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 if (field.type == f32) {
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                } else if (field.type == f64) {
+                    // A declared one-number float arm (transpiled cores,
+                    // where f32 cannot be spelled): the fraction widens
+                    // exactly at dispatch. Integer arms stay excluded —
+                    // a 0..1 fraction rounded into an integer would be
+                    // silently useless data.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// The slider `on-change` value form: an arm carrying the applied
+        /// 0..1 fraction as `f32` (the canvas-native shape) or the
+        /// transpiled one-number float arm (`f64`, widened exactly).
+        fn valueConstructor(tag: []const u8) ?Ui.ValueMsgFn {
+            @setEvalBranchQuota(scan_quota);
+            inline for (@typeInfo(MsgT).@"union".fields) |field| {
+                const class = comptime reflect.valueArmClass(field.type);
+                if (comptime class != null) {
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return switch (comptime class.?) {
+                            .identity => Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name)),
+                            .float => Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type),
+                        };
                     }
                 }
             }
@@ -2120,6 +2559,12 @@ pub const color_style_attr_fields: []const AttrName = &markup.schema.color_style
 /// definition of what markup can bind, three consumers).
 const reflect = @import("ui_markup_reflect.zig");
 pub const typeScanQuota = reflect.typeScanQuota;
+pub const Pointee = reflect.Pointee;
+pub const declaredTextInputUnion = reflect.declaredTextInputUnion;
+pub const declaredScrollStateRecord = reflect.declaredScrollStateRecord;
+pub const declaredTerminalStateRecord = reflect.declaredTerminalStateRecord;
+pub const declaredLegacyScrollStateRecord = reflect.declaredLegacyScrollStateRecord;
+pub const valueArmClass = reflect.valueArmClass;
 pub const sliceElement = reflect.sliceElement;
 pub const isItemFn = reflect.isItemFn;
 pub const isArenaScalarFn = reflect.isArenaScalarFn;
@@ -2209,6 +2654,15 @@ fn resolveOn(comptime T: type, value: *const T, path: []const u8, arena: ?std.me
             }
             return null;
         },
+        // Single-item const pointers are transparent (`reflect.Pointee`):
+        // a `*const Row` loop item or shared model node binds like the
+        // struct it points at.
+        .pointer => |info| {
+            if (info.size == .one and info.is_const) {
+                return resolveOn(info.child, value.*, path, arena);
+            }
+            return null;
+        },
         else => return null,
     }
 }
@@ -2231,6 +2685,12 @@ pub fn fieldIsTextBuffer(comptime T: type, head: []const u8) bool {
 fn resolveNested(comptime T: type, ptr: anytype, path: []const u8, arena: ?std.mem.Allocator) ?Value {
     return switch (@typeInfo(T)) {
         .@"struct" => resolveOn(T, ptr, path, arena),
+        // The `reflect.Pointee` transparency: traverse through a
+        // single-item const pointer field into the struct it shares.
+        .pointer => |info| if (info.size == .one and info.is_const)
+            resolveNested(info.child, ptr.*, path, arena)
+        else
+            null,
         else => null,
     };
 }

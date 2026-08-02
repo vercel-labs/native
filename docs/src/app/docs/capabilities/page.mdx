@@ -1,0 +1,223 @@
+# Capabilities
+
+Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/docs/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [`UiApp`](/docs/app-model), clipboard access rides the effects channel (`fx.writeClipboard` / `fx.readClipboard`) so `update` never needs a runtime handle.
+
+Web content itself is declare-to-use: an app ships the embedded web layer only when it declares web intent — `"webview"` in `.capabilities`, a `.frontend` block, a `.shell` webview view, or a web engine resolved to Chromium (`.web_engine = "chromium"` in app.zon, or the `-Dweb-engine`/`--web-engine` flags) — and an app that declares none of them builds native-only, where any attempt to create a webview fails with a teaching error instead of loading a layer the app never asked for. The [`webview_layer`](/docs/app-zon) manifest field overrides the inference in either direction. Native-only builds shed the platform web stack for real: the Windows executable carries no `WebView2Loader.dll` reference, and the Linux host neither links WebKitGTK nor requires `libwebkitgtk` on user machines.
+
+## Current capability pack
+
+<table>
+  <thead>
+    <tr>
+      <th>Capability</th>
+      <th>Zig API</th>
+      <th>JavaScript command</th>
+      <th>Bridge permission</th>
+      <th>Current native support</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Open URL in system browser</td>
+      <td><code>runtime.openExternalUrl(url)</code></td>
+      <td><code>native-sdk.os.openUrl</code></td>
+      <td><code>network</code></td>
+      <td>macOS, Linux, and Windows system WebView; macOS Chromium</td>
+    </tr>
+    <tr>
+      <td>System notification</td>
+      <td><code>runtime.showNotification(options)</code></td>
+      <td><code>native-sdk.os.showNotification</code></td>
+      <td><code>notifications</code></td>
+      <td>macOS, Linux, and Windows system WebView; macOS Chromium</td>
+    </tr>
+    <tr>
+      <td>Native dialogs</td>
+      <td><code>runtime.showOpenDialog(...)</code> / <code>showSaveDialog(...)</code> / <code>showMessageDialog(...)</code></td>
+      <td><code>native-sdk.dialog.openFile</code> / <code>saveFile</code> / <code>showMessage</code></td>
+      <td><code>dialog</code></td>
+      <td>macOS system WebView and Chromium; Linux and Windows system WebView</td>
+    </tr>
+    <tr>
+      <td>Reveal path in file manager</td>
+      <td><code>runtime.revealPath(path)</code></td>
+      <td><code>native-sdk.os.revealPath</code></td>
+      <td><code>filesystem</code></td>
+      <td>macOS, Linux, and Windows system WebView; macOS Chromium</td>
+    </tr>
+    <tr>
+      <td>Recent documents</td>
+      <td><code>runtime.addRecentDocument(path)</code> / <code>runtime.clearRecentDocuments()</code></td>
+      <td><code>native-sdk.os.addRecentDocument</code> / <code>native-sdk.os.clearRecentDocuments</code></td>
+      <td><code>filesystem</code></td>
+      <td>macOS, Linux, and Windows system WebView; macOS Chromium</td>
+    </tr>
+    <tr>
+      <td>Clipboard</td>
+      <td><code>runtime.readClipboard()</code> / <code>runtime.writeClipboard(text)</code> / <code>runtime.readClipboardData(mimeType)</code> / <code>runtime.writeClipboardData(data)</code></td>
+      <td><code>native-sdk.clipboard.readText</code> / <code>native-sdk.clipboard.writeText</code> / <code>native-sdk.clipboard.read</code> / <code>native-sdk.clipboard.write</code></td>
+      <td><code>clipboard</code></td>
+      <td><code>text/plain</code> on supported clipboard hosts; <code>text/html</code> and RTF on macOS system WebView, macOS Chromium, Linux system WebView, and Windows system WebView</td>
+    </tr>
+    <tr>
+      <td>Audio playback</td>
+      <td><code>fx.playAudio(options)</code> / <code>fx.pauseAudio()</code> / <code>fx.resumeAudio()</code> / <code>fx.stopAudio()</code> / <code>fx.seekAudio(ms)</code> / <code>fx.setAudioVolume(v)</code></td>
+      <td>None. Effects-channel API; every report arrives as an <code>on_event</code> Msg.</td>
+      <td>None. No bridge surface.</td>
+      <td>macOS system-engine host (ONE AVPlayer for local files, verified cache entries, and streamed URLs — one tappable path), Windows system WebView (one Media Foundation media session for local files and streamed URLs), Linux system WebView (one GStreamer playbin for local files and streamed URLs, loaded at runtime — a host without GStreamer reports unsupported), the iOS toolkit host (the AVFoundation player behind the embed audio service, with an honest playback audio session — interruptions pause and report), and the Android toolkit host (one MediaPlayer for local files, verified cache entries, and progressive URL streams behind the same embed audio service, with honest audio focus — a focus loss pauses and reports); macOS Chromium and GStreamer-less Linux hosts report unsupported and playback degrades to one explicit failed Msg</td>
+    </tr>
+    <tr>
+      <td>Audio spectrum analysis</td>
+      <td>None to call — hosts that analyze deliver <code>.spectrum</code> audio events through the same <code>on_event</code> Msg as position ticks</td>
+      <td>None. Effects-channel events.</td>
+      <td>None. No bridge surface.</td>
+      <td>macOS system-engine host (an MTAudioProcessingTap on the app's single AVPlayer feeding a vDSP FFT — local files, cache entries, and streams alike), Windows system WebView (process-scoped WASAPI loopback capture of THIS app's audio session only — never other apps' audio — with an in-box FFT), and Linux system WebView (GStreamer's <code>spectrum</code> element as the playbin's audio-filter; requires gst-plugins-good, probed live); hosts that cannot analyze — macOS Chromium, pre-2004 Windows, spectrum-less GStreamer setups, iOS, Android — report <code>audio_spectrum</code> unsupported and simply never send the events: honest absence, never fabricated bands</td>
+    </tr>
+    <tr>
+      <td>File drops</td>
+      <td><code>Event.files_dropped</code></td>
+      <td><code>window.zero.on("drop:files")</code></td>
+      <td>None. Host-emitted event.</td>
+      <td>macOS, Linux, and Windows system WebView</td>
+    </tr>
+    <tr>
+      <td>Credential store</td>
+      <td><code>runtime.setCredential(options)</code> / <code>runtime.getCredential(key)</code> / <code>runtime.deleteCredential(key)</code></td>
+      <td><code>native-sdk.credentials.set</code> / <code>native-sdk.credentials.get</code> / <code>native-sdk.credentials.delete</code></td>
+      <td><code>credentials</code></td>
+      <td>macOS system WebView and macOS Chromium through Keychain; Linux system WebView through Secret Service/libsecret when available; Windows system WebView through Credential Manager</td>
+    </tr>
+    <tr>
+      <td>App activation events</td>
+      <td><code>LifecycleEvent.activate</code> / <code>LifecycleEvent.deactivate</code></td>
+      <td><code>window.zero.on("app:activate")</code> / <code>window.zero.on("app:deactivate")</code></td>
+      <td>None. Host-emitted event.</td>
+      <td>macOS, Linux, and Windows system WebView; macOS Chromium</td>
+    </tr>
+    <tr>
+      <td>File associations and URL schemes</td>
+      <td><code>Manifest.file_associations</code> / <code>Manifest.url_schemes</code></td>
+      <td>None. Packaging metadata.</td>
+      <td>None. Manifest-only declaration.</td>
+      <td>Parsed, validated, and emitted in macOS, Linux, and Windows package registration metadata.</td>
+    </tr>
+  </tbody>
+</table>
+
+Unsupported platform hosts reject with the standard unsupported-service error.
+
+## Audio streaming and the track cache
+
+`fx.playAudio` resolves its source in a fixed order: the local `path` first; when it is absent or missing, the `url` — where a verified cache entry at `cache_path` plays as a plain local file (no network), and anything else streams progressively (playback starts while bytes are still arriving, never download-then-play) while the same bytes fill the cache for the next play. `expected_bytes` (the track's known size, from a manifest) is the integrity gate: a cache entry or a finished download whose size disagrees never plays — it is discarded and re-streamed. While a stream waits for bytes, position events carry `buffering = true`: an honest third UI state, distinct from playing and paused, since the transport is not paused but nothing is coming out of the speakers. Seek and volume work mid-stream; a network failure mid-stream (or offline with a cold cache) delivers one explicit `.failed` Msg.
+
+The cache lives under the platform caches directory (the `app_dirs` `.cache` convention — `~/Library/Caches/<app>/audio/` on macOS, `$XDG_CACHE_HOME/<app>/audio/` on Linux, `%LOCALAPPDATA%\<app>\Cache\audio\` on Windows, the app sandbox container's `Library/Caches/audio/` on iOS and the app data directory's `cache/audio/` on Android — both namespaces are already per-app, and both systems treat those directories as reclaimable), keyed by the URL's hash (`native_sdk.audioCachePath` derives the path). Clearing the cache is deleting that one directory; the OS already treats caches there as reclaimable. Hosts with a player but no streaming path report `audio_streaming` unsupported and URL playback degrades to the same explicit failed Msg. For record/replay, streaming changes nothing: the delivered audio events are journaled at the effect boundary like every other result, so network timing — real-world nondeterminism — stays outside the recording and replay never touches the network.
+
+## Spectrum analysis
+
+Hosts with `audio_spectrum` analyze the audio the app itself is producing and deliver `.spectrum` events through the active playback's ordinary `on_event` Msg: 32 band magnitudes with log-spaced center frequencies covering roughly 50 Hz–16 kHz, each band a byte mapping linearly in decibels from the −60 dBFS analysis floor (0) to full scale (255) — divide by 255 for a 0..1 level, and equal visual steps read as equal dB steps, the way hardware analyzers do. Per band the host reports the peak FFT-bin magnitude inside the bucket. Events arrive at a steady ~25 Hz (40 ms cadence) only while audio is audibly playing: pause and stop starve the stream, and a buffering stall goes quiet with the speakers, so everything a UI derives from the bands freezes honestly. Silence while playing is a row of floor bytes, still delivered — the cadence follows the transport, the magnitudes tell the truth. The bands also describe a display, so a host that knows the app has no visible window stops delivering them while the glass is away — macOS while every window is occluded (minimized, fully covered, hidden), Windows while every window is minimized or hidden by its `close_policy` — and resumes within one report of reveal; playback and the position ticks continue untouched, and an occluded stretch journals as honest silence. Linux keeps emitting regardless: no visibility signal holds across compositors, and a gate that might never clear would freeze visible bars.
+
+The mechanisms are host-native and in-box: macOS taps the app's single AVPlayer with an MTAudioProcessingTap and folds a vDSP FFT into the bands (the tap sits pre-effects, so the bands describe the decoded track, not the app's volume fader); Windows captures the app's OWN audio session through process-scoped WASAPI loopback — never system-wide, so other apps' audio can never pollute the bands — and runs an in-box FFT; Linux installs GStreamer's `spectrum` element as the playbin's audio-filter and folds its linear bands into the documented log buckets. A host that cannot analyze (macOS Chromium, Windows before 10 2004, a GStreamer install without gst-plugins-good, iOS, Android) reports `audio_spectrum` unsupported and never sends the events — apps should show a resting state, not fake motion. For record/replay, the bands are honest non-determinism recorded at the edge: every `.spectrum` event journals verbatim at the effect boundary like a position tick, so replay repaints identical bars, and the null platform ships a deterministic fake generator so tests stay hermetic.
+
+## Support discovery
+
+Use `runtime.supports(...)` before native code shows optional affordances. Trusted WebView code can make the same check with `native-sdk.platform.supports` when that built-in command is explicitly allowed:
+
+```javascript
+const support = {
+  notifications: await window.zero.platform.supports("notifications"),
+  dialogs: await window.zero.platform.supports("dialogs"),
+  clipboardRichData: await window.zero.platform.supports("clipboard_rich_data"),
+  credentials: await window.zero.platform.supports("credentials"),
+  fileDrops: await window.zero.platform.supports("file_drops"),
+  audioPlayback: await window.zero.platform.supports("audio_playback"),
+  audioStreaming: await window.zero.platform.supports("audio_streaming"),
+  audioSpectrum: await window.zero.platform.supports("audio_spectrum"),
+};
+```
+
+## Security
+
+OS bridge commands are default-deny. Add explicit `builtin_bridge` entries for each command your app calls:
+
+```zig
+.builtin_bridge = .{
+    .enabled = true,
+    .commands = &.{
+        .{ .name = "native-sdk.platform.supports", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.openUrl", .permissions = .{ "network" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.showNotification", .permissions = .{ "notifications" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.openFile", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.saveFile", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.showMessage", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.revealPath", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.addRecentDocument", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.readText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.writeText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.read", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.write", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.set", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.get", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.delete", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+    },
+},
+```
+
+Opening external URLs is also gated by the external-link policy:
+
+```zig
+.security = .{
+    .navigation = .{
+        .external_links = .{
+            .action = .open_system_browser,
+            .allowed_urls = &.{ "https://example.com/docs/*" },
+        },
+    },
+},
+```
+
+## JavaScript
+
+```javascript
+await window.zero.os.openUrl("https://example.com/docs/start");
+await window.zero.os.showNotification({
+  title: "Build finished",
+  subtitle: "native-sdk",
+  body: "All checks passed.",
+});
+await window.zero.os.revealPath("/Users/me/Downloads/report.pdf");
+await window.zero.os.addRecentDocument("/Users/me/Downloads/report.pdf");
+await window.zero.os.clearRecentDocuments();
+
+await window.zero.clipboard.writeText("Copied from Native SDK");
+const text = await window.zero.clipboard.readText();
+await window.zero.clipboard.write({
+  mimeType: "text/html",
+  data: "<strong>Copied from Native SDK</strong>",
+});
+const html = await window.zero.clipboard.read({ mimeType: "text/html" });
+
+window.zero.on("drop:files", (event) => {
+  console.log(event.paths);
+});
+
+await window.zero.credentials.set({
+  service: "com.example.app",
+  account: "current-user",
+  secret: "session-token",
+});
+const token = await window.zero.credentials.get({
+  service: "com.example.app",
+  account: "current-user",
+});
+await window.zero.credentials.delete({
+  service: "com.example.app",
+  account: "current-user",
+});
+
+window.zero.on("app:activate", () => {
+  refreshForegroundState();
+});
+```
+
+See also: [Builtin Commands](/docs/bridge/builtin-commands) and [Security](/docs/security).

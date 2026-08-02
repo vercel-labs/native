@@ -1,0 +1,94 @@
+# Testing
+
+Native SDK apps test headlessly by default: the view is a function of the model, dispatch is typed, and the layout engine runs without a window server. Unit tests drive the real loop, `TestHarness` covers runtime integration, and the [automation](/docs/automation) harness drives the live app. For running these tiers on GitHub Actions — including the workflow `native init --full` scaffolds — see [Testing in CI](/docs/testing/ci).
+
+## Full-loop UI tests
+
+The generated `src/tests.zig` shows the core pattern: build the real view from the markup, find a widget, dispatch its press exactly like the runtime would, and assert on the model and the rebuilt view:
+
+```zig
+var view = try canvas.MarkupView(Model, Msg).init(arena, main.app_markup);
+var ui = canvas.Ui(Msg).init(arena);
+const tree = try ui.finalize(try view.build(&ui, &model));
+
+var fx = main.Effects.init(testing.allocator);           // fake-executor effects channel
+defer fx.deinit();
+fx.executor = .fake;
+
+const plus = findByText(tree.root, .button, "+").?;           // walk tree.root
+main.update(&model, tree.msgForPointer(plus.id, .up).?, &fx); // dispatch like the runtime
+try testing.expectEqual(@as(i64, 1), model.count);
+```
+
+Two `msgForPointer` traps: a disabled control yields `null` (assert `== null` rather than unwrapping when testing disabled states), and the tree is a snapshot — after each dispatch, rebuild the view before pressing anything again. Widget ids are stable across rebuilds, so asserting an id stayed constant while its text changed is the standard way to prove keyed identity. Sliders have their own split: `msgForValue(id, value)` fires only a Zig builder's `on_value` constructor and returns `null` for a markup slider — a markup slider binds a plain `on-change`, so assert its dispatch with `msgFor(id, .change)`.
+
+The same tests can push the tree through the layout engine (`canvas.layoutWidgetTree`) to assert real frames — see the generated `src/tests.zig` for both patterns. Effects-using apps swap in the fake executor (`app_state.effects.executor = .fake`) to assert on spawn/fetch/file requests and feed results back deterministically — see [Native UI: Effects](/docs/native-ui#effects).
+
+## TestHarness
+
+`TestHarness` provides a headless test driver using `NullPlatform` and a `BufferSink` for capturing trace records:
+
+```zig
+const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+defer harness.destroy(std.testing.allocator);
+```
+
+The harness embeds the multi-megabyte `Runtime`, so create it on the heap (`create`/`destroy`) — stack instances overflow test threads, and the same rule applies to `UiApp` instances in tests (`App.create`/`destroy`). The harness provides a pre-configured runtime with `NullPlatform` and a trace sink that captures records in memory; handler and update errors propagate (fail the test) instead of degrading. Use it to test runtime integration: lifecycle events, command dispatch, and full `UiApp` frames.
+
+`TestHarness` is the same mechanism used by the framework's own test suite to verify bridge policy enforcement, window management, and lifecycle correctness.
+
+## Headless tests
+
+The default test suite does not require a window server:
+
+```bash
+zig build test
+zig build test-desktop
+zig build test-automation-protocol
+zig build test-platform-info
+zig build test-examples
+zig build test-examples-native
+zig build test-examples-mobile
+```
+
+Bridge and IPC coverage lives in the headless desktop tests: they inject platform bridge events, exercise command policy and handlers, and assert the platform response without launching a WebView. Automation command parsing is covered by `test-automation-protocol`.
+
+`test-examples` runs all repository example checks. Use the narrower example groups when you want a faster pass over one slice.
+
+`test-examples-native` runs every native-first example's headless suite with `-Dplatform=null` from the repository root. Zero-config examples (app.zon + src, no build files) are driven through the `native` CLI's generated build graph — the same path `native test` takes in any app directory — while examples that own a `build.zig` run their in-directory `zig build test`.
+
+`test-examples-mobile` verifies the iOS, Android, and shared `mobile-shell` example layouts so the embedded host scaffolds stay present. It also checks the shared mobile-shell platform, capability, and command metadata.
+
+## WebView smoke tests
+
+WebView smoke coverage is a separate macOS integration step using [Automation](/docs/automation):
+
+```bash
+zig build test-webview-smoke -Dplatform=macos
+zig build test-native-shell-smoke -Dplatform=macos
+zig build test-webview-cef-smoke -Dplatform=macos -Dweb-engine=chromium
+```
+
+This step:
+
+1. Starts the system WebView example with automation and the JS bridge enabled
+2. Waits for a published automation snapshot (`native automate wait`)
+3. Verifies main window, source, and native/WebView metadata (`native automate snapshot`)
+4. Sends a `native.ping` request through `native automate bridge`
+5. Verifies child WebView create, resize, navigate, and close commands
+6. Verifies the responses
+
+The CEF smoke step additionally requires a local CEF layout or `-Dcef-auto-install=true`; it exercises `native.ping` and child WebView create/resize/navigate/close through the automation bridge. These steps are intentionally opt-in because they need a GUI-capable macOS session.
+
+The native-shell smoke step launches `examples/native-shell`, verifies toolbar/sidebar/statusbar/WebView rows in the automation snapshot, drives native focus traversal, drives a main-window resize and checks relayout bounds, dispatches `app.refresh` through bridge, menu, toolbar, and shortcut command paths, creates and closes a child preview WebView, and checks that the native status label reflects each command source.
+
+## NullPlatform
+
+`NullPlatform` is a headless platform stub that records loaded sources and dispatched events without creating real windows. Use it in tests and with `EmbeddedApp`:
+
+```zig
+var null_platform = native_sdk.NullPlatform.init(.{});
+var runtime = native_sdk.Runtime.init(.{
+    .platform = null_platform.platform(),
+});
+```

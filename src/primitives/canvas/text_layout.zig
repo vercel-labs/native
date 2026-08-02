@@ -371,8 +371,15 @@ pub const TextLineIterator = struct {
             self.finished = true;
         } else {
             var next_start = end;
-            if (next_start < bytes.len and bytes[next_start] == '\n') next_start += 1;
-            while (self.options.wrap == .word and next_start < bytes.len and isTextBreakByte(bytes[next_start])) next_start += 1;
+            if (next_start < bytes.len and bytes[next_start] == '\n') {
+                // A hard break starts the next line immediately after
+                // the newline. Its leading whitespace is editable
+                // content, so it must contribute paint and caret width.
+                next_start += 1;
+            } else {
+                // Only soft word wraps elide their break separators.
+                while (self.options.wrap == .word and next_start < bytes.len and isTextBreakByte(bytes[next_start])) next_start += 1;
+            }
             self.cursor = next_start;
         }
         const elision = plainLineElision(bytes, start, end, self.text.font_id, self.text.size, self.options);
@@ -464,12 +471,30 @@ fn metricTextBounds(value: DrawText) ?geometry.RectF {
 /// buffer and no line-count failure mode: the caret of an arbitrarily
 /// long document always resolves.
 pub fn layoutTextCaretRect(text: DrawText, options: TextLayoutOptions, offset: usize) ?geometry.RectF {
-    const line = streamTextLineForOffset(text, options, snapTextOffset(text.text, offset)) orelse return null;
+    return layoutTextCaretRectWithAffinity(text, options, offset, .upstream);
+}
+
+pub fn layoutTextCaretRectWithAffinity(
+    text: DrawText,
+    options: TextLayoutOptions,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?geometry.RectF {
+    const line = streamTextLineForOffset(text, options, snapTextOffset(text.text, offset), affinity) orelse return null;
     return textCaretRectForLine(text, line, offset);
 }
 
 pub fn textCaretRectForLayout(text: DrawText, layout: TextLayout, offset: usize) ?geometry.RectF {
-    const line = textLineForOffset(layout, text.text.len, snapTextOffset(text.text, offset)) orelse return null;
+    return textCaretRectForLayoutWithAffinity(text, layout, offset, .upstream);
+}
+
+pub fn textCaretRectForLayoutWithAffinity(
+    text: DrawText,
+    layout: TextLayout,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?geometry.RectF {
+    const line = textLineForOffset(layout, text.text.len, snapTextOffset(text.text, offset), affinity) orelse return null;
     return textCaretRectForLine(text, line, offset);
 }
 
@@ -554,31 +579,90 @@ fn accumulateTextSelectionRect(accumulator: *TextSelectionRectAccumulator, text:
 /// Byte offset for a point, streaming the run's lines — hit testing a
 /// click in a long document has no line-count failure mode.
 pub fn layoutTextOffsetForPoint(text: DrawText, options: TextLayoutOptions, point: geometry.PointF) ?usize {
+    const position = layoutTextCaretPositionForPoint(text, options, point) orelse return null;
+    return position.offset;
+}
+
+pub fn layoutTextCaretPositionForPoint(
+    text: DrawText,
+    options: TextLayoutOptions,
+    point: geometry.PointF,
+) ?canvas.TextCaretPosition {
     var lines = TextLineIterator.init(text, options);
     var candidate: ?TextLine = null;
+    var previous: ?TextLine = null;
+    var candidate_previous: ?TextLine = null;
     while (lines.next()) |line| {
         candidate = line;
+        candidate_previous = previous;
         if (point.y < line.bounds.y + line.bounds.height) break;
+        previous = line;
     }
     const line = candidate orelse return null;
-    return textLineOffsetForX(text, line, point.x);
+    return textCaretPositionForLine(text, line, candidate_previous, point.x);
 }
 
 pub fn textOffsetForLayoutPoint(text: DrawText, layout: TextLayout, point: geometry.PointF) ?usize {
-    const line = textLineForPoint(layout, point) orelse return null;
-    return textLineOffsetForX(text, line, point.x);
+    const position = textCaretPositionForLayoutPoint(text, layout, point) orelse return null;
+    return position.offset;
+}
+
+pub fn textCaretPositionForLayoutPoint(
+    text: DrawText,
+    layout: TextLayout,
+    point: geometry.PointF,
+) ?canvas.TextCaretPosition {
+    var previous: ?TextLine = null;
+    for (layout.lines) |line| {
+        if (point.y < line.bounds.y + line.bounds.height) {
+            return textCaretPositionForLine(text, line, previous, point.x);
+        }
+        previous = line;
+    }
+    const line = previous orelse return null;
+    const before = if (layout.lines.len > 1) layout.lines[layout.lines.len - 2] else null;
+    return textCaretPositionForLine(text, line, before, point.x);
+}
+
+fn textCaretPositionForLine(
+    text: DrawText,
+    line: TextLine,
+    previous: ?TextLine,
+    x: f32,
+) canvas.TextCaretPosition {
+    const offset = textLineOffsetForX(text, line, x);
+    const range = textLineRange(text, line);
+    const affinity: canvas.TextCaretAffinity = if (previous) |previous_line|
+        if (offset == range.start and textLineRange(text, previous_line).end == offset)
+            .downstream
+        else
+            .upstream
+    else
+        .upstream;
+    return .{ .offset = offset, .affinity = affinity };
 }
 
 /// Streaming twin of `textLineForOffset`: the line containing
 /// `offset` (already snapped), with the same neighbor semantics.
-fn streamTextLineForOffset(text: DrawText, options: TextLayoutOptions, offset: usize) ?TextLine {
+fn streamTextLineForOffset(
+    text: DrawText,
+    options: TextLayoutOptions,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?TextLine {
     const normalized = @min(offset, text.text.len);
     var lines = TextLineIterator.init(text, options);
     var previous: ?TextLine = null;
     while (lines.next()) |line| {
         const range = textLineRangeForLength(text.text.len, line);
         if (normalized < range.start) return previous orelse line;
-        if (normalized <= range.end) return line;
+        if (normalized < range.end) return line;
+        if (normalized == range.end) {
+            if (affinity == .upstream) return line;
+            const next_line = lines.next() orelse return line;
+            const next_range = textLineRangeForLength(text.text.len, next_line);
+            return if (next_range.start == normalized) next_line else line;
+        }
         previous = line;
     }
     return previous;
@@ -748,23 +832,25 @@ fn alignTextLineBounds(bounds: geometry.RectF, options: TextLayoutOptions) geome
     return bounds.translate(geometry.OffsetF.init(dx, 0));
 }
 
-fn textLineForOffset(layout: TextLayout, text_len: usize, offset: usize) ?TextLine {
+fn textLineForOffset(
+    layout: TextLayout,
+    text_len: usize,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?TextLine {
     if (layout.lines.len == 0) return null;
     const normalized = @min(offset, text_len);
     var previous: ?TextLine = null;
-    for (layout.lines) |line| {
+    for (layout.lines, 0..) |line, index| {
         const range = textLineRangeForLength(text_len, line);
         if (normalized < range.start) return previous orelse line;
-        if (normalized <= range.end) return line;
-        previous = line;
-    }
-    return previous;
-}
-
-fn textLineForPoint(layout: TextLayout, point: geometry.PointF) ?TextLine {
-    var previous: ?TextLine = null;
-    for (layout.lines) |line| {
-        if (point.y < line.bounds.y + line.bounds.height) return line;
+        if (normalized < range.end) return line;
+        if (normalized == range.end) {
+            if (affinity == .upstream or index + 1 >= layout.lines.len) return line;
+            const next_line = layout.lines[index + 1];
+            const next_range = textLineRangeForLength(text_len, next_line);
+            return if (next_range.start == normalized) next_line else line;
+        }
         previous = line;
     }
     return previous;

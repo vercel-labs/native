@@ -1,0 +1,175 @@
+# Debugging
+
+The Native SDK provides structured tracing, persistent logging, panic capture, and diagnostic tools for debugging desktop apps.
+
+## Trace modes
+
+The runtime emits structured trace records. Control verbosity with `TraceMode`:
+
+<table>
+  <thead>
+    <tr>
+      <th>Mode</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>off</code></td>
+      <td>No trace output</td>
+    </tr>
+    <tr>
+      <td><code>events</code></td>
+      <td>Lifecycle and platform events only (default)</td>
+    </tr>
+    <tr>
+      <td><code>runtime</code></td>
+      <td>Runtime internals: frame timing, invalidation, window state</td>
+    </tr>
+    <tr>
+      <td><code>all</code></td>
+      <td>Everything</td>
+    </tr>
+  </tbody>
+</table>
+
+Enable at build time with `-Dtrace=true`, or parse from a string:
+
+```zig
+const mode = native_sdk.debug.parseTraceMode("all"); // returns ?TraceMode
+```
+
+## Trace sinks
+
+Trace records are routed through sinks. the Native SDK provides three:
+
+**FileTraceSink** -- appends records to a file on disk:
+
+```zig
+var file_sink = native_sdk.debug.FileTraceSink.init(io, log_dir, log_file, .json_lines);
+```
+
+**FanoutTraceSink** -- broadcasts to multiple child sinks (e.g. stdout + file):
+
+```zig
+var sinks = [_]trace.Sink{ stdout_sink.sink(), file_sink.sink() };
+var fanout = native_sdk.debug.FanoutTraceSink{ .sinks = &sinks };
+```
+
+**StdoutTraceSink** (from Native SDK's trace module) -- writes to stdout for interactive development.
+
+Wire a sink into the runtime via `RuntimeOptions.trace_sink`:
+
+```zig
+var runtime = native_sdk.Runtime.init(.{
+    .platform = my_platform,
+    .trace_sink = fanout.sink(),
+});
+```
+
+## Log format
+
+The `NATIVE_SDK_LOG_FORMAT` environment variable controls the persistent log format:
+
+<table>
+  <thead>
+    <tr>
+      <th>Value</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>jsonl</code></td>
+      <td>JSON Lines -- one JSON object per trace record (default)</td>
+    </tr>
+    <tr>
+      <td><code>text</code></td>
+      <td>Human-readable text lines</td>
+    </tr>
+  </tbody>
+</table>
+
+## Log paths
+
+Default log file locations by platform:
+
+<table>
+  <thead>
+    <tr>
+      <th>Platform</th>
+      <th>Path</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>macOS</td>
+      <td><code>~/Library/Logs/&lt;bundle-id&gt;/native-sdk.jsonl</code></td>
+    </tr>
+    <tr>
+      <td>Linux</td>
+      <td><code>~/.local/state/&lt;bundle-id&gt;/logs/native-sdk.jsonl</code></td>
+    </tr>
+    <tr>
+      <td>Windows</td>
+      <td><code>%LOCALAPPDATA%\&lt;bundle-id&gt;\Logs\native-sdk.jsonl</code></td>
+    </tr>
+  </tbody>
+</table>
+
+Override with `NATIVE_SDK_LOG_DIR`:
+
+```bash
+NATIVE_SDK_LOG_DIR=/tmp/my-logs native dev
+```
+
+## Panic capture
+
+The Native SDK captures Zig panics before the default handler runs:
+
+1. Writes a report to `last-panic.txt` in the log directory (includes panic message and return address)
+2. Appends a `fatal` trace record to the log file
+3. Invokes `std.debug.defaultPanic` for the normal Zig panic output
+
+Enable in your app:
+
+```zig
+pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
+```
+
+Then call `installPanicCapture` during startup:
+
+```zig
+native_sdk.debug.installPanicCapture(io, log_setup.paths);
+```
+
+## Debug overlay
+
+For apps with [web content](/docs/frontend), build with `-Ddebug-overlay=true` to enable a visual debugging overlay in the WebView. This shows frame timing, invalidation regions, and window metadata.
+
+```bash
+native dev -Ddebug-overlay=true
+```
+
+See also [native doctor](/docs/debugging/doctor) for a full diagnostic tool reference.
+
+## Environment variables
+
+<table>
+  <thead>
+    <tr>
+      <th>Variable</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>NATIVE_SDK_LOG_DIR</code></td>
+      <td>Override log output directory</td>
+    </tr>
+    <tr>
+      <td><code>NATIVE_SDK_LOG_FORMAT</code></td>
+      <td>Log format: <code>text</code> or <code>jsonl</code> (default: <code>jsonl</code>)</td>
+    </tr>
+  </tbody>
+</table>

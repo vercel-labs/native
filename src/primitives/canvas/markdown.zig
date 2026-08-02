@@ -10,7 +10,8 @@
 //!
 //! Supported blocks: `#`/`##`/`###` headings (deeper levels clamp to h3),
 //! paragraphs, bullet/ordered/task lists (nesting up to
-//! `max_markdown_list_depth` by two-space indent), fenced code blocks,
+//! `max_markdown_list_depth` by two-space indent), fenced code blocks
+//! (source indentation preserved and language-tagged fences highlighted),
 //! `>` blockquotes, horizontal rules, GFM pipe tables (header row +
 //! delimiter row + body rows onto `table`/`data_row`/`data_cell` widgets;
 //! `:---`/`:--:`/`---:` delimiter cells set per-column start/center/end
@@ -57,6 +58,7 @@
 //! that exceed a capacity truncate deterministically.
 
 const std = @import("std");
+const code_model = @import("code.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_spans = @import("text_spans.zig");
@@ -291,7 +293,8 @@ pub fn Markdown(comptime Msg: type) type {
             }
 
             fn parseCodeFence(self: *Builder, lines: *LineIterator) ?Node {
-                _ = lines.next(); // opening fence (info string ignored)
+                const opening = lines.next() orelse return null;
+                const language = code_model.languageFromFence(opening);
                 const start = lines.index;
                 var end = start;
                 while (lines.next()) |line| {
@@ -299,13 +302,7 @@ pub fn Markdown(comptime Msg: type) type {
                     end = lines.index;
                 }
                 const code = std.mem.trimEnd(u8, lines.source[start..@min(end, lines.source.len)], "\n");
-                const code_span = [_]TextSpan{.{ .text = code, .monospace = true }};
-                return self.ui.el(.panel, .{
-                    .padding = 12,
-                    .style_tokens = .{ .background = .surface_subtle },
-                }, .{
-                    self.ui.paragraph(.{}, &code_span),
-                });
+                return self.ui.code(.{ .language = language }, code);
             }
 
             fn parseBlockquote(self: *Builder, lines: *LineIterator) ?Node {
@@ -365,9 +362,14 @@ pub fn Markdown(comptime Msg: type) type {
                         .semantics = .{ .label = marker.content },
                     }),
                 };
-                if (depth == 0) return self.ui.row(.{ .gap = 8 }, .{ lead, content });
+                // The outer row must keep stretch alignment so a wrapped
+                // paragraph receives the row's full measured height. A
+                // one-child column consumes that stretched marker slot
+                // while laying its marker at the slot's leading edge.
+                const lead_top = self.ui.column(.{}, .{lead});
+                if (depth == 0) return self.ui.row(.{ .gap = 8 }, .{ lead_top, content });
                 const indent = self.ui.el(.stack, .{ .width = @as(f32, @floatFromInt(depth)) * 16 }, .{});
-                return self.ui.row(.{ .gap = 8 }, .{ indent, lead, content });
+                return self.ui.row(.{ .gap = 8 }, .{ indent, lead_top, content });
             }
 
             fn parseDetails(self: *Builder, lines: *LineIterator) ?Node {

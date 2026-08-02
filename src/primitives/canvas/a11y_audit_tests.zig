@@ -190,6 +190,26 @@ test "below-the-fold scroll content stays reachable through OUTER clip scopes" {
     try std.testing.expectEqual(a11y_audit.A11yAuditRuleKind.focus_unreachable, issues.findings[0].rule);
 }
 
+test "a horizontal shelf forgives offscreen-right tiles and still flags below-viewport content" {
+    var nodes: [32]canvas.WidgetLayoutNode = undefined;
+    var storage: [8]a11y_audit.A11yAuditFinding = undefined;
+
+    // A horizontal-only scroll region: a tile past its RIGHT edge is
+    // scroll content (reachable by design), while a button fully below
+    // the viewport is genuinely stranded — nothing scrolls vertically
+    // to reveal it.
+    const root = Widget{ .kind = .column, .children = &.{
+        .{ .kind = .scroll_view, .id = 2, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 400, 80), .children = &.{
+            .{ .kind = .button, .id = 3, .text = "Visible", .frame = geometry.RectF.init(0, 0, 140, 60) },
+            .{ .kind = .button, .id = 4, .text = "Offscreen right", .frame = geometry.RectF.init(500, 0, 140, 60) },
+            .{ .kind = .button, .id = 5, .text = "Below the shelf", .frame = geometry.RectF.init(0, 120, 140, 30) },
+        } },
+    } };
+    const issues = try auditTree(root, window, &nodes, &storage);
+    try std.testing.expectEqual(@as(usize, 1), issues.total);
+    try std.testing.expectEqual(a11y_audit.A11yAuditRuleKind.focus_unreachable, issues.findings[0].rule);
+}
+
 test "the formatter names the path, the role, and the fix" {
     var nodes: [16]canvas.WidgetLayoutNode = undefined;
     var storage: [8]a11y_audit.A11yAuditFinding = undefined;

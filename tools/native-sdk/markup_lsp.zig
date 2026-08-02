@@ -315,6 +315,8 @@ pub const Server = struct {
                     // else takes no attributes
                 } else if (std.mem.eql(u8, element_name, "markdown")) {
                     for (markdown_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markdown attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "code")) {
+                    for (code_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "code attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "stepper")) {
                     for (stepper_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "stepper attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "step")) {
@@ -631,7 +633,11 @@ pub fn hoverAt(text: []const u8, offset: usize) ?HoverResult {
     }
     const open = lastTagOpen(text, start) orelse return null;
     if (insideQuotes(text, open, start)) return null;
-    const doc = attributeDoc(word) orelse return null;
+    var element_start = open + 1;
+    if (element_start < text.len and text[element_start] == '/') element_start += 1;
+    var element_end = element_start;
+    while (element_end < text.len and isNameChar(text[element_end])) element_end += 1;
+    const doc = attributeDocForElement(text[element_start..element_end], word) orelse return null;
     return .{ .name = word, .doc = doc };
 }
 
@@ -646,6 +652,7 @@ pub const template_attr_docs = markup_docs.template_attr_docs;
 pub const for_attr_docs = markup_docs.for_attr_docs;
 pub const if_attr_docs = markup_docs.if_attr_docs;
 pub const markdown_attr_docs = markup_docs.markdown_attr_docs;
+pub const code_attr_docs = markup_docs.code_attr_docs;
 pub const stepper_attr_docs = markup_docs.stepper_attr_docs;
 pub const timeline_attr_docs = markup_docs.timeline_attr_docs;
 pub const timeline_item_attr_docs = markup_docs.timeline_item_attr_docs;
@@ -660,6 +667,7 @@ pub const reactions_attr_docs = markup_docs.reactions_attr_docs;
 pub const event_docs = markup_docs.event_docs;
 pub const elementDoc = markup_docs.elementDoc;
 pub const attributeDoc = markup_docs.attributeDoc;
+pub const attributeDocForElement = markup_docs.attributeDocForElement;
 
 // ------------------------------------------------------------------ tests
 
@@ -829,9 +837,9 @@ test "analyze reports parser and validation findings with positions" {
 
     // avatar image misuse surfaces the validator's teaching messages.
     const literal_image = analyze(arena, "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>").?;
-    try testing.expectEqualStrings(ui_markup.avatar_image_message, literal_image.message);
+    try testing.expectEqualStrings(ui_markup.image_binding_message, literal_image.message);
     const misplaced_image = analyze(arena, "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>").?;
-    try testing.expectEqualStrings(ui_markup.avatar_image_element_message, misplaced_image.message);
+    try testing.expectEqualStrings(ui_markup.image_binding_element_message, misplaced_image.message);
     try testing.expectEqual(@as(?ui_markup.MarkupErrorInfo, null), analyze(arena, "<row><avatar image=\"{user_image}\">CT</avatar></row>"));
 
     // The a11y lint's error half rides analyze (an unnamed control is
@@ -912,11 +920,23 @@ test "hoverAt resolves element and attribute docs" {
     try testing.expectEqualStrings("button", closing.name);
 }
 
+test "hoverAt resolves reused attributes in their element context" {
+    const source = "<markdown source=\"{docs}\"/><code source=\"{snippet}\"/>";
+    const markdown_source = std.mem.indexOf(u8, source, "source").?;
+    const code_open = std.mem.indexOf(u8, source, "<code").?;
+    const code_source = std.mem.indexOfPos(u8, source, code_open, "source").?;
+
+    const markdown_hover = hoverAt(source, markdown_source).?;
+    try testing.expect(std.mem.startsWith(u8, markdown_hover.doc, "markdown:"));
+    const code_hover = hoverAt(source, code_source).?;
+    try testing.expect(std.mem.startsWith(u8, code_hover.doc, "code:"));
+}
+
 test "doc tables cover every known element, attribute, and event" {
     for (ui_markup.known_element_names) |name| {
         try testing.expect(elementDoc(name) != null);
     }
-    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions" }) |name| {
+    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions", "video" }) |name| {
         try testing.expect(elementDoc(name) != null);
     }
     for (ui_markup.schema.attrs) |entry| {

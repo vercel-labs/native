@@ -223,6 +223,32 @@ pub fn canvasWidgetAccessibilityActionKindFromPlatform(action: platform.WidgetAc
         .decrement => .decrement,
         .set_text => .set_text,
         .set_selection => .set_selection,
+        .set_composition => .set_composition,
+        .commit_composition => .commit_composition,
+        .cancel_composition => .cancel_composition,
+        .select => .select,
+        .drag => .drag,
+        .drop_files => .drop_files,
+        .dismiss => .dismiss,
+    };
+}
+
+/// The inverse of `canvasWidgetAccessibilityActionKindFromPlatform`: the
+/// direct verb surfaces (embed hosts, automation `widget_action`
+/// commands) reach the dispatch without a platform event, and the
+/// session journal needs one to record the verb outer-wins.
+pub fn platformWidgetAccessibilityActionKindFromCanvas(action: CanvasWidgetAccessibilityActionKind) platform.WidgetAccessibilityActionKind {
+    return switch (action) {
+        .focus => .focus,
+        .press => .press,
+        .toggle => .toggle,
+        .increment => .increment,
+        .decrement => .decrement,
+        .set_text => .set_text,
+        .set_selection => .set_selection,
+        .set_composition => .set_composition,
+        .commit_composition => .commit_composition,
+        .cancel_composition => .cancel_composition,
         .select => .select,
         .drag => .drag,
         .drop_files => .drop_files,

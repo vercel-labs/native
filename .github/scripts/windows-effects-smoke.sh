@@ -9,7 +9,7 @@
 # the app's trace log:
 #
 #   1. snapshot ready=true                (app booted, automation server live)
-#   2. gpu_backend=software + nonblank    (the canvas presented real pixels)
+#   2. gpu_backend=direct2d + nonblank    (the canvas presented real pixels)
 #   3. widget-click "Start stream"        (fx.spawn launches cmd.exe under
 #                                          Wine; streamed lines land in the
 #                                          model and grow the snapshot)
@@ -118,9 +118,9 @@ app_pid=$!
 poll 180 'ready=true' || fail "snapshot never became ready"
 echo "== ready: $(head -1 "$snap" | cut -d'|' -f1)"
 
-# ---- 2: software backend presented non-blank pixels ------------------------
+# ---- 2: Direct2D backend presented non-blank pixels ------------------------
 poll 60 'gpu_nonblank=true' || fail "gpu_nonblank never became true"
-grep -q 'gpu_backend=software' "$snap" || fail "gpu_backend is not software"
+grep -q 'gpu_backend=direct2d' "$snap" || fail "gpu_backend is not direct2d"
 echo "== canvas: $(grep -o 'gpu_backend=[a-z]*' "$snap" | head -1)" \
   "$(grep -o 'gpu_nonblank=[a-z]*' "$snap" | head -1)"
 grep -q 'idle' "$snap" || fail "probe did not start idle"

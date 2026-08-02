@@ -501,15 +501,41 @@ test "widget keyboard control intents map slider and scroll keys" {
     const line_down = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "arrowdown" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, line_down.kind);
     try std.testing.expect(line_down.actions.increment);
-    try std.testing.expectApproxEqAbs(@as(f32, 35), line_down.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 35), line_down.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), line_down.delta.dx);
 
     const page_up = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "pageup" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, page_up.kind);
     try std.testing.expect(page_up.actions.decrement);
-    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta.dy, 0.001);
 
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_to_start, widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "home" }).?.kind);
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_to_end, widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "end" }).?.kind);
+
+    // A vertical-only region maps Left/Right to the vertical axis (the
+    // legacy keymap, byte-identical); a horizontal-only region mirrors
+    // the whole map onto its one axis, steps measured from the WIDTH;
+    // a both-axes region gives Left/Right to the horizontal axis.
+    const vertical_left = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "arrowleft" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, -35), vertical_left.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), vertical_left.delta.dx);
+
+    const shelf = Widget{ .kind = .scroll_view, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 120, 100) };
+    const shelf_right = widgetKeyboardControlIntent(shelf, .{ .phase = .key_down, .key = "arrowright" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, shelf_right.kind);
+    try std.testing.expect(shelf_right.actions.increment);
+    try std.testing.expectApproxEqAbs(@as(f32, 42), shelf_right.delta.dx, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), shelf_right.delta.dy);
+    const shelf_page = widgetKeyboardControlIntent(shelf, .{ .phase = .key_down, .key = "pagedown" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 102), shelf_page.delta.dx, 0.001);
+
+    const dual = Widget{ .kind = .scroll_view, .scroll_axes = .both, .frame = geometry.RectF.init(0, 0, 120, 100) };
+    const dual_left = widgetKeyboardControlIntent(dual, .{ .phase = .key_down, .key = "arrowleft" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, -42), dual_left.delta.dx, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), dual_left.delta.dy);
+    const dual_down = widgetKeyboardControlIntent(dual, .{ .phase = .key_down, .key = "arrowdown" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 35), dual_down.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), dual_down.delta.dx);
 }
 
 test "widget semantic control intents map built-in actions" {
@@ -577,12 +603,21 @@ test "widget semantic control intents map slider and scroll actions" {
     const page_down = widgetSemanticControlIntentWithActions(scroll, .increment, scroll_actions).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, page_down.kind);
     try std.testing.expect(page_down.actions.increment);
-    try std.testing.expectApproxEqAbs(@as(f32, 85), page_down.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 85), page_down.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), page_down.delta.dx);
 
     const page_up = widgetSemanticControlIntentWithActions(scroll, .decrement, scroll_actions).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, page_up.kind);
     try std.testing.expect(page_up.actions.decrement);
-    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta.dy, 0.001);
+
+    // A horizontal-only region's assistive steps page its one axis,
+    // measured from the viewport WIDTH.
+    const shelf = Widget{ .kind = .scroll_view, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 120, 100) };
+    const shelf_page = widgetSemanticControlIntentWithActions(shelf, .increment, scroll_actions).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, shelf_page.kind);
+    try std.testing.expectApproxEqAbs(@as(f32, 102), shelf_page.delta.dx, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), shelf_page.delta.dy);
 }
 
 test "widget keyboard events map to text edit events" {
@@ -711,6 +746,29 @@ test "text edit state tracks ime composition ranges" {
     try std.testing.expectEqualStrings("héo", state.text);
     try std.testing.expectEqual(@as(usize, 3), state.selection.focus);
     try std.testing.expect(state.composition == null);
+}
+
+test "ime composition owns exact bytes when its preview completes CRLF" {
+    var preview_storage: [64]u8 = undefined;
+    var update_storage: [64]u8 = undefined;
+    var cancel_storage: [64]u8 = undefined;
+
+    const initial = TextEditState{
+        .text = "a\nb",
+        .selection = TextSelection.collapsed(1),
+    };
+    const preview = try initial.apply(.{ .set_composition = .{ .text = "\r", .cursor = 1 } }, &preview_storage);
+    try std.testing.expectEqualStrings("a\r\nb", preview.text);
+    try std.testing.expectEqualDeep(TextRange.init(1, 2), preview.composition.?);
+
+    const updated = try preview.apply(.{ .set_composition = .{ .text = "X", .cursor = 1 } }, &update_storage);
+    try std.testing.expectEqualStrings("aX\nb", updated.text);
+    try std.testing.expectEqualDeep(TextRange.init(1, 2), updated.composition.?);
+
+    const cancelled = try preview.apply(.cancel_composition, &cancel_storage);
+    try std.testing.expectEqualStrings("a\nb", cancelled.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(1), cancelled.selection);
+    try std.testing.expect(cancelled.composition == null);
 }
 
 test "text bounds follow utf8 scalar fallback and shaped y offsets" {
@@ -1087,6 +1145,44 @@ test "text layout maps caret selection and points across wrapped fallback lines"
     try std.testing.expectEqual(@as(usize, 1), folded.len);
     try std.testing.expectEqualDeep(TextRange.init(3, 8), folded[0].range);
     try expectRectApprox(geometry.RectF.init(4, 10, 24.25, 28), folded[0].rect);
+}
+
+test "unbroken soft wraps preserve downstream caret affinity" {
+    const text = DrawText{
+        .font_id = 1,
+        .size = 10,
+        .origin = geometry.PointF.init(4, 20),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "abcdefghijklmnopqrstuvwxyz",
+    };
+    const options = TextLayoutOptions{ .max_width = 30, .line_height = 14, .wrap = .word };
+    var lines: [8]TextLine = undefined;
+    const layout = try layoutTextRun(text, options, &lines);
+    try std.testing.expect(layout.lines.len > 1);
+
+    const first_range = text_model.textLineRange(text, layout.lines[0]);
+    const second_range = text_model.textLineRange(text, layout.lines[1]);
+    try std.testing.expectEqual(first_range.end, second_range.start);
+
+    const point = geometry.PointF.init(
+        layout.lines[1].bounds.x - 1,
+        layout.lines[1].bounds.y + layout.lines[1].bounds.height * 0.5,
+    );
+    const streamed = canvas.layoutTextCaretPositionForPoint(text, options, point).?;
+    const buffered = canvas.textCaretPositionForLayoutPoint(text, layout, point).?;
+    try std.testing.expectEqualDeep(
+        canvas.TextCaretPosition{ .offset = second_range.start, .affinity = .downstream },
+        streamed,
+    );
+    try std.testing.expectEqualDeep(streamed, buffered);
+
+    const upstream = canvas.layoutTextCaretRectWithAffinity(text, options, streamed.offset, .upstream).?;
+    const downstream = canvas.layoutTextCaretRectWithAffinity(text, options, streamed.offset, streamed.affinity).?;
+    try std.testing.expectApproxEqAbs(layout.lines[0].bounds.y, upstream.y, 0.001);
+    try std.testing.expectApproxEqAbs(layout.lines[1].bounds.y, downstream.y, 0.001);
+
+    const buffered_downstream = canvas.textCaretRectForLayoutWithAffinity(text, layout, streamed.offset, streamed.affinity).?;
+    try std.testing.expectApproxEqAbs(downstream.y, buffered_downstream.y, 0.001);
 }
 
 test "text layout maps caret selection and points across shaped glyph lines" {
@@ -1473,6 +1569,31 @@ test "text layout handles newlines and shaped glyph runs" {
     try std.testing.expectEqual(@as(usize, 1), shaped.lineCount());
     try std.testing.expectEqual(@as(usize, 2), shaped.lines[0].glyph_len);
     try expectRect(geometry.RectF.init(3, 4, 19, 20), shaped.lines[0].bounds);
+}
+
+test "word-wrapped hard lines preserve leading spaces and caret advances" {
+    const text = DrawText{
+        .font_id = 1,
+        .size = 12,
+        .origin = geometry.PointF.init(0, 12),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "One\n  ",
+    };
+    const options = TextLayoutOptions{ .max_width = 100, .line_height = 16, .wrap = .word };
+    var lines: [2]TextLine = undefined;
+    const layout = try layoutTextRun(text, options, &lines);
+
+    try std.testing.expectEqual(@as(usize, 2), layout.lineCount());
+    try std.testing.expectEqual(@as(usize, 4), layout.lines[1].text_start);
+    try std.testing.expectEqual(@as(usize, 2), layout.lines[1].text_len);
+
+    const line_start = layoutTextCaretRect(text, options, 4).?;
+    const first_space = layoutTextCaretRect(text, options, 5).?;
+    const second_space = layoutTextCaretRect(text, options, 6).?;
+    try std.testing.expectEqual(line_start.y, first_space.y);
+    try std.testing.expectEqual(first_space.y, second_space.y);
+    try std.testing.expect(first_space.x > line_start.x);
+    try std.testing.expect(second_space.x > first_space.x);
 }
 
 test "text layout bounds shaped glyph positions and vertical offsets" {

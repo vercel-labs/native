@@ -1,0 +1,38 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Alert
+
+An inline callout surface. The title comes from the `text` attribute and renders beside a fixed 16px icon aligned to its first line; `variant` colors the identity (`destructive` reads in the destructive hue with a warning icon). Children are the description: they start under the title and hang past the icon column, the standard callout grid. Like the other stacking surfaces it rejects `gap` — wrap multi-line descriptions in a `column`.
+
+<ComponentPreview name="alert" alt="Default and destructive alerts rendered by the engine" caption="a titled alert with a description, and the destructive variant" />
+
+## Markup
+
+```html
+<column gap="12" width="380">
+  <alert text="A new version of the shell is available.">
+    <text wrap="true" foreground="text_muted">Restart the app to finish updating.</text>
+  </alert>
+  <alert text="Your session has expired. Sign in again." variant="destructive"></alert>
+</column>
+```
+
+For a message the user can dismiss, render the alert under an `if` and clear the flag from a button inside it — the model owns the visibility, as with every surface. For modal interruptions reach for [dialog](/docs/components/dialog), [drawer](/docs/components/drawer), or [sheet](/docs/components/sheet) instead.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.column(.{ .gap = 12, .width = 380 }, .{
+    ui.el(.alert, .{ .text = "A new version of the shell is available." }, .{
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Restart the app to finish updating."),
+    }),
+    ui.el(.alert, .{ .text = "Your session has expired. Sign in again.", .variant = .destructive }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["text", "variant"]} />

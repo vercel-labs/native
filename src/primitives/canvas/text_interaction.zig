@@ -38,12 +38,35 @@ pub const TextSelectionRect = struct {
     rect: geometry.RectF = .{},
 };
 
+/// Which painted line owns a caret whose byte offset is shared by the
+/// end of one soft-wrapped line and the start of the next.
+pub const TextCaretAffinity = enum {
+    upstream,
+    downstream,
+};
+
+pub const TextCaretPosition = struct {
+    offset: usize = 0,
+    affinity: TextCaretAffinity = .upstream,
+};
+
 pub const TextSelection = struct {
     anchor: usize = 0,
     focus: usize = 0,
+    /// Affinity belongs to the focus end. It only changes geometry at a
+    /// soft-wrap boundary; ordinary offsets render identically.
+    affinity: TextCaretAffinity = .upstream,
 
     pub fn collapsed(offset: usize) TextSelection {
         return .{ .anchor = offset, .focus = offset };
+    }
+
+    pub fn collapsedAt(position: TextCaretPosition) TextSelection {
+        return .{
+            .anchor = position.offset,
+            .focus = position.offset,
+            .affinity = position.affinity,
+        };
     }
 
     pub fn range(self: TextSelection, text_len: usize) TextRange {
@@ -121,7 +144,7 @@ pub fn applyTextInputEvent(state: TextEditState, event: TextInputEvent, output: 
         .move_caret => |move| moveTextCaret(normalized, move),
         .set_selection => |selection| .{
             .text = normalized.text,
-            .selection = snapTextSelection(normalized.text, selection),
+            .selection = snapTextCaretSelection(normalized.text, selection),
             .composition = null,
         },
         .set_composition => |composition| setTextComposition(normalized, composition, output),
@@ -142,7 +165,7 @@ const TextReplaceResult = struct {
 fn normalizeTextEditState(state: TextEditState) TextEditState {
     return .{
         .text = state.text,
-        .selection = snapTextSelection(state.text, state.selection),
+        .selection = snapTextCaretSelection(state.text, state.selection),
         .composition = if (state.composition) |range| snapTextRange(state.text, range) else null,
     };
 }
@@ -161,7 +184,7 @@ fn replaceTextEditRange(
     cursor_offset: usize,
 ) Error!TextEditState {
     const result = try replaceTextRange(state.text, range, replacement, output);
-    const cursor = snapTextOffset(result.text, result.inserted_range.start + @min(cursor_offset, replacement.len));
+    const cursor = snapTextCaretOffset(result.text, result.inserted_range.start + @min(cursor_offset, replacement.len));
     return .{
         .text = result.text,
         .selection = TextSelection.collapsed(cursor),
@@ -171,9 +194,9 @@ fn replaceTextEditRange(
 
 fn setTextComposition(state: TextEditState, composition: TextCompositionUpdate, output: []u8) Error!TextEditState {
     const range = activeTextReplaceRange(state);
-    const cursor = snapTextOffset(composition.text, composition.cursor orelse composition.text.len);
+    const cursor = snapTextCaretOffset(composition.text, composition.cursor orelse composition.text.len);
     const result = try replaceTextRange(state.text, range, composition.text, output);
-    const absolute_cursor = snapTextOffset(result.text, result.inserted_range.start + cursor);
+    const absolute_cursor = snapTextCaretOffset(result.text, result.inserted_range.start + cursor);
     return .{
         .text = result.text,
         .selection = TextSelection.collapsed(absolute_cursor),
@@ -187,7 +210,7 @@ fn cancelTextComposition(state: TextEditState, output: []u8) Error!TextEditState
     const result = try replaceTextRange(state.text, range, "", output);
     return .{
         .text = result.text,
-        .selection = TextSelection.collapsed(result.inserted_range.start),
+        .selection = TextSelection.collapsed(snapTextCaretOffset(result.text, result.inserted_range.start)),
         .composition = null,
     };
 }
@@ -196,25 +219,25 @@ fn deleteBackwardTextEdit(state: TextEditState, output: []u8) Error!TextEditStat
     const range = activeTextReplaceRange(state);
     if (!range.isCollapsed(state.text.len)) return replaceTextEditRange(state, range, "", output, null, 0);
 
-    const caret = snapTextOffset(state.text, state.selection.focus);
+    const caret = snapTextCaretOffset(state.text, state.selection.focus);
     if (caret == 0) return .{ .text = state.text, .selection = TextSelection.collapsed(0), .composition = null };
-    return replaceTextEditRange(state, TextRange.init(previousTextOffset(state.text, caret), caret), "", output, null, 0);
+    return replaceTextEditRange(state, TextRange.init(previousTextCaretOffset(state.text, caret), caret), "", output, null, 0);
 }
 
 fn deleteForwardTextEdit(state: TextEditState, output: []u8) Error!TextEditState {
     const range = activeTextReplaceRange(state);
     if (!range.isCollapsed(state.text.len)) return replaceTextEditRange(state, range, "", output, null, 0);
 
-    const caret = snapTextOffset(state.text, state.selection.focus);
+    const caret = snapTextCaretOffset(state.text, state.selection.focus);
     if (caret >= state.text.len) return .{ .text = state.text, .selection = TextSelection.collapsed(state.text.len), .composition = null };
-    return replaceTextEditRange(state, TextRange.init(caret, nextTextOffset(state.text, caret)), "", output, null, 0);
+    return replaceTextEditRange(state, TextRange.init(caret, nextTextCaretOffset(state.text, caret)), "", output, null, 0);
 }
 
 fn deleteWordBackwardTextEdit(state: TextEditState, output: []u8) Error!TextEditState {
     const range = activeTextReplaceRange(state);
     if (!range.isCollapsed(state.text.len)) return replaceTextEditRange(state, range, "", output, null, 0);
 
-    const caret = snapTextOffset(state.text, state.selection.focus);
+    const caret = snapTextCaretOffset(state.text, state.selection.focus);
     if (caret == 0) return .{ .text = state.text, .selection = TextSelection.collapsed(0), .composition = null };
     return replaceTextEditRange(state, TextRange.init(previousTextWordOffset(state.text, caret), caret), "", output, null, 0);
 }
@@ -223,17 +246,17 @@ fn deleteWordForwardTextEdit(state: TextEditState, output: []u8) Error!TextEditS
     const range = activeTextReplaceRange(state);
     if (!range.isCollapsed(state.text.len)) return replaceTextEditRange(state, range, "", output, null, 0);
 
-    const caret = snapTextOffset(state.text, state.selection.focus);
+    const caret = snapTextCaretOffset(state.text, state.selection.focus);
     if (caret >= state.text.len) return .{ .text = state.text, .selection = TextSelection.collapsed(state.text.len), .composition = null };
     return replaceTextEditRange(state, TextRange.init(caret, nextTextWordOffset(state.text, caret)), "", output, null, 0);
 }
 
 fn moveTextCaret(state: TextEditState, move: TextCaretMove) TextEditState {
     const range = state.selection.range(state.text.len);
-    const focus = snapTextOffset(state.text, state.selection.focus);
+    const focus = snapTextCaretOffset(state.text, state.selection.focus);
     const target = switch (move.direction) {
-        .previous => if (!move.extend and !range.isCollapsed(state.text.len)) range.start else previousTextOffset(state.text, focus),
-        .next => if (!move.extend and !range.isCollapsed(state.text.len)) range.end else nextTextOffset(state.text, focus),
+        .previous => if (!move.extend and !range.isCollapsed(state.text.len)) range.start else previousTextCaretOffset(state.text, focus),
+        .next => if (!move.extend and !range.isCollapsed(state.text.len)) range.end else nextTextCaretOffset(state.text, focus),
         .previous_word => if (!move.extend and !range.isCollapsed(state.text.len)) range.start else previousTextWordOffset(state.text, focus),
         .next_word => if (!move.extend and !range.isCollapsed(state.text.len)) range.end else nextTextWordOffset(state.text, focus),
         .start => 0,
@@ -245,7 +268,7 @@ fn moveTextCaret(state: TextEditState, move: TextCaretMove) TextEditState {
         TextSelection.collapsed(target);
     return .{
         .text = state.text,
-        .selection = snapTextSelection(state.text, selection),
+        .selection = snapTextCaretSelection(state.text, selection),
         .composition = null,
     };
 }
@@ -277,7 +300,42 @@ pub fn snapTextSelection(text: []const u8, selection: TextSelection) TextSelecti
     return .{
         .anchor = snapTextOffset(text, selection.anchor),
         .focus = snapTextOffset(text, selection.focus),
+        .affinity = selection.affinity,
     };
+}
+
+/// Snap a caret to a valid UTF-8 boundary that cannot split a CRLF hard
+/// line ending. Layout represents the painted end of a CRLF line at the
+/// LF-side byte offset; editing canonicalizes that position before CR.
+pub fn snapTextCaretPosition(text: []const u8, position: TextCaretPosition) TextCaretPosition {
+    const offset = snapTextOffset(text, position.offset);
+    if (offset > 0 and
+        offset < text.len and
+        text[offset] == '\n' and
+        text[offset - 1] == '\r')
+    {
+        return .{ .offset = offset - 1, .affinity = .upstream };
+    }
+    return .{ .offset = offset, .affinity = position.affinity };
+}
+
+/// Snap both editable selection endpoints to caret-safe boundaries. This
+/// is deliberately separate from `snapTextSelection`: non-editing text
+/// ranges may still address either scalar byte of a CRLF delimiter.
+pub fn snapTextCaretSelection(text: []const u8, selection: TextSelection) TextSelection {
+    const focus = snapTextCaretPosition(text, .{
+        .offset = selection.focus,
+        .affinity = selection.affinity,
+    });
+    return .{
+        .anchor = snapTextCaretOffset(text, selection.anchor),
+        .focus = focus.offset,
+        .affinity = focus.affinity,
+    };
+}
+
+fn snapTextCaretOffset(text: []const u8, offset: usize) usize {
+    return snapTextCaretPosition(text, .{ .offset = offset }).offset;
 }
 
 pub fn snapTextRange(text: []const u8, range: TextRange) TextRange {
@@ -310,6 +368,24 @@ pub fn nextTextOffset(text: []const u8, offset: usize) usize {
     // bytes advance one byte instead: the fallback-scalar rule.
     if (next <= offset) return @min(text.len, offset + 1);
     return next;
+}
+
+/// Caret editing treats CRLF as one hard-line boundary even though layout
+/// still walks both scalar bytes to recognize and paint that boundary.
+fn previousTextCaretOffset(text: []const u8, offset: usize) usize {
+    const previous = previousTextOffset(text, offset);
+    if (previous > 0 and text[previous] == '\n' and text[previous - 1] == '\r') {
+        return previous - 1;
+    }
+    return previous;
+}
+
+fn nextTextCaretOffset(text: []const u8, offset: usize) usize {
+    const cursor = snapTextOffset(text, offset);
+    if (cursor < text.len and text[cursor] == '\r' and cursor + 1 < text.len and text[cursor + 1] == '\n') {
+        return cursor + 2;
+    }
+    return nextTextOffset(text, cursor);
 }
 
 pub fn previousTextWordOffset(text: []const u8, offset: usize) usize {
@@ -417,12 +493,28 @@ pub fn textWordSelectionAtOffset(text: []const u8, offset: usize) TextSelection 
 /// text without a stray terminator). Scanning raw bytes for `\n` is
 /// UTF-8 safe — 0x0A never appears inside a multibyte sequence.
 pub fn textLineSelectionAtOffset(text: []const u8, offset: usize) TextSelection {
-    const cursor = @min(offset, text.len);
-    var start = cursor;
-    while (start > 0 and text[start - 1] != '\n') start -= 1;
-    var end = cursor;
-    while (end < text.len and text[end] != '\n') end += 1;
-    return .{ .anchor = start, .focus = end };
+    return .{
+        .anchor = textLineStartOffset(text, offset),
+        .focus = textLineEndOffset(text, offset),
+    };
+}
+
+/// Start of the hard-newline-delimited line containing `offset`. The
+/// offset is snapped to a UTF-8 boundary first; scanning for ASCII LF is
+/// byte-safe because it cannot occur inside a multibyte sequence.
+pub fn textLineStartOffset(text: []const u8, offset: usize) usize {
+    var cursor = snapTextOffset(text, offset);
+    while (cursor > 0 and text[cursor - 1] != '\n') cursor -= 1;
+    return cursor;
+}
+
+/// End of the hard-newline-delimited line containing `offset`, excluding
+/// its line break. CRLF documents exclude both bytes from the line.
+pub fn textLineEndOffset(text: []const u8, offset: usize) usize {
+    var cursor = snapTextOffset(text, offset);
+    while (cursor < text.len and text[cursor] != '\n') cursor += 1;
+    if (cursor > 0 and cursor < text.len and text[cursor - 1] == '\r') return cursor - 1;
+    return cursor;
 }
 
 fn textOffsetStartsWord(text: []const u8, offset: usize) bool {
@@ -565,6 +657,56 @@ test "textLineSelectionAtOffset selects the newline-delimited line without its b
     try std.testing.expectEqualDeep(TextSelection{ .anchor = 18, .focus = 18 }, textLineSelectionAtOffset(text, 18));
     // The last line has no trailing newline; it still selects fully.
     try std.testing.expectEqualDeep(TextSelection{ .anchor = 19, .focus = 25 }, textLineSelectionAtOffset(text, 22));
+
+    try std.testing.expectEqual(@as(usize, 11), textLineStartOffset(text, 15));
+    try std.testing.expectEqual(@as(usize, 17), textLineEndOffset(text, 15));
+    try std.testing.expectEqual(@as(usize, 3), textLineEndOffset("one\r\ntwo", 1));
+    // A bare CR at EOF is content, not the first half of a CRLF break.
+    try std.testing.expectEqual(@as(usize, 4), textLineEndOffset("one\r", 1));
+}
+
+test "caret movement and deletion cross CRLF atomically" {
+    const text = "one\r\ntwo";
+    var scratch: [32]u8 = undefined;
+
+    // Programmatic selections and raw edit state cannot expose the byte
+    // between CR and LF as a caret or selection endpoint.
+    const inside_break = TextEditState{
+        .text = text,
+        .selection = TextSelection.collapsed(4),
+    };
+    const selected_inside_break = try inside_break.apply(.{
+        .set_selection = TextSelection.collapsed(4),
+    }, &scratch);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(3), selected_inside_break.selection);
+    const inserted_inside_break = try inside_break.apply(.{ .insert_text = "X" }, &scratch);
+    try std.testing.expectEqualStrings("oneX\r\ntwo", inserted_inside_break.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(4), inserted_inside_break.selection);
+
+    try std.testing.expectEqualDeep(
+        TextSelection{ .anchor = 3, .focus = 5 },
+        snapTextCaretSelection(text, .{ .anchor = 4, .focus = 5 }),
+    );
+
+    const before_break = TextEditState{
+        .text = text,
+        .selection = TextSelection.collapsed(3),
+    };
+    const moved_next = try before_break.apply(.{ .move_caret = .{ .direction = .next } }, &scratch);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(5), moved_next.selection);
+    const deleted_forward = try before_break.apply(.delete_forward, &scratch);
+    try std.testing.expectEqualStrings("onetwo", deleted_forward.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(3), deleted_forward.selection);
+
+    const after_break = TextEditState{
+        .text = text,
+        .selection = TextSelection.collapsed(5),
+    };
+    const moved_previous = try after_break.apply(.{ .move_caret = .{ .direction = .previous } }, &scratch);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(3), moved_previous.selection);
+    const deleted_backward = try after_break.apply(.delete_backward, &scratch);
+    try std.testing.expectEqualStrings("onetwo", deleted_backward.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(3), deleted_backward.selection);
 }
 
 test "TextBuffer mirrors edits, truncates at capacity, and clears" {

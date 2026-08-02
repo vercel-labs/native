@@ -114,6 +114,24 @@ pub fn widgetVirtualRuntimeScrolled(widget: Widget) bool {
     return widget.kind == .scroll_view and widget.layout.virtualized and widget.layout.virtual_item_count > 0;
 }
 
+/// Whether one widget scrolls on the named axis. This is THE axis
+/// capability predicate: wheel/trackpad routing resolves each axis
+/// against it independently, keyboard and semantic scroll intents pick
+/// their axis through it, and the scrollbar/driver emit only the axes
+/// it grants. Vertical: every scrollable kind (scroll views unless
+/// declared `horizontal`, textareas, the virtualized containers).
+/// Horizontal: a non-virtualized `.scroll_view` declared `horizontal` or
+/// `both`, plus an editable no-wrap code textarea. Virtualization is
+/// vertical machinery (windowed ranges price rows, not columns), so a
+/// virtualized region never grants the horizontal axis.
+pub fn widgetScrollsAxis(widget: Widget, axis: token_model.ScrollAxis) bool {
+    return switch (axis) {
+        .vertical => widget.kind != .scroll_view or widget.scroll_axes.scrollsVertically() or widget.layout.virtualized,
+        .horizontal => (widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized) or
+            (widget.kind == .textarea and widget.code_editor and widget.text_no_wrap),
+    };
+}
+
 /// The effective scroll physics for one scroll region: the shared
 /// `ScrollPhysics` token with the region's `Widget.overscroll` override
 /// resolved onto `physics.overscroll` (`.default` keeps the token's
@@ -217,14 +235,26 @@ pub fn isWidgetConcealedByDisclosure(layout: anytype, node_index: usize) bool {
     return false;
 }
 
+/// The column count a grid lays out, measures, and reports: the DECLARED
+/// count when one is set — even when fewer children remain (a filtered
+/// grid keeps its column-slot geometry; children fill the leading slots
+/// and the trailing slots stay empty, they never stretch to fill missing
+/// columns) — and one column per child when unset (the single-row grid).
 pub fn gridColumnCount(child_count: usize, requested_columns: usize) usize {
     if (child_count == 0) return 0;
-    return if (requested_columns > 0) @min(requested_columns, child_count) else child_count;
+    return if (requested_columns > 0) requested_columns else child_count;
 }
 
+/// The row count those columns yield: ceil-division stated as
+/// `1 + (count - 1) / columns` rather than the additive
+/// `(count + columns - 1) / columns` — a declared column count is
+/// engine input (never validator-bounded), so `columns` may be any
+/// usize, including values where the additive form's sum overflows in
+/// safe builds. Both the layout and intrinsic-size paths share this
+/// helper.
 pub fn gridRowCount(child_count: usize, columns: usize) usize {
     if (child_count == 0 or columns == 0) return 0;
-    return (child_count + columns - 1) / columns;
+    return 1 + (child_count - 1) / columns;
 }
 
 pub fn saturatingU32(value: usize) u32 {

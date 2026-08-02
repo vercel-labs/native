@@ -56,6 +56,21 @@ pub const WidgetPointerEvent = struct {
     /// press that started the gesture, which is how a double-click
     /// drag knows to extend by words.
     click_count: u8 = 1,
+    /// The host's pointer identity (`GpuSurfaceInputEvent.pointer_id`),
+    /// forwarded so per-pointer state can tell devices apart on hosts
+    /// that distinguish them: the hover-Msg containment gate scopes its
+    /// hover-capable-pointer proof to this id, so a touch contact can
+    /// never ride a mouse's proof. Desktop hosts with one pointer leave
+    /// it 0.
+    pointer_id: u64 = 0,
+    /// Platform button number for down/up events (0 = primary). Motion
+    /// may leave this at 0; gesture owners use the initiating down to
+    /// decide whether to capture.
+    button: i32 = 0,
+    /// Keyboard modifiers held for this pointer event. Text editors use
+    /// Shift on pointer-down to extend from the existing selection
+    /// anchor instead of replacing it with a collapsed caret.
+    modifiers: WidgetKeyboardModifiers = .{},
 };
 
 pub const WidgetKeyboardPhase = enum {
@@ -119,6 +134,206 @@ pub fn widgetKeyboardNewlineTextEditEvent(kind: WidgetKind, event: WidgetKeyboar
     return .{ .insert_text = "\n" };
 }
 
+/// Editable code owns a plain Tab as indentation input. The file's
+/// leading whitespace votes for tabs versus spaces; space widths 2..8
+/// compete by how many indentation levels they divide cleanly, with the
+/// wider width winning exact ties (4-space files also divide by 2).
+/// Ambiguous or unindented source falls back to two spaces.
+pub fn widgetCodeTabTextEditEvent(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
+    if (widget.kind != .textarea or !widget.code_editor or widget.state.disabled) return null;
+    if (event.phase != .key_down or event.focus_moved or event.text.len != 0) return null;
+    if (event.modifiers.shift or event.modifiers.hasNavigationModifier()) return null;
+    if (!std.ascii.eqlIgnoreCase(event.key, "tab")) return null;
+    return .{ .insert_text = codeIndentationInsertion(widget) };
+}
+
+const CodeIndentKind = enum { none, spaces, tabs };
+
+fn codeIndentationInsertion(widget: Widget) []const u8 {
+    var tab_lines: usize = 0;
+    var space_lines: usize = 0;
+    var space_width_scores: [9]usize = @splat(0);
+    var only_space_indent: ?usize = null;
+
+    var line_start: usize = 0;
+    while (line_start <= widget.text.len) {
+        const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n');
+        const line_end = newline orelse widget.text.len;
+        const line = widget.text[line_start..line_end];
+        var cursor: usize = 0;
+        var spaces: usize = 0;
+        var tabs: usize = 0;
+        while (cursor < line.len) : (cursor += 1) {
+            switch (line[cursor]) {
+                ' ' => spaces += 1,
+                '\t' => tabs += 1,
+                else => break,
+            }
+        }
+        // Whitespace-only lines do not state a file convention.
+        if (cursor < line.len and cursor > 0) {
+            if (tabs > 0) {
+                tab_lines += 1;
+            } else {
+                space_lines += 1;
+                only_space_indent = if (space_lines == 1) spaces else null;
+                for (2..space_width_scores.len) |width| {
+                    if (spaces % width == 0) space_width_scores[width] += 1;
+                }
+            }
+        }
+
+        if (newline == null) break;
+        line_start = line_end + 1;
+    }
+
+    const selection = widget.text_selection orelse text_model.TextSelection.collapsed(widget.text.len);
+    const local_kind = codeIndentKindAt(widget.text, selection.focus);
+    const tabs_win = tab_lines > space_lines or
+        (tab_lines == space_lines and tab_lines > 0 and local_kind == .tabs);
+    if (tabs_win) return "\t";
+
+    var inferred_width: usize = 2;
+    if (space_lines == 1) {
+        const width = only_space_indent orelse 0;
+        if (width >= 2 and width <= 8) inferred_width = width;
+    } else if (space_lines > 1) {
+        var best_width: usize = 2;
+        var best_score: usize = 0;
+        for (2..space_width_scores.len) |width| {
+            const score = space_width_scores[width];
+            if (score > best_score or (score == best_score and score > 0 and width > best_width)) {
+                best_width = width;
+                best_score = score;
+            }
+        }
+        if (best_score * 2 >= space_lines) inferred_width = best_width;
+    }
+
+    return switch (inferred_width) {
+        3 => "   ",
+        4 => "    ",
+        5 => "     ",
+        6 => "      ",
+        7 => "       ",
+        8 => "        ",
+        else => "  ",
+    };
+}
+
+fn codeIndentKindAt(text: []const u8, offset: usize) CodeIndentKind {
+    const caret = @min(offset, text.len);
+    const line_start = if (std.mem.lastIndexOfScalar(u8, text[0..caret], '\n')) |newline| newline + 1 else 0;
+    if (line_start >= text.len) return .none;
+    return switch (text[line_start]) {
+        '\t' => .tabs,
+        ' ' => .spaces,
+        else => .none,
+    };
+}
+
+/// The single-line text-entry kinds: their value can never hold a line
+/// break (Enter submits instead of editing — see
+/// `widgetKeyboardNewlineTextEditEvent`), so text inserted into them
+/// sanitizes through `sanitizedSingleLineTextInputEvent`. The textarea is
+/// the one genuinely multi-line editable kind and stays out.
+pub fn widgetKindSingleLineTextEntry(kind: WidgetKind) bool {
+    return kind == .input or kind == .text_field or kind == .search_field or kind == .combobox;
+}
+
+/// Sanitized-edit scratch: the rewritten insert bytes live here until the
+/// next edit that needs rewriting. Sound for the same reason the runtime's
+/// paste buffer is: the event loop is single-threaded, at most one
+/// insert-bearing edit is derived per dispatched input, and every consumer
+/// (retained editor apply, the app's `on_input` Msg, model mirrors) reads
+/// the stamped bytes synchronously within that dispatch. Sized to the
+/// runtime's per-view widget-text budget
+/// (`max_canvas_widget_text_bytes_per_view`), the largest insert the
+/// editor could accept anyway.
+const max_sanitized_text_edit_bytes: usize = text_model.max_widget_text_bytes_per_view;
+const SanitizedTextEditScratch = struct {
+    bytes: [max_sanitized_text_edit_bytes]u8,
+};
+const sanitized_text_edit_scratch = @import("lazy_tls.zig").LazyTls(SanitizedTextEditScratch);
+
+fn textContainsLineBreakByte(text: []const u8) bool {
+    // Raw byte scan is UTF-8 safe: 0x0A/0x0D never appear inside a
+    // multibyte sequence.
+    return std.mem.indexOfAny(u8, text, "\r\n") != null;
+}
+
+/// The ONE sanitization rule for text entering a single-line field, at
+/// the edit-derivation seam every insertion source flows through
+/// (clipboard paste — shortcut and context menu —, typed/automation
+/// `text_input`, IME composition, and the app-side fallback derivation):
+///
+///   line breaks are STRIPPED from inserted text — U+000A and U+000D
+///   removed outright, lines joined with nothing between them.
+///
+/// This is the HTML value sanitization algorithm for single-line inputs
+/// ("Strip newlines from the value",
+/// https://html.spec.whatwg.org/multipage/input.html), which is also what
+/// Chromium does when pasting multi-line text into an `<input>` — the
+/// dominant convention. (WebKit historically substituted spaces; there is
+/// no spec for the paste path itself, so the value-sanitization rule
+/// wins.)
+///
+/// Contracts, in declaration order:
+///   - multi-line kinds (textarea) and non-insert edits pass through
+///     untouched;
+///   - an insert that strips to NOTHING is suppressed (null): pasting
+///     bare newlines inserts nothing and never eats a live selection,
+///     and an Enter whose host stuffed "\r"/"\n" into the key event
+///     stays not-an-insert;
+///   - a composition update strips the same way but an EMPTY result is
+///     kept (an empty preview is meaningful — it clears the previous
+///     one), with the preview cursor shifted left past the removed
+///     bytes, so the IME COMMIT (which lands whatever the preview
+///     holds) can never commit a line break into a single-line field;
+///   - an insert too large for the scratch passes through untouched —
+///     the editor apply rejects over-budget inserts loudly anyway.
+///
+/// Deterministic derivation: the session journal records the RAW
+/// platform event; replaying it re-derives the identical sanitized edit
+/// here, so recorded multi-line pastes replay byte-identically.
+pub fn sanitizedSingleLineTextInputEvent(kind: WidgetKind, event: TextInputEvent) ?TextInputEvent {
+    if (!widgetKindSingleLineTextEntry(kind)) return event;
+    switch (event) {
+        .insert_text => |text| {
+            if (!textContainsLineBreakByte(text)) return event;
+            if (text.len > max_sanitized_text_edit_bytes) return event;
+            const stripped = stripLineBreakBytes(text, &sanitized_text_edit_scratch.get().bytes);
+            if (stripped.len == 0) return null;
+            return .{ .insert_text = stripped };
+        },
+        .set_composition => |composition| {
+            if (!textContainsLineBreakByte(composition.text)) return event;
+            if (composition.text.len > max_sanitized_text_edit_bytes) return event;
+            const cursor = @min(composition.cursor orelse composition.text.len, composition.text.len);
+            var stripped_cursor: usize = cursor;
+            for (composition.text[0..cursor]) |byte| {
+                if (byte == '\n' or byte == '\r') stripped_cursor -= 1;
+            }
+            const stripped = stripLineBreakBytes(composition.text, &sanitized_text_edit_scratch.get().bytes);
+            return .{ .set_composition = .{
+                .text = stripped,
+                .cursor = if (composition.cursor == null and stripped_cursor == stripped.len) null else stripped_cursor,
+            } };
+        },
+        else => return event,
+    }
+}
+
+fn stripLineBreakBytes(text: []const u8, buffer: []u8) []const u8 {
+    var len: usize = 0;
+    for (text) |byte| {
+        if (byte == '\n' or byte == '\r') continue;
+        buffer[len] = byte;
+        len += 1;
+    }
+    return buffer[0..len];
+}
+
 /// The clipboard intent of a key event: cmd+C/X/V on macOS, ctrl+C/X/V
 /// elsewhere (`hasCommandModifier` covers both). Shift/alt variants are
 /// deliberately excluded so shift+ctrl+V-style paste-special chords stay
@@ -152,7 +367,12 @@ pub const WidgetControlIntent = struct {
     kind: WidgetControlIntentKind,
     actions: WidgetActions = .{},
     value: ?f32 = null,
-    delta: f32 = 0,
+    /// Scroll step for `scroll_by` intents, in canvas points on each
+    /// axis. Keyboard and semantic scroll steps set exactly one axis;
+    /// which one follows the widget's scroll-axes grant (vertical
+    /// keymap on vertical-capable regions, horizontal on
+    /// horizontal-only ones).
+    delta: geometry.OffsetF = .{},
 };
 
 pub const WidgetSemanticAction = enum {
@@ -555,29 +775,68 @@ pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent)
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .{ .kind = .scroll_to_start, .actions = .{ .decrement = true } };
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .{ .kind = .scroll_to_end, .actions = .{ .increment = true } };
     const delta = widgetScrollKeyboardDelta(widget, keyboard) orelse return null;
+    const step = if (delta.dy != 0) delta.dy else delta.dx;
     return .{
         .kind = .scroll_by,
         .actions = .{
-            .increment = delta > 0,
-            .decrement = delta < 0,
+            .increment = step > 0,
+            .decrement = step < 0,
         },
         .delta = delta,
     };
 }
 
-pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
+/// True when a scroll-intent widget takes the HORIZONTAL keymap: a
+/// horizontal-only `.scroll_view`. Vertical-capable regions (including
+/// `both`, whose left/right arrows step sideways below) and every other
+/// scrollable kind keep the vertical keymap they always had.
+fn widgetScrollKeymapHorizontalOnly(widget: Widget) bool {
+    return widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .horizontal;
+}
+
+/// The keyboard scroll step, axis-aware:
+/// - vertical regions keep the exact legacy map (both arrow pairs step
+///   the vertical axis — Left/Up a line up, Right/Down a line down —
+///   and PageUp/PageDown page it);
+/// - a horizontal-only region mirrors that whole map onto its one axis,
+///   with line/page steps measured from the viewport WIDTH;
+/// - a `both` region keeps the vertical map and gives Left/Right to the
+///   horizontal axis — the two-axis convention native scroll views use.
+pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?geometry.OffsetF {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
+    if (widgetScrollKeymapHorizontalOnly(widget)) {
+        const line_step = @max(24, viewport.width * 0.35);
+        const page_step = @max(line_step, viewport.width * 0.85);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
+            return geometry.OffsetF.init(-line_step, 0);
+        }
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
+            return geometry.OffsetF.init(line_step, 0);
+        }
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return geometry.OffsetF.init(-page_step, 0);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return geometry.OffsetF.init(page_step, 0);
+        return null;
+    }
+    const dual = widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .both;
     const line_step = @max(24, viewport.height * 0.35);
     const page_step = @max(line_step, viewport.height * 0.85);
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
-        return -line_step;
+    if (dual) {
+        const line_step_x = @max(24, viewport.width * 0.35);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return geometry.OffsetF.init(-line_step_x, 0);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return geometry.OffsetF.init(line_step_x, 0);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return geometry.OffsetF.init(0, -line_step);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return geometry.OffsetF.init(0, line_step);
+    } else {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
+            return geometry.OffsetF.init(0, -line_step);
+        }
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
+            return geometry.OffsetF.init(0, line_step);
+        }
     }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
-        return line_step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return -page_step;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return page_step;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return geometry.OffsetF.init(0, -page_step);
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return geometry.OffsetF.init(0, page_step);
     return null;
 }
 
@@ -610,11 +869,43 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
     };
 }
 
-fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirection) f32 {
+/// Assistive scroll steps page ONE axis — the region's primary, by the
+/// same range-aware rule its scroll semantics report through: vertical
+/// wherever the vertical axis is granted and can move, the horizontal
+/// axis on horizontal-only regions and on `both` regions whose content
+/// only overflows sideways. A diagonal step would move the viewport on
+/// an axis the assistive node never exposed. Range for the `both` case
+/// reads the widget's own children (widget-walk trees carry them);
+/// retained layout nodes drop children, and their caller — the
+/// runtime's accessibility-action path — resolves the axis with live
+/// extents instead (`canvasWidgetStepKey`).
+fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirection) geometry.OffsetF {
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
-    const line_step = @max(24, viewport.height * 0.35);
-    const page_step = @max(line_step, viewport.height * 0.85);
-    return if (direction == .increment) page_step else -page_step;
+    const sign: f32 = if (direction == .increment) 1 else -1;
+    const horizontal_primary = widgetScrollKeymapHorizontalOnly(widget) or
+        (widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .both and
+            widgetChildrenScrollHorizontalOnly(widget, viewport));
+    if (horizontal_primary) {
+        const page_step_x = @max(@max(24, viewport.width * 0.35), viewport.width * 0.85);
+        return geometry.OffsetF.init(sign * page_step_x, 0);
+    }
+    const page_step_y = @max(@max(24, viewport.height * 0.35), viewport.height * 0.85);
+    return geometry.OffsetF.init(0, sign * page_step_y);
+}
+
+/// Whether a `both` region's mounted children overflow ONLY sideways:
+/// no vertical range (nothing reaches past the fold) while something
+/// reaches past the right edge. False on childless nodes — retained
+/// trees drop children, and their callers resolve range elsewhere.
+fn widgetChildrenScrollHorizontalOnly(widget: Widget, viewport: geometry.RectF) bool {
+    if (widget.children.len == 0) return false;
+    var right = viewport.maxX();
+    var bottom = viewport.maxY();
+    for (widget.children) |child| {
+        right = @max(right, child.frame.maxX() + widget.value_x);
+        bottom = @max(bottom, child.frame.maxY() + widget.value);
+    }
+    return bottom <= viewport.maxY() and right > viewport.maxX();
 }
 
 pub fn semanticActions(widget: Widget) WidgetActions {
@@ -690,7 +981,78 @@ pub fn defaultFocusable(widget: Widget) bool {
     // part of the tree's roving keyboard focus set.
     if (widget.semantics.role == .treeitem) return !widget.state.disabled;
     return switch (widget.kind) {
-        .scroll_view, .accordion, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .split_divider => !widget.state.disabled,
+        .scroll_view, .accordion, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .split_divider, .terminal => !widget.state.disabled,
         else => false,
     };
+}
+
+test "sanitizedSingleLineTextInputEvent strips line breaks per the HTML value-sanitization rule" {
+    const testing = std.testing;
+    // Interior LF, CR, and CRLF all strip outright — lines join with
+    // nothing between them (the Chromium <input> paste behavior).
+    const pasted = sanitizedSingleLineTextInputEvent(.input, .{ .insert_text = "alpha\nbeta\r\ngamma\r" }).?;
+    try testing.expectEqualStrings("alphabetagamma", pasted.insert_text);
+
+    // Every single-line kind sanitizes; the textarea keeps its breaks.
+    for ([_]WidgetKind{ .input, .text_field, .search_field, .combobox }) |kind| {
+        const stripped = sanitizedSingleLineTextInputEvent(kind, .{ .insert_text = "a\nb" }).?;
+        try testing.expectEqualStrings("ab", stripped.insert_text);
+    }
+    const textarea = sanitizedSingleLineTextInputEvent(.textarea, .{ .insert_text = "a\nb" }).?;
+    try testing.expectEqualStrings("a\nb", textarea.insert_text);
+
+    // Break-free inserts pass through as the SAME slice (zero copy), and
+    // the deliberately-empty insert (cut's delete-selection) survives.
+    const clean: TextInputEvent = .{ .insert_text = "plain" };
+    try testing.expectEqual(clean.insert_text.ptr, sanitizedSingleLineTextInputEvent(.input, clean).?.insert_text.ptr);
+    const cut = sanitizedSingleLineTextInputEvent(.input, .{ .insert_text = "" }).?;
+    try testing.expectEqualStrings("", cut.insert_text);
+
+    // An insert that is ONLY line breaks suppresses: pasting bare
+    // newlines inserts nothing, and an Enter whose host stuffed "\r"
+    // into the key event stays not-an-insert.
+    try testing.expect(sanitizedSingleLineTextInputEvent(.input, .{ .insert_text = "\r\n\n" }) == null);
+
+    // Non-insert edits pass through untouched.
+    const moved = sanitizedSingleLineTextInputEvent(.input, .{ .move_caret = .{ .direction = .end } }).?;
+    try testing.expect(moved.move_caret.direction == .end);
+}
+
+test "sanitizedSingleLineTextInputEvent strips composition text and shifts the preview cursor" {
+    const testing = std.testing;
+    // "ab\ncd" with the cursor after "cd" (offset 5): the stripped
+    // preview is "abcd" with the cursor at 4.
+    const preview = sanitizedSingleLineTextInputEvent(.combobox, .{ .set_composition = .{ .text = "ab\ncd", .cursor = 5 } }).?;
+    try testing.expectEqualStrings("abcd", preview.set_composition.text);
+    try testing.expectEqual(@as(usize, 4), preview.set_composition.cursor.?);
+
+    // A cursor BEFORE the break does not shift.
+    const early = sanitizedSingleLineTextInputEvent(.search_field, .{ .set_composition = .{ .text = "ab\ncd", .cursor = 2 } }).?;
+    try testing.expectEqual(@as(usize, 2), early.set_composition.cursor.?);
+
+    // A null cursor (end-of-preview) stays null.
+    const tail = sanitizedSingleLineTextInputEvent(.input, .{ .set_composition = .{ .text = "a\r\nb" } }).?;
+    try testing.expectEqualStrings("ab", tail.set_composition.text);
+    try testing.expect(tail.set_composition.cursor == null);
+
+    // An all-breaks preview is KEPT as the empty preview (it clears the
+    // previous one) rather than suppressed.
+    const cleared = sanitizedSingleLineTextInputEvent(.input, .{ .set_composition = .{ .text = "\n" } }).?;
+    try testing.expectEqualStrings("", cleared.set_composition.text);
+
+    // A textarea preview keeps its newline.
+    const multi = sanitizedSingleLineTextInputEvent(.textarea, .{ .set_composition = .{ .text = "a\nb" } }).?;
+    try testing.expectEqualStrings("a\nb", multi.set_composition.text);
+}
+
+test "sanitizedSingleLineTextInputEvent sanitizes inserts above the former 64 KiB ceiling" {
+    const testing = std.testing;
+    const input = try testing.allocator.alloc(u8, 65537);
+    defer testing.allocator.free(input);
+    @memset(input, 'a');
+    input[32768] = '\n';
+
+    const sanitized = sanitizedSingleLineTextInputEvent(.text_field, .{ .insert_text = input }).?;
+    try testing.expectEqual(@as(usize, input.len - 1), sanitized.insert_text.len);
+    try testing.expect(std.mem.indexOfAny(u8, sanitized.insert_text, "\r\n") == null);
 }

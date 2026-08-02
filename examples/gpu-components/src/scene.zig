@@ -48,6 +48,8 @@ const canvas_toolbar_title_id = model.canvas_toolbar_title_id;
 const canvas_toolbar_theme_id = model.canvas_toolbar_theme_id;
 const canvas_toolbar_refresh_id = model.canvas_toolbar_refresh_id;
 const canvas_toolbar_separator_id = model.canvas_toolbar_separator_id;
+const component_tree_scroll_id = model.component_tree_scroll_id;
+const component_tree_id = model.component_tree_id;
 const canvas_sidebar_id = model.canvas_sidebar_id;
 const canvas_sidebar_title_id = model.canvas_sidebar_title_id;
 const canvas_sidebar_resize_line_id = model.canvas_sidebar_resize_line_id;
@@ -77,6 +79,8 @@ const environmentOptionId = model.environmentOptionId;
 const componentSectionLabel = model.componentSectionLabel;
 const componentSectionCommand = model.componentSectionCommand;
 const componentSectionNavId = model.componentSectionNavId;
+const componentTreeItemId = model.componentTreeItemId;
+const componentTreeItemCommand = model.componentTreeItemCommand;
 const surfaceOverlayLabel = model.surfaceOverlayLabel;
 const surfaceOverlayBody = model.surfaceOverlayBody;
 const color = model.color;
@@ -403,7 +407,7 @@ pub fn componentVirtualScrollTarget(route: []const canvas.WidgetEventRouteEntry)
     var page_scroll: ?canvas.ObjectId = null;
     for (route) |entry| {
         switch (entry.id) {
-            120, 130, 150 => return entry.id,
+            component_tree_scroll_id, 120, 130, 150 => return entry.id,
             content_scroll_id => page_scroll = content_scroll_id,
             else => {},
         }
@@ -455,7 +459,7 @@ pub fn clampComponentVirtualScrollOffset(raw_next: f32, max_offset: f32, fallbac
     return std.math.clamp(@max(0, raw_next), 0, @max(0, max_offset));
 }
 
-pub fn componentScrollStatesEqual(a: canvas.ScrollState, b: canvas.ScrollState) bool {
+pub fn componentScrollStatesEqual(a: canvas.ScrollAxisState, b: canvas.ScrollAxisState) bool {
     return a.offset == b.offset and
         a.velocity == b.velocity and
         a.viewport_extent == b.viewport_extent and
@@ -598,6 +602,19 @@ pub fn componentCatalogItem(kind: canvas.BuiltinComponentKind, index: usize) can
     });
 }
 
+/// One focused specimen instead of the old wall of thumbnail cards.
+/// The preview tree is identical to the catalog golden's canonical
+/// component composition, but the card supplies the content column's
+/// available width. Under Geist that lets full-width registers such as
+/// Tabs use a real application container; house controls retain their
+/// authored hug geometry.
+pub fn componentCatalogDetailItem(kind: canvas.BuiltinComponentKind, index: usize, content_width: f32) canvas.Widget {
+    var item = componentCatalogItem(kind, index);
+    item.frame = rect(64, 124, @min(720, @max(catalog_card_width, content_width - 128)), 300);
+    item.state.selected = true;
+    return item;
+}
+
 pub fn componentCatalogItemFrame(index: usize) geometry.RectF {
     const column = index % catalog_grid_columns;
     const row = index / catalog_grid_columns;
@@ -670,7 +687,7 @@ pub fn componentSectionContentHeight(section: ComponentSection) f32 {
         .controls => 700,
         .inputs => 560,
         .data => 360,
-        .components => componentCatalogGridHeight(),
+        .components => 520,
         .surfaces => 520,
     };
 }
@@ -759,15 +776,18 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
     // commits, Escape dismisses back to the trigger) applies as-is.
     const environment_select_trigger = canvas.Widget{ .id = environment_select_id, .kind = .select, .frame = rect(0, 0, 180, 34), .text = environmentLabel(ui_state.environment_index), .command = environment_toggle_command, .state = .{ .expanded = ui_state.environment_select_open }, .semantics = .{ .label = "Environment select" } };
     const environment_closed_children = [_]canvas.Widget{environment_select_trigger};
-    const environment_open_children = [_]canvas.Widget{ environment_select_trigger, canvas.builtinComponentWidget(.dropdown_menu, .{
-        .id = environment_menu_id,
-        // 3 rows on the menu's comfortable 32px band + the surface's
-        // 4px padding and 2px gaps.
-        .frame = rect(0, 0, 180, 108),
-        .layout = .{ .anchor = .{ .placement = .below, .alignment = .stretch } },
-        .semantics = .{ .label = "Environment options" },
-        .children = &environment_menu_items,
-    }) };
+    const environment_open_children = [_]canvas.Widget{
+        environment_select_trigger,
+        canvas.builtinComponentWidget(.dropdown_menu, .{
+            .id = environment_menu_id,
+            // 3 rows on the menu's comfortable 32px band + the surface's
+            // 4px padding and 2px gaps.
+            .frame = rect(0, 0, 180, 108),
+            .layout = .{ .anchor = .{ .placement = .below, .alignment = .stretch } },
+            .semantics = .{ .label = "Environment options" },
+            .children = &environment_menu_items,
+        }),
+    };
     const form_controls = [_]canvas.Widget{
         .{ .id = 111, .kind = .input, .frame = rect(0, 0, 148, 34), .text = "native-sdk", .semantics = .{ .label = "Project name" } },
         .{ .id = 112, .kind = .combobox, .frame = rect(166, 0, 172, 34), .text = "components", .semantics = .{ .label = "Component combobox" } },
@@ -777,11 +797,10 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
         .{ .id = 115, .kind = .slider, .frame = rect(0, 108, 176, 28), .value = 0.62, .semantics = .{ .label = "Density slider" } },
         .{ .id = 116, .kind = .progress, .frame = rect(202, 120, 134, 4), .value = 1, .semantics = .{ .label = "Build progress" } },
         .{ .id = 167, .kind = .radio_group, .frame = rect(0, 148, 160, 28), .layout = .{ .gap = 10, .cross_alignment = .center }, .semantics = .{ .label = "Layout radio group" }, .children = &radio_controls },
-        // The house TabsList hug: triggers sit 3px inside the container
-        // (raw widget trees bypass the builder defaults, so the inset is
-        // spelled out) and carry no gap — the selected trigger's corners
-        // stay concentric with the container's rounding.
-        .{ .id = 168, .kind = .tabs, .frame = rect(0, 200, 148, 34), .layout = .{ .padding = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 } }, .semantics = .{ .label = "Density tabs" }, .children = &segment_controls },
+        // This raw catalog tree spells out the house TabsList default:
+        // triggers sit 3px inside the container, and the provenance bit
+        // lets Geist resolve that inherited inset onto its own register.
+        .{ .id = 168, .kind = .tabs, .frame = rect(0, 200, 148, 34), .layout = .{ .padding = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 }, .padding_is_kind_default = true }, .semantics = .{ .label = "Density tabs" }, .children = &segment_controls },
         .{ .id = 171, .kind = .textarea, .frame = rect(0, 246, 336, 72), .text = "Compose a native-rendered message", .semantics = .{ .label = "Message textarea" } },
         .{ .id = environment_stack_id, .kind = .stack, .frame = rect(0, 330, 180, 34), .children = if (ui_state.environment_select_open) &environment_open_children else &environment_closed_children },
     };
@@ -842,15 +861,73 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
     const content_height_available = componentContentHeightForSize(size);
     const statusbar_height_available = componentStatusbarHeightForSize(size);
     const sidebar_width = componentSidebarWidthForSize(ui_state.sidebar_width, size);
+    const content_width = @max(1, size.width - sidebar_width);
     const sidebar_title_width = @max(1, sidebar_width - 44);
     const sidebar_item_width = @max(1, sidebar_width - 28);
+    const sections = [_]ComponentSection{ .controls, .inputs, .data, .components, .surfaces };
+    var sidebar_component_row_children: [canvas.builtin_component_names.len][2]canvas.Widget = undefined;
+    var sidebar_tree_rows: [sections.len + canvas.builtin_component_names.len]canvas.Widget = undefined;
+    var sidebar_tree_row_count: usize = 0;
+    for (sections) |section| {
+        try appendComponentWidget(&sidebar_tree_rows, &sidebar_tree_row_count, .{
+            .id = componentSectionNavId(section),
+            .kind = .list_item,
+            .frame = rect(0, 0, 0, 32),
+            .text = componentSectionLabel(section),
+            .tree_level = 1,
+            .command = componentSectionCommand(section),
+            .state = .{
+                .selected = ui_state.section == section and section != .components,
+                .expanded = if (section == .components) true else null,
+            },
+            .semantics = .{ .role = .treeitem, .label = componentSectionLabel(section) },
+        });
+        if (section != .components) continue;
+        for (canvas.builtin_component_names, 0..) |name, index| {
+            // `tree_level` is the row's logical hierarchy for keyboard
+            // navigation. The explorer owns its visual nesting through
+            // ordinary child layout, matching the documented tree
+            // contract and keeping generic tree rows free to choose their
+            // own indentation. The first spacer includes the list row's
+            // normal text inset plus one depth step.
+            sidebar_component_row_children[index] = .{
+                .{ .kind = .stack, .frame = rect(0, 0, tokens.spacing.md + tokens.spacing.lg, 0) },
+                .{ .kind = .text, .text = name, .text_no_wrap = true, .layout = .{ .grow = 1 } },
+            };
+            try appendComponentWidget(&sidebar_tree_rows, &sidebar_tree_row_count, .{
+                .id = componentTreeItemId(index),
+                .kind = .list_item,
+                .frame = rect(0, 0, 0, 32),
+                .tree_level = 2,
+                .command = componentTreeItemCommand(index),
+                .layout = .{ .cross_alignment = .center },
+                .state = .{ .selected = ui_state.section == .components and ui_state.selected_component == index },
+                .semantics = .{ .role = .treeitem, .label = name },
+                .children = &sidebar_component_row_children[index],
+            });
+        }
+    }
+    const sidebar_tree = canvas.Widget{
+        .id = component_tree_id,
+        .kind = .tree,
+        .frame = rect(0, 0, sidebar_item_width, @max(0, @as(f32, @floatFromInt(sidebar_tree_row_count)) * 34 - 2)),
+        .layout = .{ .gap = 2, .cross_alignment = .stretch },
+        .semantics = .{ .label = "Component explorer" },
+        .children = sidebar_tree_rows[0..sidebar_tree_row_count],
+    };
+    const sidebar_tree_children = [_]canvas.Widget{sidebar_tree};
     const sidebar_children = [_]canvas.Widget{
-        .{ .id = canvas_sidebar_title_id, .kind = .text, .frame = rect(22, 28, sidebar_title_width, 24), .text = "Native-first kit", .size = .lg },
-        .{ .id = componentSectionNavId(.controls), .kind = .list_item, .frame = rect(14, 78, sidebar_item_width, 34), .text = componentSectionLabel(.controls), .command = componentSectionCommand(.controls), .state = .{ .selected = ui_state.section == .controls }, .semantics = .{ .label = componentSectionLabel(.controls) } },
-        .{ .id = componentSectionNavId(.inputs), .kind = .list_item, .frame = rect(14, 118, sidebar_item_width, 34), .text = componentSectionLabel(.inputs), .command = componentSectionCommand(.inputs), .state = .{ .selected = ui_state.section == .inputs }, .semantics = .{ .label = componentSectionLabel(.inputs) } },
-        .{ .id = componentSectionNavId(.data), .kind = .list_item, .frame = rect(14, 158, sidebar_item_width, 34), .text = componentSectionLabel(.data), .command = componentSectionCommand(.data), .state = .{ .selected = ui_state.section == .data }, .semantics = .{ .label = componentSectionLabel(.data) } },
-        .{ .id = componentSectionNavId(.components), .kind = .list_item, .frame = rect(14, 198, sidebar_item_width, 34), .text = componentSectionLabel(.components), .command = componentSectionCommand(.components), .state = .{ .selected = ui_state.section == .components }, .semantics = .{ .label = componentSectionLabel(.components) } },
-        .{ .id = componentSectionNavId(.surfaces), .kind = .list_item, .frame = rect(14, 238, sidebar_item_width, 34), .text = componentSectionLabel(.surfaces), .command = componentSectionCommand(.surfaces), .state = .{ .selected = ui_state.section == .surfaces }, .semantics = .{ .label = componentSectionLabel(.surfaces) } },
+        .{ .id = canvas_sidebar_title_id, .kind = .text, .frame = rect(22, 20, sidebar_title_width, 24), .text = "Components", .size = .lg },
+        .{
+            .id = component_tree_scroll_id,
+            .kind = .scroll_view,
+            .frame = rect(14, 60, sidebar_item_width, @max(1, content_height_available - 76)),
+            .value = virtual_scroll.tree,
+            .scroll_axes = .vertical,
+            .layout = .{ .clip_content = true },
+            .semantics = .{ .label = "Component navigation tree" },
+            .children = &sidebar_tree_children,
+        },
     };
     var content_widgets: [canvas.builtin_component_names.len + 16]canvas.Widget = undefined;
     var content_widget_count: usize = 0;
@@ -881,13 +958,11 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 149, .kind = .stack, .frame = rect(64, 264, 568, 60), .semantics = .{ .label = "Data controls" }, .children = &data_panel_children });
         },
         .components => {
-            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 101, .kind = .text, .frame = rect(64, 56, 280, 26), .text = "Built-in Components", .size = .lg });
-            for (canvas.builtin_component_kinds, 0..) |kind, index| {
-                const item = componentCatalogItem(kind, index);
-                if (componentCatalogItemVisible(item.frame, virtual_scroll.page, content_height_available)) {
-                    try appendComponentWidget(&content_widgets, &content_widget_count, item);
-                }
-            }
+            const index = @min(ui_state.selected_component, canvas.builtin_component_kinds.len - 1);
+            const kind = canvas.builtin_component_kinds[index];
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 101, .kind = .text, .frame = rect(64, 56, @max(1, content_width - 128), 26), .text = canvas.builtinComponentName(kind), .size = .lg });
+            try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 102, .kind = .text, .frame = rect(64, 88, @max(1, content_width - 128), 20), .text = "Focused built-in component specimen", .size = .sm, .style = .{ .foreground = tokens.colors.text_muted } });
+            try appendComponentWidget(&content_widgets, &content_widget_count, componentCatalogDetailItem(kind, index, content_width));
         },
         .surfaces => {
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 101, .kind = .text, .frame = rect(64, 56, 240, 26), .text = "Surfaces", .size = .lg });
@@ -900,7 +975,6 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
         },
     }
 
-    const content_width = @max(1, size.width - sidebar_width);
     const content_height = @max(content_height_available, componentSectionContentHeight(ui_state.section));
     var content_children: [canvas.builtin_component_names.len + 17]canvas.Widget = undefined;
     content_children[0] = .{
@@ -917,23 +991,31 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
         .{ .id = themeModeTriggerId(.dark), .kind = .segmented_control, .text = "Dark", .size = .sm, .command = themeModeCommand(.dark), .state = .{ .selected = ui_state.theme_mode == .dark }, .semantics = .{ .label = "Dark theme" } },
         .{ .id = themeModeTriggerId(.high), .kind = .segmented_control, .text = "High", .size = .sm, .command = themeModeCommand(.high), .state = .{ .selected = ui_state.theme_mode == .high }, .semantics = .{ .label = "High contrast theme" } },
     };
+    var theme_tabs = canvas.Widget{
+        .id = canvas_toolbar_theme_id,
+        .kind = .tabs,
+        .layout = .{ .padding = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 }, .padding_is_kind_default = true },
+        .semantics = .{ .label = "Theme mode" },
+        .children = &theme_triggers,
+    };
+    // The house tab list is a hug container, so its frame follows the
+    // measured trigger row instead of carrying the old 174px placeholder
+    // (which left a conspicuous tail after High). Geist's primary
+    // underline register expands this same node to the containing row in
+    // `stackChildFrame`, preserving its full-width closing rail.
+    const theme_tabs_width = canvas.intrinsicWidgetSize(theme_tabs, tokens).width;
+    theme_tabs.frame = rect(292, 11, theme_tabs_width, 30);
+    const refresh_x = theme_tabs.frame.maxX() + 16;
     var root_widgets: [9]canvas.Widget = undefined;
     var root_widget_count: usize = 0;
     // The theme choice is mutually exclusive, so it renders as a REAL
     // segmented strip (the house TabsList hug) whose selected trigger is
     // the active theme — each trigger dispatches its own mode command.
-    try appendComponentWidget(&root_widgets, &root_widget_count, .{
-        .id = canvas_toolbar_theme_id,
-        .kind = .tabs,
-        .frame = rect(292, 11, 174, 30),
-        .layout = .{ .padding = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 } },
-        .semantics = .{ .label = "Theme mode" },
-        .children = &theme_triggers,
-    });
+    try appendComponentWidget(&root_widgets, &root_widget_count, theme_tabs);
     try appendComponentWidget(&root_widgets, &root_widget_count, .{
         .id = canvas_toolbar_refresh_id,
         .kind = .button,
-        .frame = rect(482, 11, 86, 30),
+        .frame = rect(refresh_x, 11, 86, 30),
         .text = "Refresh",
         .variant = .secondary,
         .command = refresh_command,
@@ -944,7 +1026,7 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
         .kind = .panel,
         .frame = rect(0, content_y, sidebar_width, content_height_available),
         .style = .{ .radius = 0 },
-        .semantics = .{ .label = "Component sections" },
+        .semantics = .{ .label = "Component explorer" },
         .children = &sidebar_children,
     });
     try appendComponentWidget(&root_widgets, &root_widget_count, .{

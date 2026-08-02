@@ -27,6 +27,7 @@ export const componentPages: ComponentPage[] = [
   { slug: "card", name: "Card", preview: "card-hero", blurb: "The bordered, elevated surface container." },
   { slug: "chart", name: "Chart", preview: "chart-hero", blurb: "Line, bar, and band series (Zig builder)." },
   { slug: "checkbox", name: "Checkbox", preview: "checkbox-hero", blurb: "Binary choice with model-owned state." },
+  { slug: "code", name: "Code", preview: "code-hero", blurb: "Highlighted source with line numbers and optional horizontal scrolling." },
   { slug: "combobox", name: "Combobox", preview: "combobox-hero", blurb: "Text entry with an anchored suggestions menu." },
   { slug: "dialog", name: "Dialog", preview: "dialog-hero", blurb: "Modal surface with model-owned dismissal." },
   { slug: "drawer", name: "Drawer", preview: "drawer-hero", blurb: "Side-anchored modal surface." },
@@ -36,6 +37,7 @@ export const componentPages: ComponentPage[] = [
   { slug: "input-group", name: "Input Group", preview: "input-group-hero", blurb: "One bordered field: textarea plus accessory actions." },
   { slug: "list", name: "List", preview: "list-hero", blurb: "Rows with icons, selection, and virtualization." },
   { slug: "markdown", name: "Markdown", preview: "markdown-hero", blurb: "GFM rendering through native widgets." },
+  { slug: "media-surface", name: "Media Surface", preview: "media-surface-hero", blurb: "Externally produced textures: video, camera, mpv." },
   { slug: "pagination", name: "Pagination", preview: "pagination-hero", blurb: "Page navigation row." },
   { slug: "panel", name: "Panel", preview: "panel-hero", blurb: "The plain surface container." },
   { slug: "progress", name: "Progress", preview: "progress-hero", blurb: "Determinate progress bar." },
@@ -60,5 +62,6 @@ export const componentPages: ComponentPage[] = [
   { slug: "toggle", name: "Toggle", preview: "toggle-hero", blurb: "Pressed-state toggles, toggle buttons, and groups." },
   { slug: "tooltip", name: "Tooltip", preview: "tooltip-hero", blurb: "The floating label above the control it annotates." },
   { slug: "tree", name: "Tree", preview: "tree-hero", blurb: "Disclosure tree with one roving focus set." },
+  { slug: "video", name: "Video", preview: "video-hero", blurb: "Platform-decoded playback with house transport chrome." },
   { slug: "virtual-list", name: "Virtual List", preview: "virtual-list-hero", blurb: "Windowed rows: the view builds only what's visible." },
 ];

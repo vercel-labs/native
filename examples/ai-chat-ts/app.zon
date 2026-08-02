@@ -1,0 +1,39 @@
+.{
+    .id = "dev.native_sdk.ai_chat_ts",
+    .name = "ai-chat-ts",
+    .display_name = "AI Chat TS",
+    .description = "A chat client for an OpenAI-compatible endpoint, authored entirely in TypeScript + Native markup.",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    // The network permission covers the one effect the app performs:
+    // the buffered `Cmd.fetch` exchange with the configured
+    // chat-completions endpoint. Nothing else leaves the process.
+    .permissions = .{ "view", "network" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    // The stock theme pack, composed with the live system appearance —
+    // light/dark follows the OS with no core code.
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "AI Chat TS",
+                .width = 760,
+                .height = 640,
+                .min_width = 560,
+                .min_height = 420,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "chat-canvas", .kind = "gpu_surface", .fill = true, .role = "Chat canvas", .accessibility_label = "AI chat conversation", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+}

@@ -1,0 +1,328 @@
+# CLI
+
+The `native` CLI provides project scaffolding, markup validation, automation, packaging, and debugging tools. Every verb accepts `--help` (prints usage and exits 0); unknown flags error with the usage text.
+
+## Core loop
+
+### `native init`
+
+```sh
+native init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--full]
+```
+
+Scaffold a new Native SDK project. The default `native` frontend scaffolds a native-rendered markup app with no web frontend and no build files — the CLI owns the build. The default core is TypeScript: `src/core.ts`, `src/app.native`, `app.zon`, and no language flag anywhere else — the build detects which core the tree carries. Omit `path` to scaffold into the current directory.
+
+<dl>
+  <dt><code>--template</code></dt>
+  <dd>Which core to scaffold: <code>ts-core</code> (default) for <code>src/core.ts</code>, or <code>zig-core</code> for <code>src/main.zig</code> plus generated full-loop tests. Applies to the native frontend only.</dd>
+  <dt><code>--frontend</code></dt>
+  <dd>What to scaffold: <code>native</code> (default) for a native-rendered markup app, or <code>next</code>, <code>vite</code>, <code>react</code>, <code>svelte</code>, <code>vue</code> for a web frontend in a WebView shell.</dd>
+  <dt><code>--full</code></dt>
+  <dd>Also write <code>build.zig</code>, <code>build.zig.zon</code>, editor config, and CI.</dd>
+</dl>
+
+### `native dev`
+
+```sh
+native dev [dir]
+native dev [dir] --core [--script msgs.ndjson] [--watch]
+native dev --binary <path> [--manifest app.zon] [--url <url>] [--command "<cmd>"] [--timeout-ms <n>]
+```
+
+Build and run the app in the current (or given) app directory — a Debug build by default, printing a one-line completion and naming any failing step. The markup hot-reload watcher and the Debug-only teaching diagnostics are compiled in only in Debug; pass `-Doptimize=...` to override. Apps with a frontend dev config also get the managed dev server — see [Dev Server](/docs/cli/dev).
+
+<dl>
+  <dt><code>--core</code></dt>
+  <dd>Run the TypeScript core's logic loop under node instead of building the app: dispatch Msgs as JSON lines on stdin, watch the committed model and effect transcript, advance a virtual clock to fire timers. Honestly not a renderer — plain <code>native dev</code> runs the real app. See <a href="/docs/typescript#the-dev-loop">TypeScript Cores</a>.</dd>
+  <dt><code>--script</code></dt>
+  <dd>With <code>--core</code>: replay a newline-delimited JSON message file instead of reading stdin.</dd>
+  <dt><code>--watch</code></dt>
+  <dd>With <code>--core</code>: re-run the script on every <code>src/core.ts</code> edit.</dd>
+  <dt><code>--binary</code></dt>
+  <dd>Path to a prebuilt app binary — the legacy prebuilt-shell form: the build step is skipped and only the frontend dev flow runs. Ordinary <code>native dev</code> builds the app itself.</dd>
+  <dt><code>--manifest</code></dt>
+  <dd>Path to <code>app.zon</code> (default: <code>app.zon</code>).</dd>
+  <dt><code>--url</code></dt>
+  <dd>Override the dev server URL from <code>app.zon</code>.</dd>
+  <dt><code>--command</code></dt>
+  <dd>Override the dev server command (space-separated).</dd>
+  <dt><code>--timeout-ms</code></dt>
+  <dd>Milliseconds to wait for the dev server (default from <code>app.zon</code>, or 30000).</dd>
+</dl>
+
+### `native build`
+
+```sh
+native build [dir]
+```
+
+Build a ReleaseFast binary into `zig-out/bin/`, printing a one-line completion and naming any failing step.
+
+### `native test`
+
+```sh
+native test [dir]
+```
+
+Run the app's test suite, printing the zig build summary (step/test tally) plus a final `native test: passed` line. It also refreshes the model-contract artifact `native check` reads.
+
+### `native check`
+
+```sh
+native check [dir] [--strict]
+```
+
+Validate the whole tree without building the app. A TypeScript core (`src/core.ts`) runs the subset checker first — real tsc semantics plus the app-core rules, diagnostics verbatim — then every `src/**.native` markup file and `app.zon` are checked as before. With a fresh model contract (`zig-out/model-contract.zon`, refreshed by `native test`) it also checks bindings, iterables, and message tags against your `Model`/`Msg` — for a TypeScript core, against its emitted model — and warns on model state no view uses. Without the artifact it degrades to structural checking and says so loudly: "model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks". Markup accessibility findings are reported per file in full, and a failing `src/*.native` file that no Zig source embeds gets a leftover-file hint.
+
+<dl>
+  <dt><code>--strict</code></dt>
+  <dd>Fail on warnings.</dd>
+</dl>
+
+## App lifecycle
+
+### `native eject`
+
+```sh
+native eject [dir]
+```
+
+Write an owned `build.zig`/`build.zig.zon` into the app (once); the verbs then drive your files via `zig build`. Ejecting is only for owning the build files — it is never a prerequisite: zero-config apps build, test, and [package](/docs/packaging) directly (`native package` works on the zero-config build as-is).
+
+### `native eject component`
+
+```sh
+native eject component <name> [dir]
+```
+
+Write an owned copy of a library composite into `src/components/` (once, never overwriting — ejecting again errors with the file to delete first). Ejectable today: `stepper`, `timeline`, `timeline-item` — the library views that are honest compositions of primitives; engine controls are not on the menu (theme them through [tokens](/docs/theming) instead). `timeline` lands as a markup template (use it via `<use template="timeline" ...>`), the others as Zig view functions; each file opens with a header comment walking through the call-site migration, and each builds a widget tree identical to its library form at the moment of ejection. Unknown names get a did-you-mean plus the full ejectable list. See [Building Components](/docs/building-components#use-eject-or-build).
+
+### `native doctor`
+
+```sh
+native doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
+```
+
+Check host environment, WebView, manifest, and CEF. See [native doctor](/docs/debugging/doctor) for what each check means.
+
+### `native validate`
+
+```sh
+native validate [app.zon]
+```
+
+Validate `app.zon` against the manifest schema.
+
+### `native package`
+
+```sh
+native package [--target <macos|linux|windows|ios|android>] [flags]
+```
+
+Package the app for distribution. The manifest is picked up at `app.zon` and the binary at `zig-out/bin/<name>` automatically; the flags below override.
+
+<dl>
+  <dt><code>--target</code></dt>
+  <dd>Target platform (<code>macos</code>, <code>linux</code>, <code>windows</code>, <code>ios</code>, <code>android</code>).</dd>
+  <dt><code>--manifest</code></dt>
+  <dd>Path to <code>app.zon</code>.</dd>
+  <dt><code>--output</code></dt>
+  <dd>Output path for the package.</dd>
+  <dt><code>--binary</code></dt>
+  <dd>Path to the built binary.</dd>
+  <dt><code>--assets</code></dt>
+  <dd>Path to frontend assets directory.</dd>
+  <dt><code>--optimize</code></dt>
+  <dd>Optimization level.</dd>
+  <dt><code>--web-engine</code></dt>
+  <dd>Temporarily override <code>app.zon</code> with <code>system</code> or macOS-only <code>chromium</code>.</dd>
+  <dt><code>--web-layer</code></dt>
+  <dd>Override <code>app.zon</code>'s <code>.webview_layer</code> with <code>auto</code>, <code>include</code>, or <code>exclude</code> — the same precedence as <code>-Dweb-layer</code> in the build graph. <code>zig build package</code> passes the graph's resolved decision here automatically so the package always matches the built executable.</dd>
+  <dt><code>--cef-dir</code></dt>
+  <dd>Temporarily override the CEF distribution path from <code>app.zon</code>.</dd>
+  <dt><code>--cef-auto-install</code></dt>
+  <dd>Temporarily allow prepared CEF installation during Chromium packaging.</dd>
+  <dt><code>--signing</code></dt>
+  <dd>Signing mode: <code>none</code>, <code>adhoc</code>, or <code>identity</code>.</dd>
+  <dt><code>--identity</code></dt>
+  <dd>Code signing identity name.</dd>
+  <dt><code>--entitlements</code></dt>
+  <dd>Path to entitlements file.</dd>
+  <dt><code>--team-id</code></dt>
+  <dd>Apple Developer Team ID.</dd>
+  <dt><code>--archive</code></dt>
+  <dd>Create a distributable archive.</dd>
+</dl>
+
+### Platform shortcuts
+
+```sh
+native package-windows [--output path] [--binary path]
+native package-linux [--output path] [--binary path]
+native package-ios [--output path] [--binary path]
+native package-android [--output path] [--binary path]
+```
+
+Per-platform shortcuts for `native package --target <platform>`.
+
+### `native bundle-assets`
+
+```sh
+native bundle-assets [app.zon] [assets] [output]
+```
+
+Copy frontend assets into the build output.
+
+## Tooling
+
+### `native markup`
+
+```sh
+native markup check <file.native> [more files...] [--strict]
+native markup dump <file.native> [--out doc.nsui]
+native markup lsp
+```
+
+Work with Native markup files directly, outside the app verbs.
+
+<dl>
+  <dt><code>markup check</code></dt>
+  <dd>Validate Native markup without building; errors carry <code>file:line:column</code> and a teaching message. Run inside an app directory it picks up a fresh model contract the same way <code>native check</code> does; <code>--strict</code> promotes warnings to failures.</dd>
+  <dt><code>markup dump</code></dt>
+  <dd>Resolve and validate a view, encode the canonical NSUI binary, and print the JSON inspection view derived from the decoded binary; <code>--out</code> also writes the <code>.nsui</code> artifact.</dd>
+  <dt><code>markup lsp</code></dt>
+  <dd>Run the markup language server (diagnostics, completion, hover) for editor integration.</dd>
+</dl>
+
+### `native automate`
+
+```sh
+native automate <command>
+```
+
+Interact with the automation server of a running automation-enabled app. See [Automation](/docs/automation) for the full workflow.
+
+<dl>
+  <dt><code>automate list</code></dt>
+  <dd>List running automation-enabled apps.</dd>
+  <dt><code>automate snapshot</code></dt>
+  <dd>Dump current app state.</dd>
+  <dt><code>automate screenshot &lt;view-label&gt; [&lt;scale&gt;]</code></dt>
+  <dd>Render a <code>gpu_surface</code> view's canvas to <code>screenshot-&lt;view-label&gt;.png</code> through the deterministic CPU reference renderer.</dd>
+  <dt><code>automate reload</code></dt>
+  <dd>Reload the WebView.</dd>
+  <dt><code>automate resize &lt;width&gt; &lt;height&gt; [&lt;scale&gt;]</code></dt>
+  <dd>Dispatch a main-window resize event.</dd>
+  <dt><code>automate menu-command &lt;id&gt;</code></dt>
+  <dd>Dispatch a menu command event.</dd>
+  <dt><code>automate native-command &lt;id&gt; [&lt;view-label&gt;]</code></dt>
+  <dd>Dispatch a native view command event.</dd>
+  <dt><code>automate widget-action &lt;view-label&gt; &lt;widget-id&gt; &lt;action&gt; [&lt;value&gt;]</code></dt>
+  <dd>Invoke a retained canvas widget action.</dd>
+  <dt><code>automate widget-click &lt;view-label&gt; &lt;widget-id&gt;</code></dt>
+  <dd>Dispatch a pointer click at a retained canvas widget.</dd>
+  <dt><code>automate widget-hold &lt;view-label&gt; &lt;widget-id&gt;</code></dt>
+  <dd>Press-and-hold a retained canvas widget (drives <code>on_hold</code>).</dd>
+  <dt><code>automate widget-context-press &lt;view-label&gt; &lt;widget-id&gt;</code></dt>
+  <dd>Secondary-click a retained canvas widget (context menu, or <code>on_hold</code> when none).</dd>
+  <dt><code>automate widget-context-menu &lt;view-label&gt; &lt;widget-id&gt; &lt;item-index&gt;</code></dt>
+  <dd>Invoke a widget's declared context-menu item by index — the snapshot lists each widget's items in order.</dd>
+  <dt><code>automate widget-drag &lt;view-label&gt; &lt;widget-id&gt; &lt;start-x-ratio&gt; &lt;end-x-ratio&gt; [&lt;start-y-ratio&gt; &lt;end-y-ratio&gt;]</code></dt>
+  <dd>Dispatch pointer down/drag/up across a retained canvas widget.</dd>
+  <dt><code>automate widget-wheel &lt;view-label&gt; &lt;widget-id&gt; &lt;delta-y&gt; [&lt;delta-x&gt;]</code></dt>
+  <dd>Dispatch wheel input at a retained canvas widget; the optional <code>delta-x</code> scrolls the horizontal axis (each axis routes to the nearest region that scrolls it).</dd>
+  <dt><code>automate widget-key &lt;view-label&gt; &lt;key&gt; [&lt;text&gt;]</code></dt>
+  <dd>Dispatch key input to the focused retained canvas widget.</dd>
+  <dt><code>automate widget-pinch &lt;view-label&gt; &lt;scale&gt; [&lt;x&gt; &lt;y&gt;]</code></dt>
+  <dd>Dispatch a trackpad pinch gesture at a gpu-surface view (<code>scale</code> is the final multiplicative zoom for the gesture; the anchor point defaults to the view center).</dd>
+  <dt><code>automate shortcut &lt;id&gt;</code></dt>
+  <dd>Dispatch a shortcut command event.</dd>
+  <dt><code>automate tray-action &lt;item-id&gt;</code></dt>
+  <dd>Select a status-item dropdown row.</dd>
+  <dt><code>automate focus &lt;view-label&gt;</code></dt>
+  <dd>Focus a native or WebView-backed view.</dd>
+  <dt><code>automate focus-next</code> / <code>automate focus-previous</code></dt>
+  <dd>Move focus through visible, enabled views.</dd>
+  <dt><code>automate wait</code></dt>
+  <dd>Wait for <code>ready=true</code> in the snapshot.</dd>
+  <dt><code>automate assert [--absent] [--timeout-ms &lt;n&gt;] &lt;pattern&gt;...</code></dt>
+  <dd>Poll the snapshot until every regex pattern matches (or, with <code>--absent</code>, until none match); on timeout, prints the missing patterns plus the snapshot tail and exits non-zero.</dd>
+  <dt><code>automate bridge &lt;json&gt;</code></dt>
+  <dd>Send a bridge command (origin <code>zero://inline</code>).</dd>
+</dl>
+
+### `native skills`
+
+```sh
+native skills list
+native skills get <name> [--full]
+native skills get --all [--full]
+```
+
+List and print the built-in AI agent skills the CLI ships — the version-matched content the `npx skills add vercel-labs/native` discovery skill loads from. See [Agent Skills](/docs/skills) for the one-command agent install, what each skill covers, and how to deliver one to an agent.
+
+<dl>
+  <dt><code>skills list</code></dt>
+  <dd>List built-in skills served by the installed CLI.</dd>
+  <dt><code>skills get &lt;name&gt;</code></dt>
+  <dd>Output a skill's content (for example <code>skills get core</code> or <code>skills get native-ui</code>).</dd>
+  <dt><code>skills get --all</code></dt>
+  <dd>Output every non-hidden skill.</dd>
+  <dt><code>--full</code></dt>
+  <dd>Also include a skill's reference and template files when present.</dd>
+</dl>
+
+### `native cef`
+
+```sh
+native cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
+```
+
+Manage the macOS CEF runtime for Chromium-engine apps.
+
+<dl>
+  <dt><code>cef install</code></dt>
+  <dd>Download, prepare, and verify the macOS CEF runtime.</dd>
+  <dt><code>cef path</code></dt>
+  <dd>Print the default or configured CEF directory.</dd>
+  <dt><code>cef doctor</code></dt>
+  <dd>Check only the CEF layout.</dd>
+</dl>
+
+<dl>
+  <dt><code>--dir</code></dt>
+  <dd>CEF install directory. Defaults to the host platform directory under <code>third_party/cef</code>.</dd>
+  <dt><code>--version</code></dt>
+  <dd>CEF binary version to download. The default is Native SDK's pinned tested version.</dd>
+  <dt><code>--source</code></dt>
+  <dd><code>prepared</code> or <code>official</code>. Defaults to <code>prepared</code>, which downloads Native SDK's no-CMake runtime from GitHub Releases.</dd>
+  <dt><code>--download-url</code></dt>
+  <dd>Override the prepared runtime release base URL, or the official CEF host when using <code>--source official</code>.</dd>
+  <dt><code>--allow-build-tools</code></dt>
+  <dd>Allow the advanced official CEF path to invoke local build tools for <code>libcef_dll_wrapper</code>.</dd>
+  <dt><code>--force</code></dt>
+  <dd>Redownload and replace the target directory.</dd>
+</dl>
+
+Core maintainers who need to build CEF before a Native SDK runtime release exists should use `tools/cef/build-from-source.sh`. The CLI's default `native cef install` path remains the no-CMake app-developer path.
+
+### `native version`
+
+```sh
+native version
+```
+
+Print the native version.
+
+## Environment variables
+
+<dl>
+  <dt><code>NATIVE_SDK_FRONTEND_URL</code></dt>
+  <dd>Dev server URL (read by <code>frontend.sourceFromEnv</code>).</dd>
+  <dt><code>NATIVE_SDK_FRONTEND_ASSETS</code></dt>
+  <dd>App convention for signaling pre-built assets.</dd>
+  <dt><code>NATIVE_SDK_LOG_DIR</code></dt>
+  <dd>Override log output directory.</dd>
+  <dt><code>NATIVE_SDK_LOG_FORMAT</code></dt>
+  <dd>Log format: <code>text</code> or <code>jsonl</code>.</dd>
+</dl>

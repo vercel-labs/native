@@ -4,18 +4,21 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Sheet, SheetTrigger, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { docsPath } from "@/lib/site";
 
 const links = [
   { name: "Home", href: "/" },
-  { name: "Docs", href: "/introduction" },
-  { name: "Components", href: "/components" },
+  { name: "Docs", href: `${docsPath}/introduction` },
+  { name: "Components", href: `${docsPath}/components` },
 ];
 
 function isCurrent(href: string, pathname: string): boolean {
   if (href === "/") return pathname === "/";
-  if (href === "/components") return pathname === "/components" || pathname.startsWith("/components/");
+  if (href === `${docsPath}/components`) {
+    return pathname === href || pathname.startsWith(`${href}/`);
+  }
   // Docs owns every other docs page.
-  return pathname !== "/" && !pathname.startsWith("/components");
+  return pathname.startsWith(`${docsPath}/`) && !pathname.startsWith(`${docsPath}/components`);
 }
 
 export function HeaderNav() {

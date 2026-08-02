@@ -55,7 +55,7 @@ export function EjectSection({ components }: { components: string[] }) {
       </Code>
       <p className={paragraph}>
         The ownership model and what to do after ejecting are in{" "}
-        <a className={link} href="/building-components#use-eject-or-build">
+        <a className={link} href="/docs/building-components#use-eject-or-build">
           Use, eject, or build
         </a>
         .

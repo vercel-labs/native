@@ -171,7 +171,10 @@ pub const scenes = [_]Scene{
     .{ .name = "resizable", .height = 240, .build = stateless(buildResizable) },
     .{ .name = "skeleton", .height = 200, .build = stateless(buildSkeleton) },
     .{ .name = "spinner", .height = 140, .build = stateless(buildSpinner) },
+    .{ .name = "code", .height = 300, .build = stateless(buildCode) },
     .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
+    .{ .name = "media-surface", .height = 280, .build = stateless(buildMediaSurface) },
+    .{ .name = "video", .height = 300, .build = stateless(buildVideo) },
     .{ .name = "icon", .height = 150, .build = stateless(buildIconHero) },
     .{ .name = "chart", .height = 260, .build = stateless(buildChart) },
     .{ .name = "chart-bar", .height = 260, .build = stateless(buildChartBar) },
@@ -196,6 +199,7 @@ pub const scenes = [_]Scene{
     heroScene("chart-hero", buildChartHero),
     heroScene("checkbox-hero", buildCheckboxHero),
     heroScene("combobox-hero", buildComboboxHero),
+    heroScene("code-hero", buildCodeHero),
     heroScene("dialog-hero", buildDialogHero),
     heroScene("drawer-hero", buildDrawerHero),
     heroScene("dropdown-menu-hero", buildDropdownMenuHero),
@@ -204,6 +208,8 @@ pub const scenes = [_]Scene{
     heroScene("input-group-hero", buildInputGroupHero),
     heroScene("list-hero", buildListHero),
     heroScene("markdown-hero", buildMarkdownHero),
+    heroScene("media-surface-hero", buildMediaSurfaceHero),
+    heroScene("video-hero", buildVideoHero),
     heroScene("pagination-hero", buildPaginationHero),
     heroScene("panel-hero", buildPanelHero),
     heroScene("progress-hero", buildProgressHero),
@@ -572,6 +578,65 @@ fn buildAvatar(ui: *Ui) Node {
             ui.avatar(.{}, "ZN"),
             ui.avatar(.{}, "CT"),
             ui.avatar(.{}, "NS"),
+        }),
+    });
+}
+
+fn buildMediaSurface(ui: *Ui) Node {
+    // The docs previews render through the deterministic reference
+    // renderer, so this shows exactly what goldens show: the surface's
+    // id-derived placeholder. Producer frames exist only on live GPU
+    // hosts — presentation chrome by policy.
+    return tile(ui, .{
+        ui.column(.{ .gap = 10, .width = 340 }, .{
+            ui.mediaSurface(.{
+                .image = 7,
+                .height = 180,
+                .style_tokens = .{ .radius = .md },
+                .semantics = .{ .label = "Camera preview" },
+            }),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Awaiting producer frames"),
+        }),
+    });
+}
+
+fn buildVideo(ui: *Ui) Node {
+    // Docs previews render through the deterministic reference
+    // renderer: the surface shows its placeholder and the house chrome
+    // its idle (no playback loaded) state — exactly what goldens show.
+    return tile(ui, .{
+        ui.column(.{ .gap = 10, .width = 360 }, .{
+            ui.video(.{
+                .src = "assets/clips/launch.mp4",
+                .controls = true,
+                .height = 200,
+                .label = "Launch clip",
+            }),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "House transport chrome under the picture"),
+        }),
+    });
+}
+
+fn buildVideoHero(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.video(.{
+            .src = "assets/clips/launch.mp4",
+            .controls = true,
+            .width = 300,
+            .height = 168,
+            .label = "Video",
+        }),
+    });
+}
+
+fn buildMediaSurfaceHero(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.mediaSurface(.{
+            .image = 7,
+            .width = 300,
+            .height = 150,
+            .style_tokens = .{ .radius = .md },
+            .semantics = .{ .label = "Media surface" },
         }),
     });
 }
@@ -993,6 +1058,28 @@ const markdown_sample =
     \\```
 ;
 
+const code_sample =
+    \\<Accordion defaultValue={["item-1"]}>
+    \\  <AccordionItem value="item-1">
+    \\    <AccordionTrigger>Is it accessible?</AccordionTrigger>
+    \\    <AccordionContent>
+    \\      Yes. It follows the WAI-ARIA design pattern.
+    \\    </AccordionContent>
+    \\  </AccordionItem>
+    \\</Accordion>
+;
+
+fn buildCode(ui: *Ui) Node {
+    return tileStart(ui, .{
+        ui.code(.{
+            .language = .html,
+            .line_numbers = true,
+            .wrap = false,
+            .width = 496,
+        }, code_sample),
+    });
+}
+
 fn buildMarkdown(ui: *Ui) Node {
     return tileStart(ui, .{
         Md.view(ui, markdown_sample, .{}),
@@ -1327,6 +1414,22 @@ const markdown_hero_sample =
     \\`inline code`, and [links](https://native-sdk.dev) — through
     \\native widgets.
 ;
+
+fn buildCodeHero(ui: *Ui) Node {
+    return heroTileStart(ui, .{
+        ui.code(.{
+            .language = .html,
+            .line_numbers = true,
+            .wrap = false,
+            .width = 320,
+        },
+            \\<Button variant="primary"
+            \\  onPress={() => save()}>
+            \\  Save changes
+            \\</Button>
+        ),
+    });
+}
 
 fn buildMarkdownHero(ui: *Ui) Node {
     return heroTileStart(ui, .{

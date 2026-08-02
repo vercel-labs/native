@@ -8,13 +8,19 @@ export const PAGE_TITLES: Record<string, string> = {
   introduction: "Introduction",
   "quick-start": "Quick Start",
   "app-model": "App Model",
+  typescript: "TypeScript Cores",
+  "typescript/packages": "Where Packages Go",
   "native-ui": "Native UI",
+  "dynamic-images": "Dynamic Images",
+  terminal: "Terminal",
   state: "State & Data Flow",
   theming: "Theming",
+  fonts: "Fonts",
   "building-components": "Building Components",
   runtime: "App & Runtime",
   frontend: "Frontend Projects",
   "native-surfaces": "Native Surfaces",
+  "media-producers": "Media Producers",
   windows: "Windows",
   webviews: "Multiple WebViews",
   "keyboard-shortcuts": "Keyboard Shortcuts",
@@ -45,6 +51,7 @@ export const PAGE_TITLES: Record<string, string> = {
   embed: "Embedded App",
   "web-engines": "Web Engines",
   packages: "Package Distribution",
+  zig: "Zig 0.16 Notes",
 };
 
 export function getPageTitle(slug: string): string | null {

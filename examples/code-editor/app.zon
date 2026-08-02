@@ -1,0 +1,44 @@
+.{
+    .id = "dev.native_sdk.code_editor",
+    .name = "code-editor",
+    .display_name = "Code Editor",
+    .description = "Choose a folder and edit its source files in a native two-pane window.",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command", "dialog" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shortcuts = .{
+        .{ .id = "save-file", .key = "s", .modifiers = .{ "primary" } },
+        .{ .id = "close-tab", .key = "w", .modifiers = .{ "primary" } },
+        .{ .id = "open-folder", .key = "o", .modifiers = .{ "primary" } },
+        .{ .id = "new-window", .key = "n", .modifiers = .{ "primary" } },
+        .{ .id = "previous-tab", .key = "[", .modifiers = .{ "primary", "shift" } },
+        .{ .id = "next-tab", .key = "]", .modifiers = .{ "primary", "shift" } },
+    },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Native SDK Code Editor",
+                .width = 1120,
+                .height = 720,
+                .min_width = 760,
+                .min_height = 480,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .titlebar = "hidden_inset_tall",
+                .views = .{
+                    .{ .label = "code-editor-canvas", .kind = "gpu_surface", .fill = true, .role = "Code editor canvas", .accessibility_label = "Code editor", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}

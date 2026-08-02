@@ -309,20 +309,21 @@ test "runtime dispatches GPU surface events" {
         .label = "canvas",
         .kind = .gpu_surface,
         .frame = geometry.RectF.init(0, 0, 640, 360),
+        .gpu_surface = .{ .alpha_mode = .premultiplied },
     });
     const initial_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
     try std.testing.expectEqual(created.id, initial_frame.surface_id);
     try std.testing.expectEqual(platform.GpuSurfaceBackend.metal, created.gpu_backend);
     try std.testing.expectEqual(platform.GpuSurfacePixelFormat.bgra8_unorm, created.gpu_pixel_format);
     try std.testing.expectEqual(platform.GpuSurfacePresentMode.timer, created.gpu_present_mode);
-    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.@"opaque", created.gpu_alpha_mode);
+    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, created.gpu_alpha_mode);
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, created.gpu_color_space);
     try std.testing.expect(created.gpu_vsync);
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, created.gpu_status);
     try std.testing.expectEqual(platform.GpuSurfaceBackend.metal, initial_frame.backend);
     try std.testing.expectEqual(platform.GpuSurfacePixelFormat.bgra8_unorm, initial_frame.pixel_format);
     try std.testing.expectEqual(platform.GpuSurfacePresentMode.timer, initial_frame.present_mode);
-    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.@"opaque", initial_frame.alpha_mode);
+    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, initial_frame.alpha_mode);
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, initial_frame.color_space);
     try std.testing.expect(initial_frame.vsync);
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, initial_frame.status);
@@ -389,7 +390,9 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(platform.GpuSurfaceBackend.metal, app_state.last_gpu_backend);
     try std.testing.expectEqual(platform.GpuSurfacePixelFormat.bgra8_unorm, app_state.last_gpu_pixel_format);
     try std.testing.expectEqual(platform.GpuSurfacePresentMode.timer, app_state.last_gpu_present_mode);
-    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.@"opaque", app_state.last_gpu_alpha_mode);
+    // Desktop hosts still stamp their legacy opaque completion value;
+    // runtime delivery preserves the surface's create-time contract.
+    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, app_state.last_gpu_alpha_mode);
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, app_state.last_gpu_color_space);
     try std.testing.expect(app_state.last_gpu_vsync);
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, app_state.last_gpu_status);
@@ -444,7 +447,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(platform.GpuSurfaceBackend.metal, frame.backend);
     try std.testing.expectEqual(platform.GpuSurfacePixelFormat.bgra8_unorm, frame.pixel_format);
     try std.testing.expectEqual(platform.GpuSurfacePresentMode.timer, frame.present_mode);
-    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.@"opaque", frame.alpha_mode);
+    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, frame.alpha_mode);
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, frame.color_space);
     try std.testing.expect(frame.vsync);
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, frame.status);
@@ -515,7 +518,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuBackend\":\"metal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuPixelFormat\":\"bgra8_unorm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuPresentMode\":\"timer\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuAlphaMode\":\"opaque\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuAlphaMode\":\"premultiplied\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuColorSpace\":\"srgb\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuVsync\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuStatus\":\"ready\"") != null);
@@ -586,7 +589,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(platform.GpuSurfaceBackend.metal, preview_frame.backend);
     try std.testing.expectEqual(platform.GpuSurfacePixelFormat.bgra8_unorm, preview_frame.pixel_format);
     try std.testing.expectEqual(platform.GpuSurfacePresentMode.timer, preview_frame.present_mode);
-    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.@"opaque", preview_frame.alpha_mode);
+    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, preview_frame.alpha_mode);
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, preview_frame.color_space);
     try std.testing.expect(preview_frame.vsync);
     try std.testing.expectEqual(platform.GpuSurfaceStatus.ready, preview_frame.status);
@@ -933,6 +936,80 @@ test "gpu surface nonblank transition invalidates the runtime" {
     try std.testing.expect(!harness.runtime.invalidated);
 }
 
+test "gpu surface backend transition invalidates the runtime" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-backend-transition", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = context;
+            _ = runtime;
+            _ = event_value;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 640, 360),
+    });
+
+    // A fallback completion changes an observable snapshot fact even when
+    // nonblank and latency state stay unchanged.
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 16,
+        .nonblank = false,
+        .backend = .software,
+    } });
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(platform.GpuSurfaceBackend.software, (try harness.runtime.gpuSurfaceFrame(1, "canvas")).backend);
+
+    // The same presenter on the next timer completion is steady state and
+    // must not turn snapshot publication into a per-frame loop.
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 32,
+        .nonblank = false,
+        .backend = .software,
+    } });
+    try std.testing.expect(!harness.runtime.invalidated);
+
+    // Recovery to the packet presenter is the same observable transition
+    // in the opposite direction.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .frame_index = 3,
+        .timestamp_ns = 48,
+        .nonblank = false,
+        .backend = .direct2d,
+    } });
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(platform.GpuSurfaceBackend.direct2d, (try harness.runtime.gpuSurfaceFrame(1, "canvas")).backend);
+}
+
 test "a handler error degrades: dispatch continues, the error ring records it, snapshots publish it" {
     // One erroring update arm used to exit the whole app
     // (the platform callback saw the error, set `failed`, and stopped
@@ -979,7 +1056,7 @@ test "a handler error degrades: dispatch continues, the error ring records it, s
     // The error is recorded and queryable...
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.dispatchErrors().len);
     try std.testing.expectEqual(@as(u64, 1), harness.runtime.dispatchErrorTotal());
-    try std.testing.expectEqualStrings("command", harness.runtime.dispatchErrors()[0].event);
+    try std.testing.expectEqualStrings("command", harness.runtime.dispatchErrors()[0].event());
     try std.testing.expectEqualStrings("UpdateArmBlewUp", harness.runtime.dispatchErrors()[0].error_name);
 
     // ...traced at error level...
@@ -1076,4 +1153,23 @@ test "a full trace sink never fails dispatch; the loss is counted and published"
     try automation.snapshot.writeText(harness.runtime.automationSnapshot("Chatty"), &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "dropped_trace_records=") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "dropped_trace_records=0") == null);
+}
+
+test "the dispatch-error ring owns its event name" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+
+    // Record through a caller-owned buffer, then clobber it: the ring's
+    // record must have copied the name at record time (the record is
+    // copied by value into a ring that outlives every caller's buffer).
+    var name_buffer: [32]u8 = undefined;
+    const name = "hover_leave_capture";
+    @memcpy(name_buffer[0..name.len], name);
+    harness.runtime.recordDispatchError(name_buffer[0..name.len], error.OutOfMemory);
+    @memset(&name_buffer, 'x');
+
+    const errors = harness.runtime.dispatchErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings(name, errors[errors.len - 1].event());
+    try std.testing.expectEqualStrings("OutOfMemory", errors[errors.len - 1].error_name);
 }

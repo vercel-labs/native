@@ -872,6 +872,583 @@ test "widget image emits draw image and exposes image semantics" {
     try std.testing.expect(display_list.commands[2] == .pop_clip);
 }
 
+test "widget media surface cover fit emits the image widget's rectangular clip" {
+    // Cover fit expands the drawn texture past the widget frame on one
+    // axis; emitImageWidget crops the overflow with a rectangular clip.
+    // The media surface draws through the same image pipeline and must
+    // carry the SAME clip: its draw-level radius mask is nothing at
+    // radius zero, so hosts that only mask radii (the AppKit packet
+    // draw) painted a zero-radius cover surface outside its bounds,
+    // over its siblings.
+    const surface_id: u64 = 5;
+    const row_children = [_]Widget{
+        .{
+            .id = 21,
+            .kind = .media_surface,
+            .frame = geometry.RectF.init(0, 0, 80, 48),
+            .image_id = surface_id,
+            .image_fit = .cover,
+        },
+        .{
+            .id = 22,
+            .kind = .image,
+            .frame = geometry.RectF.init(0, 0, 40, 48),
+            .image_id = 42,
+        },
+    };
+    const root = Widget{ .id = 20, .kind = .row, .children = &row_children };
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 160, 48), &nodes);
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
+    const media_frame = geometry.RectF.init(0, 0, 80, 48);
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(21, 1)), fill.id);
+            try expectRect(media_frame, fill.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .push_clip => |clip| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(21, 3)), clip.id);
+            try expectRect(media_frame, clip.rect);
+            // A rectangular bounds crop, exactly like the image
+            // widget's — rounding stays on the draw's own mask.
+            try std.testing.expectEqual(@as(f32, 0), clip.radius.top_left);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            try std.testing.expectEqual(@as(ObjectId, widgetPartId(21, 2)), draw.id);
+            try std.testing.expectEqual(canvas.mediaSurfaceTextureImageId(surface_id), draw.image_id);
+            try std.testing.expectEqual(ImageFit.cover, draw.fit);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // The clip closes BEFORE the sibling paints: the sibling's own draw
+    // is never cropped by the media surface's frame.
+    try std.testing.expect(display_list.commands[3] == .pop_clip);
+    switch (display_list.commands[4]) {
+        .draw_image => |draw| try std.testing.expectEqual(@as(ObjectId, widgetPartId(22, 1)), draw.id),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Non-cover fits expand nothing and emit no clip — unchanged.
+    const contained = Widget{
+        .id = 21,
+        .kind = .media_surface,
+        .frame = media_frame,
+        .image_id = surface_id,
+        .image_fit = .stretch,
+    };
+    var contained_nodes: [1]WidgetLayoutNode = undefined;
+    const contained_layout = try layoutWidgetTree(contained, media_frame, &contained_nodes);
+    var contained_commands: [4]CanvasCommand = undefined;
+    var contained_builder = Builder.init(&contained_commands);
+    try contained_layout.emitDisplayList(&contained_builder, .{});
+    try std.testing.expectEqual(@as(usize, 2), contained_builder.displayList().commandCount());
+
+    // The rounded cover case keeps its draw-level radius mask AND gains
+    // the same bounds crop (the mask lies inside the rect, so pixels
+    // are unchanged where the radius already masked).
+    const rounded = Widget{
+        .id = 21,
+        .kind = .media_surface,
+        .frame = media_frame,
+        .image_id = surface_id,
+        .image_fit = .cover,
+        .style = .{ .radius = 12 },
+    };
+    var rounded_nodes: [1]WidgetLayoutNode = undefined;
+    const rounded_layout = try layoutWidgetTree(rounded, media_frame, &rounded_nodes);
+    var rounded_commands: [4]CanvasCommand = undefined;
+    var rounded_builder = Builder.init(&rounded_commands);
+    try rounded_layout.emitDisplayList(&rounded_builder, .{});
+    const rounded_list = rounded_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 4), rounded_list.commandCount());
+    try std.testing.expect(rounded_list.commands[1] == .push_clip);
+    switch (rounded_list.commands[2]) {
+        .draw_image => |draw| try std.testing.expectEqual(@as(f32, 12), draw.radius.top_left),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(rounded_list.commands[3] == .pop_clip);
+}
+
+test "a composited cover media texture is byte-contained in the reference render" {
+    // Containment pin for the deterministic path: the render planner
+    // already crops every draw to its requested `dst` (command bounds),
+    // so reference renders — goldens, screenshots — were contained
+    // before the cover clip and must stay byte-identical with it. The
+    // clip COMMAND itself (pinned in the test above) is what protects
+    // packet hosts, which replay the display list and expand cover at
+    // draw time without the planner's bounds. The reference renderer
+    // skips presentation-only media textures by policy; feeding the
+    // texture in as an ordinary resource under the media-derived id
+    // exercises the draw geometry itself.
+    const surface_id: u64 = 5;
+    const media_frame = geometry.RectF.init(8, 4, 8, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = media_frame,
+        .image_id = surface_id,
+        .image_fit = .cover,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, media_frame, &nodes);
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+
+    // A square texture in a 1:2 frame: cover expands the draw to
+    // (4,4,16,16) — four columns past BOTH vertical edges of the frame,
+    // where a sibling would sit.
+    const texture_pixels = [_]u8{
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+    };
+    const images = [_]ReferenceImage{.{
+        .id = canvas.mediaSurfaceTextureImageId(surface_id),
+        .width = 2,
+        .height = 2,
+        .pixels = &texture_pixels,
+    }};
+
+    var render_commands: [8]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    @memset(&pixels, 0);
+    const surface = (try ReferenceRenderSurface.init(32, 24, &pixels)).withImages(&images);
+    try surface.renderPass(.{
+        .commands = plan.commands,
+        .surface_size = geometry.SizeF.init(32, 24),
+        .full_repaint = true,
+    }, Color.rgb8(0, 0, 0));
+
+    // Inside the frame: the texture (cover fills the whole frame).
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 12, 12);
+    // The fit-expanded bleed columns — left (x in [4,8)) and right
+    // (x in [16,20)) of the frame — stay background: the emitted clip
+    // contains the draw to the widget's bytes.
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 5, 12);
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 18, 12);
+}
+
+/// Render one contain-fit media surface headlessly and hand back the
+/// composited pixels: the widget's emitted display list (placeholder
+/// fill + black remainder bars + fitted quad) reference-rendered with
+/// the texture fed in as an ORDINARY resource under the media-derived
+/// id, defeating the presentation-only skip so the letterbox geometry
+/// itself is pixel-assertable. The texture is solid white at the
+/// STREAM's own aspect (a decoder pushes frames at stream geometry, so
+/// the draw's contain re-fit against the real texture is a no-op —
+/// exactly production); the pass clears to opaque blue so bars
+/// (black), picture (white), and page (blue) are three unmistakable
+/// bands.
+fn renderContainVideoSurface(
+    frame: geometry.RectF,
+    stream: ?geometry.SizeF,
+    texture_width: usize,
+    texture_height: usize,
+    pixels: *[32 * 24 * 4]u8,
+) !ReferenceRenderSurface {
+    const surface_id: u64 = 5;
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = surface_id,
+        .image_fit = .contain,
+        .stream_size = stream,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+
+    var texture_pixels: [4 * 2 * 4]u8 = undefined;
+    @memset(&texture_pixels, 255);
+    const images = [_]ReferenceImage{.{
+        .id = canvas.mediaSurfaceTextureImageId(surface_id),
+        .width = texture_width,
+        .height = texture_height,
+        .pixels = texture_pixels[0 .. texture_width * texture_height * 4],
+    }};
+    var render_commands: [8]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    @memset(pixels, 0);
+    const surface = (try ReferenceRenderSurface.init(32, 24, pixels)).withImages(&images);
+    try surface.renderPass(.{
+        .commands = plan.commands,
+        .surface_size = geometry.SizeF.init(32, 24),
+        .full_repaint = true,
+    }, Color.rgb8(0, 0, 255));
+    return surface;
+}
+
+test "a contain video surface pillarboxes a narrow stream on black" {
+    // A square (1:1) stream into a 2:1 box: the fitted quad is the
+    // 16x16 center, with 8px black bars left and right.
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 240, .height = 240 },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+
+    // The letterbox field: black across the WHOLE frame at the frame's
+    // radius — the silhouette is exact by construction.
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(frame, fill.rect);
+            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // The deterministic placeholder, confined to the quad: goldens and
+    // replay screenshots (which skip the texture) show it exactly where
+    // the picture goes, inside the black field.
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), fill.rect);
+            try std.testing.expectEqual(Fill{ .color = canvas.mediaSurfacePlaceholderColor(5) }, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // The frame quad: aspect-fitted from the REPORTED dimensions and
+    // centered — the engine computed it, no host fit math required.
+    // `image_src` keeps its ordinary source-crop meaning (untouched
+    // here, so null).
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            try std.testing.expectEqual(canvas.mediaSurfaceTextureImageId(5), draw.image_id);
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), draw.dst);
+            // The quad IS the fit: the draw stretches into it, so a
+            // decoder whose true dimensions round off the report can
+            // never open a host-side contain seam inside the quad.
+            try std.testing.expectEqual(ImageFit.stretch, draw.fit);
+            try std.testing.expectEqual(@as(?geometry.RectF, null), draw.src);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Pixel truth: black side regions, picture centered, page untouched.
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    const surface = try renderContainVideoSurface(frame, .{ .width = 240, .height = 240 }, 2, 2, &pixels);
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 12); // left bar
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 28, 12); // right bar
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 16, 12); // picture
+    try support.expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 16, 1); // page above the frame
+}
+
+test "a contain video surface letterboxes a wide stream on black" {
+    // A 2:1 stream into a 2:3 box: the fitted quad is the 16x8 center
+    // band, with 8px black bars above and below.
+    const frame = geometry.RectF.init(8, 0, 16, 24);
+    const stream = geometry.SizeF{ .width = 480, .height = 240 };
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = stream,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    // Black field over the frame, placeholder confined to the quad.
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(frame, fill.rect);
+            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(geometry.RectF.init(8, 8, 16, 8), fill.rect);
+            try std.testing.expectEqual(Fill{ .color = canvas.mediaSurfacePlaceholderColor(5) }, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| try expectRect(geometry.RectF.init(8, 8, 16, 8), draw.dst),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    const surface = try renderContainVideoSurface(frame, stream, 4, 2, &pixels);
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 16, 4); // top bar
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 16, 20); // bottom bar
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 16, 12); // picture
+    try support.expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 4, 12); // page beside the frame
+}
+
+test "a contain video surface with matching aspect fills the frame barless" {
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const stream = geometry.SizeF{ .width = 640, .height = 320 };
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    const surface = try renderContainVideoSurface(frame, stream, 4, 2, &pixels);
+    // Every frame corner is picture — no bars on either axis.
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 1, 5);
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 30, 18);
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 16, 12);
+
+    // No bar fills, and the full-frame quad keeps the frame's own
+    // corner radius (an inset quad drops it — its corners sit in the
+    // bars, not at the surface's silhouette).
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = stream,
+        .style = .{ .radius = 6 },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 2), display_list.commandCount());
+    switch (display_list.commands[1]) {
+        .draw_image => |draw| {
+            try expectRect(frame, draw.dst);
+            try std.testing.expectEqual(@as(f32, 6), draw.radius.top_left);
+            // Known geometry always stretches into the engine's quad —
+            // the barless exact-aspect case seams just like the boxed
+            // ones if a host re-fits the real texture.
+            try std.testing.expectEqual(ImageFit.stretch, draw.fit);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "bars thinner than the corner radius shrink the quad's mask to the tangent radius" {
+    // A 2.25:1 stream into a 2:1 box leaves ~0.89px letterbox bars —
+    // thinner than the 6px corner radius. The quad's mask is the TIGHT
+    // inset radius, max(0, 6 - bar) ~ 5.11: internally tangent to the
+    // frame's corner circle, so the picture never paints outside the
+    // rounded silhouette (a hairline bar cannot cover a 6px corner)
+    // and never loses more corner than the silhouette demands.
+    const frame = geometry.RectF.init(0, 0, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 36, .height = 16 },
+        .style = .{ .radius = 6 },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    // Black field + placeholder quad + the picture quad.
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    const bar: f32 = (16.0 - 32.0 * 16.0 / 36.0) * 0.5;
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            try std.testing.expect(draw.dst.height < frame.height);
+            try std.testing.expectApproxEqAbs(@as(f32, 6) - bar, draw.radius.top_left, 0.0001);
+            try std.testing.expectApproxEqAbs(@as(f32, 6) - bar, draw.radius.bottom_right, 0.0001);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // The placeholder stand-in carries the same tight mask.
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 6) - bar, fill.radius.top_left, 0.0001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "an unbounded style radius clamps to the frame before the tangent mask" {
+    // Radius 100 on a 32x16 surface: renderers clamp every corner to
+    // half the short side (8). The tangent math must start from that
+    // effective value — from the raw 100, an 8px-bar quad would carry
+    // mask radius 92, which renderers clamp to 8 on the 16x16 quad and
+    // round the picture into a circle. Effective 8 minus the 8px bar
+    // is 0: a square quad, exactly the silhouette's demand.
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 240, .height = 240 },
+        .style = .{ .radius = 100 },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqual(@as(f32, 8), fill.radius.top_left),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), draw.dst);
+            try std.testing.expectEqual(@as(f32, 0), draw.radius.top_left);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "the fitted video draw composites the whole frame; image_src crops do not apply" {
+    // `DrawImage.src` is adopted-TEXTURE pixel coordinates, and the
+    // video texture's size is unknowable at emit time (macOS
+    // budget-fits large decodes to a smaller texture), so a crop
+    // declared against the stream cannot be translated — forwarding it
+    // raw would sample the wrong region or nothing, and fitting the
+    // quad to it would stretch whatever the host's clip leaves. The
+    // fitted draw therefore always samples the whole texture at the
+    // stream's aspect; crops remain a generic-producer facility in
+    // texture coordinates (the non-fitted paths pass them through
+    // unchanged, as ever).
+    const frame = geometry.RectF.init(0, 0, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 240, .height = 240 },
+        .image_src = geometry.RectF.init(100, 40, 240, 240),
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            // Square stream into the 2:1 box: the quad is the stream's
+            // 16x16 center, the sample is the whole texture.
+            try expectRect(geometry.RectF.init(8, 0, 16, 16), draw.dst);
+            try std.testing.expectEqual(@as(?geometry.RectF, null), draw.src);
+            try std.testing.expectEqual(ImageFit.stretch, draw.fit);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "a rounded pillarboxed surface keeps its silhouette on the black field and unmasks the deep-set quad" {
+    // Bars (8px) wider than the corner radius (6): the black field
+    // carries the frame's rounding — the silhouette lives there, never
+    // approximated per bar — and the quad's tight mask relaxes to
+    // square (max(0, 6 - 8) = 0): its corners sit fully inside the
+    // frame's straight edges, so no picture is notched.
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 240, .height = 240 },
+        .style = .{ .radius = 6 },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(frame, fill.rect);
+            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
+            try std.testing.expectEqual(@as(f32, 6), fill.radius.top_left);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), fill.rect);
+            try std.testing.expectEqual(@as(f32, 0), fill.radius.top_left);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            try std.testing.expectEqual(@as(f32, 0), draw.radius.top_left);
+            try std.testing.expectEqual(@as(f32, 0), draw.radius.bottom_right);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "a contain video surface with unknown stream geometry keeps the placeholder draw" {
+    // Pre-LOADED: no reported dimensions, so no fit math runs (nothing
+    // to divide by) — the id-derived placeholder fills the frame and
+    // the texture draw keeps the full frame as its dst.
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqual(
+                Fill{ .color = canvas.mediaSurfacePlaceholderColor(5) },
+                fill.fill,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .draw_image => |draw| {
+            try expectRect(frame, draw.dst);
+            try std.testing.expectEqual(ImageFit.contain, draw.fit);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "widget text fields expose textbox semantics and render focused chrome" {
     const text_field = Widget{
         .id = 8,

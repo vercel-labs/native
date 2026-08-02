@@ -79,6 +79,193 @@ test "embedded app starts and loads source" {
     try @import("std").testing.expectEqualStrings("<p>Embedded</p>", null_platform.loaded_source.?.bytes);
 }
 
+test "embedded app deinit returns registered font bytes across create-destroy cycles" {
+    // A direct embedder that creates and destroys apps in one process:
+    // every cycle registers a face (font bytes are the embedded
+    // runtime's only heap ownership) and tears down through the public
+    // `deinit` — the lifecycle end the doc comment promises. The
+    // leak-checking test allocator behind the `Options.allocator` seam
+    // fails this test if any cycle strands the storage, which is
+    // exactly what a stop()-only teardown did.
+    var cycle: usize = 0;
+    while (cycle < 3) : (cycle += 1) {
+        var null_platform = platform.NullPlatform.init(.{});
+        var state: u8 = 0;
+        const embedded = try std.testing.allocator.create(EmbeddedApp);
+        defer std.testing.allocator.destroy(embedded);
+        embedded.initInPlace(.{
+            .context = &state,
+            .name = "embedded-font-cycle",
+            .source = platform.WebViewSource.html("<p>Fonts</p>"),
+        }, null_platform.platform());
+        defer embedded.deinit();
+        // Ownership is frozen at init (`Runtime.owned_allocator`;
+        // mutating `options.allocator` retargets nothing), so the test
+        // re-freezes the field itself — equivalent to constructing with
+        // the leak-checked allocator, safe while nothing is owned yet.
+        embedded.runtime.owned_allocator = std.testing.allocator;
+
+        try embedded.start();
+        try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+        try std.testing.expectEqual(@as(usize, 1), embedded.runtime.registeredCanvasFontCount());
+        try embedded.stop();
+
+        // Deinit returns BOTH sides of the registration: the Zig-side
+        // bytes (the leak-checking allocator above) and the host-side
+        // registration — the runtime must call the platform's
+        // font-unregister seam per registered id, the call a macOS host
+        // answers by dropping its CoreText descriptor and caches. The
+        // null platform records that call; the deferred second deinit
+        // stays the idempotence backstop.
+        embedded.deinit();
+        try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_font_unregister_count);
+        try std.testing.expectEqual(@as(u64, canvas.min_registered_font_id), null_platform.gpu_surface_font_unregister_id);
+        // The null platform's register seam is off by default, so the
+        // runtime captured ownership token 0 (nothing installed
+        // host-side) and the teardown call must carry exactly that.
+        try std.testing.expectEqual(@as(u64, 0), null_platform.gpu_surface_font_unregister_token);
+    }
+}
+
+test "embedded app deinit leaves a newer runtime's re-registration of the same font id intact" {
+    // Host font state is per-process while font ids are only permanent
+    // per-runtime, so two live runtimes can pass the same id through one
+    // host: the later registration wins (the documented lifecycle), and
+    // the OLDER runtime's deinit must return only its own already-
+    // replaced registration — never the newer runtime's live face,
+    // which that runtime's engine still holds and draws through. The
+    // null platform's host-font mirror models the stateful host (the
+    // shape of macOS's descriptor and token tables): one instance
+    // stands in for the process, both runtimes register through it, and
+    // the per-registration ownership token is what the unregister guard
+    // matches. An id-keyed removal is exactly the regression this test
+    // catches — it would empty the mirror at A's deinit and fail the
+    // survives assertion below.
+    var host_platform = platform.NullPlatform.init(.{});
+    host_platform.gpu_surface_font_registrations = true;
+    var state_a: u8 = 0;
+    var state_b: u8 = 0;
+    const embedded_a = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded_a);
+    const embedded_b = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded_b);
+    embedded_a.initInPlace(.{
+        .context = &state_a,
+        .name = "embedded-font-owner-a",
+        .source = platform.WebViewSource.html("<p>A</p>"),
+    }, host_platform.platform());
+    defer embedded_a.deinit();
+    embedded_b.initInPlace(.{
+        .context = &state_b,
+        .name = "embedded-font-owner-b",
+        .source = platform.WebViewSource.html("<p>B</p>"),
+    }, host_platform.platform());
+    defer embedded_b.deinit();
+    embedded_a.runtime.owned_allocator = std.testing.allocator;
+    embedded_b.runtime.owned_allocator = std.testing.allocator;
+
+    // A registers first, B re-registers the same id: last wins, each
+    // runtime captured its own never-repeating ownership token.
+    try embedded_a.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+    const token_a = embedded_a.runtime.canvas_font_entries[0].host_registration_token;
+    try embedded_b.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+    const token_b = embedded_b.runtime.canvas_font_entries[0].host_registration_token;
+    try std.testing.expect(token_a != 0);
+    try std.testing.expect(token_b != 0);
+    try std.testing.expect(token_a != token_b);
+    const live = host_platform.gpuSurfaceFont(canvas.min_registered_font_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(token_b, live.token);
+
+    // A's deinit presents its stale token: recorded and accepted (the
+    // registration it owned is already gone), and provably removing
+    // nothing — B's registration is still the one the host resolves.
+    embedded_a.deinit();
+    try std.testing.expectEqual(@as(usize, 1), host_platform.gpu_surface_font_unregister_count);
+    try std.testing.expectEqual(@as(u64, canvas.min_registered_font_id), host_platform.gpu_surface_font_unregister_id);
+    try std.testing.expectEqual(token_a, host_platform.gpu_surface_font_unregister_token);
+    const survivor = host_platform.gpuSurfaceFont(canvas.min_registered_font_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(token_b, survivor.token);
+
+    // B's deinit presents the live token and the host state comes out —
+    // the guard blocks the wrong owner, not teardown itself.
+    embedded_b.deinit();
+    try std.testing.expectEqual(@as(usize, 2), host_platform.gpu_surface_font_unregister_count);
+    try std.testing.expectEqual(token_b, host_platform.gpu_surface_font_unregister_token);
+    try std.testing.expect(host_platform.gpuSurfaceFont(canvas.min_registered_font_id) == null);
+}
+
+test "embedded app deinit is idempotent" {
+    var null_platform = platform.NullPlatform.init(.{});
+    var state: u8 = 0;
+    const embedded = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded);
+    embedded.initInPlace(.{
+        .context = &state,
+        .name = "embedded-deinit-twice",
+        .source = platform.WebViewSource.html("<p>Fonts</p>"),
+    }, null_platform.platform());
+    embedded.runtime.owned_allocator = std.testing.allocator;
+    try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+
+    // The documented idiom is `defer embedded.deinit()`, which must
+    // compose with an explicit early teardown: the second call is a
+    // no-op, never a double free — and never a double host unregister
+    // (the first deinit already returned the host-side registration).
+    embedded.deinit();
+    try std.testing.expectEqual(@as(usize, 0), embedded.runtime.registeredCanvasFontCount());
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_font_unregister_count);
+    embedded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_font_unregister_count);
+}
+
+test "embedded app deinit returns the font registration to the platform that received it" {
+    // `Runtime.options` is public and mutable, and embedders genuinely
+    // swap the platform on a live runtime (tests in this repo do it
+    // constantly). The host-side registration must still come back to
+    // the host that RECEIVED it: each font entry captures its
+    // unregistration owner at registration time (the allocator-identity
+    // freeze, applied to the host seam), so a swap between registration
+    // and teardown retargets nothing. A deinit reading the live options
+    // instead would unregister against the swapped-in platform — the
+    // wrong host, or a null seam — and strand the original host's
+    // descriptor and caches for the process lifetime.
+    var platform_a = platform.NullPlatform.init(.{});
+    var platform_b = platform.NullPlatform.init(.{});
+    var state: u8 = 0;
+    const embedded = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded);
+    embedded.initInPlace(.{
+        .context = &state,
+        .name = "embedded-font-platform-swap",
+        .source = platform.WebViewSource.html("<p>Fonts</p>"),
+    }, platform_a.platform());
+    embedded.runtime.owned_allocator = std.testing.allocator;
+    try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+
+    // The swap under test: platform B holds the option by teardown time,
+    // but it never saw the registration.
+    embedded.runtime.options.platform = platform_b.platform();
+    embedded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), platform_a.gpu_surface_font_unregister_count);
+    try std.testing.expectEqual(@as(u64, canvas.min_registered_font_id), platform_a.gpu_surface_font_unregister_id);
+    try std.testing.expectEqual(@as(usize, 0), platform_b.gpu_surface_font_unregister_count);
+}
+
+test "mobile C ABI destroy returns registered font bytes through the embedded deinit" {
+    const app = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    errdefer native_sdk_app_destroy(app);
+
+    const self = mobileApp(app).?;
+    self.embedded.runtime.owned_allocator = std.testing.allocator;
+    try self.embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+    try std.testing.expectEqual(@as(usize, 1), self.embedded.runtime.registeredCanvasFontCount());
+
+    // `native_sdk_app_destroy` is the shim's whole teardown: it routes
+    // through `EmbeddedApp.deinit` (one lifecycle owner), so the
+    // leak-checked font bytes must come back here.
+    native_sdk_app_destroy(app);
+}
+
 test "mobile C ABI can load packaged asset source" {
     const app = native_sdk_app_create() orelse return error.TestUnexpectedResult;
     defer native_sdk_app_destroy(app);

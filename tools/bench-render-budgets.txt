@@ -36,8 +36,11 @@ scroll-transcript 5000
 # regression lands it at several hundred us).
 chart-tick 200
 # markdown-doc-edit: guards markdown re-render + plan cost on a
-# README-sized doc; the pre-fix number was ~2400.
-markdown-doc-edit 1500
+# README-sized doc. Theme-token syntax highlighting emits separate text
+# runs for fenced-code tokens; healthy p50 is ~1590-1630 with fourteen
+# highlighted fences (plain-fence baseline ~1370), while the pre-fix
+# renderer was ~2400.
+markdown-doc-edit 1800
 # keystroke-measured-text: guards the batched measure seam and its
 # retained caches on the provider path (a counting synthetic provider
 # stands in for CoreText). Healthy p50 ~540-660 across calibration runs.

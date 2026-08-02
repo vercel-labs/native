@@ -1,0 +1,199 @@
+# System Tray
+
+The Native SDK supports system tray icons with menus. Tray menu items can dispatch explicit command names with `source = .tray`; items without a command dispatch the compatibility command name `"tray.action"`.
+
+Tray support is currently implemented on macOS and Windows system WebView hosts. Linux returns `UnsupportedService` until a portable status notifier implementation is selected.
+
+On macOS, `title` renders the tray as a menu-bar extra: a titled `NSStatusItem` with variable width. When both `icon_path` and `title` are empty, the button falls back to the app name's first letter.
+
+## TrayOptions
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Type</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>icon_path</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>title</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>tooltip</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>items</code></td>
+      <td><code>[]const TrayMenuItem</code></td>
+      <td><code>&.{}</code></td>
+    </tr>
+  </tbody>
+</table>
+
+## TrayMenuItem
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Type</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>id</code></td>
+      <td><code>TrayItemId</code> (<code>u32</code>)</td>
+      <td><code>0</code></td>
+    </tr>
+    <tr>
+      <td><code>label</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>command</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>separator</code></td>
+      <td><code>bool</code></td>
+      <td><code>false</code></td>
+    </tr>
+    <tr>
+      <td><code>enabled</code></td>
+      <td><code>bool</code></td>
+      <td><code>true</code></td>
+    </tr>
+  </tbody>
+</table>
+
+## PlatformServices methods
+
+Use the runtime methods from app code:
+
+- `runtime.createTray(options)` -- create or replace the tray icon
+- `runtime.updateTrayMenu(items)` -- update menu items without recreating the tray
+- `runtime.removeTray()` -- remove the tray icon
+
+The lower-level `PlatformServices.createTray`, `updateTrayMenu`, and `removeTray` hooks are available for platform adapters. `Runtime` validates tray options before dispatch: non-separator menu items need a label, command-backed items need a unique non-zero `id`, and menus are capped at 32 items.
+
+## Handling tray actions
+
+When a user clicks a tray menu item, the runtime dispatches a `CommandEvent` with source `.tray` and the native `tray_item_id`. Prefer command-backed items when the item represents a known app action:
+
+```zig
+try runtime.createTray(.{
+    .tooltip = "native-sdk",
+    .items = &.{
+        .{ .id = 1, .label = "Refresh", .command = "app.refresh" },
+        .{ .separator = true },
+        .{ .id = 2, .label = "Quit", .command = "app.quit" },
+    },
+});
+```
+
+Use your `event_fn` to handle the commands — every declared name gets a real consequence, `"app.quit"` included:
+
+```zig
+fn event(context: *anyopaque, runtime: *Runtime, ev: Event) anyerror!void {
+    switch (ev) {
+        .command => |cmd| {
+            if (std.mem.eql(u8, cmd.name, "app.refresh")) {
+                // Refresh the model, re-render.
+            } else if (std.mem.eql(u8, cmd.name, "app.quit")) {
+                // The REAL graceful terminate: the host emits the same
+                // shutdown event a last-window close does, so the stop
+                // hook runs exactly once.
+                try runtime.quitApp();
+            }
+        },
+        else => {},
+    }
+}
+```
+
+## Menu-bar extras in `UiApp`
+
+Canvas-first apps declare the status item once, with `UiApp.Options.status_item` (installed on the installing frame). Selecting a menu item dispatches its `command` through the ordinary `on_command` mapping with source `.tray`:
+
+```zig
+app.* = PreviewApp.init(allocator, .{}, .{
+    // ...
+    .on_command = command,
+    .status_item = .{
+        .title = "ZN",
+        .tooltip = "Native SDK Canvas Preview",
+        .items = &.{
+            .{ .id = 1, .label = "Show Docs", .command = "app.docs" },
+            .{ .separator = true },
+            .{ .id = 2, .label = "Reload Preview", .command = "app.reload" },
+        },
+    },
+});
+```
+
+macOS (`NSStatusItem`) is the proven host; platforms without a status-bar service log a warning and continue. See `examples/canvas-preview` for the live composition.
+
+## Model-driven title and menu
+
+For a live menu-bar extra — an open-count badge in the title, the latest items in the dropdown — add `UiApp.Options.status_item_fn`. It is consulted on install and after every rebuild, and the runtime re-applies only what actually changed: a title-only change retitles the live status button (no flicker, no menu rebuild), a menu change updates the dropdown. The static `status_item` still provides the icon and tooltip.
+
+```zig
+fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusItemState {
+    const title = std.fmt.bufPrint(&scratch.title_buffer, "ZN {d}", .{model.open_count}) catch "ZN";
+    scratch.items[0] = .{ .id = 1, .label = "Refresh", .command = "app.refresh" };
+    scratch.items[1] = .{ .separator = true };
+    scratch.items[2] = .{ .id = 10, .label = model.latest_title, .command = "issue.select.latest" };
+    return .{ .title = title, .items = scratch.items[0..3] };
+}
+// options: .status_item_fn = statusItem,
+```
+
+Selections dispatch each item's `command` through `on_command` with source `.tray`, the same shape as window menus. Platforms without a tray-title seam keep the menu updates and log the missing title support once.
+
+## The menu-bar app lifecycle
+
+The tray-player pattern (a Spotify-shaped app that lives in the menu bar) is two declarations and two verbs:
+
+1. The window declares `close_policy = "hide"` in app.zon, so the red close button hides it instead of quitting — the app keeps running behind its status item, and on macOS clicking the Dock icon re-shows the hidden window on its own. On Windows this requires the `"tray"` capability (the status item is the only way back to a hidden window there — the build refuses `"hide"` without it, and a tray that fails to install downgrades the first hide-close to a real close with a loud log). The default (`"quit"`) keeps the classic behavior; see [Windows](/docs/windows#close-policy).
+2. The tray rows map to the window verbs in `update`: "Open" returns `fx.showWindow(label)` (un-hide + activate; it also restores a minimized window) and "Quit" returns `fx.quitApp()` — the real graceful terminate, riding the same shutdown path a last-window close takes.
+
+```zig
+pub const status_items = [_]native_sdk.TrayMenuItem{
+    .{ .id = 1, .label = "Open Player", .command = "app.open" },
+    .{ .separator = true },
+    .{ .id = 2, .label = "Quit", .command = "app.quit" },
+};
+
+pub fn command(name: []const u8) ?Msg {
+    if (std.mem.eql(u8, name, "app.open")) return .open_player;
+    if (std.mem.eql(u8, name, "app.quit")) return .quit;
+    return null;
+}
+
+pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
+    switch (msg) {
+        .open_player => fx.showWindow("main"),
+        .quit => fx.quitApp(),
+        // ...
+    }
+}
+```
+
+In the TypeScript tier the same verbs are `Cmd.showWindow("main")` and `Cmd.quitApp()`. `examples/menu-bar` is the whole loop, tested end to end.
+
+Linux is the honest exception: the toolkit has no status item there yet, so nothing could bring a hidden window back — `close_policy = "hide"` is refused at build/create time with a teaching, and the platform-support matrix states it plainly.
+
+A future `.event` close-policy tier (the model receives the close request and decides — unsaved-changes prompts) is deliberately left room for but is not implemented yet; model-declared secondary windows already have that shape today through `WindowDescriptor.on_close`.

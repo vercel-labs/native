@@ -13,6 +13,7 @@ const App = support.App;
 const Runtime = support.Runtime;
 const Event = support.Event;
 const TestHarness = support.TestHarness;
+const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 
 const TestMsg = union(enum) {
     resized: f32,
@@ -369,6 +370,105 @@ test "tree keymap walks visible rows, collapses, expands, and selects through re
     const after_enter = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(after_enter.findById(111).?.widget.state.selected);
     try std.testing.expect(!after_enter.findById(12).?.widget.state.selected);
+}
+
+test "flat tree levels resolve logical parents and children" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 160),
+    });
+
+    // The rows are layout siblings (the natural output of a declarative
+    // `for`), but their one-based levels describe the logical tree:
+    //   src (expanded)
+    //   └─ main.zig
+    //   README.md
+    const rows = [_]canvas.Widget{
+        blk: {
+            var row = treeRowPanel(21, 0, 24, true, &.{});
+            row.tree_level = 1;
+            break :blk row;
+        },
+        blk: {
+            var row = treeRowPanel(22, 30, 24, null, &.{});
+            row.tree_level = 2;
+            break :blk row;
+        },
+        blk: {
+            var row = treeRowPanel(23, 60, 24, null, &.{});
+            row.tree_level = 1;
+            break :blk row;
+        },
+    };
+    var nodes: [6]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 20, .kind = .tree, .children = &rows }, geometry.RectF.init(0, 0, 240, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+
+    // Focus the flat child row, then use the standard tree moves. Left
+    // reaches its logical parent; Right on that expanded parent reaches
+    // the first logical child even though neither is a widget ancestor.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 10, .y = 35, .button = 0 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 10, .y = 35, .button = 0 } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 22), view.canvas_widget_focused_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowleft" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 21), view.canvas_widget_focused_id);
+    try std.testing.expect(app_state.last_keyboard_focus_moved);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 22), view.canvas_widget_focused_id);
+    try std.testing.expect(app_state.last_keyboard_focus_moved);
+}
+
+test "flat tree child lookup stays inside its tree scope" {
+    var first_row = treeRowPanel(31, 0, 24, true, &.{});
+    first_row.tree_level = 1;
+    var second_row = treeRowPanel(41, 0, 24, null, &.{});
+    second_row.tree_level = 2;
+    const first_rows = [_]canvas.Widget{first_row};
+    const second_rows = [_]canvas.Widget{second_row};
+    const trees = [_]canvas.Widget{
+        .{ .id = 30, .kind = .tree, .children = &first_rows },
+        .{ .id = 40, .kind = .tree, .children = &second_rows },
+    };
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 29, .kind = .stack, .children = &trees },
+        geometry.RectF.init(0, 0, 240, 100),
+        &nodes,
+    );
+    const focused = layout.focusTargetById(31).?;
+
+    const target = canvas_widget_runtime.canvasWidgetTreeDirectionalFocusTarget(layout, focused, .right).?;
+    try std.testing.expectEqual(@as(canvas.ObjectId, 31), target.id);
+}
+
+test "flat tree child lookup handles the maximum logical level" {
+    var first_row = treeRowPanel(51, 0, 24, true, &.{});
+    first_row.tree_level = std.math.maxInt(u16);
+    var second_row = treeRowPanel(52, 30, 24, null, &.{});
+    second_row.tree_level = std.math.maxInt(u16);
+    const rows = [_]canvas.Widget{ first_row, second_row };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 50, .kind = .tree, .children = &rows },
+        geometry.RectF.init(0, 0, 240, 100),
+        &nodes,
+    );
+    const focused = layout.focusTargetById(51).?;
+
+    const target = canvas_widget_runtime.canvasWidgetTreeDirectionalFocusTarget(layout, focused, .right).?;
+    try std.testing.expectEqual(@as(canvas.ObjectId, 51), target.id);
 }
 
 test "a virtual list declaring the tree role scopes the tree keymap over its rows" {

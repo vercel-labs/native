@@ -673,22 +673,151 @@ test "gap on stacking containers is rejected with the teaching error" {
     }
 }
 
-test "the avatar image attribute validates as one binding, avatar-only" {
+test "the image attribute validates as one binding on avatar and image" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // One {binding} on avatar is the whole grammar.
-    var parser = markup.Parser.init(arena, "<row>\n  <avatar image=\"{user_image}\">CT</avatar>\n</row>");
-    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    // One {binding} on avatar or the image leaf is the whole grammar.
+    const valid = [_][]const u8{
+        "<row>\n  <avatar image=\"{user_image}\">CT</avatar>\n</row>",
+        "<row>\n  <image image=\"{cover}\" width=\"120\" height=\"80\" label=\"Cover art\" />\n</row>",
+    };
+    for (valid) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
 
     const cases = [_]struct { source: []const u8, message: []const u8 }{
         // Runtime image ids are model data, never markup literals.
-        .{ .source = "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>", .message = markup.avatar_image_message },
-        .{ .source = "<row>\n  <avatar image=\"{a == b}\">CT</avatar>\n</row>", .message = markup.avatar_image_message },
-        // Scoped to avatar: the other image elements stay Zig views.
-        .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.avatar_image_element_message },
-        .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.avatar_image_element_message },
+        .{ .source = "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>", .message = markup.image_binding_message },
+        .{ .source = "<row>\n  <avatar image=\"{a == b}\">CT</avatar>\n</row>", .message = markup.image_binding_message },
+        .{ .source = "<row>\n  <image image=\"7\" label=\"Art\" />\n</row>", .message = markup.image_binding_message },
+        // Scoped to the two ImageId-drawing widgets: anywhere else the
+        // attribute would be silently inert.
+        .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.image_binding_element_message },
+        .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.image_binding_element_message },
+        // ...and required on the leaf: an unbound image is statically
+        // dead markup (avatar keeps its initials fallback instead).
+        .{ .source = "<row>\n  <image label=\"Art\" />\n</row>", .message = markup.image_missing_image_message },
+        // The leaf takes no children (icon's policy): widget layout
+        // gives an image no child slots, so a nested caption would
+        // silently vanish instead of rendering.
+        .{ .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>", .message = markup.image_children_message },
+        // ...and the rejection reads the RAW node: an extracted
+        // context-menu (host metadata on a pressable host) still counts
+        // as a child - the leaf takes no children at all, and both
+        // engines check the original node the same way.
+        .{ .source = "<row>\n  <image image=\"{cover}\" label=\"Art\" on-press=\"refresh\"><context-menu><menu-item on-press=\"refresh\">Reload</menu-item></context-menu></image>\n</row>", .message = markup.image_children_message },
+    };
+    for (cases) |case| {
+        var case_parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try case_parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expectEqual(@as(usize, 2), info.line);
+    }
+}
+
+test "the media-surface surface attribute validates as one binding, required, media-surface-only" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // One {binding} on media-surface is the whole grammar.
+    var parser = markup.Parser.init(arena, "<row>\n  <media-surface surface=\"{preview}\" label=\"Preview\" />\n</row>");
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // Surface ids are model data, never markup literals.
+        .{ .source = "<row>\n  <media-surface surface=\"7\" label=\"Preview\" />\n</row>", .message = markup.media_surface_surface_message },
+        .{ .source = "<row>\n  <media-surface surface=\"{a == b}\" label=\"Preview\" />\n</row>", .message = markup.media_surface_surface_message },
+        // Scoped to media-surface: anywhere else it would be inert.
+        .{ .source = "<row>\n  <panel surface=\"{preview}\" />\n</row>", .message = markup.media_surface_surface_element_message },
+        // ...and required: an unbound surface is statically dead markup.
+        .{ .source = "<row>\n  <media-surface label=\"Preview\" />\n</row>", .message = markup.media_surface_missing_surface_message },
+    };
+    for (cases) |case| {
+        var case_parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try case_parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expectEqual(@as(usize, 2), info.line);
+    }
+}
+
+test "the video element validates as a leaf with its closed attribute set" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The full declaration (bare flags read as presence-is-true), a
+    // bound src, and the src-less surface-only shape are all legal.
+    const valid = [_][]const u8{
+        "<row>\n  <video src=\"assets/clips/a.mp4\" controls autoplay loop muted/>\n</row>",
+        "<row>\n  <video src=\"{clip}\" controls=\"true\" width=\"320\" height=\"180\" label=\"Trailer\"/>\n</row>",
+        "<row>\n  <video controls grow=\"1\" label=\"Preview\"/>\n</row>",
+    };
+    for (valid) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // A leaf like image and icon: widget layout gives the playback
+        // surface no child slots, so nested content would silently
+        // vanish instead of rendering.
+        .{ .source = "<row>\n  <video src=\"a.mp4\"><text>Caption</text></video>\n</row>", .message = markup.video_children_message },
+        // The closed attribute set teaches its vocabulary.
+        .{ .source = "<row>\n  <video src=\"a.mp4\" gap=\"4\"/>\n</row>", .message = markup.video_attr_message },
+        // Events are not part of the set either: the chrome is
+        // runtime-consumed, so there is nothing to bind.
+        .{ .source = "<row>\n  <video src=\"a.mp4\" on-press=\"open\"/>\n</row>", .message = markup.video_attr_message },
+        // The flags are video-scoped: anywhere else they would be
+        // silently inert.
+        .{ .source = "<row>\n  <panel controls=\"true\"/>\n</row>", .message = markup.video_flag_element_message },
+        .{ .source = "<row>\n  <badge muted=\"true\">3</badge>\n</row>", .message = markup.video_flag_element_message },
+        // A malformed flag value errors exactly as flags do.
+        .{ .source = "<row>\n  <video controls=\"{\"/>\n</row>", .message = markup.invalid_expression_message },
+    };
+    for (cases) |case| {
+        var case_parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try case_parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expectEqual(@as(usize, 2), info.line);
+    }
+}
+
+test "the terminal element requires its pty binding and scopes its vocabulary" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const valid = [_][]const u8{
+        "<column>\n  <terminal pty=\"{shell}\" label=\"Shell\" grow=\"1\"/>\n</column>",
+        "<column>\n  <terminal pty=\"{shell}\" scrollback=\"{offset}\" label=\"Shell\" on-terminal=\"term_state\" autofocus/>\n</column>",
+    };
+    for (valid) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // A terminal without its pty binding can never attach a session:
+        // dead markup, the media-surface-without-surface policy.
+        .{ .source = "<column>\n  <terminal label=\"Shell\"/>\n</column>", .message = markup.terminal_missing_pty_message },
+        // pty keys are model data, never markup literals.
+        .{ .source = "<column>\n  <terminal pty=\"1\" label=\"Shell\"/>\n</column>", .message = markup.terminal_pty_message },
+        // A leaf like icon and image: no child slots.
+        .{ .source = "<column>\n  <terminal pty=\"{shell}\" label=\"Shell\"><text>x</text></terminal>\n</column>", .message = markup.terminal_children_message },
+        // The scoped vocabulary teaches where it lives.
+        .{ .source = "<column>\n  <panel pty=\"{shell}\"/>\n</column>", .message = markup.terminal_pty_element_message },
+        .{ .source = "<column>\n  <panel scrollback=\"3\"/>\n</column>", .message = markup.scrollback_element_message },
+        .{ .source = "<column>\n  <panel on-terminal=\"term_state\"/>\n</column>", .message = markup.on_terminal_element_message },
+        // The text channel is runtime-owned (the live screen rides it),
+        // so an authored text would be clobbered every frame.
+        .{ .source = "<column>\n  <terminal pty=\"{shell}\" text=\"Build shell\"/>\n</column>", .message = markup.terminal_text_attr_message },
+        // A container role promises child structure a terminal leaf can
+        // never hold.
+        .{ .source = "<column>\n  <terminal pty=\"{shell}\" label=\"Shell\" role=\"list\"/>\n</column>", .message = markup.a11y_container_role_message },
     };
     for (cases) |case| {
         var case_parser = markup.Parser.init(arena, case.source);
@@ -785,6 +914,119 @@ test "overscroll validates as scroll-scoped with a closed value vocabulary" {
         .{
             .source = "<column>\n  <scroll overscroll=\"bouncy\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
             .message = markup.overscroll_value_message,
+        },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+    }
+}
+
+test "axis and value-x validate as scroll-scoped with the axis grant dependency" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Valid: every vocabulary value on scroll, and value-x beside a
+    // horizontal-capable axis (literal or a binding resolved at build).
+    const valid_sources = [_][]const u8{
+        "<column>\n  <scroll axis=\"vertical\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"horizontal\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"both\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"horizontal\" value-x=\"120\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"both\" value-x=\"{shelf_x}\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        // A literal VERTICAL axis is legal beside virtualization (it
+        // grants nothing virtualization ignores), and a horizontal
+        // grant is legal beside a literal virtualized="false".
+        "<column>\n  <scroll axis=\"vertical\" virtualized=\"true\" virtual-item-extent=\"24\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"horizontal\" virtualized=\"false\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // Axes exist only where the runtime scrolls.
+        .{
+            .source = "<column>\n  <row axis=\"horizontal\">\n    <text>a</text>\n  </row>\n</column>",
+            .message = markup.axis_element_message,
+        },
+        // Literal values outside the closed vocabulary teach the set.
+        .{
+            .source = "<column>\n  <scroll axis=\"sideways\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.axis_value_message,
+        },
+        // Windowed virtualization is vertical machinery: a horizontal
+        // grant there would be silently ignored.
+        .{
+            .source = "<column>\n  <scroll axis=\"horizontal\" virtualized=\"true\" virtual-item-extent=\"24\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.axis_virtualized_message,
+        },
+        // The horizontal offset exists only where the runtime scrolls
+        // sideways.
+        .{
+            .source = "<column>\n  <row value-x=\"20\">\n    <text>a</text>\n  </row>\n</column>",
+            .message = markup.value_x_element_message,
+        },
+        // An offset on an axis the region never grants is silently
+        // inert: no axis at all, and the explicit vertical default.
+        .{
+            .source = "<column>\n  <scroll value-x=\"20\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.value_x_dependent_attr_message,
+        },
+        .{
+            .source = "<column>\n  <scroll axis=\"vertical\" value-x=\"20\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.value_x_dependent_attr_message,
+        },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+    }
+}
+
+test "tooltip-delay validates as tooltip-scoped beside anchor, and anchor accepts tooltip" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Valid: an anchored tooltip with a literal delay, a zero delay
+    // (instant show), a binding (resolved by the engines at build), and
+    // an anchored tooltip with no delay at all (the token default).
+    const valid_sources = [_][]const u8{
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"above\" tooltip-delay=\"500\">Bold the selection</tooltip>\n</stack>",
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"above\" tooltip-delay=\"0\">Bold the selection</tooltip>\n</stack>",
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"below\" tooltip-delay=\"{delay}\">Bold the selection</tooltip>\n</stack>",
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"above\">Bold the selection</tooltip>\n</stack>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // Hover intent exists only where the runtime owns visibility;
+        // anywhere else the delay is silently inert.
+        .{
+            .source = "<column>\n  <button on-press=\"pressed\" tooltip-delay=\"500\">Bold</button>\n</column>",
+            .message = markup.tooltip_delay_element_message,
+        },
+        // A delay beside no anchor shapes a hover-show that never
+        // happens: a static tooltip paints whenever the view renders it.
+        .{
+            .source = "<column>\n  <tooltip tooltip-delay=\"500\">Bold the selection</tooltip>\n</column>",
+            .message = markup.tooltip_delay_dependent_attr_message,
+        },
+        // Anchor stays scoped to its registry set; tooltip joining it
+        // must not open other elements.
+        .{
+            .source = "<column>\n  <badge anchor=\"above\">3</badge>\n</column>",
+            .message = markup.anchor_element_message,
         },
     };
     for (cases) |case| {

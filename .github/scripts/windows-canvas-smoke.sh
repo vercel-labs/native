@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Windows canvas smoke under Wine.
 #
-# Exercises the Windows gpu_surface software path (src/platform/windows/
-# webview2_host.cpp: child HWND, WM_TIMER frame events, SetDIBitsToDevice
-# blits) without Windows hardware: cross-compiles examples/ui-inbox for
+# Exercises the Windows gpu_surface Direct2D path (src/platform/windows/
+# webview2_host.cpp: child HWND, WM_TIMER frame events, retained binary
+# packets) under Wine: cross-compiles examples/ui-inbox for
 # x86_64-windows-gnu, runs the .exe under Xvfb + Wine, and asserts against
 # the automation snapshot:
 #
 #   1. snapshot ready=true            (app booted, automation server live)
-#   2. gpu_backend=software           (the SetDIBitsToDevice path is active)
+#   2. gpu_backend=direct2d           (the retained packet path is active)
 #   3. gpu_nonblank=true              (real pixels were presented)
 #   4. widget-click "Add task" -> '4 open'   (automation input mutates state)
 #   5. real X11 click + typing lands in the draft textbox (XTEST -> Wine ->
@@ -77,6 +77,21 @@ poll() {
   return 1
 }
 
+# Print the first snapshot match, retrying reads that land between the
+# runtime's truncate and rewrite on a presented frame.
+snapshot_match() {
+  local match=""
+  for _ in $(seq 1 20); do
+    match=$(grep -o "$1" "$snap" | head -1)
+    if [ -n "$match" ]; then
+      printf '%s\n' "$match"
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 # ---- build ----------------------------------------------------------------
 (cd "$repo_root" && zig build) || fail "root zig build (CLI) failed"
 (cd "$app_dir" && zig build -Dtarget=x86_64-windows-gnu -Dplatform=windows -Dweb-engine=system -Dautomation=true) \
@@ -101,9 +116,9 @@ app_pid=$!
 poll 180 'ready=true' || fail "snapshot never became ready"
 echo "== ready: $(head -1 "$snap" | cut -d'|' -f1)"
 
-# ---- 2 + 3: software backend presented non-blank pixels --------------------
+# ---- 2 + 3: Direct2D backend presented non-blank pixels --------------------
 poll 60 'gpu_nonblank=true' || fail "gpu_nonblank never became true"
-grep -q 'gpu_backend=software' "$snap" || fail "gpu_backend is not software"
+poll 10 'gpu_backend=direct2d' || fail "gpu_backend is not direct2d"
 echo "== canvas: $(grep -o 'gpu_backend=[a-z]*' "$snap" | head -1)" \
   "$(grep -o 'gpu_nonblank=[a-z]*' "$snap" | head -1)" \
   "$(grep -o 'gpu_sample=0x[0-9a-f]*' "$snap" | head -1)" \
@@ -111,7 +126,7 @@ echo "== canvas: $(grep -o 'gpu_backend=[a-z]*' "$snap" | head -1)" \
 
 # ---- 4: automation widget-click mutates the model --------------------------
 echo "== open before click: $(grep -oE '[0-9]+ open' "$snap" | head -1)"
-add_id=$(grep -o 'widget @w1/inbox-canvas#[0-9]* role=button name="Add task"' "$snap" \
+add_id=$(snapshot_match 'widget @w1/inbox-canvas#[0-9]* role=button name="Add task"' \
   | grep -o '#[0-9]*' | tr -d '#')
 [ -n "$add_id" ] || fail "Add task button not found in snapshot"
 "$cli" automate widget-click inbox-canvas "$add_id" || fail "CLI widget-click failed"
@@ -137,15 +152,20 @@ for w in $(xdotool search --name "." 2>/dev/null); do
 done
 [ -n "$win" ] || fail "app X window not found"
 eval "$(xdotool getwindowgeometry --shell "$win")"
-client_h=$(grep -o 'window @w1 "[^"]*" bounds=([^)]*)' "$snap" | head -1 \
-  | sed -n 's/.*x\([0-9]*\)[^x]*$/\1/p')
-[ -n "$client_h" ] || client_h=$HEIGHT
+# The runtime rewrites snapshot.txt on every presented frame. Retry the
+# extraction instead of treating a read that lands between truncate and
+# write as a standard-frame window: that fallback erases the 30px Wine
+# caption correction and turns the real-input receipt into a flaky miss.
+client_line=$(snapshot_match 'window @w1 "[^"]*" bounds=([^)]*)')
+[ -n "$client_line" ] || fail "could not read client bounds from snapshot"
+client_h=$(printf '%s\n' "$client_line" | sed -n 's/.*x\([0-9]*\)[^x]*$/\1/p')
+[ -n "$client_h" ] || fail "could not read client height from snapshot"
 y_off=$((client_h - HEIGHT))
 [ "$y_off" -ge 0 ] 2>/dev/null || y_off=0
 echo "== x window $win: pos=($X,$Y) size=${WIDTH}x${HEIGHT} client_h=$client_h y_off=$y_off"
 xdotool windowactivate "$win" >/dev/null 2>&1 || xdotool windowfocus "$win" >/dev/null 2>&1
 
-draft_line=$(grep -o 'widget @w1/inbox-canvas#[0-9]* role=textbox[^|]*' "$snap" | head -1)
+draft_line=$(snapshot_match 'widget @w1/inbox-canvas#[0-9]* role=textbox[^|]*')
 [ -n "$draft_line" ] || fail "draft textbox not found in snapshot"
 bounds=$(echo "$draft_line" | grep -o 'bounds=([^)]*)')
 bx=$(echo "$bounds" | sed -n 's/bounds=(\([0-9.]*\),.*/\1/p')

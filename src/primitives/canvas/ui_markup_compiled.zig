@@ -263,6 +263,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime std.mem.eql(u8, node.name, "markdown")) {
                 return buildMarkdown(node, entries, ui, model, scope);
             }
+            if (comptime std.mem.eql(u8, node.name, "code")) {
+                return buildCode(node, entries, ui, model, scope);
+            }
             if (comptime std.mem.eql(u8, node.name, "stepper")) {
                 return buildStepper(node, entries, ui, model, scope);
             }
@@ -282,6 +285,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime std.mem.eql(u8, node.name, "series")) {
                 // Series inside a chart are consumed by buildChart.
                 comptime fail(node, markup.series_parent_message);
+            }
+            if (comptime std.mem.eql(u8, node.name, "video")) {
+                return buildVideo(node, entries, ui, model, scope);
             }
             if (comptime std.mem.eql(u8, node.name, "context-menu")) {
                 // Direct context-menu children are consumed by their host
@@ -404,6 +410,31 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                         }
                     }
                     if (pane_count != 2) fail(node, markup.split_children_message);
+                }
+                // Interpreter parity: the image leaf's static shape.
+                // Without its id binding the leaf can never draw —
+                // statically dead markup, a compile error here too. And
+                // it takes no children at all (icon's leaf policy): the
+                // check reads the ORIGINAL node, so an extracted
+                // context-menu still counts as a child exactly like the
+                // validator's raw-node check.
+                if (kind == .image) {
+                    if (node.attr("image") == null) {
+                        fail(node, markup.image_missing_image_message);
+                    }
+                    if (node.children.len > 0) {
+                        fail(node, markup.image_children_message);
+                    }
+                }
+                // Interpreter parity: the terminal leaf's static shape —
+                // pty required (dead markup without it), no children.
+                if (kind == .terminal) {
+                    if (node.attr("pty") == null) {
+                        fail(node, markup.terminal_missing_pty_message);
+                    }
+                    if (node.children.len > 0) {
+                        fail(node, markup.terminal_children_message);
+                    }
                 }
                 // Interpreter parity: the a11y lint's error half — an
                 // unnamed interactive control or a misused role ships a
@@ -746,6 +777,90 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 if (base.len > 0) options.issue_link_base = base;
             }
             return Md.view(ui, source_text, options);
+        }
+
+        // ----------------------------------------------------------- code
+
+        fn buildCode(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            comptime {
+                if (node.children.len != 0) fail(node.children[0], markup.code_children_message);
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                    const known = std.mem.eql(u8, attribute.name, "source") or
+                        std.mem.eql(u8, attribute.name, "language") or
+                        std.mem.eql(u8, attribute.name, "editable") or
+                        std.mem.eql(u8, attribute.name, "on-input") or
+                        std.mem.eql(u8, attribute.name, "line-numbers") or
+                        std.mem.eql(u8, attribute.name, "wrap") or
+                        std.mem.eql(u8, attribute.name, "width") or
+                        std.mem.eql(u8, attribute.name, "height") or
+                        std.mem.eql(u8, attribute.name, "min-width") or
+                        std.mem.eql(u8, attribute.name, "grow") or
+                        std.mem.eql(u8, attribute.name, "label") or
+                        std.mem.eql(u8, attribute.name, "key") or
+                        std.mem.eql(u8, attribute.name, "global-key");
+                    if (!known) fail(node, markup.code_attr_message);
+                }
+            }
+            const source_path = comptime blk: {
+                const raw = node.attr("source") orelse fail(node, markup.code_source_message);
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.code_source_message);
+                if (expression != .binding) fail(node, markup.code_source_message);
+                break :blk expression.binding;
+            };
+            comptime requireVariant(pathVariant(node, entries, source_path, true), &.{.string}, node, markup.code_source_message);
+            const source = switch (bindingValue(node, entries, source_path, ui, model, scope, true)) {
+                .string => |text| text,
+                else => runtimeFail([]const u8, ui),
+            };
+
+            var options: Ui.CodeOptions = .{};
+            if (comptime (node.attr("language") != null)) {
+                const name = comptime blk: {
+                    const expression = markup.parseAttrExpression(node.attr("language").?) orelse fail(node, markup.code_language_message);
+                    if (expression != .literal) fail(node, markup.code_language_message);
+                    if (!canvas.code.isLanguageName(expression.literal)) fail(node, markup.code_language_message);
+                    break :blk expression.literal;
+                };
+                options.language = canvas.code.languageFromName(name);
+            }
+            if (comptime (node.attr("line-numbers") != null)) {
+                options.line_numbers = videoFlagValue(node, entries, comptime node.attr("line-numbers").?, ui, model, scope);
+            }
+            if (comptime (node.attr("editable") != null)) {
+                options.editable = videoFlagValue(node, entries, comptime node.attr("editable").?, ui, model, scope);
+            }
+            if (comptime (node.attr("on-input") != null)) {
+                const expression = comptime (markup.parseMessageExpression(node.attr("on-input").?) orelse
+                    fail(node, "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")"));
+                options.on_input = comptime (inputConstructor(expression.tag) orelse
+                    fail(node, "on-input tag must carry a TextInputEvent payload"));
+            }
+            if (comptime (node.attr("wrap") != null)) {
+                options.wrap = videoFlagValue(node, entries, comptime node.attr("wrap").?, ui, model, scope);
+            }
+            if (comptime (node.attr("width") != null)) {
+                options.width = floatAttr(node, entries, comptime node.attr("width").?, ui, model, scope);
+            }
+            if (comptime (node.attr("height") != null)) {
+                options.height = floatAttr(node, entries, comptime node.attr("height").?, ui, model, scope);
+            }
+            if (comptime (node.attr("min-width") != null)) {
+                options.min_width = floatAttr(node, entries, comptime node.attr("min-width").?, ui, model, scope);
+            }
+            if (comptime (node.attr("grow") != null)) {
+                options.grow = floatAttr(node, entries, comptime node.attr("grow").?, ui, model, scope);
+            }
+            if (comptime (node.attr("label") != null)) {
+                options.semantics.label = stringAttr(node, entries, comptime node.attr("label").?, ui, model, scope, "label expects text");
+            }
+            if (comptime (node.attr("key") != null)) {
+                options.key = attrKey(node, entries, comptime node.attr("key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            if (comptime (node.attr("global-key") != null)) {
+                options.global_key = attrKey(node, entries, comptime node.attr("global-key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            return ui.code(options, source);
         }
 
         fn markdownLinkConstructor(comptime node: markup.MarkupNode, comptime raw: []const u8) Ui.LinkMsgFn {
@@ -1217,6 +1332,72 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             return series;
         }
 
+        // ---------------------------------------------------------- video
+
+        /// Comptime mirror of the interpreter's `buildVideo`: the leaf
+        /// shape and the closed attribute set resolve at comptime with
+        /// the interpreter's messages; the src string, flags, and
+        /// sizing evaluate at runtime and lower through `Ui.video`.
+        fn buildVideo(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            comptime {
+                if (node.children.len > 0) fail(node.children[0], markup.video_children_message);
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                    const known = std.mem.eql(u8, attribute.name, "src") or
+                        markup.videoFlagAttrName(attribute.name) or
+                        std.mem.eql(u8, attribute.name, "width") or
+                        std.mem.eql(u8, attribute.name, "height") or
+                        std.mem.eql(u8, attribute.name, "grow") or
+                        std.mem.eql(u8, attribute.name, "label") or
+                        std.mem.eql(u8, attribute.name, "key") or
+                        std.mem.eql(u8, attribute.name, "global-key");
+                    if (!known) fail(node, markup.video_attr_message);
+                }
+            }
+            var options: Ui.VideoOptions = .{};
+            if (comptime (node.attr("src") != null)) {
+                options.src = stringAttr(node, entries, comptime node.attr("src").?, ui, model, scope, markup.video_src_message);
+            }
+            if (comptime (node.attr("controls") != null)) {
+                options.controls = videoFlagValue(node, entries, comptime node.attr("controls").?, ui, model, scope);
+            }
+            if (comptime (node.attr("autoplay") != null)) {
+                options.autoplay = videoFlagValue(node, entries, comptime node.attr("autoplay").?, ui, model, scope);
+            }
+            if (comptime (node.attr("loop") != null)) {
+                options.loop = videoFlagValue(node, entries, comptime node.attr("loop").?, ui, model, scope);
+            }
+            if (comptime (node.attr("muted") != null)) {
+                options.muted = videoFlagValue(node, entries, comptime node.attr("muted").?, ui, model, scope);
+            }
+            if (comptime (node.attr("width") != null)) {
+                options.width = floatAttr(node, entries, comptime node.attr("width").?, ui, model, scope);
+            }
+            if (comptime (node.attr("height") != null)) {
+                options.height = floatAttr(node, entries, comptime node.attr("height").?, ui, model, scope);
+            }
+            if (comptime (node.attr("grow") != null)) {
+                options.grow = floatAttr(node, entries, comptime node.attr("grow").?, ui, model, scope);
+            }
+            if (comptime (node.attr("label") != null)) {
+                options.label = stringAttr(node, entries, comptime node.attr("label").?, ui, model, scope, "label expects text");
+            }
+            if (comptime (node.attr("key") != null)) {
+                options.key = attrKey(node, entries, comptime node.attr("key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            if (comptime (node.attr("global-key") != null)) {
+                options.global_key = attrKey(node, entries, comptime node.attr("global-key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            return ui.video(options);
+        }
+
+        /// One video flag's value (interpreter parity): bare presence
+        /// declares true, a valued flag evaluates truthy.
+        fn videoFlagValue(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype) bool {
+            if (comptime (raw.len == 0)) return true;
+            return evalExpr(node, entries, raw, ui, model, scope).truthy();
+        }
+
         /// Resolve a chart `x-labels` binding through the same sources
         /// `for each` accepts, requiring a string element type at
         /// comptime — the label twin of `chartValuesItems`.
@@ -1245,7 +1426,12 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
 
         /// Resolve a series `values` binding through the same sources
         /// `for each` accepts (scope slice args shadow model iterables),
-        /// requiring an f32 element type at comptime.
+        /// requiring an f32 or f64 element type at comptime. f64
+        /// iterables narrow into a build-arena f32 copy per sample (the
+        /// interpreter's `f32Items` rule): transpiled TS cores carry
+        /// every number array as f64 — the subset's one float class —
+        /// and refusing them would leave markup charts unreachable from
+        /// a TS model.
         fn chartValuesItems(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype) []const f32 {
             const path = comptime blk: {
                 const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.series_values_message);
@@ -1256,17 +1442,31 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime (scope_index_opt != null)) {
                 const scope_index = comptime scope_index_opt.?;
                 comptime {
-                    if (entries[scope_index].kind != .slice_arg or entries[scope_index].Item != f32) {
+                    if (entries[scope_index].kind != .slice_arg or
+                        (entries[scope_index].Item != f32 and entries[scope_index].Item != f64))
+                    {
                         fail(node, markup.series_values_message);
                     }
                 }
-                return scopePayload(entries, scope_index, scope);
+                return narrowedSeriesValues(entries[scope_index].Item, scopePayload(entries, scope_index, scope), ui);
             }
             const info = comptime (eachInfo(path) orelse fail(node, markup.series_values_message));
             comptime {
-                if (info.Item != f32) fail(node, markup.series_values_message);
+                if (info.Item != f32 and info.Item != f64) fail(node, markup.series_values_message);
             }
-            return eachItems(info, ui, model);
+            return narrowedSeriesValues(info.Item, eachItems(info, ui, model), ui);
+        }
+
+        /// f32 series values pass through; f64 values copy down into the
+        /// build arena (charts plot f32).
+        fn narrowedSeriesValues(comptime Item: type, items: []const Item, ui: *Ui) []const f32 {
+            if (comptime (Item == f32)) return items;
+            const narrowed = ui.arena.alloc(f32, items.len) catch {
+                ui.failed = true;
+                return &.{};
+            };
+            for (narrowed, items) |*slot, value| slot.* = @floatCast(value);
+            return narrowed;
         }
 
         /// Comptime icon-value classification with the invalid arm turned
@@ -1570,6 +1770,23 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     };
                 } else if (comptime std.mem.eql(u8, attribute.name, "image")) {
                     applyImageAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime std.mem.eql(u8, attribute.name, "surface")) {
+                    applySurfaceAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime std.mem.eql(u8, attribute.name, "pty")) {
+                    applyPtyAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime (std.mem.eql(u8, attribute.name, "scrollback") and !std.mem.eql(u8, node.name, "terminal"))) {
+                    // Terminal-scoped (validator parity for unvalidated
+                    // paths): anywhere else the option is inert data.
+                    comptime fail(node, markup.scrollback_element_message);
+                } else if (comptime (std.mem.eql(u8, attribute.name, "text") and std.mem.eql(u8, node.name, "terminal"))) {
+                    // Runtime-owned text channel (interpreter and
+                    // validator parity).
+                    comptime fail(node, markup.terminal_text_attr_message);
+                } else if (comptime markup.videoFlagAttrName(attribute.name)) {
+                    // The video element's flags, video-scoped (its own
+                    // build consumed them): anywhere else they would be
+                    // silently inert (interpreter and validator parity).
+                    comptime fail(node, markup.video_flag_element_message);
                 } else if (comptime std.mem.eql(u8, attribute.name, "name")) {
                     // Consumed by the icon branch in buildElement; a
                     // compile error on any other element (interpreter and
@@ -1612,6 +1829,15 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                         break :blk std.fmt.parseFloat(f32, attribute.value) catch
                             fail(node, markup.anchor_offset_value_message);
                     };
+                } else if (comptime std.mem.eql(u8, attribute.name, "quiet-hover")) {
+                    // The quiet-surface knob (`WidgetStyle.quiet_hover`)
+                    // for image-forward content tiles: hover wash off,
+                    // press/selection fills, focus ring, cursor intent,
+                    // and hit testing untouched. Hit-target elements only
+                    // (interpreter and validator parity); applied to
+                    // `options.style`, so no flat option field backs it.
+                    comptime if (!markup.hitTargetElement(node.name)) fail(node, markup.quiet_hover_element_message);
+                    options.style.quiet_hover = evalExpr(node, entries, attribute.value, ui, model, scope).truthy();
                 } else if (comptime (colorStyleField(attribute.name) != null)) {
                     // Style token refs resolve entirely at comptime: a typo
                     // in a token name is a compile error.
@@ -1626,21 +1852,71 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         }
 
         /// Comptime mirror of the interpreter's `applyImageAttr`:
-        /// `image="{binding}"` on avatar resolves to a `u64` ImageId the
-        /// app registered at runtime — avatar-only, binding-only, and the
-        /// binding must produce an integer, all checked at comptime with
-        /// the interpreter's messages.
+        /// `image="{binding}"` on avatar and image resolves to a `u64`
+        /// ImageId the app registered at runtime — binding-only, and
+        /// the binding must produce an integer, all checked at comptime
+        /// with the interpreter's messages.
         fn applyImageAttr(comptime node: markup.MarkupNode, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
             comptime {
-                if (!std.mem.eql(u8, node.name, "avatar")) fail(node, markup.avatar_image_element_message);
-                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.avatar_image_message);
-                if (expression != .binding) fail(node, markup.avatar_image_message);
+                if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) fail(node, markup.image_binding_element_message);
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.image_binding_message);
+                if (expression != .binding) fail(node, markup.image_binding_message);
             }
             const path = comptime markup.parseAttrExpression(raw).?.binding;
-            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.avatar_image_message);
+            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.image_binding_message);
+            // Range-checked before the u64 cast (the interpreter fails
+            // the same way): a signed model field (`image: i64 = -1`)
+            // can deliver a negative — fail the build, never trap.
             options.image = switch (bindingValue(node, entries, path, ui, model, scope, true)) {
-                .integer => |int| @intCast(int),
+                .integer => |int| if (int < 0) runtimeFail(canvas.ImageId, ui) else @intCast(int),
                 else => runtimeFail(canvas.ImageId, ui),
+            };
+        }
+
+        /// Comptime mirror of the interpreter's `applySurfaceAttr`:
+        /// `surface="{binding}"` on media-surface resolves to the
+        /// model-owned u64 surface id a producer targets —
+        /// media-surface-only, binding-only, integer-valued, all checked
+        /// at comptime with the interpreter's messages. The id rides
+        /// `options.image` into `Widget.image_id`, the media surface's
+        /// surface-id channel.
+        fn applySurfaceAttr(comptime node: markup.MarkupNode, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
+            comptime {
+                if (!std.mem.eql(u8, node.name, "media-surface")) fail(node, markup.media_surface_surface_element_message);
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.media_surface_surface_message);
+                if (expression != .binding) fail(node, markup.media_surface_surface_message);
+            }
+            const path = comptime markup.parseAttrExpression(raw).?.binding;
+            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.media_surface_surface_message);
+            // Range-checked before the u64 cast (the interpreter fails
+            // the same way): a signed model field (`surface: i64 = -1`)
+            // can deliver a negative — fail the build, never trap.
+            options.image = switch (bindingValue(node, entries, path, ui, model, scope, true)) {
+                .integer => |int| if (int < 0) runtimeFail(canvas.ImageId, ui) else @intCast(int),
+                else => runtimeFail(canvas.ImageId, ui),
+            };
+        }
+
+        /// `pty="{binding}"` on terminal resolves to the model-owned u64
+        /// pty effect key whose session the terminal renders —
+        /// terminal-only, binding-only, integer-valued, all checked at
+        /// comptime with the interpreter's messages (the media-surface
+        /// `surface` grammar exactly). The key rides `options.pty` into
+        /// `Widget.terminal.pty`.
+        fn applyPtyAttr(comptime node: markup.MarkupNode, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
+            comptime {
+                if (!std.mem.eql(u8, node.name, "terminal")) fail(node, markup.terminal_pty_element_message);
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.terminal_pty_message);
+                if (expression != .binding) fail(node, markup.terminal_pty_message);
+            }
+            const path = comptime markup.parseAttrExpression(raw).?.binding;
+            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.terminal_pty_message);
+            // Range-checked before the u64 cast (the interpreter fails
+            // the same way): a signed model field can deliver a negative
+            // — fail the build, never trap.
+            options.pty = switch (bindingValue(node, entries, path, ui, model, scope, true)) {
+                .integer => |int| if (int < 0) runtimeFail(u64, ui) else @intCast(int),
+                else => runtimeFail(u64, ui),
             };
         }
 
@@ -1704,8 +1980,16 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 .optional => @field(options, zig_field) = evalExpr(node, entries, raw, ui, model, scope).truthy(),
                 .int => {
                     comptime requireVariant(variant, &.{.integer}, node, "expected a whole number");
+                    // Range-checked against the field's own integer type
+                    // before the cast (the grid-lines pattern; the
+                    // interpreter fails the same way): expression values
+                    // are i64, so a literal or model binding can deliver
+                    // 2147483648 to the i32 tooltip-delay — an unchecked
+                    // @intCast TRAPPED on it instead of failing the
+                    // build. The field type is the honest upper bound;
+                    // no semantic cap is invented on top of it.
                     @field(options, zig_field) = switch (evalExpr(node, entries, raw, ui, model, scope)) {
-                        .integer => |int| if (int < 0) runtimeFail(FieldType, ui) else @intCast(int),
+                        .integer => |int| if (int < 0 or int > std.math.maxInt(FieldType)) runtimeFail(FieldType, ui) else @intCast(int),
                         else => runtimeFail(FieldType, ui),
                     };
                 },
@@ -1742,7 +2026,10 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
 
         fn uiKeyFromValue(value: Value, ui: *Ui) canvas.UiKey {
             return switch (value) {
-                .integer => |int| canvas.uiKey(@as(u64, @intCast(int))),
+                // Keys are identity, not quantities: a negative integer
+                // id maps bijectively into the u64 key space (the
+                // interpreter's itemKey/attrKey rule), never a trap.
+                .integer => |int| canvas.uiKey(@as(u64, @bitCast(int))),
                 .string => |text| canvas.uiKey(text),
                 else => blk: {
                     ui.failed = true;
@@ -1777,7 +2064,21 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 comptime {
                     if (!std.mem.eql(u8, node.name, "scroll")) fail(node, markup.on_scroll_element_message);
                 }
-                options.on_scroll = comptime (scrollConstructor(expression.tag) orelse fail(node, markup.on_scroll_payload_message));
+                options.on_scroll = comptime (scrollConstructor(expression.tag) orelse
+                    // The retired one-axis record gets the migration
+                    // teaching (it names the new per-axis fields) instead
+                    // of the generic payload rejection.
+                    fail(node, if (legacyScrollTag(expression.tag)) markup.on_scroll_legacy_payload_message else markup.on_scroll_payload_message));
+                return;
+            }
+            if (comptime std.mem.eql(u8, event, "terminal")) {
+                comptime {
+                    if (!std.mem.eql(u8, node.name, "terminal")) fail(node, markup.on_terminal_element_message);
+                    // Bare tag only: the runtime supplies the payload, so
+                    // an authored one would be silently discarded.
+                    if (expression.payload.len > 0) fail(node, markup.on_terminal_payload_message);
+                }
+                options.on_terminal = comptime (terminalConstructor(expression.tag) orelse fail(node, markup.on_terminal_payload_message));
                 return;
             }
             if (comptime std.mem.eql(u8, event, "resize")) {
@@ -1787,9 +2088,22 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 options.on_resize = comptime (resizeConstructor(expression.tag) orelse fail(node, markup.on_resize_payload_message));
                 return;
             }
+            // The value-payload change event: a slider's `on-change` with a
+            // bare tag naming a value-carrying arm dispatches the APPLIED
+            // value through the `on_value` constructor (the `on-resize`
+            // fraction mechanism) instead of a static Msg. Void arms keep
+            // the static form below (interpreter parity).
+            if (comptime (std.mem.eql(u8, event, "change") and std.mem.eql(u8, node.name, "slider") and expression.payload.len == 0)) {
+                if (comptime valueConstructor(expression.tag)) |make| {
+                    options.on_value = make;
+                    return;
+                }
+            }
             const msg = constructMessage(node, expression, entries, ui, model, scope);
             if (comptime std.mem.eql(u8, event, "press")) {
                 options.on_press = msg;
+            } else if (comptime std.mem.eql(u8, event, "double-press")) {
+                options.on_double_press = msg;
             } else if (comptime std.mem.eql(u8, event, "toggle")) {
                 options.on_toggle = msg;
             } else if (comptime std.mem.eql(u8, event, "change")) {
@@ -1807,6 +2121,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 // Press family: like on-press, a bound hold makes any
                 // element pressable.
                 options.on_hold = msg;
+            } else if (comptime std.mem.eql(u8, event, "hover-enter")) {
+                // Hover family: binding either edge makes any element
+                // hover-hittable (never pressable), so both are legal
+                // everywhere like the press family (interpreter parity).
+                options.on_hover_enter = msg;
+            } else if (comptime std.mem.eql(u8, event, "hover-leave")) {
+                options.on_hover_leave = msg;
             } else if (comptime std.mem.eql(u8, event, "reach-end")) {
                 // The approach-end signal (infinite-scroll fetch) is
                 // emitted for scroll containers only (interpreter and
@@ -1827,6 +2148,12 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     if (field.type == canvas.TextInputEvent and std.mem.eql(u8, field.name, tag)) {
                         return Ui.inputMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                    // A declared mirror of the event union (transpiled
+                    // cores, where type identity cannot cross the emission
+                    // boundary): translated at dispatch, same handler shape.
+                    if (interpreter.declaredTextInputUnion(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedInputMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
                 }
                 return null;
             }
@@ -1839,8 +2166,48 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     if (field.type == canvas.ScrollState and std.mem.eql(u8, field.name, tag)) {
                         return Ui.scrollMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                    // A declared mirror of the scroll-state record
+                    // (transpiled cores, where type identity cannot cross
+                    // the emission boundary): translated at dispatch, same
+                    // handler shape.
+                    if (interpreter.declaredScrollStateRecord(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedScrollMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
                 }
                 return null;
+            }
+        }
+
+        fn terminalConstructor(comptime tag: []const u8) ?Ui.TerminalMsgFn {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (@typeInfo(MsgT).@"union".fields) |field| {
+                    if (field.type == canvas.TerminalState and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.terminalMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                    // A declared mirror of the terminal-state record
+                    // (transpiled cores): translated at dispatch, same
+                    // handler shape.
+                    if (interpreter.declaredTerminalStateRecord(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedTerminalMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+                return null;
+            }
+        }
+
+        /// Whether `tag` names an arm carrying the RETIRED one-axis
+        /// scroll record — recognized only so the on-scroll rejection
+        /// can teach the two-axis migration by field name.
+        fn legacyScrollTag(comptime tag: []const u8) bool {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (@typeInfo(MsgT).@"union".fields) |field| {
+                    if (interpreter.declaredLegacyScrollStateRecord(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return true;
+                    }
+                }
+                return false;
             }
         }
 
@@ -1851,6 +2218,32 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     if (field.type == f32 and std.mem.eql(u8, field.name, tag)) {
                         return Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                    // A declared one-number float arm (transpiled cores):
+                    // the fraction widens exactly at dispatch. Integer
+                    // arms stay excluded — a 0..1 fraction rounded into
+                    // an integer would be silently useless data.
+                    if (field.type == f64 and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+                return null;
+            }
+        }
+
+        /// The slider `on-change` value form: an arm carrying the applied
+        /// 0..1 fraction as `f32` (the canvas-native shape) or the
+        /// transpiled one-number float arm (`f64`, widened exactly).
+        /// Interpreter parity.
+        fn valueConstructor(comptime tag: []const u8) ?Ui.ValueMsgFn {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (@typeInfo(MsgT).@"union".fields) |field| {
+                    const class = interpreter.valueArmClass(field.type) orelse continue;
+                    if (!std.mem.eql(u8, field.name, tag)) continue;
+                    return switch (class) {
+                        .identity => Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name)),
+                        .float => Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type),
+                    };
                 }
                 return null;
             }
@@ -1891,8 +2284,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             switch (comptime @typeInfo(T)) {
                 .int => {
                     comptime requireVariant(variant, &.{.integer}, node, "payload type does not match the message");
+                    // Range-checked against the payload's own integer
+                    // type before the cast (the interpreter fails the
+                    // same way): a binding's i64 can deliver a negative
+                    // to an unsigned payload or overflow a small one.
+                    // Signed payloads keep their negative range.
                     return switch (value) {
-                        .integer => |int| @intCast(int),
+                        .integer => |int| if (int < std.math.minInt(T) or int > std.math.maxInt(T)) runtimeFail(T, ui) else @intCast(int),
                         else => runtimeFail(T, ui),
                     };
                 },
@@ -2159,16 +2557,20 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         /// and (when `allow_arena`) arena-taking scalar methods — or null
         /// when the path names nothing `valueOf` can represent (which is
         /// exactly when the interpreter fails).
-        fn OnType(comptime T: type, comptime path: []const u8, comptime allow_arena: bool) ?type {
+        fn OnType(comptime OuterT: type, comptime path: []const u8, comptime allow_arena: bool) ?type {
             comptime {
                 @setEvalBranchQuota(10_000);
+                // Single-item const pointers are transparent
+                // (`reflect.Pointee`): a `*const Row` loop item or shared
+                // model node resolves like the struct it points at.
+                const T = interpreter.Pointee(OuterT);
                 if (@typeInfo(T) != .@"struct") return null;
                 const head = interpreter.pathHead(path);
                 const tail_opt = interpreter.pathTail(path);
                 for (@typeInfo(T).@"struct".fields) |field| {
                     if (!std.mem.eql(u8, field.name, head)) continue;
                     if (tail_opt) |tail| {
-                        if (@typeInfo(field.type) != .@"struct") return null;
+                        if (@typeInfo(interpreter.Pointee(field.type)) != .@"struct") return null;
                         return OnType(field.type, tail, allow_arena);
                     }
                     if (!supportedValue(field.type)) return null;
@@ -2202,6 +2604,14 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         /// to member access, method leaves to a direct call (arena-taking
         /// leaves receive the build arena).
         fn valueOn(comptime T: type, comptime path: []const u8, ptr: *const T, arena: std.mem.Allocator) (OnType(T, path, true).?) {
+            // Mirror OnType's `reflect.Pointee` transparency: a resolved
+            // path through a single-item const pointer dereferences it and
+            // continues on the struct it shares (OnType already proved the
+            // pointer shape, so only const single-item pointers reach this
+            // branch).
+            if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one)) {
+                return valueOn(@typeInfo(T).pointer.child, path, ptr.*, arena);
+            }
             const head = comptime interpreter.pathHead(path);
             if (comptime (interpreter.pathTail(path) != null)) {
                 const tail = comptime interpreter.pathTail(path).?;

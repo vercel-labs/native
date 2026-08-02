@@ -1,0 +1,42 @@
+<!-- The workbench: a live terminal beside a browser, one resizable
+     split. The LEFT pane is a single <terminal> bound to the model's pty
+     key — the runtime owns the emulator session behind it (feeding,
+     keyboard, resize, scrollback) — under a bare drag band the hidden
+     inset titlebar's traffic lights float over, the terminal-window
+     look. The RIGHT pane is the browser: back / forward / reload and an
+     address bar in one compact toolbar, then the page — no tabs, no
+     other chrome. The webview snaps to the growing column labeled
+     "web-pane" every presented frame, so dragging the divider reflows
+     live web content. -->
+<column grow="1" background="background">
+  <split grow="1" value="{split_fraction}" on-resize="split_resized">
+    <column min-width="260" background="background">
+      <!-- The terminal pane's titlebar band: bare drag surface on the
+           terminal's own background, sized past the traffic lights via
+           on_chrome — the window reads as one seamless terminal surface
+           with only the lights floating over it. -->
+      <row height="{titlebar_band}" window-drag="true"></row>
+      <!-- Autofocused: a terminal window's keyboard belongs to the shell
+           the moment it opens, no click first. This is a full-bleed pane,
+           so dissolve its focus ring into the background; otherwise the
+           exposed top edge reads as a stray rule while the other three
+           edges disappear into the window and split boundaries. -->
+      <terminal pty="{shell_key}" scrollback="{term_scrollback}" on-terminal="term_state" autofocus="true" grow="1" focus-ring="background" label="Shell" />
+    </column>
+    <column min-width="420">
+      <!-- The browser toolbar: navigation cluster, then the address bar
+           taking the rest of the row. The row is also the right pane's
+           drag surface, so the whole top band moves the window. -->
+      <row height="48" padding="10" gap="6" cross="center" background="surface" window-drag="true" label="Browser toolbar">
+        <button variant="ghost" size="sm" icon="chevron-left" on-press="go_back" disabled="{back_disabled}" label="Back"></button>
+        <button variant="ghost" size="sm" icon="chevron-right" on-press="go_forward" disabled="{forward_disabled}" label="Forward"></button>
+        <button variant="ghost" size="sm" icon="refresh-cw" on-press="reload" label="Reload"></button>
+        <text-field text="{address}" placeholder="Enter address" grow="1" on-input="address_edit" on-submit="navigate" label="Address" />
+      </row>
+      <separator />
+      <!-- The web pane's anchor: the embedded webview snaps to this
+           growing column's laid-out frame every presented frame. -->
+      <column grow="1" label="web-pane"></column>
+    </column>
+  </split>
+</column>

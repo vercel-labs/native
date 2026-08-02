@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const canvas = @import("canvas");
 const security = @import("../security/root.zig");
 
 pub const default_gpu_frame_interval_ns: u64 = 16_666_667;
@@ -7,6 +8,7 @@ pub const default_gpu_first_frame_latency_budget_ns: u64 = 150_000_000;
 
 pub const Error = error{
     UnsupportedService,
+    UnsupportedWindowTransparency,
     WindowNotFound,
     WindowLimitReached,
     DuplicateWindowId,
@@ -65,6 +67,10 @@ pub const Error = error{
     AudioPathTooLarge,
     AudioSourceNotFound,
     AudioDecodeFailed,
+    InvalidVideoOptions,
+    VideoPathTooLarge,
+    VideoSourceNotFound,
+    VideoDecodeFailed,
     InvalidGpuSurfacePixels,
     InvalidGpuSurfacePacket,
     InvalidGpuSurfaceImage,
@@ -152,6 +158,28 @@ pub const PlatformFeature = enum {
     /// keeps emitting; the null platform models the rule through its
     /// windows' modeled occlusion so the suites can pin it.
     audio_spectrum,
+    /// The `close_policy = .hide` window shape: the host can intercept
+    /// the user's close affordance, keep the window alive off the
+    /// glass, and re-show it later (`show_window_fn`, tray actions, the
+    /// macOS Dock reopen). macOS and Windows implement it; GTK reports
+    /// false — Linux has no status-item affordance in this toolkit, so
+    /// a hidden window would be unreachable, and window create refuses
+    /// the policy with a teaching error instead. The null platform
+    /// models full support.
+    window_hide_on_close,
+    /// Single-player video playback into a media-surface texture channel
+    /// (macOS: AVFoundation — one AVPlayer whose AVPlayerItemVideoOutput
+    /// frames feed the surface's producer; the null platform: a
+    /// deterministic fake). The core never sees pixels: apps send
+    /// transport commands and receive `.video` events (load
+    /// acknowledgment with dimensions and duration, coarse position
+    /// ticks, one completion at natural end, failures), while decoded
+    /// frames flow platform-side through the `VideoFrameSink` handed to
+    /// the load verbs. Windows (Media Foundation) and Linux (GStreamer)
+    /// do not implement the decoder yet: their hosts answer the load
+    /// verbs with a teaching and `error.UnsupportedService` — named
+    /// unsupported, not half-implemented — and report false here.
+    video_playback,
 };
 
 pub const WebViewSourceKind = enum {
@@ -256,12 +284,27 @@ pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
 pub const max_gpu_present_fallback_detail_bytes: usize = 32;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
 /// matches the runtime registry's per-slot bound
-/// (`canvas_limits.max_registered_canvas_image_pixel_bytes`).
+/// (`canvas_limits.max_registered_canvas_image_pixel_bytes`). Applies to
+/// ORDINARY registered-image ids only: the registry refuses anything
+/// larger at registration, so an over-bound upload of a registered image
+/// can only be an engine bug and is refused loudly here rather than
+/// copied into host allocations.
 pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
+/// Per-image bound for uploads in the media-surface texture namespace
+/// (ids with `canvas.media_surface_image_id_bit` set — producer-pushed
+/// dynamic textures, structurally disjoint from registered-image ids):
+/// video scale, not avatar scale. Matches the producer channel's
+/// per-frame budget (`canvas_limits.max_media_surface_pixel_bytes`; a
+/// lockstep test in media_surface_tests.zig pins the pair), so a frame
+/// the producer accepted — a full 1920x1080 RGBA8 frame included — can
+/// never be refused between adoption and host presentation.
+pub const max_gpu_surface_media_image_pixel_bytes: usize = 8 * 1024 * 1024;
 /// Per-font bound for the gpu-surface font registration side-channel;
 /// matches the runtime registry's per-slot bound
-/// (`canvas_limits.max_registered_canvas_font_bytes`).
-pub const max_gpu_surface_font_bytes: usize = 2 * 1024 * 1024;
+/// (`canvas_limits.max_registered_canvas_font_bytes`), sized so full
+/// CJK faces register (Noto Sans SC's TrueType build, the largest
+/// measured, is 17.8 MB).
+pub const max_gpu_surface_font_bytes: usize = 24 * 1024 * 1024;
 
 pub const ShortcutModifiers = struct {
     primary: bool = false,
@@ -360,6 +403,24 @@ pub fn isValidShortcutKey(key: []const u8) bool {
         "arrowright",
         "arrowup",
         "arrowdown",
+        "delete",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "insert",
+        "f1",
+        "f2",
+        "f3",
+        "f4",
+        "f5",
+        "f6",
+        "f7",
+        "f8",
+        "f9",
+        "f10",
+        "f11",
+        "f12",
     };
     for (&specials) |special| {
         if (std.ascii.eqlIgnoreCase(key, special)) return true;
@@ -506,6 +567,24 @@ pub const WindowShowMode = enum {
     on_first_present,
 };
 
+/// What the user's close affordance (the red traffic light, cmd+W, the
+/// caption X) does to this window.
+/// `.quit` is the default and today's behavior unchanged: the window
+/// really closes, and the last close follows the host's exit semantics.
+/// `.hide` is the menu-bar/tray-app shape: the close affordance hides
+/// the window instead — it stays alive in the host's records (no
+/// shutdown), `WindowState.hidden` flips true on the frame channel,
+/// and `Effects.showWindow` / the macOS Dock reopen bring it back.
+/// Hosts that cannot re-show a hidden window (GTK has no status item
+/// to click) refuse `.hide` at create time with a teaching error —
+/// never a silent no-op that strands the window.
+/// Deliberate enum room for a future `.event` tier (model-decides
+/// close, for unsaved-changes flows) — not implemented yet.
+pub const WindowClosePolicy = enum {
+    quit,
+    hide,
+};
+
 pub const WindowOptions = struct {
     id: WindowId = 1,
     label: []const u8 = "main",
@@ -516,6 +595,22 @@ pub const WindowOptions = struct {
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
+    /// Make the top-level window and its rendering surface alpha-capable.
+    /// The app must also render alpha (for canvas views, select a
+    /// non-opaque gpu alpha mode); otherwise opaque content still covers
+    /// the desktop normally. Backends that cannot provide an alpha-capable
+    /// render surface reject creation with `UnsupportedWindowTransparency`.
+    transparent: bool = false,
+    /// Keep the window above ordinary application windows using the
+    /// platform's floating/topmost window level.
+    always_on_top: bool = false,
+    /// Ignore pointer hit testing for the whole top-level window so
+    /// clicks, motion, and scrolling reach the window underneath.
+    click_through: bool = false,
+    /// Whether an implicit show (initial creation, first-present reveal,
+    /// or `showWindow`) activates the app and takes keyboard focus.
+    /// Explicit `focusWindow` remains an activation request either way.
+    activate_on_show: bool = true,
     /// Content min-size floor the WINDOW enforces (macOS
     /// `contentMinSize`): the user cannot resize below it, so declared
     /// layout floors stop clamping/clipping panes instead of stopping
@@ -523,6 +618,9 @@ pub const WindowOptions = struct {
     /// does not grow an already-smaller restored frame.
     min_width: f32 = 0,
     min_height: f32 = 0,
+    /// What the user's close affordance does — see `WindowClosePolicy`.
+    /// Fixed at create like the titlebar: it is host window state.
+    close_policy: WindowClosePolicy = .quit,
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
@@ -539,6 +637,16 @@ pub const WindowState = struct {
     focused: bool = true,
     maximized: bool = false,
     fullscreen: bool = false,
+    /// True while the window is alive but off the glass because its
+    /// `close_policy = .hide` intercepted a user close (the menu-bar-app
+    /// shape): the window keeps its views and native identity, `open`
+    /// stays true, and a show — `Effects.showWindow`, a tray action's
+    /// consequence, the macOS Dock reopen — flips it back. Distinct from
+    /// minimized (which keeps a Dock/taskbar affordance) and from
+    /// closed (`open = false`, the window is gone). Session-transient:
+    /// never persisted to the window-state store, so every launch
+    /// starts shown.
+    hidden: bool = false,
 };
 
 pub const WindowInfo = struct {
@@ -549,6 +657,8 @@ pub const WindowInfo = struct {
     scale_factor: f32 = 1,
     open: bool = true,
     focused: bool = false,
+    /// Alive but policy-hidden — see `WindowState.hidden`.
+    hidden: bool = false,
 
     pub fn state(self: WindowInfo) WindowState {
         return .{
@@ -559,6 +669,7 @@ pub const WindowInfo = struct {
             .scale_factor = self.scale_factor,
             .open = self.open,
             .focused = self.focused,
+            .hidden = self.hidden,
         };
     }
 };
@@ -573,10 +684,16 @@ pub const WindowCreateOptions = struct {
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
     /// Window-enforced content min-size floor (see
     /// `WindowOptions.min_width`/`min_height`); 0 = no floor.
     min_width: f32 = 0,
     min_height: f32 = 0,
+    /// See `WindowOptions.close_policy`.
+    close_policy: WindowClosePolicy = .quit,
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {
@@ -590,8 +707,13 @@ pub const WindowCreateOptions = struct {
             .restore_policy = self.restore_policy,
             .titlebar = self.titlebar,
             .show = self.show,
+            .transparent = self.transparent,
+            .always_on_top = self.always_on_top,
+            .click_through = self.click_through,
+            .activate_on_show = self.activate_on_show,
             .min_width = self.min_width,
             .min_height = self.min_height,
+            .close_policy = self.close_policy,
         };
     }
 };
@@ -644,6 +766,10 @@ pub const ViewKind = enum {
 pub const GpuSurfaceBackend = enum {
     none,
     metal,
+    /// Direct2D retained rendering on Windows. The application-facing
+    /// backend request remains portable; frame events report the concrete
+    /// renderer that actually completed the present.
+    direct2d,
     /// CPU rasterization (reference renderer) presented through the
     /// platform's pixel blit path. Platforms without a GPU packet renderer
     /// (Linux/GTK) report this backend in their frame events; manifests
@@ -756,7 +882,7 @@ pub const GpuSurfaceOptions = struct {
         return (self.backend == .metal or self.backend == .software) and
             self.pixel_format == .bgra8_unorm and
             self.present_mode == .timer and
-            self.alpha_mode == .@"opaque" and
+            (self.alpha_mode == .@"opaque" or self.alpha_mode == .premultiplied) and
             self.color_space == .srgb and
             self.vsync;
     }
@@ -1078,6 +1204,14 @@ pub const AppInfo = struct {
     /// default menus: web items like Reload only exist when a webview
     /// can answer them.
     has_web_content: bool = false,
+    /// Whether the manifest declares the "tray" capability (a status
+    /// item). Close policy `.hide` leans on it where the OS has no
+    /// built-in re-show affordance: hiding a window on windows removes
+    /// its taskbar entry and windows has no dock-reopen path, so only a
+    /// tray icon can bring the hidden window back. The Windows host
+    /// folds this into its `window_hide_on_close` answer; macOS ignores
+    /// it (the Dock reopen path always exists).
+    declares_tray: bool = false,
     window_title: []const u8 = "",
     bundle_id: []const u8 = "dev.native_sdk.app",
     icon_path: []const u8 = "",
@@ -1322,6 +1456,75 @@ pub const AudioLoadResolution = enum(u8) {
     stream,
 };
 
+/// Longest video source string (local path or URL) `videoLoad`/
+/// `videoLoadUrl` accepts; longer strings are rejected with
+/// `error.VideoPathTooLarge` before the platform is asked.
+pub const max_video_path_bytes: usize = 1024;
+
+/// How the platform's video player reports back — the audio vocabulary,
+/// verbatim. `loaded` answers a successful load with the stream's real
+/// pixel dimensions and the player's duration estimate; `position` ticks
+/// at the host's honest coarse cadence (about every 500ms) only while
+/// playing, carrying the stream's `buffering` flag; `completed` fires
+/// exactly once when a non-looping video reaches its natural end (a
+/// looping player wraps and keeps ticking — a video that never ends
+/// never completes); `failed` reports an asynchronous decode/device
+/// failure. Pause, stop, seek, volume, mute, and loop never echo events
+/// — the caller already knows. Pixels never ride events: decoded frames
+/// flow through the `VideoFrameSink` handed to the load verb.
+pub const VideoEventKind = enum(u8) {
+    loaded,
+    position,
+    completed,
+    failed,
+};
+
+/// One report from the platform video player. Positions and durations
+/// are in milliseconds; `playing`/`buffering` carry the audio event's
+/// exact semantics (transport intent vs a stalled stream). `width` and
+/// `height` are the STREAM's decoded pixel dimensions, reported on
+/// `.loaded` (0 elsewhere) — the honest source geometry even when the
+/// host downscales frames to fit the texture channel's pixel budget.
+pub const VideoEvent = struct {
+    kind: VideoEventKind,
+    /// Which LOAD this event reports on: the engine mints a fresh
+    /// token per `videoLoad`/`videoLoadUrl` and the host echoes it in
+    /// every event that playback produces. The single player replaces
+    /// in place, and an event emitted by the replaced playback can
+    /// still be queued when the replacement lands — the token is how
+    /// the engine swallows it instead of resetting (or misattributing
+    /// events to) the playback that replaced it.
+    token: u64 = 0,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    playing: bool = false,
+    buffering: bool = false,
+    width: u64 = 0,
+    height: u64 = 0,
+};
+
+/// Where a platform video decoder delivers frames: a type-erased,
+/// copyable handle to one media-surface texture channel claim. The pair
+/// `context`/`generation` addresses process-lifetime slot memory fenced
+/// by a generation stamp (the media-surface thread contract), so the
+/// host may call `push_fn` from ANY thread — a decode callback, a frame
+/// timer — and a push after the claim was released lands in inert
+/// memory and reports `error.MediaSurfaceReleased` instead of touching
+/// freed state. `rgba8` is one tightly-packed straight-alpha RGBA8
+/// frame, copied before the call returns. A zeroed sink (`push_fn`
+/// null) is inert: hosts must tolerate it and simply decode nowhere.
+pub const VideoFrameSink = struct {
+    context: ?*anyopaque = null,
+    generation: u64 = 0,
+    push_fn: ?*const fn (context: ?*anyopaque, generation: u64, width: usize, height: usize, rgba8: []const u8) anyerror!void = null,
+
+    /// Push one frame through the sink; inert sinks drop it silently.
+    pub fn push(self: VideoFrameSink, width: usize, height: usize, rgba8: []const u8) anyerror!void {
+        const push_fn = self.push_fn orelse return;
+        return push_fn(self.context, self.generation, width, height, rgba8);
+    }
+};
+
 pub const FileDropEvent = struct {
     window_id: WindowId = 1,
     view_label: []const u8 = "",
@@ -1550,13 +1753,40 @@ pub const GpuSurfaceInputKind = enum {
     ime_set_composition,
     ime_commit_composition,
     ime_cancel_composition,
+    // Trackpad gestures are phase-explicit (every source models phases:
+    // NSEvent.phase on macOS, GTK GestureZoom begin/scale-changed/end,
+    // Windows precision-touchpad gesture messages), and the family stays
+    // open for rotate/smart-zoom later. Only the macOS host emits these
+    // today; Windows (precision touchpad) and Linux (GTK GestureZoom)
+    // are staged follow-ups — on those platforms the kinds simply never
+    // arrive.
+    pinch_begin,
+    pinch_change,
+    pinch_end,
 };
+
+/// Reserved bit in `GpuSurfaceInputEvent.pointer_id`: a host that can
+/// identify a TOUCH-sourced pointer event stamps it (a
+/// `GDK_SOURCE_TOUCHSCREEN` device on GTK; a mouse message whose
+/// `GetMessageExtraInfo` carries the touch `MI_WP_SIGNATURE` on
+/// Windows, where the OS synthesizes mouse-shaped moves for taps), and
+/// the runtime's hover-Msg containment then refuses to treat that
+/// pointer as hover-capable — the mechanical backstop for the "touch
+/// never synthesizes hover" contract even where the OS fakes a hover
+/// move. Hosts that cannot identify the source leave ids unstamped;
+/// unstamped ids keep today's behavior. The bit rides the EXISTING id
+/// field, so journals and the input codec are unchanged.
+pub const touch_pointer_id_bit: u64 = 1 << 63;
 
 pub const GpuSurfaceInputEvent = struct {
     window_id: WindowId = 1,
     label: []const u8,
     kind: GpuSurfaceInputKind,
     timestamp_ns: u64 = 0,
+    /// Host pointer identity, when the host distinguishes pointers
+    /// (per-sequence touch ids, `WM_POINTER` ids); 0 on single-pointer
+    /// hosts. Touch-sourced events additionally carry
+    /// `touch_pointer_id_bit`.
     pointer_id: u64 = 0,
     x: f32 = 0,
     y: f32 = 0,
@@ -1568,11 +1798,109 @@ pub const GpuSurfaceInputEvent = struct {
     text: []const u8 = "",
     composition_cursor: ?usize = null,
     modifiers: ShortcutModifiers = .{},
+    /// Pinch magnification DELTA for this event: nonzero only on
+    /// `pinch_change`, 0 on begin/end. The delta is MULTIPLICATIVE: the
+    /// cumulative gesture scale is the running product of `(1 + scale)`
+    /// across the gesture's change events. On macOS this is AppKit's
+    /// raw per-event `NSEvent.magnification`, forwarded untransformed —
+    /// raw magnification IS the multiplicative per-event delta, the
+    /// convention every browser engine ships (see the doctrine note at
+    /// `magnifyWithEvent:` in appkit_host.m), so the product matches
+    /// the zoom the same gesture performs in Safari and Chrome. The
+    /// host guarantees `1 + scale > 0` on every event (a per-event
+    /// floor clamps the physically impossible). The pointer anchor rides
+    /// `x`/`y` (view-local, same space as pointer events) — the pointer
+    /// location during the gesture, NOT a midpoint between the fingers:
+    /// hosts report gesture events at the pointer (AppKit's
+    /// `locationInWindow`), and zoom-at-cursor is the anchoring apps
+    /// want.
+    scale: f32 = 0,
+};
+
+/// Pinch gesture phase for the app-level pinch channel (`Options.on_pinch`
+/// / the TS core's `pinchMsg` export). Every source is phase-explicit
+/// (NSEvent phases, GTK GestureZoom, Windows precision-touchpad gestures);
+/// a host-cancelled gesture folds into `.end` — pinch delivers incremental
+/// deltas the app applies as they arrive, so there is no transient state
+/// to roll back the way `pointer_cancel` rolls back an in-flight press.
+/// A terminal host event (Ended or Cancelled) that still measured a
+/// nonzero magnification delivers that delta as a final `.change` before
+/// the `.end`, so the cumulative product always matches what the OS
+/// reported.
+pub const PinchPhase = enum {
+    begin,
+    change,
+    end,
+};
+
+/// The pinch channel's app-facing record, derived from the raw
+/// `gpu_surface_input` pinch events. Pinch bypasses the widget pipeline
+/// deliberately: it is a view-global gesture (timeline/canvas zoom), the
+/// `on_key`-fallback shape rather than a widget-targeted event.
+pub const PinchEvent = struct {
+    /// Source identity: which window and gpu-surface view the gesture
+    /// happened on (the `GpuFrame` identity shape, because `x`/`y` are
+    /// view-local — a coordinate without its view is not a position).
+    /// Multi-window and multi-view apps tell pinches apart by these.
+    /// `label` is borrowed for the callback, like every event slice:
+    /// a model that keeps it must copy.
+    window_id: WindowId = 1,
+    label: []const u8 = "",
+    phase: PinchPhase,
+    /// Magnification DELTA for this event: nonzero only on `.change`,
+    /// 0 on begin/end. The delta is MULTIPLICATIVE — the cumulative
+    /// gesture scale is the running product of `(1 + scale)` across the
+    /// gesture's change events; apply it memorylessly
+    /// (`zoom *= 1 + scale`), no gesture-start bookkeeping. On macOS
+    /// this is AppKit's raw per-event `NSEvent.magnification`, which IS
+    /// that multiplicative delta per the browser-engine convention, so
+    /// the product matches the zoom the same gesture performs in Safari
+    /// and Chrome. Every event keeps `1 + scale > 0`.
+    scale: f32 = 0,
+    /// The pointer anchor, view-local canvas points (the pointer-event
+    /// space): where the zoom should anchor. This is the POINTER
+    /// location during the gesture (AppKit reports gesture events at
+    /// `locationInWindow`), not a midpoint between the fingers — raw
+    /// touch positions are trackpad-normalized and never reach view
+    /// space, and zoom-at-cursor is what apps want anyway.
+    x: f32 = 0,
+    y: f32 = 0,
+};
+
+/// A wheel/trackpad scroll over a gpu surface, for the app-level wheel
+/// channel (`on_wheel` — the pinch channel's sibling). Deltas are the
+/// host's scroll units in view points, sign as the platform reports it
+/// (natural scrolling on hosts that apply it); `x`/`y` locate the
+/// pointer in view-local canvas points.
+pub const WheelEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8 = "",
+    delta_x: f32 = 0,
+    delta_y: f32 = 0,
+    x: f32 = 0,
+    y: f32 = 0,
+    modifiers: ShortcutModifiers = .{},
 };
 
 /// Upper bound on native scroll drivers per gpu-surface view (one per
 /// scrollable canvas region).
 pub const max_gpu_surface_scroll_drivers: usize = 16;
+
+/// Upper bound on scroll OCCLUDERS per gpu-surface view (floating
+/// surfaces and modal catchers that hit-block regions beneath them).
+pub const max_gpu_surface_scroll_occluders: usize = 8;
+
+/// A surface that hit-blocks scroll regions beneath it: anchored
+/// floating surfaces (popovers, dropdowns, tooltips) at their frames,
+/// and modal surfaces (dialog/drawer/sheet input catchers) as the whole
+/// view. The host must not route a wheel to a driver whose
+/// `occluder_mask` includes an occluder containing the point — the
+/// engine's hit test would give that point to the overlay's branch, so
+/// the native fast path has to decline it the same way (the wheel then
+/// rides the wire, where real hit-testing decides).
+pub const GpuSurfaceScrollOccluder = struct {
+    frame: geometry.RectF,
+};
 
 /// One native scroll driver's desired state, pushed by the runtime on
 /// every widget-layout install and every presented frame (self-healing
@@ -1585,20 +1913,50 @@ pub const GpuSurfaceScrollDriver = struct {
     /// The scroll region's layout frame, view-local.
     frame: geometry.RectF,
     /// Total scrollable content size for the region. The vertical max
-    /// scroll offset is `content_size.height - frame.height`.
+    /// scroll offset is `content_size.height - frame.height`; the
+    /// horizontal one is `content_size.width - frame.width` (a region
+    /// that does not scroll horizontally reports `width ==
+    /// frame.width`, so the horizontal max is 0 and the native
+    /// scroller never travels sideways).
     content_size: geometry.SizeF,
-    /// The runtime's current scroll offset (canvas points, y-down).
+    /// The runtime's current scroll offsets (canvas points, y-down,
+    /// x-rightward).
+    offset_x: f32 = 0,
     offset_y: f32 = 0,
-    /// True when the runtime changed the offset from a non-driver source
-    /// (keyboard scroll, programmatic scroll, rebuild clamp): the host
-    /// must write `offset_y` into the native scroller. False leaves the
-    /// native scroller alone — the driver owns the offset.
-    set_offset: bool = false,
+    /// True when the runtime changed that axis's offset from a
+    /// non-driver source (keyboard scroll, programmatic scroll, rebuild
+    /// clamp): the host must write that offset into the native
+    /// scroller. False leaves the axis alone — the driver owns it. Per
+    /// axis, so a programmatic vertical write can never push a stale
+    /// horizontal offset over native motion whose coalesced report is
+    /// still in flight (and vice versa).
+    set_offset_x: bool = false,
+    set_offset_y: bool = false,
     /// Edge behavior for this region's native scroller: false (the
     /// default) pins scrolling at the content edges, true lets the OS
-    /// scroller bounce past them (vertical elasticity). Reconciled on
-    /// every push like the frame and content size.
+    /// scroller bounce past them. Reconciled on every push like the
+    /// frame and content size, and armed per axis through the grants
+    /// below.
     rubber_band: bool = false,
+    /// The nearest ANCESTOR driver's id (0 = none): the widget-tree
+    /// containment chain, pushed so the host can restrict wheel-owner
+    /// resolution to the hit region and its ancestors — geometric
+    /// overlap alone would let an unrelated background region behind a
+    /// floating surface steal an axis the engine's route would never
+    /// give it.
+    parent_id: u64 = 0,
+    /// Which occluders (by bit index into the sync call's occluder
+    /// array) hit-block THIS region: every pushed occluder that is not
+    /// an ancestor of the region — a scroll region inside an open
+    /// popover is not blocked by its own surface.
+    occluder_mask: u32 = 0,
+    /// Which axes the region GRANTS (`canvas.widgetScrollsAxis`): the
+    /// host arms elasticity and scroller chrome only on granted axes.
+    /// Distinct from having range right now — a granted axis with short
+    /// content keeps its scroller parked but may still bounce, while an
+    /// ungranted axis must never move, bounce, or grow a scroller.
+    scrolls_x: bool = false,
+    scrolls_y: bool = true,
 };
 
 /// A native scroll driver reported a new content offset (the user
@@ -1609,6 +1967,7 @@ pub const GpuSurfaceScrollDriverEvent = struct {
     window_id: WindowId = 1,
     label: []const u8,
     driver_id: u64,
+    offset_x: f32 = 0,
     offset_y: f32 = 0,
     timestamp_ns: u64 = 0,
 };
@@ -1635,7 +1994,8 @@ pub const ContextMenuRequest = struct {
     view_label: []const u8 = "",
     point: geometry.PointF = .{},
     /// Opaque correlation token echoed back on the action event (the
-    /// runtime uses the target widget's id).
+    /// runtime mints one per request, so a superseded menu's late
+    /// dismissal can never resolve its successor's request).
     token: u64 = 0,
     items: []const ContextMenuItem = &.{},
 };
@@ -1690,8 +2050,11 @@ pub const GpuSurfaceImagePixels = struct {
 /// keyed by the canvas font id host-wide. The engine validates the bytes
 /// (a parseable TrueType face under the registry bounds) before this
 /// call, so hosts may treat a decode failure as a hard error rather than
-/// a fallback. Ids are permanent for the process — the engine never
-/// re-registers an id with different bytes.
+/// a fallback. Ids are permanent per RUNTIME (one runtime never
+/// re-registers an id with different bytes), but host font state is
+/// per-process and runtimes are not: a later runtime may re-register an
+/// id a still-live earlier runtime also holds, and the host resolves the
+/// most recent registration (last wins).
 pub const GpuSurfaceFontData = struct {
     id: u64,
     ttf: []const u8,
@@ -1795,6 +2158,8 @@ pub const WidgetAccessibilityNode = struct {
     required: bool = false,
     read_only: bool = false,
     invalid: bool = false,
+    can_undo: bool = false,
+    can_redo: bool = false,
     focusable: bool = false,
     actions: WidgetAccessibilityActions = .{},
 };
@@ -1817,6 +2182,15 @@ pub const WidgetAccessibilityActionKind = enum(c_int) {
     drag = 8,
     drop_files = 9,
     dismiss = 10,
+    // The composition verbs never arrive from desktop assistive-tech
+    // bridges (AppKit has no AX composition action); they exist so the
+    // DIRECT verb surfaces (embed hosts, automation commands) and the
+    // session journal can carry every accessibility verb as one
+    // `widget_accessibility_action` — replay re-runs the verb, focus
+    // included, instead of replaying its untargeted ime children.
+    set_composition = 11,
+    commit_composition = 12,
+    cancel_composition = 13,
 };
 
 pub const WidgetAccessibilityActionEvent = struct {
@@ -1844,6 +2218,15 @@ pub const Appearance = struct {
     high_contrast: bool = false,
 };
 
+/// A platform child view gained keyboard focus through native input.
+/// Canvas/GPU input reports its own focus edge with the input event;
+/// native webviews and controls need this explicit inverse edge because
+/// their pointer stream never crosses the runtime.
+pub const ViewFocusEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8,
+};
+
 pub const Event = union(enum) {
     app_start,
     app_activated,
@@ -1854,6 +2237,7 @@ pub const Event = union(enum) {
     surface_resized: Surface,
     window_frame_changed: WindowState,
     window_focused: WindowId,
+    view_focused: ViewFocusEvent,
     bridge_message: BridgeMessage,
     tray_action: TrayItemId,
     shortcut: ShortcutEvent,
@@ -1875,6 +2259,9 @@ pub const Event = union(enum) {
     /// Audio player reports: load acknowledgment, coarse position ticks
     /// while playing, one completion at natural end, async failures.
     audio: AudioEvent,
+    /// Video player reports — the same shape, plus the stream's decoded
+    /// dimensions on `.loaded`. Pixels never ride here.
+    video: VideoEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -1887,6 +2274,7 @@ pub const Event = union(enum) {
             .surface_resized => "surface_resized",
             .window_frame_changed => "window_frame_changed",
             .window_focused => "window_focused",
+            .view_focused => "view_focused",
             .bridge_message => "bridge_message",
             .tray_action => "tray_action",
             .shortcut => "shortcut",
@@ -1902,6 +2290,7 @@ pub const Event = union(enum) {
             .context_menu_action => "context_menu_action",
             .widget_accessibility_action => "widget_accessibility_action",
             .audio => "audio",
+            .video => "video",
         };
     }
 };
@@ -1945,6 +2334,30 @@ pub const PlatformServices = struct {
     /// controls — chromeless windows have no system button to click.
     /// Platforms without the concept leave this null.
     minimize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The real OS show verb: unhide + order front. It activates by
+    /// default; windows created with `activate_on_show = false` use the
+    /// platform's passive variant. This is the counterpart to a
+    /// `close_policy = .hide` hide, and the tray "Open" consequence.
+    /// Platforms without the concept leave this null.
+    show_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The graceful app quit: terminate through the SAME shutdown path
+    /// a last-window close takes — but the host QUEUES the emit, so
+    /// `app_shutdown` dispatches on its NEXT loop turn, only after the
+    /// dispatch that requested the quit has returned. Never emit
+    /// synchronously from inside this call: the request arrives mid
+    /// dispatch (the command whose update returned it is still on the
+    /// recorder's staged-event stack), and a nested emit seals the
+    /// session journal before the requesting command commits — the
+    /// record is lost and replay diverges. Before the run loop starts
+    /// (a quit from App.start's update, or from a boot command in the
+    /// synchronous first canvas frame) the host parks the request and
+    /// drains it at top level after the current callback returns.
+    /// Either way `app.stop` runs exactly once, and the shutdown is
+    /// journaled like any platform event. The null platform's
+    /// `quit_pending`/`takeQueuedQuit` seam is the reference model of
+    /// the queued shape. Platforms without the concept leave this
+    /// null.
+    quit_app_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     /// Hand the ACTIVE pointer-down to the platform as a window-drag
     /// gesture (the hidden-titlebar drag-region channel): the window
     /// moves once the pointer actually moves — a plain click moves
@@ -2052,6 +2465,49 @@ pub const PlatformServices = struct {
     audio_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
     /// Set the player volume, `0.0` (silent) through `1.0` (full).
     audio_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
+    /// Load a local video file into THE app's single video player,
+    /// leaving it PAUSED at position zero (transport is a separate
+    /// verb, exactly like audio). Loading replaces whatever was loaded
+    /// before. Success is asynchronous: a `.video`/`.loaded` event
+    /// carries the stream's decoded dimensions and the player's
+    /// duration estimate; an unreadable path fails synchronously
+    /// (`error.VideoSourceNotFound` / `error.VideoDecodeFailed`).
+    /// Decoded frames flow through `sink` from whatever thread the
+    /// host's decode path runs on — the core never sees pixels. One
+    /// player is the whole surface, like the audio channel it mirrors.
+    video_load_fn: ?*const fn (context: ?*anyopaque, path: []const u8, token: u64, sink: VideoFrameSink) anyerror!void = null,
+    /// Load an http(s) video source into the same single player,
+    /// streaming progressively (playable before the download finishes;
+    /// `buffering` flags on position ticks report stalls honestly).
+    /// Same acknowledgment, sink, and replace semantics as
+    /// `video_load_fn`.
+    video_load_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8, token: u64, sink: VideoFrameSink) anyerror!void = null,
+    /// Start or resume the loaded player. While playing the platform
+    /// emits `.video`/`.position` events at the audio tier's coarse
+    /// honest cadence (about every 500ms — a readout, never the frame
+    /// clock; frames pace themselves through the sink) and one
+    /// `.video`/`.completed` when a non-looping video ends naturally.
+    video_play_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Pause in place; position holds, ticks and frame pushes stop, and
+    /// the surface keeps its last adopted frame. No event echoes.
+    video_pause_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Stop and unload the player entirely; a new load is required
+    /// before anything can play again.
+    video_stop_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Jump the loaded player to `position_ms` (clamped to the
+    /// duration). Works while playing or paused; a paused seek still
+    /// pushes the sought frame so scrubbing is visible.
+    video_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
+    /// Set the player volume, `0.0` (silent) through `1.0` (full) —
+    /// independent of mute, which is a separate reversible switch.
+    video_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
+    /// Mute or unmute the player's audio track without touching the
+    /// volume setting (the transport keeps playing either way).
+    video_set_muted_fn: ?*const fn (context: ?*anyopaque, muted: bool) anyerror!void = null,
+    /// Enable or disable looping: a looping player wraps from the
+    /// natural end back to zero and keeps playing — no `.completed`
+    /// event, because the playback never ends.
+    video_set_loop_fn: ?*const fn (context: ?*anyopaque, loop: bool) anyerror!void = null,
     /// Nudge the platform event loop from ANY thread: the platform must
     /// deliver a `.wake` event on its loop thread as soon as possible.
     /// One of exactly two `PlatformServices` entries that may be called
@@ -2059,7 +2515,54 @@ pub const PlatformServices = struct {
     /// must be thread-safe (macOS: main-queue dispatch, GTK: `g_idle_add`,
     /// Win32: `PostMessage`, null platform: an atomic counter tests drain
     /// explicitly).
+    ///
+    /// CONTRACT — bounded, non-blocking, enqueue-only. The
+    /// implementation must schedule the `.wake` delivery and return: it
+    /// must never synchronously wait on the loop thread (a
+    /// dispatch_sync-style marshal, a Win32 `SendMessage`) or on the
+    /// posting thread. The first-party implementations are the model —
+    /// macOS `dispatch_async` onto the main queue, GTK `g_idle_add`,
+    /// Win32 `PostMessageW`, the null platform's atomic counter — the
+    /// exact enqueue-only shape `request_frame_fn` documents for the
+    /// media-surface producer wake, so the call stays bounded and never
+    /// blocks on I/O. This contract is what the runtime's channel
+    /// posting guarantee is conditioned on: `ChannelHandle.post` never
+    /// blocks GIVEN a conforming wake, and because the runtime holds no
+    /// channel lock across the call, a violating implementation hangs
+    /// only its own posting thread — it can never entangle the
+    /// runtime's lock graph. A violator still inside the call when the
+    /// runtime tears down is ABANDONED after a bounded quiesce; see
+    /// `note_channel_wake_abandoned_fn` for the consequence the
+    /// platform must then honor.
     wake_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Teardown consequence of an abandoned wake call. The runtime's
+    /// effects teardown waits (bounded) for posts still inside
+    /// `wake_fn`; a call that outlives the deadline — only possible
+    /// when the wake violates its enqueue-only contract above — is
+    /// abandoned, and it still holds `context` and may execute into the
+    /// platform at ANY later time. The runtime reports that abandon
+    /// here, synchronously, while the platform is still alive — and
+    /// keeps its own half of the bargain: the `PlatformServices` VALUE
+    /// the stale call reads on resume is a process-lived snapshot the
+    /// runtime published at bind, never runtime-owned storage (see
+    /// `Effects.bindServices`). A platform receiving this call must
+    /// latch it, and its destruction path must consult the latch:
+    /// destruction is SKIPPED and the platform deliberately leaked,
+    /// process-lived, so the stale call can never execute into freed
+    /// host state (the abandoned-worker idiom the effect workers
+    /// already follow). The leak must cover EVERYTHING `context`
+    /// transitively reaches — for the first-party desktop platforms
+    /// that is the wrapper struct itself plus the native host behind
+    /// it, which is why runners heap-allocate the wrapper
+    /// (`createWithOptions`) and gate its free on the latch
+    /// (`destroy`), never leaving it on a stack frame that unwinds at
+    /// runner return. Every first-party platform wires this seam and
+    /// gates both `deinit` and its storage on the latch; embedders
+    /// providing their own `Platform` must do the same — or guarantee
+    /// a conforming `wake_fn`, under which the teardown deadline is
+    /// never met and this is never called. Loop-thread, teardown-only,
+    /// unlike `wake_fn` itself.
+    note_channel_wake_abandoned_fn: ?*const fn (context: ?*anyopaque) void = null,
     /// Ask the platform loop, from ANY thread, to deliver ONE
     /// `frame_requested` event on its loop thread soon — the same event a
     /// resize or an input-driven frame produces, so everything that rides
@@ -2102,16 +2605,43 @@ pub const PlatformServices = struct {
     /// without host-side text (GTK/Win32/null default), where the engine
     /// measures with the parsed face and inks it through the reference
     /// renderer.
-    register_gpu_surface_font_fn: ?*const fn (context: ?*anyopaque, font: GpuSurfaceFontData) anyerror!void = null,
+    ///
+    /// Returns the host's ownership token for THIS registration of the
+    /// id. Host font state is per-process while ids are only permanent
+    /// per-runtime, so two live runtimes can register the same id (last
+    /// wins); the token names which registration a later unregister may
+    /// remove — the runtime stores it beside the captured unregister
+    /// owner and passes it back at teardown. Platforms that retain no
+    /// per-id host state (a stateless accept) return 0: there was
+    /// nothing installed, so there is nothing a token could own, and an
+    /// unregister carrying 0 removes nothing.
+    register_gpu_surface_font_fn: ?*const fn (context: ?*anyopaque, font: GpuSurfaceFontData) anyerror!u64 = null,
+    /// Teardown twin of the registration seam above: return whatever
+    /// per-id state the host retained for a registered face (descriptor
+    /// tables, size/measurement caches) when the runtime that registered
+    /// the id deinits. Fonts are per-runtime but host font state is
+    /// per-process, so without this seam an embedder cycling runtimes
+    /// with fresh ids grows host state for the process lifetime.
+    /// `token` is the ownership token the matching register call
+    /// returned: the host removes the id's state ONLY while the id's
+    /// current registration still carries that token, so an older
+    /// runtime's deinit can never tear down a newer runtime's live face
+    /// under a shared id. A stale token (the id was re-registered since)
+    /// is a no-op accept — the registration it owned is already gone,
+    /// which is exactly the state its owner asked for. Unregistering an
+    /// id the host never saw is likewise a no-op, not an error. Null on
+    /// platforms whose register seam is itself null (GTK/Win32 default)
+    /// — with no host font state there is nothing to return.
+    unregister_gpu_surface_font_fn: ?*const fn (context: ?*anyopaque, id: u64, token: u64) anyerror!void = null,
     update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
     /// Reconcile the native scroll drivers for a gpu-surface view against
     /// the full desired set: create missing drivers, update frames /
-    /// content extents / (when `set_offset`) offsets, remove drivers whose
+    /// content extents / (per set-offset flag) offsets, remove drivers whose
     /// id is absent. Idempotent — the runtime calls this on every layout
     /// install and every presented frame. Null on platforms without
     /// native scroll drivers (GTK / Win32 / null default), which keeps
     /// scrolling on the engine's wheel physics.
-    set_gpu_surface_scroll_drivers_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void = null,
+    set_gpu_surface_scroll_drivers_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver, occluders: []const GpuSurfaceScrollOccluder) anyerror!void = null,
     /// Present a native context menu at the request's pointer location.
     /// Asynchronous: the selection (or dismissal) arrives later as a
     /// `context_menu_action` event echoing `request.token`. Null on
@@ -2224,6 +2754,16 @@ pub const PlatformServices = struct {
         return minimize_fn(self.context, window_id);
     }
 
+    pub fn showWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const show_fn = self.show_window_fn orelse return error.UnsupportedService;
+        return show_fn(self.context, window_id);
+    }
+
+    pub fn quitApp(self: PlatformServices) anyerror!void {
+        const quit_fn = self.quit_app_fn orelse return error.UnsupportedService;
+        return quit_fn(self.context);
+    }
+
     pub fn startWindowDrag(self: PlatformServices, window_id: WindowId) anyerror!void {
         const drag_fn = self.start_window_drag_fn orelse return error.UnsupportedService;
         return drag_fn(self.context, window_id);
@@ -2333,9 +2873,9 @@ pub const PlatformServices = struct {
         return close_fn(self.context, window_id, label);
     }
 
-    pub fn setGpuSurfaceScrollDrivers(self: PlatformServices, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void {
+    pub fn setGpuSurfaceScrollDrivers(self: PlatformServices, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver, occluders: []const GpuSurfaceScrollOccluder) anyerror!void {
         const set_fn = self.set_gpu_surface_scroll_drivers_fn orelse return error.UnsupportedService;
-        return set_fn(self.context, window_id, label, drivers);
+        return set_fn(self.context, window_id, label, drivers, occluders);
     }
 
     pub fn showContextMenu(self: PlatformServices, request: ContextMenuRequest) anyerror!void {
@@ -2528,12 +3068,89 @@ pub const PlatformServices = struct {
         return volume_fn(self.context, volume);
     }
 
+    /// Load a local video file into the app's single video player (see
+    /// `video_load_fn`). Platforms without video playback answer
+    /// `error.UnsupportedService`; bad arguments are rejected here
+    /// before the platform is asked.
+    pub fn videoLoad(self: PlatformServices, path: []const u8, token: u64, sink: VideoFrameSink) anyerror!void {
+        if (path.len == 0) return error.InvalidVideoOptions;
+        if (path.len > max_video_path_bytes) return error.VideoPathTooLarge;
+        const load_fn = self.video_load_fn orelse return error.UnsupportedService;
+        return load_fn(self.context, path, token, sink);
+    }
+
+    /// Load an http(s) video source into the app's single video player,
+    /// streaming progressively (see `video_load_url_fn`). Platforms
+    /// without video playback answer `error.UnsupportedService`; bad
+    /// arguments are rejected here before the platform is asked —
+    /// including any non-http(s) scheme: hosts hand the URL to their
+    /// media stack whole (AVPlayer opens file: URLs happily), so the
+    /// seam is where the streaming-only contract holds for every
+    /// caller, not just the engine's own gated loads.
+    pub fn videoLoadUrl(self: PlatformServices, url: []const u8, token: u64, sink: VideoFrameSink) anyerror!void {
+        if (url.len == 0) return error.InvalidVideoOptions;
+        if (url.len > max_video_path_bytes) return error.VideoPathTooLarge;
+        const uri = std.Uri.parse(url) catch return error.InvalidVideoOptions;
+        const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+            std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        if (!scheme_ok) return error.InvalidVideoOptions;
+        const load_fn = self.video_load_url_fn orelse return error.UnsupportedService;
+        return load_fn(self.context, url, token, sink);
+    }
+
+    pub fn videoPlay(self: PlatformServices) anyerror!void {
+        const play_fn = self.video_play_fn orelse return error.UnsupportedService;
+        return play_fn(self.context);
+    }
+
+    pub fn videoPause(self: PlatformServices) anyerror!void {
+        const pause_fn = self.video_pause_fn orelse return error.UnsupportedService;
+        return pause_fn(self.context);
+    }
+
+    pub fn videoStop(self: PlatformServices) anyerror!void {
+        const stop_fn = self.video_stop_fn orelse return error.UnsupportedService;
+        return stop_fn(self.context);
+    }
+
+    pub fn videoSeek(self: PlatformServices, position_ms: u64) anyerror!void {
+        const seek_fn = self.video_seek_fn orelse return error.UnsupportedService;
+        return seek_fn(self.context, position_ms);
+    }
+
+    pub fn videoSetVolume(self: PlatformServices, volume: f32) anyerror!void {
+        if (!(volume >= 0.0 and volume <= 1.0)) return error.InvalidVideoOptions;
+        const volume_fn = self.video_set_volume_fn orelse return error.UnsupportedService;
+        return volume_fn(self.context, volume);
+    }
+
+    pub fn videoSetMuted(self: PlatformServices, muted: bool) anyerror!void {
+        const muted_fn = self.video_set_muted_fn orelse return error.UnsupportedService;
+        return muted_fn(self.context, muted);
+    }
+
+    pub fn videoSetLoop(self: PlatformServices, loop: bool) anyerror!void {
+        const loop_fn = self.video_set_loop_fn orelse return error.UnsupportedService;
+        return loop_fn(self.context, loop);
+    }
+
     /// Ask the platform loop to deliver a `.wake` event on its own thread.
     /// Safe to call from any thread; a missing implementation is an error
     /// so callers never assume a nudge happened when it did not.
     pub fn wake(self: PlatformServices) anyerror!void {
         const wake_fn = self.wake_fn orelse return error.UnsupportedService;
         return wake_fn(self.context);
+    }
+
+    /// Report that an in-flight `wake_fn` call was abandoned at
+    /// teardown (see `note_channel_wake_abandoned_fn` for the platform
+    /// obligation this triggers). Loop-thread, teardown-only. A
+    /// platform without the seam simply cannot be told — the caller's
+    /// own warning still names the leak, and a conforming `wake_fn`
+    /// never reaches this in the first place.
+    pub fn noteChannelWakeAbandoned(self: PlatformServices) void {
+        const note_fn = self.note_channel_wake_abandoned_fn orelse return;
+        note_fn(self.context);
     }
 
     /// Ask the platform loop to deliver one `frame_requested` event on
@@ -2570,7 +3187,19 @@ pub const PlatformServices = struct {
     pub fn uploadGpuSurfaceImage(self: PlatformServices, image: GpuSurfaceImagePixels) anyerror!void {
         const expected = image.expectedByteLen() orelse return error.InvalidGpuSurfaceImage;
         if (image.rgba8.len != expected) return error.InvalidGpuSurfaceImage;
-        if (image.rgba8.len > max_gpu_surface_image_pixel_bytes) return error.InvalidGpuSurfaceImage;
+        // Two honest bounds, keyed by the id namespace: hosts copy every
+        // upload into host-owned allocations (AppKit's NSData + NSImage
+        // store), so each bound teaches the real cost of its id space.
+        // Ordinary registered images are avatar-scale by the registry's
+        // own slot bound; media-surface textures (the reserved high-bit
+        // namespace) are video-scale by the producer channel's frame
+        // budget — the bound the producer already enforced, so nothing a
+        // producer staged can fail here.
+        const bound = if ((image.id & canvas.media_surface_image_id_bit) != 0)
+            max_gpu_surface_media_image_pixel_bytes
+        else
+            max_gpu_surface_image_pixel_bytes;
+        if (image.rgba8.len > bound) return error.InvalidGpuSurfaceImage;
         const upload_fn = self.upload_gpu_surface_image_fn orelse return error.UnsupportedService;
         return upload_fn(self.context, image);
     }
@@ -2581,11 +3210,23 @@ pub const PlatformServices = struct {
         return remove_fn(self.context, id);
     }
 
-    pub fn registerGpuSurfaceFont(self: PlatformServices, font: GpuSurfaceFontData) anyerror!void {
+    /// Returns the host's ownership token for this registration (0 from
+    /// hosts that retain no per-id state) — see
+    /// `register_gpu_surface_font_fn`.
+    pub fn registerGpuSurfaceFont(self: PlatformServices, font: GpuSurfaceFontData) anyerror!u64 {
         if (font.id == 0) return error.InvalidGpuSurfaceFont;
         if (font.ttf.len == 0 or font.ttf.len > max_gpu_surface_font_bytes) return error.InvalidGpuSurfaceFont;
         const register_fn = self.register_gpu_surface_font_fn orelse return error.UnsupportedService;
         return register_fn(self.context, font);
+    }
+
+    /// `token` must be the value the matching `registerGpuSurfaceFont`
+    /// returned; a stale token is a no-op accept — see
+    /// `unregister_gpu_surface_font_fn`.
+    pub fn unregisterGpuSurfaceFont(self: PlatformServices, id: u64, token: u64) anyerror!void {
+        if (id == 0) return error.InvalidGpuSurfaceFont;
+        const unregister_fn = self.unregister_gpu_surface_font_fn orelse return error.UnsupportedService;
+        return unregister_fn(self.context, id, token);
     }
 
     pub fn updateWidgetAccessibility(self: PlatformServices, snapshot: WidgetAccessibilitySnapshot) anyerror!void {
@@ -2666,6 +3307,16 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         // cannot see it; platforms that analyze answer through their own
         // `supports_fn` (like file_drops and gpu_surfaces above).
         .audio_spectrum => false,
+        // Hide-on-close is host close-delegate behavior, not a service
+        // verb: hosts that implement it answer through their own
+        // `supports_fn`. The generic floor is honest refusal.
+        .window_hide_on_close => false,
+        // The load verb's presence alone is not proof of a decoder:
+        // staged hosts register a teaching load that always refuses, so
+        // they answer false through their own `supports_fn`. The
+        // generic floor still probes the verb for embedders that wire a
+        // real one.
+        .video_playback => services.video_load_fn != null,
     };
 }
 

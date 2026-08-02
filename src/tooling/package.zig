@@ -66,6 +66,13 @@ pub const PackageOptions = struct {
     assets_dir: []const u8 = "assets",
     frontend: ?manifest_tool.FrontendMetadata = null,
     web_engine: WebEngine = .system,
+    /// The `--web-layer` flag, when the caller passed one: beats app.zon's
+    /// `.webview_layer` the same way `-Dweb-layer` beats it in the build
+    /// graph. The standard build graphs always pass their RESOLVED layer
+    /// decision here (include|exclude), so a graph-driven package never
+    /// re-infers what the graph already compiled into the exe. Null means
+    /// the manifest field decides.
+    web_layer_setting: ?manifest_tool.WebViewLayerSetting = null,
     cef_dir: []const u8 = web_engine_tool.default_cef_dir,
     signing: SigningConfig = .{},
     archive: bool = false,
@@ -77,15 +84,61 @@ pub const PackageOptions = struct {
     env_map: ?*std.process.Environ.Map = null,
 };
 
+/// The Windows subsystem verdict the packaging posture check reaches:
+/// `gui` and `console` only when the PE optional header actually said
+/// so, `unknown` when the probe proved nothing — non-PE or truncated
+/// bytes, a headerless image, an `e_lfanew` past the header ceiling, a
+/// benign read error, or some other declared subsystem entirely
+/// (native, EFI, ...). No surface may claim a subsystem the parse
+/// never established.
+pub const WindowsSubsystem = enum { gui, console, unknown };
+
 pub const PackageStats = struct {
     path: []const u8,
     artifact_name: []const u8 = "",
     target: PackageTarget = .macos,
     signing_mode: SigningMode = .none,
+    /// True when a signing mode that claims to sign (adhoc or identity)
+    /// ran AND the result passed `codesign --verify --deep --strict`:
+    /// the proof behind the report's "signed, verified" line. A package
+    /// whose signing or verification fails never produces stats at all.
+    signing_verified: bool = false,
     asset_count: usize = 0,
     web_engine: WebEngine = .system,
+    web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
+    /// The Windows subsystem verdict: `console` when the package
+    /// wrapped a CONSOLE-subsystem exe (the app will flash a terminal
+    /// window behind itself on every launch), `gui` for a GUI-subsystem
+    /// exe, `unknown` when the probe could not establish either, and
+    /// null when the check never ran (non-Windows target, or no binary
+    /// to probe). Release-shaped `native build` exes are GUI-subsystem,
+    /// so console only fires for stale or hand-supplied binaries — the
+    /// packager warns and the report carries the truth (pinned by tests
+    /// over a synthetic PE header).
+    windows_subsystem: ?WindowsSubsystem = null,
 };
+
+/// The web-layer verdict for a package, from the same declare-to-use
+/// inference the build graph runs — fed the RESOLVED engine
+/// (`--web-engine` orelse app.zon, resolved by the CLI before packaging)
+/// so a Chromium flag on a system manifest still ships the layer, and
+/// the RESOLVED layer setting (`--web-layer` orelse app.zon) so a
+/// flag-overridden exe is packaged under the decision it was built with.
+/// Metadata that cannot be inferred (invalid or contradictory
+/// `.webview_layer`) keeps the layer here — `createPackage` refuses
+/// those loudly up front, and the direct artifact helpers must not
+/// silently strip a layer on bad input.
+fn webLayerFor(options: PackageOptions) manifest_tool.WebLayer {
+    return manifest_tool.webLayerResolved(options.metadata, options.web_engine, options.web_layer_setting) catch .{ .enabled = true, .reason = .declared_include };
+}
+
+/// The verdict line's engine half: what web layer this artifact ships.
+fn webLayerEngineName(layer: manifest_tool.WebLayer, target: PackageTarget, web_engine: WebEngine) []const u8 {
+    if (!layer.enabled) return "none";
+    if (web_engine == .chromium) return "chromium";
+    return if (target == .windows) "webview2" else "system";
+}
 
 pub fn artifactName(buffer: []u8, metadata: manifest_tool.Metadata, target: PackageTarget, optimize: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}-{s}-{s}-{s}{s}", .{
@@ -98,6 +151,16 @@ pub fn artifactName(buffer: []u8, metadata: manifest_tool.Metadata, target: Pack
 }
 
 pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
+    // The package boundary of the reject-conflicts contract: an exclude
+    // (from `--web-layer` or app.zon) against declared web content — or
+    // against a resolved Chromium engine — never becomes an artifact.
+    _ = manifest_tool.webLayerResolved(options.metadata, options.web_engine, options.web_layer_setting) catch |err| {
+        switch (err) {
+            error.WebViewLayerConflict => std.debug.print("error: {s}\n", .{if (options.web_layer_setting == .exclude) manifest_tool.web_layer_flag_conflict_message else manifest_tool.web_layer_conflict_message}),
+            error.InvalidWebViewLayer => std.debug.print("error: app.zon webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"\n", .{}),
+        }
+        return err;
+    };
     try validateWebEngineTarget(options.target, options.web_engine);
     var stats = switch (options.target) {
         .macos => try createMacosApp(allocator, io, options),
@@ -132,6 +195,19 @@ pub fn printDiagnostic(stats: PackageStats) void {
         .message = std.fmt.bufPrint(&message_buffer, "created {s} artifact at {s}", .{ @tagName(stats.target), stats.path }) catch "created package",
     }, &writer) catch return;
     std.debug.print("{s}\n", .{writer.buffered()});
+    if (stats.web_layer) |layer| {
+        std.debug.print("  web layer: {s} ({s})\n", .{ webLayerEngineName(layer, stats.target, stats.web_engine), layer.sourceText() });
+    }
+    if (stats.signing_verified) {
+        std.debug.print("  signing: {s} (signed, verified)\n", .{@tagName(stats.signing_mode)});
+    }
+    if (stats.windows_subsystem) |subsystem| {
+        switch (subsystem) {
+            .console => std.debug.print("  subsystem: console (a terminal window opens behind the app - rebuild with `native build`)\n", .{}),
+            .gui => std.debug.print("  subsystem: gui\n", .{}),
+            .unknown => std.debug.print("  subsystem: unknown (unrecognized executable format)\n", .{}),
+        }
+    }
     if (stats.archive_path) |archive| {
         std.debug.print("  archive: {s}\n", .{archive});
     }
@@ -178,20 +254,22 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
     try copyMacosIcon(allocator, io, package_dir, options);
     try copyMacosDocumentIcons(allocator, io, package_dir, options.metadata);
-    try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count);
+    try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count, null);
     if (options.web_engine == .chromium) {
         try cef.ensureLayout(io, options.cef_dir);
         try copyMacosCefRuntime(allocator, io, package_dir, options.cef_dir);
     }
-    try runSigning(allocator, io, package_dir, options);
+    const signing_verified = try runSigning(allocator, io, package_dir, options);
 
     return .{
         .path = options.output_path,
         .artifact_name = std.fs.path.basename(options.output_path),
         .target = .macos,
         .signing_mode = options.signing.mode,
+        .signing_verified = signing_verified,
         .asset_count = bundle_stats.asset_count,
         .web_engine = options.web_engine,
+        .web_layer = webLayerFor(options),
     };
 }
 
@@ -209,14 +287,63 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try allocator.dupe(u8, options.metadata.name);
     defer allocator.free(executable_name);
 
+    // Native-only apps ship no WebView2 loader: their host was compiled
+    // without the embedded web layer, so the loader would be dead bytes
+    // pretending the app can spawn a webview.
+    const wants_webview2_loader = options.target == .windows and options.web_engine == .system and webLayerFor(options).enabled;
+    // The package-time half of the web-layer audit (the build-time half
+    // is tools/audit_web_layer.zig): a Windows exe that references
+    // WebView2Loader.dll was compiled WITH the embedded web layer, so
+    // packaging it loaderless ships an app whose every webview call
+    // fails at runtime. Refuse the mismatch and teach the fix — this
+    // catches exes built under an override the packaging decision never
+    // saw (a stale zig-out binary, a hand-supplied --binary).
+    if (options.target == .windows and !wants_webview2_loader) {
+        if (options.binary_path) |binary_path| {
+            if (try peReferencesWebView2Loader(allocator, io, binary_path)) {
+                std.debug.print("error: {s} references WebView2Loader.dll but this package ships no web layer, so its webviews would fail to spawn - the exe was built with the embedded web layer (for example `zig build -Dweb-layer=include`)\n" ++
+                    "  package with `--web-layer include`, or rebuild the binary to match the packaging decision\n", .{binary_path});
+                return error.WebViewLayerMismatch;
+            }
+        }
+    }
+    // The Linux twin of that guard (the build-time half is the ELF scan
+    // in tools/audit_web_layer.zig): an executable that links WebKitGTK
+    // was compiled WITH the embedded web layer, so packaging it under a
+    // native-only decision ships an app that still demands libwebkitgtk
+    // on every user machine while its webviews would fail to spawn.
+    if (options.target == .linux and options.web_engine == .system and !webLayerFor(options).enabled) {
+        if (options.binary_path) |binary_path| {
+            if (try elfReferencesWebKitGtk(allocator, io, binary_path)) {
+                std.debug.print("error: {s} references WebKitGTK but this package ships no web layer, so its webviews would fail to spawn - the binary was built with the embedded web layer (for example `zig build -Dweb-layer=include`)\n" ++
+                    "  package with `--web-layer include`, or rebuild the binary to match the packaging decision\n", .{binary_path});
+                return error.WebViewLayerMismatch;
+            }
+        }
+    }
+    // The subsystem posture check: `native build` produces GUI-subsystem
+    // release exes on Windows, so a console-subsystem exe here is a stale
+    // zig-out binary or a hand-supplied --binary — packaged as-is it
+    // flashes a terminal window behind the app on every launch. Warn and
+    // carry the truth in the stats/report; the package still builds
+    // (the app works, it just looks unfinished). Null means the check
+    // never ran: a non-Windows target, or no binary to probe.
+    const windows_subsystem: ?WindowsSubsystem = if (options.target == .windows)
+        if (options.binary_path) |binary_path| try peSubsystemVerdictAtPath(allocator, io, binary_path) else null
+    else
+        null;
+    if (windows_subsystem == .console) {
+        std.debug.print("warning[package.console-subsystem]: {s} is a console-subsystem exe, so a terminal window will open behind the app on every launch\n" ++
+            "  rebuild with `native build` (release exes are GUI-subsystem) or pass a GUI-subsystem --binary\n", .{options.binary_path.?});
+    }
     if (options.binary_path) |binary_path| {
         const binary_subpath = try std.fmt.allocPrint(allocator, "bin/{s}", .{executable_name});
         defer allocator.free(binary_subpath);
         try copyFileToDir(allocator, io, dir, binary_path, binary_subpath);
-        if (options.target == .windows and options.web_engine == .system) {
+        if (wants_webview2_loader) {
             try copyWindowsWebView2Loader(allocator, io, dir, options, binary_path);
         }
-    } else if (options.target == .windows and options.web_engine == .system) {
+    } else if (wants_webview2_loader) {
         try writeFile(dir, io, "bin/README.txt", "Build the app binary separately and place it here for this target, together with the WebView2Loader.dll for its architecture (vendored in the SDK under third_party/webview2/).\n");
     } else {
         try writeFile(dir, io, "bin/README.txt", "Build the app binary separately and place it here for this target.\n");
@@ -257,8 +384,8 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try cef.ensureLayoutFor(io, cef_platform, options.cef_dir);
         try copyDesktopCefRuntime(allocator, io, dir, options.target, options.cef_dir);
     }
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count);
-    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine };
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count, windows_subsystem);
+    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options), .windows_subsystem = windows_subsystem };
 }
 
 /// The iOS host tier: a COMPLETE Xcode project the user never edits —
@@ -329,8 +456,8 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     const readme = try iosProjectReadme(allocator, options.metadata);
     defer allocator.free(readme);
     try writeFile(dir, io, "README.md", readme);
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count);
-    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = .ios, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine };
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count, null);
+    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = .ios, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options) };
 }
 
 fn iosProjectReadme(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
@@ -391,13 +518,13 @@ fn createAndroidArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     const readme = try androidProjectReadme(allocator, options.metadata);
     defer allocator.free(readme);
     try writeFile(dir, io, "README.md", readme);
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count);
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count, null);
 
     var artifact_name: []const u8 = std.fs.path.basename(options.output_path);
     if (try assembleAndroidApk(allocator, io, options)) |apk_name| {
         artifact_name = apk_name;
     }
-    return .{ .path = options.output_path, .artifact_name = artifact_name, .target = .android, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine };
+    return .{ .path = options.output_path, .artifact_name = artifact_name, .target = .android, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options) };
 }
 
 /// Assemble the debug APK inside the generated project when the caller
@@ -961,6 +1088,182 @@ fn copyWindowsWebView2Loader(allocator: std.mem.Allocator, io: std.Io, dir: std.
     try copyFileToDir(allocator, io, dir, loader_path, "bin/WebView2Loader.dll");
 }
 
+/// Whether a Windows executable carries the embedded web layer: the host
+/// loads WebView2Loader.dll through LoadLibraryW, so the honest evidence
+/// is the loader's name in the binary — stored as UTF-16 in a web build
+/// and compiled out entirely (with the whole layer) in a native-only
+/// build. The same probe as the build-time auditor
+/// (tools/audit_web_layer.zig); a non-PE file proves nothing about the
+/// layer, so it scans as false rather than refusing the package.
+fn peReferencesWebView2Loader(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    const bytes = try readPath(allocator, io, path);
+    defer allocator.free(bytes);
+    if (bytes.len < 0x40 or bytes[0] != 'M' or bytes[1] != 'Z') return false;
+    const pe_offset: usize = std.mem.readInt(u32, bytes[0x3c..0x40], .little);
+    if (pe_offset + 4 > bytes.len) return false;
+    if (!std.mem.eql(u8, bytes[pe_offset..][0..4], "PE\x00\x00")) return false;
+    const needle_ascii = "WebView2Loader.dll";
+    var needle_wide: [needle_ascii.len * 2]u8 = undefined;
+    for (needle_ascii, 0..) |ch, index| {
+        needle_wide[index * 2] = ch;
+        needle_wide[index * 2 + 1] = 0;
+    }
+    return std.mem.indexOf(u8, bytes, &needle_wide) != null or
+        std.mem.indexOf(u8, bytes, needle_ascii) != null;
+}
+
+/// The Windows subsystem a PE executable declares (IMAGE_OPTIONAL_HEADER
+/// Subsystem: 2 = GUI, 3 = console), or null when the file is not a PE
+/// with an optional header large enough to say. The packaging check
+/// reads this because a console-subsystem GUI app flashes a terminal
+/// window behind itself on every launch — `native build` produces
+/// GUI-subsystem release exes, so a console one here means a stale or
+/// hand-built binary.
+pub fn peSubsystem(bytes: []const u8) ?u16 {
+    if (bytes.len < 0x40 or bytes[0] != 'M' or bytes[1] != 'Z') return null;
+    const pe_offset: usize = std.mem.readInt(u32, bytes[0x3c..0x40], .little);
+    if (pe_offset + 24 > bytes.len) return null;
+    if (!std.mem.eql(u8, bytes[pe_offset..][0..4], "PE\x00\x00")) return null;
+    const optional_size = std.mem.readInt(u16, bytes[pe_offset + 20 ..][0..2], .little);
+    // Subsystem sits 68 bytes into the optional header (same offset in
+    // PE32 and PE32+).
+    if (optional_size < 70) return null;
+    const subsystem_offset = pe_offset + 24 + 68;
+    if (subsystem_offset + 2 > bytes.len) return null;
+    return std.mem.readInt(u16, bytes[subsystem_offset..][0..2], .little);
+}
+
+const pe_subsystem_gui: u16 = 2;
+const pe_subsystem_console: u16 = 3;
+
+/// The farthest into a file a real executable's PE header is allowed to
+/// start for the subsystem probe: linkers place `e_lfanew` right after
+/// the DOS stub (well under a page), so an offset past this ceiling is
+/// not a real Windows exe and proves nothing about the subsystem —
+/// exactly like non-PE bytes.
+const max_pe_header_offset: usize = 1024 * 1024;
+
+/// The Subsystem field's distance past the PE signature: 24 header
+/// bytes (signature + COFF), then 68 bytes into the optional header,
+/// plus the field's own 2 bytes.
+const pe_subsystem_span: usize = 24 + 70;
+
+/// `peSubsystem` over a file, reading ONLY the headers: the DOS header
+/// names where the PE header starts (`e_lfanew` at 0x3c), and the
+/// Subsystem field sits a fixed `pe_subsystem_span` past that — so
+/// `min(file size, e_lfanew + span)` bytes bound the read no matter how
+/// large the executable is. The whole-file slurp this replaces
+/// (`readPath`, capped at 128 MiB) allocated the entire binary to read
+/// 2 bytes and silently skipped exes over its cap.
+fn peSubsystemAtPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?u16 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    var dos_header: [0x40]u8 = undefined;
+    if (try reader.interface.readSliceShort(&dos_header) < dos_header.len) return null;
+    if (dos_header[0] != 'M' or dos_header[1] != 'Z') return null;
+    const pe_offset: usize = std.mem.readInt(u32, dos_header[0x3c..0x40], .little);
+    if (pe_offset > max_pe_header_offset) return null;
+    const bytes = try allocator.alloc(u8, pe_offset + pe_subsystem_span);
+    defer allocator.free(bytes);
+    @memcpy(bytes[0..dos_header.len], &dos_header);
+    const rest = try reader.interface.readSliceShort(bytes[dos_header.len..]);
+    return peSubsystem(bytes[0 .. dos_header.len + rest]);
+}
+
+/// The posture check's verdict over a file: only a parsed Subsystem of
+/// GUI (2) or console (3) earns a named claim; everything else — a file
+/// the parse proves non-PE or headerless, an unreadable file, or a
+/// declared subsystem this check does not model (native, EFI, ...) —
+/// is honestly `unknown`. OutOfMemory still propagates: an allocation
+/// failure says nothing about the exe.
+fn peSubsystemVerdictAtPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !WindowsSubsystem {
+    const subsystem = peSubsystemAtPath(allocator, io, path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .unknown,
+    };
+    return switch (subsystem orelse return .unknown) {
+        pe_subsystem_gui => .gui,
+        pe_subsystem_console => .console,
+        else => .unknown,
+    };
+}
+
+/// Whether a Linux executable carries the embedded web layer: the GTK
+/// host links webkitgtk-6.0 directly, so the honest evidence is a
+/// libwebkitgtk/libjavascriptcoregtk DT_NEEDED entry or a webkit_*/jsc_*
+/// dynamic-symbol name — all removed by the WebKitGTK compile seam in a
+/// native-only build. The same probe as the build-time auditor
+/// (tools/audit_web_layer.zig), hand-rolled over the section headers;
+/// a non-ELF file (or one this minimal parse cannot walk) proves
+/// nothing about the layer, so it scans as false rather than refusing
+/// the package.
+fn elfReferencesWebKitGtk(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    const bytes = try readPath(allocator, io, path);
+    defer allocator.free(bytes);
+    return elfBytesReferenceWebKitGtk(bytes);
+}
+
+fn elfBytesReferenceWebKitGtk(bytes: []const u8) bool {
+    // ELF64 little endian only — every Linux target this toolkit builds.
+    if (bytes.len < 0x40 or !std.mem.eql(u8, bytes[0..4], "\x7fELF")) return false;
+    if (bytes[4] != 2 or bytes[5] != 1) return false;
+    const sh_offset: u64 = std.mem.readInt(u64, bytes[0x28..0x30], .little);
+    const sh_entsize: u16 = std.mem.readInt(u16, bytes[0x3a..0x3c], .little);
+    const sh_count: u16 = std.mem.readInt(u16, bytes[0x3c..0x3e], .little);
+    if (sh_offset == 0 or sh_count == 0 or sh_entsize < 0x40) return false;
+
+    var index: u16 = 0;
+    while (index < sh_count) : (index += 1) {
+        const header = elfSectionSlice(bytes, sh_offset + @as(u64, index) * sh_entsize, 0x40) orelse return false;
+        const sh_type = std.mem.readInt(u32, header[0x04..0x08], .little);
+        const link = std.mem.readInt(u32, header[0x28..0x2c], .little);
+        const offset = std.mem.readInt(u64, header[0x18..0x20], .little);
+        const size = std.mem.readInt(u64, header[0x20..0x28], .little);
+        const entsize = std.mem.readInt(u64, header[0x38..0x40], .little);
+        // SHT_DYNAMIC = 6, SHT_DYNSYM = 11.
+        if (sh_type != 6 and sh_type != 11) continue;
+        if (link >= sh_count) continue;
+        const link_header = elfSectionSlice(bytes, sh_offset + @as(u64, link) * sh_entsize, 0x40) orelse return false;
+        const strtab = elfSectionSlice(bytes, std.mem.readInt(u64, link_header[0x18..0x20], .little), std.mem.readInt(u64, link_header[0x20..0x28], .little)) orelse return false;
+        const table = elfSectionSlice(bytes, offset, size) orelse return false;
+        if (sh_type == 6) {
+            var cursor: usize = 0;
+            while (cursor + 16 <= table.len) : (cursor += 16) {
+                const tag: i64 = @bitCast(std.mem.readInt(u64, table[cursor..][0..8], .little));
+                if (tag != 1) continue; // DT_NEEDED
+                const name = elfStringAt(strtab, std.mem.readInt(u64, table[cursor + 8 ..][0..8], .little)) orelse continue;
+                if (std.mem.indexOf(u8, name, "webkitgtk") != null or std.mem.indexOf(u8, name, "javascriptcoregtk") != null) return true;
+            }
+        } else {
+            const stride: usize = if (entsize >= 24) @intCast(entsize) else 24;
+            var cursor: usize = 0;
+            while (cursor + 24 <= table.len) : (cursor += stride) {
+                const name_offset: u32 = std.mem.readInt(u32, table[cursor..][0..4], .little);
+                if (name_offset == 0) continue;
+                const name = elfStringAt(strtab, name_offset) orelse continue;
+                if (std.mem.startsWith(u8, name, "webkit_") or std.mem.startsWith(u8, name, "jsc_")) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn elfSectionSlice(bytes: []const u8, offset: u64, size: u64) ?[]const u8 {
+    if (offset > bytes.len) return null;
+    const start: usize = @intCast(offset);
+    if (size > bytes.len - start) return null;
+    return bytes[start .. start + @as(usize, @intCast(size))];
+}
+
+fn elfStringAt(strtab: []const u8, offset: u64) ?[]const u8 {
+    if (offset >= strtab.len) return null;
+    const start: usize = @intCast(offset);
+    const end = std.mem.indexOfScalarPos(u8, strtab, start, 0) orelse return null;
+    return strtab[start..end];
+}
+
 /// Whether a PE executable targets arm64, read from the COFF machine
 /// field. Anything unrecognized falls back to x64, the default Windows
 /// build target.
@@ -1002,11 +1305,13 @@ fn readPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return reader.interface.allocRemaining(allocator, .limited(128 * 1024 * 1024));
 }
 
-fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize) !void {
+fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize, windows_subsystem: ?WindowsSubsystem) !void {
     const capabilities = try capabilityLines(allocator, options.metadata.capabilities);
     defer allocator.free(capabilities);
     const frontend = try frontendLines(allocator, options.frontend);
     defer allocator.free(frontend);
+    const subsystem = try subsystemLine(allocator, windows_subsystem);
+    defer allocator.free(subsystem);
     const artifact = try zonStringAlloc(allocator, std.fs.path.basename(options.output_path));
     defer allocator.free(artifact);
     const target = try zonStringAlloc(allocator, @tagName(options.target));
@@ -1021,6 +1326,15 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
     defer allocator.free(optimize);
     const web_engine = try zonStringAlloc(allocator, @tagName(options.web_engine));
     defer allocator.free(web_engine);
+    // The web-layer verdict the artifact was staged under, in the same
+    // "engine (source)" shape the package diagnostic prints — e.g.
+    // "none (inferred: nothing in app.zon declares web use)" or
+    // "webview2 (declared: capabilities)".
+    const layer = webLayerFor(options);
+    const web_layer_value = try std.fmt.allocPrint(allocator, "{s} ({s})", .{ webLayerEngineName(layer, options.target, options.web_engine), layer.sourceText() });
+    defer allocator.free(web_layer_value);
+    const web_layer = try zonStringAlloc(allocator, web_layer_value);
+    defer allocator.free(web_layer);
     const signing = try zonStringAlloc(allocator, @tagName(options.signing.mode));
     defer allocator.free(signing);
     const report = try std.fmt.allocPrint(allocator,
@@ -1032,8 +1346,9 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
         \\  .executable = {s},
         \\  .optimize = {s},
         \\  .web_engine = {s},
+        \\  .web_layer = {s},
         \\  .signing = {s},
-        \\  .asset_count = {d},
+        \\{s}  .asset_count = {d},
         \\{s}
         \\  .capabilities = .{{
         \\{s}
@@ -1048,7 +1363,9 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
         executable,
         optimize,
         web_engine,
+        web_layer,
         signing,
+        subsystem,
         asset_count,
         frontend,
         capabilities,
@@ -1068,6 +1385,18 @@ fn capabilityLines(allocator: std.mem.Allocator, capabilities: []const []const u
         try out.appendSlice(allocator, ",\n");
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// The report's subsystem-verdict line, present only when the posture
+/// check actually ran (a Windows package with a binary to probe): the
+/// durable twin of the transient warning[package.console-subsystem],
+/// in the same string style the report's other verdicts use.
+fn subsystemLine(allocator: std.mem.Allocator, windows_subsystem: ?WindowsSubsystem) ![]const u8 {
+    const subsystem = windows_subsystem orelse return allocator.dupe(u8, "");
+    return std.fmt.allocPrint(allocator,
+        \\  .subsystem = "{s}",
+        \\
+    , .{@tagName(subsystem)});
 }
 
 fn frontendLines(allocator: std.mem.Allocator, frontend: ?manifest_tool.FrontendMetadata) ![]const u8 {
@@ -1173,33 +1502,65 @@ fn copyTree(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8, d
 /// the signature on the bundle is the proof it happened — and only a
 /// FAILED signing rewrites it, which is safe because a failed codesign
 /// leaves the bundle without a seal to break.
-fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: PackageOptions) !void {
+/// Returns true when the bundle was signed AND the signature verified —
+/// the value the report's "signed, verified" line states. A signing mode
+/// that claims to sign (adhoc or identity) either delivers a verified
+/// signature or fails the whole package with codesign's own reason:
+/// exiting 0 while shipping an unsigned bundle is the release-breaking
+/// failure this pipeline exists to prevent.
+fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: PackageOptions) !bool {
     const plan_path = "Contents/Resources/signing-plan.txt";
     switch (options.signing.mode) {
-        .none => try writeFile(dir, io, plan_path, "signing=none\nunsigned local package\n"),
+        .none => {
+            try writeFile(dir, io, plan_path, "signing=none\nunsigned local package\n");
+            return false;
+        },
         .adhoc => {
             try writeFile(dir, io, plan_path, "signing=adhoc\nad-hoc signed\n");
-            const result = codesign.signAdHoc(io, options.output_path) catch {
+            const result = try codesign.signAdHoc(allocator, io, options.output_path);
+            defer allocator.free(result.message);
+            if (!result.ok) {
                 try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
+                std.debug.print("error: ad-hoc code signing failed for {s}, so this package would ship unsigned - codesign said:\n{s}\n  fix what codesign reports above, or package with `--signing none` if an unsigned bundle is what you want\n", .{ options.output_path, trimmedToolOutput(result.message) });
+                return error.SigningFailed;
+            }
         },
         .identity => {
             const identity = options.signing.identity orelse {
                 try writeFile(dir, io, plan_path, "signing=identity\nno identity provided; bundle is unsigned\n");
-                return;
+                std.debug.print("error: --signing identity needs the identity to sign with, so this package would ship unsigned - pass --identity \"Developer ID Application: Your Name (TEAMID)\"\n  `security find-identity -v -p codesigning` lists the identities this machine can sign with\n", .{});
+                return error.SigningFailed;
             };
             const plan_text = try std.fmt.allocPrint(allocator, "signing=identity\nsigned with {s}\n", .{identity});
             defer allocator.free(plan_text);
             try writeFile(dir, io, plan_path, plan_text);
-            const result = codesign.signIdentity(io, options.output_path, identity, options.signing.entitlements) catch {
+            const result = try codesign.signIdentity(allocator, io, options.output_path, identity, options.signing.entitlements);
+            defer allocator.free(result.message);
+            if (!result.ok) {
                 try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
+                std.debug.print("error: code signing with \"{s}\" failed for {s}, so this package would ship unsigned - codesign said:\n{s}\n  `security find-identity -v -p codesigning` lists the identities this machine can sign with\n", .{ identity, options.output_path, trimmedToolOutput(result.message) });
+                return error.SigningFailed;
+            }
         },
     }
+    // The signature just applied must actually hold — the same strict
+    // deep check an Apple silicon launch effectively runs. A bundle that
+    // signs but does not verify (a stale seal, unsigned nested code) is
+    // a packaging failure, not a report footnote.
+    const verified = try codesign.verify(allocator, io, options.output_path);
+    defer allocator.free(verified.message);
+    if (!verified.ok) {
+        std.debug.print("error: {s} was signed but failed `codesign --verify --deep --strict`, so it would be rejected at launch - codesign said:\n{s}\n  fix what codesign reports above and rerun `native package`\n", .{ options.output_path, trimmedToolOutput(verified.message) });
+        return error.SignatureVerificationFailed;
+    }
+    return true;
+}
+
+/// codesign's output, trimmed of trailing newlines so the teaching
+/// message's fix line lands directly under it (the output itself stays
+/// verbatim).
+fn trimmedToolOutput(output: []const u8) []const u8 {
+    return std.mem.trimEnd(u8, output, "\r\n");
 }
 
 fn hasRegistrationMetadata(metadata: manifest_tool.Metadata) bool {
@@ -1715,7 +2076,6 @@ test "mobile package templates ship the toolkit hosts" {
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "WINDOW_FORMAT_RGBA_8888") != null);
 }
 
-
 test "mobile package artifacts use manifest identity metadata" {
     var cwd = std.Io.Dir.cwd();
     try cwd.deleteTree(std.testing.io, ".zig-cache/test-package-mobile-identity");
@@ -2143,13 +2503,660 @@ test "package report records target signing and assets" {
         .target = .linux,
         .output_path = ".zig-cache/test-package-report",
         .signing = .{ .mode = .none },
-    }, "demo", 2);
+    }, "demo", 2, null);
     var buffer: [512]u8 = undefined;
     var file = try dir.openFile(std.testing.io, "package-manifest.zon", .{});
     defer file.close(std.testing.io);
     const len = try file.readPositionalAll(std.testing.io, &buffer, 0);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".target = \"linux\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".asset_count = 2") != null);
+    // No subsystem check ran, so the report makes no subsystem claim.
+    try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".subsystem") == null);
+}
+
+test "adhoc packaging into a spaced output path signs and verifies" {
+    // The reported release-breaker: `--output "<path with spaces>.app"`
+    // packaged, exited 0, and shipped an UNSIGNED bundle because the
+    // codesign command was a shell string the spaces split apart. The
+    // pipeline now execs argv arrays, so the spaced path must sign — and
+    // the strict deep verify (real codesign, darwin hosts only) is the
+    // proof.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package signed spaced";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.spaced-sign", .name = "spaced-demo", .version = "1.0.0" };
+    const app_path = root ++ "/My Spaced Demo.app";
+    const stats = try createMacosApp(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = app_path,
+        // A real Mach-O executable, so codesign has honest code to sign.
+        .binary_path = "/bin/ls",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .adhoc },
+    });
+    try std.testing.expectEqual(SigningMode.adhoc, stats.signing_mode);
+    try std.testing.expect(stats.signing_verified);
+
+    // Pin the claim with an independent codesign run, not just the flag.
+    const verified = try codesign.verify(gpa, std.testing.io, app_path);
+    defer gpa.free(verified.message);
+    try std.testing.expect(verified.ok);
+}
+
+test "a codesign failure fails packaging instead of shipping unsigned" {
+    // An identity codesign cannot resolve exits nonzero; packaging must
+    // surface that as an error (with codesign's reason printed), never
+    // as a created artifact. Real codesign run: darwin hosts only.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-signing-failure";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.sign-fail", .name = "sign-fail-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.SigningFailed, createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Sign Fail Demo.app",
+        .binary_path = "/bin/ls",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .identity, .identity = "native-sdk-no-such-identity" },
+    }));
+}
+
+test "identity signing without an identity is a loud failure, not a silent unsigned bundle" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-signing-no-identity";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.no-identity", .name = "no-identity-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.SigningFailed, createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/NoIdentity.app",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .identity },
+    }));
+}
+
+test "native-only windows package ships no WebView2 loader and reports web layer none" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-native-only-windows";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app-binary", .data = "not a real exe" });
+
+    // A canvas app shape: gpu capabilities, no frontend, no webview.
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.canvas",
+        .name = "canvas-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .binary_path = root ++ "/app-binary",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(!stats.web_layer.?.enabled);
+
+    // No loader staged next to the binary.
+    var dir = try cwd.openDir(std.testing.io, root ++ "/demo-windows", .{});
+    defer dir.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "bin/WebView2Loader.dll", .{}));
+
+    // No frontend dist directory (native-only packages bundle plain assets).
+    try std.testing.expectError(error.FileNotFound, dir.openDir(std.testing.io, "resources/dist", .{}));
+
+    // The report carries the verdict.
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"none (inferred: nothing in app.zon declares web use)\"") != null);
+}
+
+test "webview-declaring package reports the web layer as declared" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-declared";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const capabilities = [_][]const u8{ "webview", "js_bridge" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.web",
+        .name = "web-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+
+    // No binary: the loader copy is not exercised (it needs a framework
+    // root), but the report and stats still carry the declared verdict.
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.capability, stats.web_layer.?.reason);
+    // No binary means the subsystem check never ran: no verdict to carry.
+    try std.testing.expectEqual(@as(?WindowsSubsystem, null), stats.windows_subsystem);
+
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"webview2 (declared: capabilities)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem") == null);
+}
+
+test "package refuses a manifest that excludes the web layer while declaring web content" {
+    const capabilities = [_][]const u8{"webview"};
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.conflict",
+        .name = "conflict-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+        .webview_layer = "exclude",
+    };
+    try std.testing.expectError(error.WebViewLayerConflict, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = ".zig-cache/test-package-web-layer-conflict",
+    }));
+}
+
+test "package web layer follows the resolved engine, not the raw manifest" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-resolved-engine";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/index.html", .data = "<h1>Web</h1>" });
+
+    // A system manifest with no web declarations, packaged with the
+    // engine the CLI resolved from `--web-engine chromium`: the layer
+    // ships, and the verdict names the engine as the cause.
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.resolved",
+        .name = "resolved-demo",
+        .version = "1.0.0",
+    };
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .ios,
+        .output_path = root ++ "/ios",
+        .assets_dir = root ++ "/assets",
+        .web_engine = .chromium,
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.chromium_engine, stats.web_layer.?.reason);
+}
+
+test "package refuses an exclude against a resolved Chromium engine" {
+    // `.webview_layer = "exclude"` with `--web-engine chromium` is the
+    // same contradiction as exclude + a manifest web declaration: the
+    // package boundary rejects it exactly like build configure does.
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.exclude-chromium",
+        .name = "exclude-chromium-demo",
+        .version = "1.0.0",
+        .webview_layer = "exclude",
+    };
+    try std.testing.expectError(error.WebViewLayerConflict, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .macos,
+        .output_path = ".zig-cache/test-package-web-layer-exclude-chromium",
+        .web_engine = .chromium,
+    }));
+}
+
+/// A minimal Windows executable for web-layer packaging tests: a valid
+/// PE header (so the loader-reference scan and the arch sniff both treat
+/// it as a real exe) followed by the UTF-16 loader name a web build
+/// carries. The COFF machine field stays zero, which the arch sniff
+/// reads as x64.
+fn testWebLayerPeBytes() [0x80 + "WebView2Loader.dll".len * 2]u8 {
+    var bytes = [_]u8{0} ** (0x80 + "WebView2Loader.dll".len * 2);
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 0x40, .little);
+    bytes[0x40] = 'P';
+    bytes[0x41] = 'E';
+    for ("WebView2Loader.dll", 0..) |ch, index| {
+        bytes[0x80 + index * 2] = ch;
+    }
+    return bytes;
+}
+
+/// A minimal Windows executable with a real optional header for the
+/// subsystem tests: MZ + PE + a COFF header declaring a 240-byte
+/// optional header, with the Subsystem field set as asked.
+fn testSubsystemPeBytes(subsystem: u16) [0x200]u8 {
+    var bytes = [_]u8{0} ** 0x200;
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 0x40, .little);
+    bytes[0x40] = 'P';
+    bytes[0x41] = 'E';
+    // COFF SizeOfOptionalHeader (PE32+ is 240 bytes).
+    std.mem.writeInt(u16, bytes[0x54..0x56], 240, .little);
+    // Optional header starts at 0x58; Subsystem sits 68 bytes in.
+    std.mem.writeInt(u16, bytes[0x9c..0x9e], subsystem, .little);
+    return bytes;
+}
+
+test "peSubsystem reads the optional header and refuses non-PE bytes" {
+    const gui = testSubsystemPeBytes(2);
+    try std.testing.expectEqual(@as(?u16, 2), peSubsystem(&gui));
+    const console = testSubsystemPeBytes(3);
+    try std.testing.expectEqual(@as(?u16, 3), peSubsystem(&console));
+    // The loader-scan fixture has no optional header: no subsystem claim.
+    const headerless = testWebLayerPeBytes();
+    try std.testing.expectEqual(@as(?u16, null), peSubsystem(&headerless));
+    try std.testing.expectEqual(@as(?u16, null), peSubsystem("not a pe"));
+}
+
+test "the subsystem probe reads only the headers, so an exe past the old slurp cap still warns" {
+    // A console-subsystem exe stretched past readPath's 128 MiB cap
+    // (sparse: valid headers, then a hole). The whole-file slurp this
+    // probe replaced hit the cap's StreamTooLong, swallowed it as
+    // false, and packaged the exe WITHOUT the promised console warning
+    // — the bounded header read answers from the first 94-ish bytes and
+    // never sees the far end of the file.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-huge";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    const console_bytes = testSubsystemPeBytes(3);
+    const path = root ++ "/huge-console.exe";
+    try cwd.writeFile(std.testing.io, .{ .sub_path = path, .data = &console_bytes });
+    {
+        var file = try cwd.openFile(std.testing.io, path, .{ .mode = .read_write });
+        defer file.close(std.testing.io);
+        try file.setLength(std.testing.io, 128 * 1024 * 1024 + 4096);
+    }
+    try std.testing.expectEqual(WindowsSubsystem.console, try peSubsystemVerdictAtPath(std.testing.allocator, std.testing.io, path));
+}
+
+test "a PE offset past the header ceiling proves nothing and allocates nothing" {
+    // An `e_lfanew` claiming the PE header sits 8 MiB into the file is
+    // not a real Windows exe (linkers put it right after the DOS stub):
+    // the probe answers null before sizing any buffer to the claimed
+    // offset — the failing allocator turns any allocation into a test
+    // failure — and packaging treats it like non-PE bytes: an unknown
+    // verdict, no warning, and never a gui claim.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-offset";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    var bytes = [_]u8{0} ** 0x40;
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 8 * 1024 * 1024, .little);
+    const path = root ++ "/bogus-offset.exe";
+    try cwd.writeFile(std.testing.io, .{ .sub_path = path, .data = &bytes });
+    try std.testing.expectEqual(WindowsSubsystem.unknown, try peSubsystemVerdictAtPath(std.testing.failing_allocator, std.testing.io, path));
+}
+
+test "windows package pins the exe's subsystem: GUI is quiet, console warns in the stats" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.subsystem",
+        .name = "subsystem-demo",
+        .version = "1.0.0",
+    };
+
+    // The exe `native build` installs: GUI subsystem, no console flash —
+    // the package carries no console finding.
+    const gui_bytes = testSubsystemPeBytes(2);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/gui.exe", .data = &gui_bytes });
+    const gui_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/gui-package",
+        .binary_path = root ++ "/gui.exe",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expectEqual(@as(?WindowsSubsystem, .gui), gui_stats.windows_subsystem);
+    const gui_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/gui-package/package-manifest.zon");
+    defer std.testing.allocator.free(gui_report);
+    try std.testing.expect(std.mem.indexOf(u8, gui_report, ".subsystem = \"gui\"") != null);
+
+    // A stale or hand-built console-subsystem exe: packaged (the app
+    // still works), but the stats carry the finding the warning teaches.
+    const console_bytes = testSubsystemPeBytes(3);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/console.exe", .data = &console_bytes });
+    const console_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/console-package",
+        .binary_path = root ++ "/console.exe",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expectEqual(@as(?WindowsSubsystem, .console), console_stats.windows_subsystem);
+    const console_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/console-package/package-manifest.zon");
+    defer std.testing.allocator.free(console_report);
+    try std.testing.expect(std.mem.indexOf(u8, console_report, ".subsystem = \"console\"") != null);
+}
+
+test "a binary the probe proves nothing about reports subsystem unknown, never gui" {
+    // The parse failing is not evidence of a GUI exe: non-PE bytes and a
+    // PE truncated before its optional header both earn an honest
+    // "unknown" in the stats and report — the old bool verdict folded
+    // these into false and the report affirmatively claimed "gui".
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-unknown";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.subsystem-unknown",
+        .name = "subsystem-unknown-demo",
+        .version = "1.0.0",
+    };
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/not-a-pe.exe", .data = "not a pe at all" });
+    const full_bytes = testSubsystemPeBytes(3);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/truncated.exe", .data = full_bytes[0..0x50] });
+    const fixtures = [_]struct { binary: []const u8, output: []const u8 }{
+        .{ .binary = root ++ "/not-a-pe.exe", .output = root ++ "/not-a-pe-package" },
+        .{ .binary = root ++ "/truncated.exe", .output = root ++ "/truncated-package" },
+    };
+    for (fixtures) |fixture| {
+        const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+            .metadata = metadata,
+            .target = .windows,
+            .output_path = fixture.output,
+            .binary_path = fixture.binary,
+            .assets_dir = root ++ "/assets",
+        });
+        try std.testing.expectEqual(@as(?WindowsSubsystem, .unknown), stats.windows_subsystem);
+        const report_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/package-manifest.zon", .{fixture.output});
+        defer std.testing.allocator.free(report_path);
+        const report = try readPath(std.testing.allocator, std.testing.io, report_path);
+        defer std.testing.allocator.free(report);
+        try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem = \"unknown\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem = \"gui\"") == null);
+    }
+
+    // A subsystem the check does not model (1 = native) parses fine but
+    // still proves nothing about console-vs-GUI posture.
+    const native_bytes = testSubsystemPeBytes(1);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/native.exe", .data = &native_bytes });
+    try std.testing.expectEqual(WindowsSubsystem.unknown, try peSubsystemVerdictAtPath(std.testing.allocator, std.testing.io, root ++ "/native.exe"));
+}
+
+test "package --web-layer include on a canvas manifest stages the loader and names the flag" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-include-flag";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    // The exe a `zig build package -Dweb-layer=include` graph produces on
+    // a canvas manifest: a real PE that references the loader.
+    const exe_bytes = testWebLayerPeBytes();
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.exe", .data = &exe_bytes });
+
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.canvas",
+        .name = "canvas-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+
+    // The loader copy resolves the framework root from the environment.
+    var env_map = std.process.Environ.Map.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("NATIVE_SDK_PATH", ".");
+
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .binary_path = root ++ "/app.exe",
+        .assets_dir = root ++ "/assets",
+        .web_layer_setting = .include,
+        .env_map = &env_map,
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.declared_include, stats.web_layer.?.reason);
+
+    // The loader is staged next to the binary, exactly like a manifest
+    // that declares web use.
+    var dir = try cwd.openDir(std.testing.io, root ++ "/demo-windows", .{});
+    defer dir.close(std.testing.io);
+    var loader = try dir.openFile(std.testing.io, "bin/WebView2Loader.dll", .{});
+    loader.close(std.testing.io);
+
+    // The report names the flag as the cause, not app.zon.
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"webview2 (declared: --web-layer include)\"") != null);
+}
+
+test "package --web-layer exclude on a web manifest is the same refused conflict" {
+    const capabilities = [_][]const u8{"webview"};
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.flag-conflict",
+        .name = "flag-conflict-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    try std.testing.expectError(error.WebViewLayerConflict, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = ".zig-cache/test-package-web-layer-flag-conflict",
+        .web_layer_setting = .exclude,
+    }));
+}
+
+test "package forwarded include on a web manifest keeps the manifest's reason" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-forwarded-include";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    // The build graphs forward `--web-layer include` for every web app;
+    // the verdict must keep reporting the manifest's own declaration, so
+    // graph-driven and hand-run packages read identically.
+    const capabilities = [_][]const u8{"webview"};
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.forwarded",
+        .name = "forwarded-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .assets_dir = root ++ "/assets",
+        .web_layer_setting = .include,
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.capability, stats.web_layer.?.reason);
+}
+
+test "package refuses to strip the loader from an exe that references it" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-mismatch";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const exe_bytes = testWebLayerPeBytes();
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.exe", .data = &exe_bytes });
+
+    // A loader-referencing exe (built with the web layer) packaged under
+    // a native-only decision would ship broken webviews: refused, with
+    // `--web-layer include` as the way out. Non-PE payloads (the other
+    // tests' fake binaries) prove nothing and stay packageable.
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.mismatch",
+        .name = "mismatch-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    try std.testing.expectError(error.WebViewLayerMismatch, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .binary_path = root ++ "/app.exe",
+        .assets_dir = root ++ "/assets",
+    }));
+}
+
+/// A minimal but structurally valid ELF64 executable for the WebKitGTK
+/// scan: one .dynstr, one .dynamic with a single DT_NEEDED naming
+/// `needed_lib`, and one .dynsym whose single real symbol is named
+/// `symbol_name` — the two evidence channels the Linux web-layer guard
+/// reads. Caller frees.
+fn testWebLayerElfBytes(gpa: std.mem.Allocator, needed_lib: []const u8, symbol_name: []const u8) ![]u8 {
+    const dynstr_offset: u64 = 0x100;
+    const dynamic_offset: u64 = 0x180;
+    const dynsym_offset: u64 = 0x1c0;
+    const shdr_offset: u64 = 0x200;
+    const bytes = try gpa.alloc(u8, 0x2c0);
+    @memset(bytes, 0);
+
+    // ELF header: magic, ELFCLASS64, little endian, section table.
+    @memcpy(bytes[0..4], "\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    std.mem.writeInt(u64, bytes[0x28..0x30], shdr_offset, .little);
+    std.mem.writeInt(u16, bytes[0x3a..0x3c], 0x40, .little);
+    std.mem.writeInt(u16, bytes[0x3c..0x3e], 3, .little);
+
+    // .dynstr: "\0<needed_lib>\0<symbol_name>\0".
+    const lib_name_offset: u64 = 1;
+    const symbol_name_offset: u64 = 1 + needed_lib.len + 1;
+    const dynstr_len: u64 = symbol_name_offset + symbol_name.len + 1;
+    @memcpy(bytes[@intCast(dynstr_offset + lib_name_offset)..][0..needed_lib.len], needed_lib);
+    @memcpy(bytes[@intCast(dynstr_offset + symbol_name_offset)..][0..symbol_name.len], symbol_name);
+
+    // .dynamic: DT_NEEDED -> needed_lib, then DT_NULL.
+    std.mem.writeInt(u64, bytes[@intCast(dynamic_offset)..][0..8], 1, .little); // DT_NEEDED
+    std.mem.writeInt(u64, bytes[@intCast(dynamic_offset + 8)..][0..8], lib_name_offset, .little);
+
+    // .dynsym: the null symbol, then one named symbol.
+    std.mem.writeInt(u32, bytes[@intCast(dynsym_offset + 24)..][0..4], @intCast(symbol_name_offset), .little);
+
+    // Section headers: [0] .dynstr (SHT_STRTAB), [1] .dynamic, [2] .dynsym.
+    const shdr = struct {
+        fn write(buffer: []u8, base: u64, index: u64, sh_type: u32, link: u32, offset: u64, size: u64, entsize: u64) void {
+            const header = buffer[@intCast(base + index * 0x40)..][0..0x40];
+            std.mem.writeInt(u32, header[0x04..0x08], sh_type, .little);
+            std.mem.writeInt(u64, header[0x18..0x20], offset, .little);
+            std.mem.writeInt(u64, header[0x20..0x28], size, .little);
+            std.mem.writeInt(u32, header[0x28..0x2c], link, .little);
+            std.mem.writeInt(u64, header[0x38..0x40], entsize, .little);
+        }
+    };
+    shdr.write(bytes, shdr_offset, 0, 3, 0, dynstr_offset, dynstr_len, 0);
+    shdr.write(bytes, shdr_offset, 1, 6, 0, dynamic_offset, 32, 16);
+    shdr.write(bytes, shdr_offset, 2, 11, 0, dynsym_offset, 48, 24);
+    return bytes;
+}
+
+test "the linux web-layer scan reads DT_NEEDED and dynamic symbols" {
+    const gpa = std.testing.allocator;
+    // The library link is evidence on its own.
+    const linked = try testWebLayerElfBytes(gpa, "libwebkitgtk-6.0.so.4", "gtk_init");
+    defer gpa.free(linked);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(linked));
+    // So is a lone webkit_/jsc_ dynamic symbol (a hand-linked binary
+    // that dodged the DT_NEEDED entry still calls into WebKit).
+    const symboled = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "webkit_web_view_new");
+    defer gpa.free(symboled);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(symboled));
+    const jsc = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "jsc_value_to_string");
+    defer gpa.free(jsc);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(jsc));
+    // A WebKit-free GTK binary scans clean, and a non-ELF payload
+    // proves nothing (stays packageable), mirroring the PE probe.
+    const clean = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "gtk_init");
+    defer gpa.free(clean);
+    try std.testing.expect(!elfBytesReferenceWebKitGtk(clean));
+    try std.testing.expect(!elfBytesReferenceWebKitGtk("not an executable"));
+}
+
+test "package refuses to strip WebKitGTK from a Linux binary that links it" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-linux-mismatch";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const elf_bytes = try testWebLayerElfBytes(std.testing.allocator, "libwebkitgtk-6.0.so.4", "webkit_web_view_new");
+    defer std.testing.allocator.free(elf_bytes);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = elf_bytes });
+
+    // A WebKitGTK-linking binary (built with the web layer) packaged
+    // under a native-only decision would ship broken webviews AND a
+    // libwebkitgtk runtime requirement the package claims not to have:
+    // refused, with `--web-layer include` as the way out.
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.linux-mismatch",
+        .name = "linux-mismatch-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    try std.testing.expectError(error.WebViewLayerMismatch, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/demo-linux",
+        .binary_path = root ++ "/app",
+        .assets_dir = root ++ "/assets",
+    }));
+}
+
+test "native-only linux package accepts a WebKit-free ELF and reports web layer none" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-linux-clean";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const elf_bytes = try testWebLayerElfBytes(std.testing.allocator, "libgtk-4.so.1", "gtk_init");
+    defer std.testing.allocator.free(elf_bytes);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = elf_bytes });
+
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.linux-clean",
+        .name = "linux-clean-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/demo-linux",
+        .binary_path = root ++ "/app",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(!stats.web_layer.?.enabled);
+
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-linux/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"none (inferred: nothing in app.zon declares web use)\"") != null);
 }
 
 // ---------------------------------------------------------------------------

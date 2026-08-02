@@ -136,22 +136,23 @@ pub const TextLayoutCachePlanner = struct {
             previous.len >= plan_key_index.min_entries_for_index) and
             plan_key_index.fitsHashSlots(text_layout_cache_index_slots, previous.len) and
             plan_key_index.fitsHashSlots(text_layout_cache_index_slots, plans.len + previous.len);
-        if (use_index) {
-            text_layout_cache_previous_index.reset();
+        const index_scratch: ?*TextLayoutCacheIndexScratch = if (use_index) text_layout_cache_index_scratch.get() else null;
+        if (index_scratch) |scratch| {
+            scratch.previous.reset();
             for (previous, 0..) |entry, index| {
                 var p = TextLayoutCacheIndex.probe(textLayoutKeyHash(entry.key));
-                while (text_layout_cache_previous_index.next(&p)) |_| {}
-                text_layout_cache_previous_index.insert(p, @intCast(index));
+                while (scratch.previous.next(&p)) |_| {}
+                scratch.previous.insert(p, @intCast(index));
             }
-            text_layout_cache_entry_index.reset();
+            scratch.entry.reset();
         }
 
         for (plans, 0..) |plan, layout_index| {
             const previous_index = blk: {
-                if (use_index) {
+                if (index_scratch) |scratch| {
                     const key_hash = textLayoutKeyHash(plan.key);
-                    if (self.entryIndexProbe(plan.key, key_hash)) |_| continue;
-                    break :blk findTextLayoutCacheEntryIndexed(previous, plan.key, key_hash);
+                    if (self.entryIndexProbe(&scratch.entry, plan.key, key_hash)) |_| continue;
+                    break :blk findTextLayoutCacheEntryIndexed(&scratch.previous, previous, plan.key, key_hash);
                 }
                 if (findTextLayoutCacheEntry(self.entries[0..self.entry_len], plan.key) != null) continue;
                 break :blk findTextLayoutCacheEntry(previous, plan.key);
@@ -162,7 +163,7 @@ pub const TextLayoutCachePlanner = struct {
                 .line_count = plan.lineCount(),
                 .bounds = plan.layout.bounds,
                 .last_used_frame = frame_index,
-            }, use_index);
+            }, if (index_scratch) |scratch| &scratch.entry else null);
             try self.appendAction(.{
                 .kind = if (previous_index == null) .upload else .retain,
                 .key = plan.key,
@@ -172,13 +173,13 @@ pub const TextLayoutCachePlanner = struct {
         }
 
         for (previous, 0..) |entry, index| {
-            if (use_index) {
-                if (self.entryIndexProbe(entry.key, textLayoutKeyHash(entry.key))) |_| continue;
+            if (index_scratch) |scratch| {
+                if (self.entryIndexProbe(&scratch.entry, entry.key, textLayoutKeyHash(entry.key))) |_| continue;
             } else if (findTextLayoutCacheEntry(self.entries[0..self.entry_len], entry.key) != null) {
                 continue;
             }
             if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
-                try self.appendEntryMaybeIndexed(entry, use_index);
+                try self.appendEntryMaybeIndexed(entry, if (index_scratch) |scratch| &scratch.entry else null);
                 try self.appendAction(.{
                     .kind = .retain,
                     .key = entry.key,
@@ -202,20 +203,20 @@ pub const TextLayoutCachePlanner = struct {
     /// First appended entry equal to `key`, walking the entry index's
     /// probe chain — the indexed equivalent of scanning
     /// `self.entries[0..self.entry_len]`.
-    fn entryIndexProbe(self: *TextLayoutCachePlanner, key: TextLayoutKey, key_hash: u64) ?usize {
+    fn entryIndexProbe(self: *TextLayoutCachePlanner, entry_index: *const TextLayoutCacheIndex, key: TextLayoutKey, key_hash: u64) ?usize {
         var p = TextLayoutCacheIndex.probe(key_hash);
-        while (text_layout_cache_entry_index.next(&p)) |candidate| {
+        while (entry_index.next(&p)) |candidate| {
             if (textLayoutKeysEqual(self.entries[candidate].key, key)) return candidate;
         }
         return null;
     }
 
-    fn appendEntryMaybeIndexed(self: *TextLayoutCachePlanner, entry: TextLayoutCacheEntry, use_index: bool) Error!void {
+    fn appendEntryMaybeIndexed(self: *TextLayoutCachePlanner, entry: TextLayoutCacheEntry, entry_index: ?*TextLayoutCacheIndex) Error!void {
         try self.appendEntry(entry);
-        if (use_index) {
+        if (entry_index) |index| {
             var p = TextLayoutCacheIndex.probe(textLayoutKeyHash(entry.key));
-            while (text_layout_cache_entry_index.next(&p)) |_| {}
-            text_layout_cache_entry_index.insert(p, @intCast(self.entry_len - 1));
+            while (index.next(&p)) |_| {}
+            index.insert(p, @intCast(self.entry_len - 1));
         }
     }
 
@@ -249,12 +250,18 @@ fn findTextLayoutCacheEntry(entries: []const TextLayoutCacheEntry, key: TextLayo
 /// bound; bigger inputs fall back to the linear scans.
 const text_layout_cache_index_slots = 8192;
 const TextLayoutCacheIndex = plan_key_index.HashSlots(text_layout_cache_index_slots);
-threadlocal var text_layout_cache_previous_index: TextLayoutCacheIndex = .{};
-threadlocal var text_layout_cache_entry_index: TextLayoutCacheIndex = .{};
+// Lazily heap-allocated per thread (64 KiB of probe tables): reset per
+// build, so first-use init on the planning thread is the only contract —
+// threads that never plan text layouts never allocate it.
+const TextLayoutCacheIndexScratch = struct {
+    previous: TextLayoutCacheIndex = .{},
+    entry: TextLayoutCacheIndex = .{},
+};
+const text_layout_cache_index_scratch = @import("lazy_tls.zig").LazyTls(TextLayoutCacheIndexScratch);
 
-fn findTextLayoutCacheEntryIndexed(previous: []const TextLayoutCacheEntry, key: TextLayoutKey, key_hash: u64) ?usize {
+fn findTextLayoutCacheEntryIndexed(previous_index: *const TextLayoutCacheIndex, previous: []const TextLayoutCacheEntry, key: TextLayoutKey, key_hash: u64) ?usize {
     var p = TextLayoutCacheIndex.probe(key_hash);
-    while (text_layout_cache_previous_index.next(&p)) |candidate| {
+    while (previous_index.next(&p)) |candidate| {
         if (textLayoutKeysEqual(previous[candidate].key, key)) return candidate;
     }
     return null;

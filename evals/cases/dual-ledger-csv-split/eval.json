@@ -1,0 +1,89 @@
+{
+  "name": "dual-ledger-csv-split",
+  "description": "Wave-2 dual-track case: split an existing single-file core into modules and add an export-to-CSV feature in the new module — multi-file authoring (imports on the ts track, @import on the zig track), byte-exact CSV quoting, the file-write effect, and an export state machine. Both tracks start from the same working ledger.",
+  "prompt": "This workspace holds a small working expense-ledger app (see README.md — it names the deliverable files and the check loop; the authoring guides are under .claude/skills/). Seeded expenses with a label, a category, and an amount in cents; rows can be removed; the view shows the table and the total. Your task has two parts.\n\n1) Split the core into modules. The CSV/byte formatting you are about to write belongs in its own module: create exactly src/csv.ts (TypeScript) or src/csv.zig (Zig) and put the CSV building there; the entry module (src/core.ts / src/main.zig) keeps Model/Msg/update and imports it. Follow your track's module rules (in TypeScript: relative imports spelled with the real filename, type-only back-edges are idiomatic; in Zig: @import(\"csv.zig\")).\n\n2) Add an Export feature. A button named exactly \"Export CSV\" writes the CURRENT expenses to exactly export.csv through the toolkit's file effect.\n- The CSV shape, byte-exact: the header line label,category,cents then one line per expense in list order, with a newline after every line (the header included). A label containing a comma or a double quote is wrapped in double quotes with embedded double quotes doubled — the seeded data exercises both. cents is the plain integer; category is its lowercase name.\n- The export lifecycle lives in the model as export_state, exactly one of \"idle\" | \"exporting\" | \"done\" | \"failed\": idle at boot; exporting while a write is in flight — and Export CSV does nothing while exporting; done on success; failed on any write failure (visible, never silent). Exporting again from done or failed starts a new export.\n- Msg arms added: export_csv (no payload); the write result routed per your track's effects surface — in TypeScript the ok arm exported (no payload fields) and the err arm export_failed (one bytes field reason); in Zig one file-result arm export_done carrying the toolkit's file result.\n- Keep the existing behavior (remove, totals, the seeded data) working unchanged. In Zig this moves update onto the effects channel: update(model, msg, fx) with pub const Effects = native_sdk.Effects(Msg); keep Model/Msg/update/initialModel pub in src/main.zig.\n\nCheck your work with the loop in README.md until it is green, and make sure the behavior above actually holds. When you are done, summarize what you built and how you split the modules.",
+  "frontend": "app-dual",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": ["-Dplatform=null"]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/app.native",
+      "pattern": "Export CSV",
+      "expect": true,
+      "description": "the view carries the Export CSV control"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The split is a real module boundary: the CSV building (and the byte helpers it owns) lives in src/csv.* with a clean interface, the entry module keeps Model/Msg/update, and nothing is duplicated across the two files.",
+        "The CSV quoting is exactly right at the byte level: fields quoted only when they need it, embedded quotes doubled, integer cents never through float-lossy paths, and the whole file built as one honest byte sequence.",
+        "The export state machine has the four pinned states with honest transitions, re-entry guarded while exporting, and the write routed through the file effect with a stable key.",
+        "The existing app is untouched where the spec says so, and the new code (including the module interface) reads idiomatically for its track."
+      ],
+      "files": ["src/core.ts", "src/csv.ts", "src/*.zig", "src/*.native"],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the module split, CSV correctness, and state machine beyond compliance"
+    }
+  ],
+  "tracks": {
+    "ts": {
+      "checks": [
+        {
+          "type": "ts_transpile"
+        },
+        {
+          "type": "file_grep",
+          "files": "src/core.ts",
+          "pattern": "from \"\\./csv\\.ts\"",
+          "expect": true,
+          "description": "the entry module imports the new csv module by its real filename"
+        },
+        {
+          "type": "file_grep",
+          "files": "src/csv.ts",
+          "pattern": "export",
+          "expect": true,
+          "description": "src/csv.ts exists and exports the CSV surface"
+        },
+        {
+          "type": "ts_harness",
+          "harness": "harness-ts.zig",
+          "description": "export writes the byte-exact quoted CSV to export.csv, the four-state lifecycle holds with re-entry guarded, exports track removals, starter behavior intact"
+        }
+      ]
+    },
+    "zig": {
+      "checks": [
+        {
+          "type": "file_grep",
+          "files": "src/main.zig",
+          "pattern": "@import\\(\"csv\\.zig\"\\)",
+          "expect": true,
+          "description": "the entry module imports the new csv module"
+        },
+        {
+          "type": "file_grep",
+          "files": "src/csv.zig",
+          "pattern": "pub ",
+          "expect": true,
+          "description": "src/csv.zig exists and exposes the CSV surface"
+        },
+        {
+          "type": "zig_harness",
+          "harness": "harness-zig.zig",
+          "args": ["-Dplatform=null"],
+          "description": "export writes the byte-exact quoted CSV to export.csv, the four-state lifecycle holds with re-entry guarded, exports track removals, starter behavior intact"
+        }
+      ]
+    }
+  }
+}

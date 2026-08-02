@@ -16,6 +16,7 @@ pub const normalizedCanvasPresentationScale = canvas_frame_helpers.normalizedCan
 pub const canvasFramePixelSize = canvas_frame_helpers.canvasFramePixelSize;
 pub const canvasColorToRgba8 = canvas_frame_helpers.canvasColorToRgba8;
 pub const clippedCanvasDirtyBounds = canvas_frame_helpers.clippedCanvasDirtyBounds;
+pub const bleedAlignedCanvasDirtyBounds = canvas_frame_helpers.bleedAlignedCanvasDirtyBounds;
 pub const unionRects = canvas_frame_helpers.unionRects;
 pub const canvasWidgetPointerEventFromGpuInput = canvas_frame_helpers.canvasWidgetPointerEventFromGpuInput;
 pub const canvasWidgetInputBatchesDisplayListRefresh = canvas_frame_helpers.canvasWidgetInputBatchesDisplayListRefresh;
@@ -23,6 +24,7 @@ pub const canvasWidgetKeyboardEventFromGpuInput = canvas_frame_helpers.canvasWid
 pub const canvasWidgetTextInputEventFromGpuInput = canvas_frame_helpers.canvasWidgetTextInputEventFromGpuInput;
 pub const canvasWidgetEscapeKey = canvas_frame_helpers.canvasWidgetEscapeKey;
 pub const canvasWidgetKeyboardModifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers;
+pub const gpuInputHasTextCommandModifier = canvas_frame_helpers.gpuInputHasTextCommandModifier;
 pub const mergeCanvasRenderOverrides = canvas_frame_helpers.mergeCanvasRenderOverrides;
 pub const findCanvasRenderOverrideIndex = canvas_frame_helpers.findCanvasRenderOverrideIndex;
 pub const canvasRenderOverrideNoop = canvas_frame_helpers.canvasRenderOverrideNoop;
@@ -30,6 +32,16 @@ pub const canvasRenderAnimationFinalOverrideNoop = canvas_frame_helpers.canvasRe
 pub const canvasRenderAnimationActive = canvas_frame_helpers.canvasRenderAnimationActive;
 pub const platformCanvasFrameProfileRisk = canvas_frame_helpers.platformCanvasFrameProfileRisk;
 pub const gpuSurfaceFrameEventFromGpuFrame = canvas_frame_helpers.gpuSurfaceFrameEventFromGpuFrame;
+
+/// Whether presentation for this view should use the GPU packet path. A
+/// missing view stays eligible so the presentation entry point can report
+/// its normal validation error instead of masking it as a backend choice.
+pub fn canvasGpuPacketPresentationRequested(runtime: anytype, window_id: platform.WindowId, label: []const u8) bool {
+    return if (runtimeFindViewIndex(runtime, window_id, label)) |index|
+        runtime.views[index].gpu_requested_backend != .software
+    else
+        true;
+}
 
 const runtime_api = @import("api.zig");
 const runtime_clock = @import("clock.zig");
@@ -43,10 +55,29 @@ const max_canvas_render_animations_per_view = canvas_limits.max_canvas_render_an
 const max_canvas_text_layouts_per_view = canvas_limits.max_canvas_text_layouts_per_view;
 const max_canvas_text_layout_lines_per_view = canvas_limits.max_canvas_text_layout_lines_per_view;
 const max_canvas_retained_packet_commands_per_view = canvas_limits.max_canvas_retained_packet_commands_per_view;
-threadlocal var canvas_frame_text_layout_plans_scratch: [max_canvas_text_layouts_per_view]canvas.TextLayoutPlan = undefined;
-threadlocal var canvas_frame_text_layout_lines_scratch: [max_canvas_text_layout_lines_per_view]canvas.TextLine = undefined;
-threadlocal var canvas_frame_text_layout_cache_entries_scratch: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry = undefined;
-threadlocal var canvas_frame_text_layout_cache_actions_scratch: [max_canvas_text_layouts_per_view * 2]canvas.TextLayoutCacheAction = undefined;
+// The frame planner's per-thread scratch behind one lazily
+// heap-allocated pointer (~1.8 MiB that would otherwise sit in the
+// static TLS template every OS thread's loader clones): the text-layout
+// planning arrays plus the packet patch-derivation arrays declared with
+// their contract below. Init happens on a thread's first frame plan —
+// the runtime loop thread by construction — so window-host, COM,
+// accessibility, and worker threads never allocate it. Every field is
+// per-use scratch (no cross-frame state), so first-use init cannot
+// change planner output; the arrays carry no default and stay
+// uninitialized, exactly like the `= undefined` statics they replace.
+const CanvasFrameScratch = struct {
+    text_layout_plans: [max_canvas_text_layouts_per_view]canvas.TextLayoutPlan,
+    text_layout_lines: [max_canvas_text_layout_lines_per_view]canvas.TextLine,
+    text_layout_cache_entries: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry,
+    text_layout_cache_actions: [max_canvas_text_layouts_per_view * 2]canvas.TextLayoutCacheAction,
+    packet_current: [max_canvas_retained_packet_commands_per_view]CanvasPacketCurrentCommand,
+    packet_current_sort: [max_canvas_retained_packet_commands_per_view]u32,
+    packet_baseline_sort: [max_canvas_retained_packet_commands_per_view]u32,
+    packet_baseline_matched: [max_canvas_retained_packet_commands_per_view]bool,
+    packet_baseline_stable: [max_canvas_retained_packet_commands_per_view]bool,
+    packet_upsert: [max_canvas_retained_packet_commands_per_view]bool,
+};
+const canvas_frame_scratch = canvas.lazy_tls.LazyTls(CanvasFrameScratch);
 
 /// One entry of the frame's CURRENT keyed command list — the full draw
 /// order the retained packet protocol works on (never the scissor
@@ -62,17 +93,14 @@ const CanvasPacketCurrentCommand = struct {
     bounds: geometry.RectF,
 };
 
-// Patch-derivation scratch (threadlocal, same pattern as the text-layout
-// scratch above): the current keyed list, a key-sorted index over it for
-// duplicate detection, a key-sorted index over the view's retained
-// baseline for O(log n) lookups, per-baseline matched flags (unmatched =
-// evict), and per-current upsert flags. ~64 KiB per thread total.
-threadlocal var canvas_packet_current_scratch: [max_canvas_retained_packet_commands_per_view]CanvasPacketCurrentCommand = undefined;
-threadlocal var canvas_packet_current_sort_scratch: [max_canvas_retained_packet_commands_per_view]u32 = undefined;
-threadlocal var canvas_packet_baseline_sort_scratch: [max_canvas_retained_packet_commands_per_view]u32 = undefined;
-threadlocal var canvas_packet_baseline_matched_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
-threadlocal var canvas_packet_baseline_stable_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
-threadlocal var canvas_packet_upsert_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
+// Patch-derivation scratch (the `packet_*` fields of
+// `CanvasFrameScratch` above): the current keyed list, a key-sorted
+// index over it for duplicate detection, a key-sorted index over the
+// view's retained baseline for O(log n) lookups, per-baseline matched
+// flags (unmatched = evict), and per-current upsert flags. ~104 KiB per
+// planning thread total. The matched/upsert flags persist between
+// `computeCanvasPacketPatchStats` and `writeCanvasPacketPatchBinary` on
+// the same thread — the same contract the statics carried.
 
 const validateViewLabel = validation.validateViewLabel;
 const canvasRenderAnimationStartNsForView = runtime_view.canvasRenderAnimationStartNsForView;
@@ -236,10 +264,23 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             packet_json_buffer: []u8,
             packet_scale: ?f32,
         ) anyerror!canvas.CanvasGpuPacket {
-            const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
+            // An explicit software request is a presentation policy, not a
+            // host refusal. Stop before planning or encoding a packet (and
+            // before uploading any packet image resources); callers that
+            // offer a pixel fallback handle UnsupportedService as usual.
+            try validateRuntimeViewParent(self, window_id);
+            try validateViewLabel(label);
+            const view_index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
+            if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+            if (self.views[view_index].gpu_requested_backend == .software) return error.UnsupportedService;
+            var canvas_frame = try planCanvasFrameForView(self, view_index, options, storage, true);
             recordCanvasClearColor(self, window_id, label, clear_color);
+            const presentation_scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
+            // Widen BEFORE the packet build so the scissor-culled
+            // command subset rides the widened scissor.
+            widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
             var packet = try canvas_frame.gpuPacket(output);
-            packet.scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
+            packet.scale = presentation_scale;
             if (!packet.requiresRender()) return packet;
             uploadCanvasPacketImages(self, packet) catch |err| {
                 if (err == error.UnsupportedService) {
@@ -284,19 +325,26 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             clear_color: canvas.Color,
             pixel_scale: ?f32,
         ) anyerror!CanvasPresentationResult {
-            const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
+            var canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
             recordCanvasClearColor(self, window_id, label, clear_color);
             if (!canvas_frame.requiresRender()) {
                 return .{ .frame = canvas_frame, .mode = .skipped };
             }
+            const presentation_scale = normalizedCanvasPresentationScale(pixel_scale, canvas_frame.scale);
+            // Widen BEFORE the packet build (and the pixel fallback below)
+            // so the scissor-culled command subset rides the widened
+            // scissor.
+            widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
 
             const services = self.options.platform.services;
-            const packet_service_available = services.present_gpu_surface_packet_fn != null or
-                services.present_gpu_surface_packet_binary_fn != null;
-            if (gpu_commands.len > 0 and packet_json_buffer.len > 0) {
+            const packet_requested = canvasGpuPacketPresentationRequested(self, window_id, label);
+            const packet_service_available = packet_requested and
+                (services.present_gpu_surface_packet_fn != null or
+                    services.present_gpu_surface_packet_binary_fn != null);
+            if (packet_requested and gpu_commands.len > 0 and packet_json_buffer.len > 0) {
                 if (packet_service_available) {
                     var packet = try canvas_frame.gpuPacket(gpu_commands);
-                    packet.scale = normalizedCanvasPresentationScale(pixel_scale, canvas_frame.scale);
+                    packet.scale = presentation_scale;
                     const result = CanvasPresentationResult{
                         .frame = canvas_frame,
                         .mode = .gpu_packet,
@@ -1002,19 +1050,34 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     storage.text_layout_cache_actions,
                 );
 
-            const full_repaint = frame_options.full_repaint or
+            var full_repaint = frame_options.full_repaint or
                 !self.views[index].presented_canvas_valid or
                 canvas_surface_changed or
                 (canvas_changed and (self.views[index].presented_canvas_has_unkeyed or self.views[index].currentCanvasHasUnkeyed()));
-            const changes = if (full_repaint)
+            var changes: []const canvas.DiffChange = if (full_repaint)
                 storage.changes[0..0]
             else
                 try self.views[index].diffPresentedCanvasSummary(storage.changes);
             var dirty_rects: [canvas.max_canvas_frame_dirty_rects]geometry.RectF = undefined;
             var dirty_rect_count: usize = 0;
-            const dirty_bounds = if (full_repaint)
+            var dirty_bounds: ?geometry.RectF = if (full_repaint)
                 canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
             else dirty: {
+                // Every incremental dirty rect leaves here through
+                // `bleedAlignedCanvasDirtyBounds`: one whole device
+                // pixel of AA bleed folded in on integer device
+                // boundaries, then snapped outward onto the pixel grid
+                // with edges whose stored-f32 round trip lands exactly
+                // on those boundaries. The bleed covers the PAINTED
+                // extent of what changed (host rasterizers ink up to a
+                // device pixel past a command's bounds) so vacated
+                // content cannot strand a stale fringe; the snap keeps
+                // the cull region identical to the cleared pixels so a
+                // fractional edge cannot erase an unchanged neighbor's
+                // boundary coverage without repainting it. Applied to
+                // the finalized rects (the refined union, each refined
+                // cluster, and the summary fallback), which covers
+                // every contribution: dilation distributes over union.
                 const overrides_dirty = unionRects(render_override_dirty_bounds, render_animation_dirty_bounds);
                 // Msg rebuilds: the presented summary records ids and
                 // bounds but not content, so a rebuild marks every keyed
@@ -1050,12 +1113,12 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         if (canvasPacketPatchDirtyBounds(&self.views[index], current)) |patch_dirty| {
                             var refined = patch_dirty;
                             if (overrides_dirty) |overrides_rect| refined.add(overrides_rect);
-                            const clipped = clippedCanvasDirtyBounds(refined.bounds, frame_options.surface_size);
+                            const clipped = bleedAlignedCanvasDirtyBounds(refined.bounds, frame_options.scale, 1, frame_options.surface_size);
                             // A list of one rect adds nothing over the
                             // scissor; ship it only when it splits.
                             if (clipped != null and refined.rect_count > 1) {
                                 for (refined.rects[0..refined.rect_count]) |rect| {
-                                    const clipped_rect = clippedCanvasDirtyBounds(rect, frame_options.surface_size) orelse continue;
+                                    const clipped_rect = bleedAlignedCanvasDirtyBounds(rect, frame_options.scale, 1, frame_options.surface_size) orelse continue;
                                     dirty_rects[dirty_rect_count] = clipped_rect;
                                     dirty_rect_count += 1;
                                 }
@@ -1065,8 +1128,25 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         }
                     }
                 }
-                break :dirty clippedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.surface_size);
+                break :dirty bleedAlignedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.scale, 1, frame_options.surface_size);
             };
+            if (!full_repaint and incrementalCanvasDamageIntersectsBackdropBlur(
+                render_plan.commands,
+                dirty_bounds,
+                dirty_rects[0..dirty_rect_count],
+            )) {
+                // A blur's apron must be reconstructed from the scene as
+                // it existed before that command. Retained pixels beyond
+                // an incremental scissor are already fully composited,
+                // so widening only the output rect would still sample
+                // stale blur/later-command pixels at its edge. Replay the
+                // whole ordered list when damage reaches the blur's read
+                // footprint; damage elsewhere remains incremental.
+                full_repaint = true;
+                changes = storage.changes[0..0];
+                dirty_bounds = canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds);
+                dirty_rect_count = 0;
+            }
 
             const canvas_frame = canvas.CanvasFrame{
                 .frame_index = frame_options.frame_index,
@@ -1118,6 +1198,21 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 if (self.views[index].canvasRenderAnimationsActive(frame_options.timestamp_ns)) {
                     self.invalidateFor(.state, self.views[index].frame);
                 }
+                // An armed tooltip show delay — and a running anchor-gap
+                // transit grace — only fire on a presented frame's
+                // timestamp, so frames must keep coming while either is
+                // pending: the render-animation pump's policy. This
+                // per-frame leg takes over from the FIRST invalidation,
+                // which the intent choke point kicks the moment any
+                // deadline arms (reconcileCanvasTooltipIntent step 5 —
+                // a deadline armed by an event that repainted nothing
+                // would otherwise wait forever for a frame nothing
+                // requested). Settled shown tooltips and the warm
+                // window need no pump: both step on journaled input
+                // timestamps.
+                if (self.views[index].canvasTooltipIntentArmed()) {
+                    self.invalidateFor(.state, self.views[index].frame);
+                }
             } else {
                 self.views[index].recordCanvasFrame(canvas_frame);
             }
@@ -1125,6 +1220,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
         }
 
         pub fn canvasFrameScratchStorage(self: *Runtime) canvas.CanvasFrameStorage {
+            const scratch = canvas_frame_scratch.get();
             return .{
                 .render_commands = &self.canvas_frame_render_commands,
                 .render_batches = &self.canvas_frame_render_batches,
@@ -1148,10 +1244,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .glyph_atlas_entries = &self.canvas_frame_glyph_atlas_entries,
                 .glyph_atlas_cache_entries = &self.canvas_frame_glyph_atlas_cache_entries,
                 .glyph_atlas_cache_actions = &self.canvas_frame_glyph_atlas_cache_actions,
-                .text_layout_plans = &canvas_frame_text_layout_plans_scratch,
-                .text_layout_lines = &canvas_frame_text_layout_lines_scratch,
-                .text_layout_cache_entries = &canvas_frame_text_layout_cache_entries_scratch,
-                .text_layout_cache_actions = &canvas_frame_text_layout_cache_actions_scratch,
+                .text_layout_plans = &scratch.text_layout_plans,
+                .text_layout_lines = &scratch.text_layout_lines,
+                .text_layout_cache_entries = &scratch.text_layout_cache_entries,
+                .text_layout_cache_actions = &scratch.text_layout_cache_actions,
                 .changes = &self.canvas_frame_changes,
             };
         }
@@ -1213,6 +1309,50 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
     };
 }
 
+/// Refined patch damage is a set, not its bounding box: two distant edits
+/// can straddle a blur without either edit reaching the blur's read apron.
+/// When refinement is unavailable, retain the conservative union check.
+fn incrementalCanvasDamageIntersectsBackdropBlur(
+    commands: []const canvas.RenderCommand,
+    dirty_bounds: ?geometry.RectF,
+    dirty_rects: []const geometry.RectF,
+) bool {
+    if (dirty_rects.len == 0) return canvas.incrementalDamageIntersectsBackdropBlur(commands, dirty_bounds);
+    for (dirty_rects) |dirty_rect| {
+        if (canvas.incrementalDamageIntersectsBackdropBlur(commands, dirty_rect)) return true;
+    }
+    return false;
+}
+
+/// Rework a planned frame's incremental damage for the present's
+/// EFFECTIVE scale. Two obligations when the scales differ:
+/// - A COARSER presentation scale carries a larger device pixel than
+///   the plan's, so the plan's one-plan-pixel AA bleed allowance falls
+///   short of one PRESENTED pixel and the fringe reopens (planned at
+///   scale 2, presented at scale 1: half a point of allowance where
+///   the host's raster apron spans a full point).
+/// - ANY differing scale changes the pixel grid — the grids need not
+///   nest (plan 1, present 1.5: a plan-aligned edge at 11 points sits
+///   mid-pixel at 1.5×) — so the damage re-snaps outward on the
+///   presentation grid, keeping the cull region identical to the
+///   pixels the present clears.
+/// One re-run of the bleed+snap at the presentation scale settles
+/// both: a whole presented device pixel of allowance on presented
+/// boundaries. No-op for full repaints, matching scales, and frames
+/// with nothing dirty.
+fn widenCanvasFrameDirtyForPresentationScale(canvas_frame: *canvas.CanvasFrame, presentation_scale: f32) void {
+    if (canvas_frame.full_repaint) return;
+    if (presentation_scale == canvas_frame.scale) return;
+    canvas_frame.dirty_bounds = bleedAlignedCanvasDirtyBounds(canvas_frame.dirty_bounds, presentation_scale, 1, canvas_frame.surface_size);
+    var kept: usize = 0;
+    for (canvas_frame.dirty_rects[0..canvas_frame.dirty_rect_count]) |rect| {
+        const widened = bleedAlignedCanvasDirtyBounds(rect, presentation_scale, 1, canvas_frame.surface_size) orelse continue;
+        canvas_frame.dirty_rects[kept] = widened;
+        kept += 1;
+    }
+    canvas_frame.dirty_rect_count = if (kept < 2) 0 else kept;
+}
+
 /// What to record when a packet attempt fails: the reason plus the
 /// overflow byte math or the offending command kind, whichever applies.
 const CanvasPacketRefusal = struct {
@@ -1261,14 +1401,15 @@ fn gatherCanvasPacketCurrentCommands(canvas_frame: canvas.CanvasFrame) ?[]const 
 /// byte-identical output.
 fn gatherCanvasPacketCurrentCommandsFromPlan(render_commands: []const canvas.RenderCommand, surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?[]const CanvasPacketCurrentCommand {
     const full_bounds = canvasFullRepaintBounds(surface_size, render_bounds) orelse return null;
+    const scratch = canvas_frame_scratch.get();
     var count: usize = 0;
     for (render_commands, 0..) |command, index| {
         if (!canvas.renderCommandIntersectsDirtyBounds(command, full_bounds)) continue;
         const gpu_command = canvas.canvasGpuCommandFromRenderCommand(command, index);
         if (!gpu_command.supported()) return null;
-        if (count >= canvas_packet_current_scratch.len) return null;
+        if (count >= scratch.packet_current.len) return null;
         const fingerprint = canvas.canvasGpuCommandFingerprint(gpu_command);
-        canvas_packet_current_scratch[count] = .{
+        scratch.packet_current[count] = .{
             .key = canvas.canvasGpuPacketCommandKey(gpu_command, fingerprint),
             .fingerprint = fingerprint,
             .render_index = @intCast(index),
@@ -1276,14 +1417,14 @@ fn gatherCanvasPacketCurrentCommandsFromPlan(render_commands: []const canvas.Ren
         };
         count += 1;
     }
-    const sorted = canvas_packet_current_sort_scratch[0..count];
+    const sorted = scratch.packet_current_sort[0..count];
     for (sorted, 0..) |*slot, index| slot.* = @intCast(index);
-    std.sort.pdq(u32, sorted, @as([]const CanvasPacketCurrentCommand, canvas_packet_current_scratch[0..count]), canvasPacketCurrentKeyLessThan);
+    std.sort.pdq(u32, sorted, @as([]const CanvasPacketCurrentCommand, scratch.packet_current[0..count]), canvasPacketCurrentKeyLessThan);
     var index: usize = 1;
     while (index < count) : (index += 1) {
-        if (canvas_packet_current_scratch[sorted[index - 1]].key == canvas_packet_current_scratch[sorted[index]].key) return null;
+        if (scratch.packet_current[sorted[index - 1]].key == scratch.packet_current[sorted[index]].key) return null;
     }
-    return canvas_packet_current_scratch[0..count];
+    return scratch.packet_current[0..count];
 }
 
 fn canvasPacketCurrentKeyLessThan(current: []const CanvasPacketCurrentCommand, a: u32, b: u32) bool {
@@ -1317,12 +1458,13 @@ fn computeCanvasPacketPatchStats(view: anytype, current: []const CanvasPacketCur
     const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
     const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
 
-    const baseline_sorted = canvas_packet_baseline_sort_scratch[0..baseline_count];
+    const scratch = canvas_frame_scratch.get();
+    const baseline_sorted = scratch.packet_baseline_sort[0..baseline_count];
     for (baseline_sorted, 0..) |*slot, index| slot.* = @intCast(index);
     std.sort.pdq(u32, baseline_sorted, @as([]const u64, baseline_keys), canvasPacketBaselineKeyLessThan);
-    const matched = canvas_packet_baseline_matched_scratch[0..baseline_count];
+    const matched = scratch.packet_baseline_matched[0..baseline_count];
     @memset(matched, false);
-    const upserts = canvas_packet_upsert_scratch[0..current.len];
+    const upserts = scratch.packet_upsert[0..current.len];
 
     var stats = CanvasPacketPatchStats{};
     for (current, 0..) |entry, index| {
@@ -1395,22 +1537,23 @@ fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurr
     const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
     const baseline_bounds = view.canvas_packet_baseline_bounds[0..baseline_count];
 
-    const baseline_sorted = canvas_packet_baseline_sort_scratch[0..baseline_count];
+    const scratch = canvas_frame_scratch.get();
+    const baseline_sorted = scratch.packet_baseline_sort[0..baseline_count];
     for (baseline_sorted, 0..) |*slot, index| slot.* = @intCast(index);
     std.sort.pdq(u32, baseline_sorted, @as([]const u64, baseline_keys), canvasPacketBaselineKeyLessThan);
-    const matched = canvas_packet_baseline_matched_scratch[0..baseline_count];
-    const stable = canvas_packet_baseline_stable_scratch[0..baseline_count];
+    const matched = scratch.packet_baseline_matched[0..baseline_count];
+    const stable = scratch.packet_baseline_stable[0..baseline_count];
     @memset(matched, false);
     @memset(stable, false);
 
     var dirty = CanvasPacketPatchDirty{};
     for (current, 0..) |entry, index| {
-        canvas_packet_upsert_scratch[index] = true;
+        scratch.packet_upsert[index] = true;
         if (findCanvasPacketBaselineIndex(baseline_keys, baseline_sorted, entry.key)) |baseline_index| {
             matched[baseline_index] = true;
             if (baseline_fingerprints[baseline_index] == entry.fingerprint) {
                 stable[baseline_index] = true;
-                canvas_packet_upsert_scratch[index] = false;
+                scratch.packet_upsert[index] = false;
                 continue;
             }
             dirty.add(baseline_bounds[baseline_index]);
@@ -1426,7 +1569,7 @@ fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurr
     // outside the union may change.
     var baseline_walk: usize = 0;
     for (current, 0..) |entry, index| {
-        if (canvas_packet_upsert_scratch[index]) continue;
+        if (scratch.packet_upsert[index]) continue;
         while (baseline_walk < baseline_count and !stable[baseline_walk]) baseline_walk += 1;
         if (baseline_walk >= baseline_count or baseline_keys[baseline_walk] != entry.key) return null;
         baseline_walk += 1;
@@ -1453,8 +1596,9 @@ fn writeCanvasPacketPatchBinary(
 ) !void {
     const baseline_count = view.canvas_packet_baseline_count;
     const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
-    const matched = canvas_packet_baseline_matched_scratch[0..baseline_count];
-    const upserts = canvas_packet_upsert_scratch[0..current.len];
+    const scratch = canvas_frame_scratch.get();
+    const matched = scratch.packet_baseline_matched[0..baseline_count];
+    const upserts = scratch.packet_upsert[0..current.len];
 
     try canvas.writeCanvasGpuPacketBinaryHeader(
         canvas.binary_packet_load_action_patch,

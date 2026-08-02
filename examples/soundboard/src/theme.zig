@@ -34,21 +34,28 @@ const pink_ink = Color.rgb8(255, 255, 255);
 /// - `colors.focus_ring`: the pack spends its identity hue on focus;
 ///   with the identity moved to pink, the ring follows so focus and
 ///   accent chrome read as one system (pink on the page clears the 3:1
-///   non-text bar in both schemes).
+///   non-text bar in both schemes). The ring is stated PER SCHEME: the
+///   accent itself in light, `canvas.accentFocusRing`'s desaturated,
+///   contrast-floored step in dark — full-chroma pink glares neon
+///   against the dark palette, and the derivation is the same one the
+///   manifest `theme_accent` channel applies, so both authoring tiers
+///   land the identical ring.
 /// - `controls.slider.active_background`: the pack's slider table states
 ///   its own hue for the filled range rather than deriving from the
 ///   accent channel, so the seek scrubber needs the same move stated
 ///   once more or it would keep the pack's stock hue.
-const accent_overrides = canvas.DesignTokenOverrides{
-    .colors = .{
-        .accent = pink_800,
-        .accent_text = pink_ink,
-        .focus_ring = pink_800,
-    },
-    .controls = .{
-        .slider = .{ .active_background = pink_800 },
-    },
-};
+fn accentOverridesFor(color_scheme: canvas.ColorScheme) canvas.DesignTokenOverrides {
+    return .{
+        .colors = .{
+            .accent = pink_800,
+            .accent_text = pink_ink,
+            .focus_ring = canvas.accentFocusRing(pink_800, color_scheme),
+        },
+        .controls = .{
+            .slider = .{ .active_background = pink_800 },
+        },
+    };
+}
 
 pub fn tokens(scheme: native_sdk.ColorScheme, high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
     const options = canvas.ThemeOptions{
@@ -64,7 +71,7 @@ pub fn tokens(scheme: native_sdk.ColorScheme, high_contrast: bool, reduce_motion
     // layer: white on the pink fill sits at ~4.5:1, well under the
     // loud-contrast bar, so the accent honestly bows out.
     if (high_contrast) return canvas.DesignTokens.theme(options);
-    return canvas.DesignTokens.themeWithOverrides(options, accent_overrides);
+    return canvas.DesignTokens.themeWithOverrides(options, accentOverridesFor(options.color_scheme));
 }
 
 /// The resolved standard-contrast palettes, exported for the suite's

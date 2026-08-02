@@ -1,0 +1,76 @@
+{
+  "name": "dual-sysinfo-panel",
+  "description": "Wave-2 dual-track case: show system info from a shell command in the UI — a collect-mode background spawn (Cmd.spawn collect / fx.spawn .collect), byte parsing of the output, and honest running/ok/failed states. Same spec on both tracks.",
+  "prompt": "This workspace is a freshly scaffolded Native SDK app (see README.md — it names the deliverable files and the check loop; the authoring guides are under .claude/skills/). Replace the starter counter with a small system-info panel.\n\nRequirements:\n- A button named exactly \"Refresh\" runs the local command /usr/bin/uname with the single argument -srm and shows the result in the UI. The command runs in the background through the toolkit's effects surface, with its whole output collected and delivered when it exits — the UI never blocks, and the app never spawns processes or threads by hand.\n- The command prints one line such as \"Darwin 24.6.0 arm64\": the operating system name, the kernel release, and the machine hardware name, separated by single spaces. Parse it into three values shown in the view with the labels OS, Release, and Machine: the first token, the second token, and the rest of the line (with the trailing newline trimmed).\n- A status line with exactly these strings: \"Status: idle\" before the first run, \"Status: probing\" while the command runs, \"Status: ok\" after a clean exit, \"Status: failed (code <code>)\" after a non-zero exit, and \"Status: failed\" when the command could not run at all (it never started, was killed, was rejected). A failure must never look like success or like nothing happened.\n- Pressing Refresh while a probe is already running does nothing. Starting a new probe clears the previous values and any previous failure.\n\nThe exact contract (the grader compiles against it; message arms and model fields are snake_case, helper functions camelCase):\n- Model fields: phase (exactly one of \"idle\" | \"probing\" | \"ok\" | \"failed\" — a Phase enum/string-literal union with those member names), fail_code (integer: the non-zero exit code when a run failed with one, otherwise 0). How you store the parsed text is yours.\n- Helpers returning the parsed values as bytes (empty before the first result): osName, releaseName, machineName. In TypeScript these are exported single-model functions (they join the markup binding surface); in Zig they are pub methods ON the Model (pub fn osName(model: *const Model) []const u8 — the markup binds Model decls).\n- Msg arms: refresh (no payload), plus the spawn's results routed to arms per your track's effects surface: in TypeScript a collect spawn with exit arm info_done ({ code: number, output: Uint8Array }) and err arm info_failed ({ reason: Uint8Array }); in Zig one exit arm info_done carrying the toolkit's exit payload (which covers non-exit failures through its reason).\n- In Zig, keep Model/Msg/update/initialModel pub in src/main.zig, with the effects-channel update shape (update(model, msg, fx) and pub const Effects = native_sdk.Effects(Msg)).\n\nKeep the logic out of the view: markup binds values and dispatches messages only. Check your work with the loop in README.md until it is green, and make sure the behavior above actually holds. When you are done, summarize what you built.",
+  "frontend": "app-dual",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": [
+        "-Dplatform=null"
+      ]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/app.native",
+      "pattern": "Refresh",
+      "expect": true,
+      "description": "the view carries the Refresh control"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zig",
+      "pattern": "std\\.process\\.Child|std\\.Thread",
+      "expect": false,
+      "description": "no hand-rolled subprocess or threads — effects only"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The spawn goes through the effects surface with a stable key and collect-mode delivery; a second Refresh while probing is impossible (guarded in update or disabled in the view), and every failure shape — non-zero exit, never-started, killed — lands in a visible failed state with the code when there is one.",
+        "Parsing is honest byte work: first token, second token, rest-of-line with the newline trimmed; malformed output (fewer tokens) does not crash or silently show stale values.",
+        "Derive, don't store: the status line is derived from phase + fail_code at view time, not a preformatted string cached in the model; starting a new probe clears previous values atomically.",
+        "The code reads idiomatically for its language and the view stays declarative — markup binds values and dispatches messages, nothing more."
+      ],
+      "files": [
+        "src/core.ts",
+        "src/*.zig",
+        "src/*.native"
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the effects usage and parsing beyond compliance"
+    }
+  ],
+  "tracks": {
+    "ts": {
+      "checks": [
+        {
+          "type": "ts_transpile"
+        },
+        {
+          "type": "ts_harness",
+          "harness": "harness-ts.zig",
+          "description": "refresh spawns uname -srm collect-mode exactly once, results parse into the three fields, non-zero exits and spawn failures land in failed, re-entry is guarded"
+        }
+      ]
+    },
+    "zig": {
+      "checks": [
+        {
+          "type": "zig_harness",
+          "harness": "harness-zig.zig",
+          "args": [
+            "-Dplatform=null"
+          ],
+          "description": "refresh spawns uname -srm collect-mode exactly once, results parse into the three fields, non-zero exits and spawn failures land in failed, re-entry is guarded"
+        }
+      ]
+    }
+  }
+}

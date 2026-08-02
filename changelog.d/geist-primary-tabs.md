@@ -1,0 +1,1 @@
+fix: **Geist primary tabs match the design system**: tab strips now use the reference 50px row, full-width bottom rail, content-hugging 14px triggers, 24px spacing, and 16px icon treatment without changing default-theme pill tabs; the GPU component gallery now pairs a compact theme picker with a scrollable component tree and focused specimen views.

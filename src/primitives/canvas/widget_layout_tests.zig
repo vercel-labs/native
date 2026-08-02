@@ -196,6 +196,7 @@ const SpringToken = support.SpringToken;
 const BlurTokenRef = support.BlurTokenRef;
 const ScrollPhysics = support.ScrollPhysics;
 const ScrollState = support.ScrollState;
+const ScrollAxisState = support.ScrollAxisState;
 const VirtualListOptions = support.VirtualListOptions;
 const VirtualListRange = support.VirtualListRange;
 const virtualListRange = support.virtualListRange;
@@ -935,6 +936,88 @@ test "widget grid layout places children in deterministic cells" {
     try std.testing.expectEqual(@as(usize, 8), builder.displayList().commandCount());
 }
 
+test "widget grid keeps declared column slots when children run short" {
+    // Fewer children than the declared columns (a filtered grid): each
+    // child keeps the column-slot width the declared count derives —
+    // never stretching across the freed row — filling the leading slots
+    // and leaving the trailing slots empty.
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .text = "One" },
+        .{ .id = 3, .kind = .text, .text = "Two" },
+    };
+    const grid = Widget{
+        .id = 1,
+        .kind = .grid,
+        .layout = .{ .gap = 8, .columns = 4 },
+        .children = &children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(grid, geometry.RectF.init(0, 0, 424, 40), &nodes);
+    try std.testing.expectEqual(@as(usize, 3), layout.nodeCount());
+    // Slot width = (424 - 3 gaps of 8) / 4 declared columns = 100.
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 100, 40));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(108, 0, 100, 40));
+}
+
+test "widget grid row count survives a huge declared column count" {
+    const widget_tree = @import("widget_tree.zig");
+    // Declared columns are engine input (never validator-bounded): the
+    // additive ceil-div `(count + columns - 1) / columns` would overflow
+    // in safe builds for a huge but valid usize. A few children under
+    // maxInt columns is one row, not a panic.
+    const huge = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(usize, 1), widget_tree.gridRowCount(3, huge));
+    try std.testing.expectEqual(@as(usize, 1), widget_tree.gridRowCount(1, huge));
+    // Zero children (or zero columns) is zero rows in both paths.
+    try std.testing.expectEqual(@as(usize, 0), widget_tree.gridRowCount(0, huge));
+    try std.testing.expectEqual(@as(usize, 0), widget_tree.gridRowCount(0, 4));
+    try std.testing.expectEqual(@as(usize, 0), widget_tree.gridRowCount(5, 0));
+    // The ordinary shape still ceil-divides: 5 children over 2 columns
+    // is 3 rows.
+    try std.testing.expectEqual(@as(usize, 3), widget_tree.gridRowCount(5, 2));
+    try std.testing.expectEqual(@as(usize, 2), widget_tree.gridRowCount(4, 2));
+}
+
+test "nested widget grid with a huge declared column count measures intrinsically" {
+    // The root-grid case above never runs the INTRINSIC path: only a
+    // parent that measures its children (a column sizing an unframed
+    // child) reaches intrinsicGridChildrenSize, where the row math must
+    // be the same overflow-safe helper — the additive ceil-div panicked
+    // here while the placement path was already fixed.
+    const tiles = [_]Widget{
+        .{ .id = 3, .kind = .text, .text = "One" },
+        .{ .id = 4, .kind = .text, .text = "Two" },
+        .{ .id = 5, .kind = .text, .text = "Three" },
+    };
+    const grid = Widget{
+        .id = 2,
+        .kind = .grid,
+        .layout = .{ .gap = 8, .columns = std.math.maxInt(usize) },
+        .children = &tiles,
+    };
+    const column = Widget{
+        .id = 1,
+        .kind = .column,
+        .children = &[_]Widget{grid},
+    };
+
+    // The direct measurement: three children under maxInt columns is
+    // ONE row, so the grid's intrinsic height is one cell (no row gap).
+    const cell = support.intrinsicWidgetSize(tiles[0], .{});
+    const intrinsic = support.intrinsicWidgetSize(grid, .{});
+    try std.testing.expectEqual(cell.height, intrinsic.height);
+
+    // And the full pass: the column measures the unframed grid child
+    // intrinsically while laying out — no panic, one grid row.
+    var nodes: [8]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(column, geometry.RectF.init(0, 0, 400, 120), &nodes);
+    try std.testing.expectEqual(@as(usize, 5), layout.nodeCount());
+    const first = layout.findById(3).?;
+    const last = layout.findById(5).?;
+    try std.testing.expectEqual(first.frame.y, last.frame.y);
+}
+
 test "widget virtualized grid lays out visible cells by row" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .button, .text = "Zero" },
@@ -1330,6 +1413,126 @@ test "widget scroll view scrollbars use control visual tokens" {
     }
 }
 
+test "horizontal scroll views draw the bottom-edge scrollbar and two-axis regions reserve the corner" {
+    const tokens: DesignTokens = .{};
+
+    // A horizontal shelf: content reaches x = 460 in a 120-wide
+    // viewport. Only the horizontal bar (part slots 4/5) exists.
+    const tiles = [_]Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 40) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 40) },
+    };
+    const shelf = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .value_x = 20,
+        .children = &tiles,
+    };
+    var shelf_nodes: [4]WidgetLayoutNode = undefined;
+    const shelf_layout = try layoutWidgetTree(shelf, geometry.RectF.init(0, 0, 120, 60), &shelf_nodes);
+    // The horizontal offset displaces children leftward at layout time,
+    // exactly as the vertical offset displaces them upward.
+    try expectLayoutFrame(shelf_layout, 2, geometry.RectF.init(-20, 0, 140, 40));
+    try expectLayoutFrame(shelf_layout, 3, geometry.RectF.init(300, 0, 140, 40));
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try shelf_layout.emitDisplayList(&builder, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expect(display_list.findCommandById(widgetPartId(1, 2)) == null);
+    try std.testing.expect(display_list.findCommandById(widgetPartId(1, 3)) == null);
+    switch (display_list.findCommandById(widgetPartId(1, 4)).?.command) {
+        .fill_rounded_rect => |track| {
+            // Bottom edge: inset 3, thickness 3, full width minus insets.
+            try expectRect(geometry.RectF.init(3, 54, 114, 3), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(1, 5)).?.command) {
+        .fill_rounded_rect => |thumb| {
+            try std.testing.expectEqual(@as(f32, 54), thumb.rect.y);
+            try std.testing.expect(thumb.rect.width < 114);
+            try std.testing.expect(thumb.rect.x > 3);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A both-axes region with overflow on both axes draws BOTH bars,
+    // each track ending short of the shared corner.
+    const sheet = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 400, 300) }},
+    };
+    var sheet_nodes: [3]WidgetLayoutNode = undefined;
+    const sheet_layout = try layoutWidgetTree(sheet, geometry.RectF.init(0, 0, 120, 60), &sheet_nodes);
+    var sheet_commands: [16]CanvasCommand = undefined;
+    var sheet_builder = Builder.init(&sheet_commands);
+    try sheet_layout.emitDisplayList(&sheet_builder, tokens);
+    const sheet_list = sheet_builder.displayList();
+    switch (sheet_list.findCommandById(widgetPartId(1, 2)).?.command) {
+        .fill_rounded_rect => |track| {
+            // The vertical track gives up thickness + inset (6) at the
+            // bottom corner: 60 - 2*3 - 6 = 48.
+            try expectRect(geometry.RectF.init(114, 3, 3, 48), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (sheet_list.findCommandById(widgetPartId(1, 4)).?.command) {
+        .fill_rounded_rect => |track| {
+            try expectRect(geometry.RectF.init(3, 54, 108, 3), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 3)) != null);
+    try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 5)) != null);
+}
+
+test "a both-axes region whose content only overflows sideways reports horizontal scroll semantics" {
+    // 500-wide content in a 200 x 100 both-axes viewport: no vertical
+    // range, real horizontal range. The assistive node must read the
+    // LIVE axis — scrollable, with the horizontal offset/extents — not
+    // a permanently unscrollable vertical axis.
+    const sheet = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value_x = 60,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 100) }},
+    };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(sheet, geometry.RectF.init(0, 0, 200, 100), &nodes);
+
+    var semantics_buffer: [3]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expect(semantics[0].scroll.present);
+    try std.testing.expectEqual(@as(f32, 60), semantics[0].scroll.offset);
+    try std.testing.expectEqual(@as(f32, 200), semantics[0].scroll.viewport_extent);
+    try std.testing.expectEqual(@as(f32, 500), semantics[0].scroll.content_extent);
+    try std.testing.expectApproxEqAbs(@as(f32, 60.0 / 300.0), semantics[0].value.?, 0.001);
+    try std.testing.expect(semantics[0].actions.increment);
+    try std.testing.expect(semantics[0].actions.decrement);
+
+    // With VERTICAL range present the vertical axis stays primary — the
+    // pre-axis behavior for every region that scrolls down.
+    const tall = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value = 30,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 400) }},
+    };
+    var tall_nodes: [3]WidgetLayoutNode = undefined;
+    const tall_layout = try layoutWidgetTree(tall, geometry.RectF.init(0, 0, 200, 100), &tall_nodes);
+    var tall_buffer: [3]WidgetSemanticsNode = undefined;
+    const tall_semantics = try tall_layout.collectSemantics(&tall_buffer);
+    try std.testing.expectEqual(@as(f32, 30), tall_semantics[0].scroll.offset);
+    try std.testing.expectEqual(@as(f32, 100), tall_semantics[0].scroll.viewport_extent);
+    try std.testing.expectEqual(@as(f32, 400), tall_semantics[0].scroll.content_extent);
+}
+
 test "widget focus traversal skips scroll clipped children" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
@@ -1364,7 +1567,7 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
         .deceleration_per_second = 0.5,
         .stop_velocity = 1,
     };
-    const start = ScrollState{
+    const start = ScrollAxisState{
         .offset = 10,
         .viewport_extent = 100,
         .content_extent = 360,
@@ -1389,7 +1592,7 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
 }
 
 test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band excursions recover" {
-    const start = ScrollState{
+    const start = ScrollAxisState{
         .offset = 250,
         .viewport_extent = 100,
         .content_extent = 360,
@@ -1403,7 +1606,7 @@ test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band e
     const pinned = start.applyWheel(1000, pinned_physics);
     try std.testing.expectEqual(@as(f32, 260), pinned.offset);
     try std.testing.expectEqual(@as(f32, 0), pinned.velocity);
-    var rolling = ScrollState{
+    var rolling = ScrollAxisState{
         .offset = 250,
         .velocity = 400,
         .viewport_extent = 100,
@@ -1430,7 +1633,7 @@ test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band e
 
     // A stale out-of-range offset on a pinned region self-heals in one
     // kinetic step instead of animating a return.
-    const stale = ScrollState{
+    const stale = ScrollAxisState{
         .offset = 300,
         .viewport_extent = 100,
         .content_extent = 360,
@@ -2465,6 +2668,41 @@ fn doubledTextMeasure(context: ?*anyopaque, font_id: FontId, size: f32, text: []
 }
 
 const doubled_text_measure = support.TextMeasureProvider{ .measure_fn = doubledTextMeasure };
+
+fn countingTextMeasure(context: ?*anyopaque, font_id: FontId, size: f32, text: []const u8) f32 {
+    const calls: *usize = @ptrCast(@alignCast(context.?));
+    calls.* += 1;
+    _ = font_id;
+    return size * @as(f32, @floatFromInt(text.len));
+}
+
+test "vertical scroll layout does not intrinsically remeasure its child" {
+    var calls: usize = 0;
+    const measure = support.TextMeasureProvider{
+        .context = &calls,
+        .measure_fn = countingTextMeasure,
+    };
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .text,
+        .text = "transcript row",
+    }};
+    const scroll = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .vertical,
+        .children = &children,
+    };
+
+    var nodes: [2]WidgetLayoutNode = undefined;
+    _ = try layoutWidgetTreeWithTokens(
+        scroll,
+        geometry.RectF.init(0, 0, 240, 120),
+        .{ .text_measure = &measure },
+        &nodes,
+    );
+    try std.testing.expectEqual(@as(usize, 0), calls);
+}
 
 test "intrinsic text sizing defaults to the estimator and honors an injected provider" {
     const widget = Widget{ .id = 1, .kind = .text, .text = "Refresh dashboard" };

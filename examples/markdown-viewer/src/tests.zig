@@ -253,6 +253,82 @@ test "editing the textarea updates the preview and derived counts through dispat
     try testing.expect(subtreeHasText(tree.root, "curious words"));
 }
 
+test "textarea undo and redo keep the controlled document mirror synchronized" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // Start from a short source-driven value, then focus the real retained
+    // textarea and type a multi-character committed-text event. Undo needs
+    // a compound select+replace internally; every intermediate edit must
+    // still flow through on-input so the model and runtime never diverge.
+    try h.dispatch(.{ .edit = .clear });
+    try h.dispatch(.{ .edit = .{ .insert_text = "base" } });
+    const editor = findByKind(h.app_state.tree.?.root, .textarea).?;
+    var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action viewer-canvas {d} focus", .{editor.id});
+    try h.harness.runtime.dispatchAutomationCommand(h.app, focus_command);
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .label = "viewer-canvas",
+        .kind = .text_input,
+        .text = "XYZ",
+    } });
+    try testing.expectEqualStrings("baseXYZ", h.app_state.model.document());
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .label = "viewer-canvas",
+        .kind = .key_down,
+        .key = "z",
+        .modifiers = .{ .command = true },
+    } });
+    try testing.expectEqualStrings("base", h.app_state.model.document());
+    var retained = try h.harness.runtime.canvasWidgetLayout(1, "viewer-canvas");
+    try testing.expectEqualStrings("base", retained.findById(editor.id).?.widget.text);
+    try testing.expectEqualDeep(canvas.TextSelection.collapsed(4), h.app_state.model.editor.selection);
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .label = "viewer-canvas",
+        .kind = .key_down,
+        .key = "z",
+        .modifiers = .{ .command = true, .shift = true },
+    } });
+    try testing.expectEqualStrings("baseXYZ", h.app_state.model.document());
+    retained = try h.harness.runtime.canvasWidgetLayout(1, "viewer-canvas");
+    try testing.expectEqualStrings("baseXYZ", retained.findById(editor.id).?.widget.text);
+    try testing.expectEqualDeep(canvas.TextSelection.collapsed(7), h.app_state.model.editor.selection);
+}
+
+test "textarea vertical arrows keep the controlled selection synchronized" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    try h.dispatch(.{ .edit = .clear });
+    try h.dispatch(.{ .edit = .{ .insert_text = "First!\nSecond" } });
+    const editor = findByKind(h.app_state.tree.?.root, .textarea).?;
+    var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action viewer-canvas {d} focus", .{editor.id});
+    try h.harness.runtime.dispatchAutomationCommand(h.app, focus_command);
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .label = "viewer-canvas",
+        .kind = .key_down,
+        .key = "arrowup",
+    } });
+    try testing.expectEqualDeep(canvas.TextSelection.collapsed(6), h.app_state.model.editor.selection);
+    var retained = try h.harness.runtime.canvasWidgetLayout(1, "viewer-canvas");
+    try testing.expectEqualDeep(h.app_state.model.editor.selection, retained.findById(editor.id).?.widget.text_selection.?);
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .label = "viewer-canvas",
+        .kind = .key_down,
+        .key = "arrowdown",
+    } });
+    try testing.expect(h.app_state.model.editor.selection.focus > 7);
+    try testing.expect(h.app_state.model.editor.selection.isCollapsed(h.app_state.model.editor.len));
+    retained = try h.harness.runtime.canvasWidgetLayout(1, "viewer-canvas");
+    try testing.expectEqualDeep(h.app_state.model.editor.selection, retained.findById(editor.id).?.widget.text_selection.?);
+}
+
 test "open and save round-trip through the fake executor" {
     var h = try Harness.create();
     defer h.destroy();
@@ -454,7 +530,7 @@ test "the preview scroll offset round-trips through the model" {
     var model = main.initialModel();
 
     // The runtime delivers the applied offset; the model stores it…
-    main.update(&model, .{ .doc_scrolled = .{ .offset = 120, .viewport_extent = 600, .content_extent = 2400 } }, &fx);
+    main.update(&model, .{ .doc_scrolled = .{ .offset_y = 120, .viewport_extent_y = 600, .content_extent_y = 2400 } }, &fx);
     try testing.expectEqual(@as(f32, 120), model.doc_scroll);
 
     // …and the rebuilt tree echoes it back through the scroll's value,

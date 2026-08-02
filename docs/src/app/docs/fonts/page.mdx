@@ -1,0 +1,87 @@
+# Fonts
+
+The SDK bundles two faces — Geist Regular and Geist Mono — and every built-in component renders through them by default. Bundled coverage is Latin-script: a codepoint outside it (CJK, emoji, most symbols) draws as the face's notdef box — tofu. Registering a font is how an app renders a script the bundled faces do not cover: register a face that covers the characters, point the typography tokens at it, and both renderers ink the registered outlines. Chinese and Japanese text render this way today.
+
+## Registering a face
+
+Declare fonts on `UiApp.Options.fonts` and the app registers them on the installing frame, before the first layout measures anything:
+
+```zig
+const MyApp = native_sdk.UiApp(Model, Msg);
+
+/// App-chosen id, at or above canvas.min_registered_font_id (64).
+/// Store the id in your theme; ids below 64 are reserved for the
+/// built-in faces.
+pub const cjk_font_id: canvas.FontId = canvas.min_registered_font_id;
+
+const app_fonts = [_]MyApp.FontRegistration{.{
+    .id = cjk_font_id,
+    .name = "NotoSansSC-Regular.ttf", // teaching errors name this
+    .ttf = @embedFile("fonts/NotoSansSC-Regular.ttf"),
+}};
+
+fn tokensFromModel(model: *const Model) canvas.DesignTokens {
+    var tokens = canvas.DesignTokens.theme(.{ .color_scheme = model.scheme });
+    // Text resolves its face through the typography tokens: pointing
+    // font_id at the registered id covers every ordinary run. Mono
+    // spans keep the bundled mono face unless you also point
+    // typography.mono_font_id at a face that covers your script.
+    tokens.typography.font_id = cjk_font_id;
+    return tokens;
+}
+
+pub fn options() MyApp.Options {
+    return .{
+        .name = "hello-cjk",
+        .scene = shell_scene,
+        .canvas_label = "canvas",
+        .update = update,
+        .view = view, // e.g. ui.text(.{}, model.greeting) with greeting = "你好，世界"
+        .tokens_fn = tokensFromModel,
+        .fonts = &app_fonts,
+    };
+}
+```
+
+The face must be a TrueType (`glyf`) file. The Google Fonts TrueType builds of the Noto CJK faces (Noto Sans SC/TC/JP/KR, OFL-licensed) register as-is; commit the file with its license next to your sources, like any other asset. Underneath `Options.fonts` sits the runtime seam the option calls, one face at a time — embedders and custom lifecycles use it directly:
+
+```zig
+try runtime.registerCanvasFont(cjk_font_id, ttf_bytes);
+```
+
+Register at startup so the first layout already measures with the face. Late registration still works honestly: `UiApp` surfaces re-measure and rebuild automatically when a face joins the registry, and callers driving the runtime directly re-emit their display lists after registering.
+
+## Validation is loud and registration-time only
+
+Every failure happens at registration, never at render time — a registered id always resolves when text draws — with one honest exception: point-matched composite placement is the one per-glyph refusal `maxp` cannot gate at registration (no declared field describes it), so it surfaces at first raster, where the glyph draws the deterministic block fallback — never a crash, never a silent skip. No measured production face places composites that way: the bundled Geist faces and every CJK face measured for the budgets use XY offsets. `Options.fonts` translates each error into a warning naming the font before propagating it:
+
+- `error.InvalidFontId` — id 0 is the "inherit run font" sentinel and can never hold a face.
+- `error.ReservedFontId` — ids below `canvas.min_registered_font_id` (64) belong to the built-in faces.
+- `error.FontTooLarge` — the per-font bound is 24 MiB (`canvas_limits.max_registered_canvas_font_bytes`), sized so full CJK files fit: measured Google Fonts TrueType builds run about 9.6 MB (Noto Sans JP) to 17.8 MB (Noto Sans SC).
+- `error.FontParseFailed` — not a parseable TrueType `glyf` face; `canvas.font_ttf.parseFailureReason(ttf)` names what is wrong (CFF/OpenType `.otf` files fail here — use the TrueType build).
+- `error.FontExceedsGlyphBudgets` — the face's `maxp` table declares glyphs denser than the renderer's outline budgets: 1024 points and 128 contours per glyph, with flattened composites held to the same numbers (at most 4 levels deep, 8 components). The budgets are sized from measured production CJK faces — the densest measured glyph (a 738-point brush kanji in Yuji Mai; Noto Sans TC's worst is 685 points / 87 contours) sits inside them with headroom — so this refuses only outliers whose densest glyphs could not render as outlines. The registration warning names the face's declared maxima against the budgets; `canvas.font_ttf.declaredGlyphMaxima(ttf)` exposes the same numbers to code.
+- `error.FontIdInUse` — registration is permanent for the runtime's lifetime and there is deliberately no unregister: glyph caches key by (font id, glyph id) with no content fingerprint, so replacing an id's bytes would serve stale glyphs. Re-registering an id fails; give each face its own id.
+- `error.FontRegistryFull` — at most 8 registered faces per runtime (`canvas_limits.max_registered_canvas_fonts`).
+- `error.FontHostRegistrationUnsupported` — the platform measures and draws text host-side but has no font registration seam, so the face could not be honored pixel-honestly. No current platform returns this; it exists so a future host can never silently substitute the default family.
+
+## Ownership and lifecycle
+
+Registration copies the file into an exact-size heap allocation owned by the runtime, so the caller's buffer (an `@embedFile` slice, a transient read) is free the moment the call returns. A runtime with no registered fonts carries zero font bytes. The copy lives until `Runtime.deinit` — registration is permanent, so ownership is one allocation and one free. Apps that live for the process never think about this; embedders that create and destroy runtimes call `Runtime.deinit` (the SDK's own embed hosts already do). `Runtime.deinit` returns the host-side registration too: on macOS, each registered id's host font state (the CoreText descriptor and its measurement caches) is dropped at deinit, so runtime cycles do not accumulate host entries. Host font state is one face per id per process — concurrent runtimes in one process that share an id resolve the most recent registration; that is a deliberate current constraint, so give concurrently live runtimes disjoint ids.
+
+## How text finds the face
+
+There is no per-widget font attribute. Text resolves its face through the typography tokens — `typography.font_id` for every ordinary run, `typography.mono_font_id` for mono-flagged runs, and optional `typography.button_font_id` for control labels — so a registered face is a theme decision, and the id rides everywhere a `canvas.FontId` rides: token overrides, both renderers, glyph atlas keys, render fingerprints.
+
+Layout and ink stay in lockstep on the desktop paths. On macOS, the raw bytes reach the host at registration time, so CoreText measurement and packet text drawing resolve the exact registered face even when the family is not installed system-wide. On Windows and Linux, layout charges the parsed face's own `cmap`/`hmtx` advances, and the deterministic reference renderer inks the same outlines — CJK advances measure as the face declares them, not as the Latin estimator would guess. Mobile hosts do not yet have a registered-font measurement seam, so this guarantee does not extend there — see the platform notes below.
+
+Codepoints the registered face does not cover keep the same per-glyph fallback as the built-ins: the face's own notdef box. The engine never silently cascades into another family — the reference renderer, the glyph atlas, and packet text through the SDK's rasterizer show missing coverage as visible notdef, never an approximation. Text the macOS host draws follows platform shaping, including system-font fallback, so uncovered codepoints there may render from a substituted family instead of notdef.
+
+One honest interaction with the [tofu guard](/docs/native-ui#tooling): the static markup check validates literal text against the *bundled* face's coverage — it runs without your app and cannot know what you register. Text in a script outside bundled coverage reaches the view through model bindings (`{greeting}` — the guard deliberately skips binding spans, and real CJK content is almost always data) or through Zig-built views, where the same lesson is a Debug-build diagnostic rather than an error.
+
+## Platform truth
+
+The registration pipeline — TTF parsing, glyph outlines, rasterization — is the SDK's own code, identical on every platform. macOS additionally registers the face with CoreText so measurement and Metal packet text agree with it; Windows registers the same bytes with DirectWrite for its retained packet path. Linux and Windows software fallback ink the registered outlines directly. The suite pins reference-renderer pixel behavior for a registered face, and a CI receipt registers a CJK face and proves Chinese text renders as real glyphs on a native Windows runner. Mobile hosts render the same reference-renderer pixels, but no mobile test exercises registered fonts yet and the mobile hosts' text measurement has no registered-font seam — treat registered fonts on iOS and Android as unverified today. See [Platform Support](/docs/platform-support#support-matrix) for the per-platform matrix.
+
+## The TypeScript tier
+
+Font registration is Zig-tier today: TypeScript cores have no fonts surface yet.

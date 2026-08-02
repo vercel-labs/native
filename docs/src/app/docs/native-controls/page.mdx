@@ -1,0 +1,132 @@
+# Native Controls
+
+Native controls are platform-owned views declared with `App.scene_fn`, attached with `runtime.createShellViews(...)`, created imperatively through `runtime.createView(...)`, or created from trusted WebView code through the guarded `window.zero.views.*` bridge helpers. They are intended for trusted chrome, utility panels, and OS-native affordances around rich WebView content.
+
+For product UI, prefer Native SDK's [Built-in Components](/docs/built-in-components). They are native-rendered through the retained canvas/GPU surface, use the house design-language defaults, and stay portable across desktop and mobile hosts. Native controls remain useful for shell chrome, menus, platform dialogs, and OS-owned integration points.
+
+```zig
+const shell_views = [_]native_sdk.ShellView{
+    .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = 52 },
+    .{ .label = "refresh-icon", .kind = .icon_button, .parent = "toolbar", .accessibility_label = "Refresh", .text = "R", .command = "app.refresh" },
+    .{ .label = "refresh", .kind = .button, .parent = "toolbar", .text = "Refresh", .command = "app.refresh" },
+    .{ .label = "search", .kind = .search_field, .parent = "toolbar", .text = "Search" },
+    .{ .label = "live", .kind = .checkbox, .parent = "toolbar", .text = "Live" },
+    .{ .label = "view-mode", .kind = .segmented_control, .parent = "toolbar", .text = "List|Grid" },
+    .{ .label = "syncing", .kind = .progress_indicator, .parent = "toolbar", .role = "Syncing" },
+    .{ .label = "body", .kind = .split, .fill = true, .axis = .row },
+    .{ .label = "sidebar", .kind = .sidebar, .parent = "body", .width = 240 },
+    .{ .label = "filters", .kind = .stack, .parent = "sidebar", .x = 16, .y = 16, .width = 180, .height = 120, .axis = .column },
+    .{ .label = "filter-title", .kind = .label, .parent = "filters", .text = "Filters" },
+    .{ .label = "inbox", .kind = .list_item, .parent = "filters", .text = "Inbox", .command = "app.open.inbox" },
+    .{ .label = "filter-live", .kind = .checkbox, .parent = "filters", .text = "Live" },
+    .{ .label = "main", .kind = .webview, .parent = "body", .url = "zero://inline", .fill = true },
+};
+
+const shell_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "Acme",
+    .width = 1100,
+    .height = 760,
+    .views = &shell_views,
+}};
+
+fn scene(context: *anyopaque) anyerror!native_sdk.ShellConfig {
+    _ = context;
+    return .{ .windows = &shell_windows };
+}
+```
+
+## Supported Kinds
+
+<table>
+  <thead>
+    <tr>
+      <th>Kind</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>toolbar</code></td>
+      <td>Native container for top app chrome</td>
+    </tr>
+    <tr>
+      <td><code>titlebar_accessory</code></td>
+      <td>Native titlebar-adjacent container where the platform allows it</td>
+    </tr>
+    <tr>
+      <td><code>sidebar</code></td>
+      <td>Native side panel container</td>
+    </tr>
+    <tr>
+      <td><code>statusbar</code></td>
+      <td>Native bottom/status container</td>
+    </tr>
+    <tr>
+      <td><code>split</code></td>
+      <td>Native container for fixed and fill panes; set <code>axis</code> to <code>.row</code> or <code>.column</code></td>
+    </tr>
+    <tr>
+      <td><code>stack</code></td>
+      <td>Native container for grouped child controls; set <code>axis</code> to <code>.row</code> or <code>.column</code></td>
+    </tr>
+    <tr>
+      <td><code>button</code></td>
+      <td>Dispatches <code>command</code> through <code>Event.command</code></td>
+    </tr>
+    <tr>
+      <td><code>icon_button</code></td>
+      <td>Compact command button for toolbar-style actions</td>
+    </tr>
+    <tr>
+      <td><code>list_item</code></td>
+      <td>Row-like native command item for sidebars, navigators, and simple lists</td>
+    </tr>
+    <tr>
+      <td><code>checkbox</code></td>
+      <td>Native checkbox control</td>
+    </tr>
+    <tr>
+      <td><code>toggle</code></td>
+      <td>Native binary toggle button</td>
+    </tr>
+    <tr>
+      <td><code>segmented_control</code></td>
+      <td>Native segmented choice control; use pipe-delimited <code>text</code>, such as <code>List|Grid</code></td>
+    </tr>
+    <tr>
+      <td><code>text_field</code></td>
+      <td>Native editable text field</td>
+    </tr>
+    <tr>
+      <td><code>search_field</code></td>
+      <td>Native search input</td>
+    </tr>
+    <tr>
+      <td><code>label</code></td>
+      <td>Native static text</td>
+    </tr>
+    <tr>
+      <td><code>spacer</code></td>
+      <td>Empty native layout spacer</td>
+    </tr>
+    <tr>
+      <td><code>progress_indicator</code></td>
+      <td>Native indeterminate progress indicator</td>
+    </tr>
+    <tr>
+      <td><code>webview</code></td>
+      <td>Compatibility view backed by the WebView backend</td>
+    </tr>
+  </tbody>
+</table>
+
+The macOS, Linux, and Windows system-WebView backends support these native kinds today. Chromium hosts return explicit unsupported errors until their native hosts implement the same surface.
+
+## Layout
+
+For declarative shell views, use `edge` for docked chrome, `fill = true` for content, `parent` for controls inside containers, `axis` for row or column child flow, and min/max size fields when a surface needs resize constraints. `stack` containers apply native spacing between controls; `split` containers divide panes along their axis without spacing, so a fixed sidebar and fill WebView can resize together. The runtime keeps shell views bound to the window and reapplies their frames on resize.
+
+Use `accessibility_label` for the announced control name when it should differ from visible text. Use `role` for semantic/fallback accessibility text. Use `text` for visible labels, button titles, and text/search placeholders.
+
+`ViewInfo.focused` reports the last successfully focused view in a window. Use `runtime.focusNextView(...)`, `runtime.focusPreviousView(...)`, or `window.zero.views.focusNext()` / `focusPrevious()` to move through visible, enabled native controls and WebView-backed views in stable view order. Automation snapshots include the same focus state for native controls and WebView-backed views.

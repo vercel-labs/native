@@ -552,6 +552,12 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
             packet_command.uses_resource = true;
         },
         .draw_text => |value| {
+            // DirectWrite glyph indices are UINT16. A larger author-supplied
+            // id cannot ride the positioned-glyph wire faithfully, so keep
+            // the packet negotiation truthful and select the pixel path.
+            for (value.glyphs) |glyph| {
+                if (glyph.id > 65535) return packet_command;
+            }
             packet_command.kind = .draw_text;
             packet_command.pipeline = .glyph_run;
             packet_command.paint = .{ .color = value.color };

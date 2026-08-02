@@ -243,9 +243,10 @@ export fn preview_create(name_ptr: ?[*]const u8, name_len: usize, dark: u32) ?*P
     self.rendered_revision = std.math.maxInt(u64);
     self.rendered_scale_bits = 0;
     self.rendered_animating = false;
-    native_sdk.Runtime.initAt(&self.runtime, .{ .platform = self.null_platform.platform() });
+    native_sdk.Runtime.initAt(&self.runtime, .{ .platform = self.null_platform.platform(), .allocator = allocator });
 
     installScene(self) catch {
+        self.runtime.deinit();
         self.render_memo.deinit();
         self.arenas[0].deinit();
         self.arenas[1].deinit();
@@ -300,6 +301,7 @@ fn rebuildScene(self: *Preview) !void {
 
 export fn preview_destroy(self: ?*Preview) void {
     const p = self orelse return;
+    p.runtime.deinit();
     p.render_memo.deinit();
     p.arenas[0].deinit();
     p.arenas[1].deinit();

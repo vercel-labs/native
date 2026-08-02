@@ -443,6 +443,41 @@ test "widget layout diff tracks added removed and layout changes by id" {
     try expectRect(geometry.RectF.init(10, 50, 100, 20), invalidations[2].dirty_bounds);
 }
 
+test "widget layout diff marks a stream-size-only change paint dirty" {
+    // The LOADED report changes only `stream_size` on the video's media
+    // surface — same frame, same image id — but the rendering flips
+    // from a full-frame draw to bars plus a fitted quad, so the diff
+    // must invalidate or retained-pixel consumers keep the stale paint.
+    const previous_widget = Widget{
+        .id = 2,
+        .kind = .media_surface,
+        .frame = geometry.RectF.init(10, 10, 100, 40),
+        .image_id = 5,
+        .image_fit = .contain,
+    };
+    var next_widget = previous_widget;
+    next_widget.stream_size = .{ .width = 640, .height = 360 };
+
+    var previous_nodes: [1]WidgetLayoutNode = undefined;
+    var next_nodes: [1]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_widget, geometry.RectF.init(0, 0, 180, 100), &previous_nodes);
+    const next = try layoutWidgetTree(next_widget, geometry.RectF.init(0, 0, 180, 100), &next_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expectEqual(WidgetInvalidationKind.changed, invalidations[0].kind);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+
+    // And identical stream sizes stay quiet: no phantom repaints per
+    // rebuild while a video plays.
+    var same_nodes: [1]WidgetLayoutNode = undefined;
+    const same = try layoutWidgetTree(next_widget, geometry.RectF.init(0, 0, 180, 100), &same_nodes);
+    const quiet = try WidgetLayoutTree.diff(next, same, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 0), quiet.len);
+}
+
 test "widget layout diff includes paint overdraw in dirty bounds" {
     const panel_child = [_]Widget{.{
         .id = 2,
@@ -569,6 +604,61 @@ test "widget render state dirty bounds tracks changed runtime states" {
     );
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 2 }, .{ .focused_id = 2 }) == null);
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 99 }, .{ .focused_id = 100 }) == null);
+}
+
+test "widget render state dirty bounds tracks terminal logical focus" {
+    const rows = [_]canvas.TerminalRow{.{ .cells = &.{} }};
+    var grid = canvas.TerminalGrid{
+        .rows = &rows,
+        .background = Color.rgb8(0, 0, 0),
+        .foreground = Color.rgb8(255, 255, 255),
+        .cursor_color = Color.rgb8(255, 255, 255),
+        .selection_color = Color.rgb8(0, 128, 255),
+        .cursor = .{ .x = 0, .y = 0 },
+    };
+    const terminal = Widget{
+        .id = 9,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(10, 12, 200, 100),
+        .terminal = .{ .pty = 1, .grid = &grid },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(terminal, terminal.frame, &nodes);
+
+    // Logical focus changes the live cursor from outline to fill even
+    // when focus-visible stays quiet, so the terminal frame is dirty.
+    try expectRect(
+        terminal.frame,
+        layout.renderStateDirtyBounds(.{}, .{ .focused_id = terminal.id }),
+    );
+    try expectRect(
+        terminal.frame,
+        layout.renderStateDirtyBounds(
+            .{ .focused_id = terminal.id },
+            .{ .keyboard_active = false, .focused_id = terminal.id },
+        ),
+    );
+
+    // A static/baked focused state is the source of truth when neither
+    // render state carries a focus id. The keyboard gate still hollows
+    // that cursor, so the no-id path must report its frame dirty too.
+    var baked_terminal = terminal;
+    baked_terminal.state.focused = true;
+    var baked_nodes: [1]WidgetLayoutNode = undefined;
+    const baked_layout = try layoutWidgetTree(baked_terminal, baked_terminal.frame, &baked_nodes);
+    try expectRect(
+        baked_terminal.frame,
+        baked_layout.renderStateDirtyBounds(.{}, .{ .keyboard_active = false }),
+    );
+
+    // An ended cursor is hollow in both states: logical focus no longer
+    // changes pixels, so no damage is reported.
+    grid.running = false;
+    try std.testing.expect(layout.renderStateDirtyBounds(.{}, .{ .focused_id = terminal.id }) == null);
+    try std.testing.expect(layout.renderStateDirtyBounds(
+        .{ .focused_id = terminal.id },
+        .{ .keyboard_active = false, .focused_id = terminal.id },
+    ) == null);
 }
 
 test "widget render state dirty bounds uses custom focus stroke tokens" {
@@ -1259,6 +1349,57 @@ test "widget tree emits panel button text and progress commands" {
             try expectFillColor(tokens.colors.accent, fill.fill);
         },
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "stack row and column backgrounds paint in tree and layout emission" {
+    const kinds = [_]WidgetKind{ .stack, .row, .column };
+    const frame = geometry.RectF.init(10, 12, 140, 72);
+    const background = Color.rgb8(18, 52, 86);
+
+    for (kinds, 0..) |kind, index| {
+        const id: ObjectId = @intCast(index + 1);
+        const widget = Widget{
+            .id = id,
+            .kind = kind,
+            .frame = frame,
+            .style = .{
+                .background = background,
+                .radius = 7,
+            },
+        };
+
+        var tree_commands: [1]CanvasCommand = undefined;
+        var tree_builder = Builder.init(&tree_commands);
+        try emitWidgetTree(&tree_builder, widget, .{});
+        const tree_display_list = tree_builder.displayList();
+        try std.testing.expectEqual(@as(usize, 1), tree_display_list.commandCount());
+        switch (tree_display_list.commands[0]) {
+            .fill_rounded_rect => |fill| {
+                try std.testing.expectEqual(widgetPartId(id, 1), fill.id);
+                try expectRect(frame, fill.rect);
+                try std.testing.expectEqualDeep(Radius.all(7), fill.radius);
+                try expectFillColor(background, fill.fill);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+
+        var nodes: [1]WidgetLayoutNode = undefined;
+        const layout = try layoutWidgetTree(widget, frame, &nodes);
+        var layout_commands: [1]CanvasCommand = undefined;
+        var layout_builder = Builder.init(&layout_commands);
+        try emitWidgetLayout(&layout_builder, layout, .{});
+        const layout_display_list = layout_builder.displayList();
+        try std.testing.expectEqual(@as(usize, 1), layout_display_list.commandCount());
+        switch (layout_display_list.commands[0]) {
+            .fill_rounded_rect => |fill| {
+                try std.testing.expectEqual(widgetPartId(id, 1), fill.id);
+                try expectRect(frame, fill.rect);
+                try std.testing.expectEqualDeep(Radius.all(7), fill.radius);
+                try expectFillColor(background, fill.fill);
+            },
+            else => return error.TestUnexpectedResult,
+        }
     }
 }
 
@@ -1956,6 +2097,50 @@ test "widget emitter applies selection and range control tokens" {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(40, 80, 120), fill.fill),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "slider at value zero emits no filled range" {
+    // The same zero guard the progress bar wears: a width-zero pill still
+    // owns anti-aliased edge coverage, so an idle transport slider
+    // (value 0, disabled) painted a one-pixel filled sliver at the rail's
+    // start. Zero range must paint NOTHING — rail, thumb, and hairline
+    // only.
+    const tokens: DesignTokens = .{};
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{
+        .id = 70,
+        .kind = .slider,
+        .frame = geometry.RectF.init(0, 0, 160, 32),
+        .value = 0,
+        .state = .{ .disabled = true },
+    }, tokens);
+    const idle = builder.displayList();
+    for (idle.commands[0..idle.commandCount()]) |command| {
+        try std.testing.expect(command.objectId() != widgetPartId(70, 2));
+    }
+
+    // A nonzero value keeps the filled range exactly as before.
+    var active_commands: [8]CanvasCommand = undefined;
+    var active_builder = Builder.init(&active_commands);
+    try emitWidgetTree(&active_builder, .{
+        .id = 70,
+        .kind = .slider,
+        .frame = geometry.RectF.init(0, 0, 160, 32),
+        .value = 0.25,
+    }, tokens);
+    const active = active_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 1 + idle.commandCount()), active.commandCount());
+    var saw_range = false;
+    for (active.commands[0..active.commandCount()]) |command| {
+        if (command.objectId() == widgetPartId(70, 2)) {
+            saw_range = true;
+            try std.testing.expect(command == .fill_rounded_rect);
+            try std.testing.expectEqual(@as(f32, 160 * 0.25), command.fill_rounded_rect.rect.width);
+        }
+    }
+    try std.testing.expect(saw_range);
 }
 
 test "widget emitter applies radio control tokens" {
@@ -2882,6 +3067,65 @@ test "hover target resolves composite row children to the row" {
     const caption_hover = layout.hoverTargetForHit(layout.hitTest(caption_frame.center())).?;
     try std.testing.expectEqual(@as(ObjectId, 8), caption_hover.id);
     try std.testing.expectEqual(WidgetCursor.arrow, layout.cursorForHit(caption_hover));
+}
+
+test "hover msg chain collects nested listeners outermost first" {
+    // A hover-listening card wrapping a hover-listening row: the chain
+    // for a hit inside the row carries BOTH, card first (the DOM's
+    // mouseenter order), because containment is per listener — the
+    // pointer moving onto the row never left the card. The card is a
+    // plain column (no hit-target kind), so the listener flag alone is
+    // what makes it resolvable; a disabled listener stands down like it
+    // does for presses.
+    const label = Widget{ .id = 6, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Row label" };
+    const row = Widget{ .id = 5, .kind = .row, .frame = geometry.RectF.init(0, 0, 0, 40), .hover_msgs = true, .children = &.{label} };
+    const plain = Widget{ .id = 4, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Plain" };
+    const card = Widget{ .id = 3, .kind = .column, .frame = geometry.RectF.init(0, 0, 0, 0), .layout = .{ .gap = 8, .padding = geometry.InsetsF.all(10) }, .hover_msgs = true, .children = &.{ plain, row } };
+    const disabled_label = Widget{ .id = 7, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Disabled" };
+    const disabled = Widget{ .id = 8, .kind = .row, .frame = geometry.RectF.init(0, 0, 0, 30), .hover_msgs = true, .state = .{ .disabled = true }, .children = &.{disabled_label} };
+    const bystander = Widget{ .id = 9, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Bystander" };
+
+    var nodes: [10]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .column, .layout = .{ .gap = 12 }, .children = &.{ card, disabled, bystander } }, geometry.RectF.init(0, 0, 320, 260), &nodes);
+
+    var chain: [8]ObjectId = undefined;
+
+    // Inside the row: both listeners, outermost first.
+    const label_frame = layout.findById(6).?.frame.normalized();
+    const in_row = layout.hoverMsgChainForHit(layout.hitTestHover(label_frame.center()), &chain);
+    try std.testing.expectEqualSlices(ObjectId, &.{ 3, 5 }, in_row);
+
+    // Over the card's own content outside the row: the card alone.
+    const plain_frame = layout.findById(4).?.frame.normalized();
+    const in_card = layout.hoverMsgChainForHit(layout.hitTestHover(plain_frame.center()), &chain);
+    try std.testing.expectEqualSlices(ObjectId, &.{3}, in_card);
+
+    // A disabled listener never joins a chain (the hit test skips it,
+    // and the walk predicate refuses it either way).
+    const disabled_frame = layout.findById(8).?.frame.normalized();
+    const over_disabled = layout.hoverMsgChainForHit(layout.hitTestHover(disabled_frame.center()), &chain);
+    try std.testing.expectEqualSlices(ObjectId, &.{}, over_disabled);
+
+    // A hit with no listening ancestor — and the null hit — both yield
+    // the empty chain.
+    const bystander_frame = layout.findById(9).?.frame.normalized();
+    try std.testing.expectEqualSlices(ObjectId, &.{}, layout.hoverMsgChainForHit(layout.hitTestHover(bystander_frame.center()), &chain));
+    try std.testing.expectEqualSlices(ObjectId, &.{}, layout.hoverMsgChainForHit(null, &chain));
+
+    // Listening keeps presses falling through: the row claims no press,
+    // so a click inside it lands on nothing (dead space) — hover-msgs
+    // flips where hover attributes, never where clicks land.
+    const press = layout.hitTestHover(label_frame.center()).?;
+    try std.testing.expect(canvas.widgetPressTargetForHit(layout, press) == null);
+
+    // And the INTERACTIVE hit test never sees hover-only listeners at
+    // all: the raw hit over the row's plain area resolves exactly as it
+    // would without the bindings (nothing here — layout containers),
+    // so no wash can ever appear where none appeared before.
+    const row_frame = layout.findById(5).?.frame.normalized();
+    const wash_probe = geometry.PointF.init(row_frame.maxX() - 2, row_frame.center().y);
+    try std.testing.expect(layout.hitTest(wash_probe) == null);
+    try std.testing.expectEqualSlices(ObjectId, &.{ 3, 5 }, layout.hoverMsgChainForHit(layout.hitTestHover(wash_probe), &chain));
 }
 
 test "widget emitter renders list item and segmented control states" {

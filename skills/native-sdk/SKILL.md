@@ -19,7 +19,7 @@ native skills get core
 native skills get core --full
 ```
 
-Use `native skills get core` for initial orientation. Use `native skills get core --full` for implementation tasks because it includes the reference files for project anatomy, runtime, frontend assets, bridge/security/native capabilities, packaging, and debugging. Use `native skills get automation` when testing a running app, taking snapshots, requesting reloads, or using the built-in automation server.
+Use `native skills get core` for initial orientation. Use `native skills get core --full` for implementation tasks because it includes the reference files for project anatomy, runtime, frontend assets, bridge/security/native capabilities, packaging, and debugging. Use `native skills get automation` when testing a running app, taking snapshots, requesting reloads, or using the built-in automation server. Use `native skills get zig` when `zig build` fails with "no member named" errors on std APIs — the SDK requires Zig 0.16.0, and that skill maps each pre-0.16 idiom's compile error to the current one.
 
 ## Quick orientation
 

@@ -42,6 +42,7 @@ fn expectSameTree(comptime MsgT: type, expected: canvas.Ui(MsgT).Tree, actual: c
             .input => |make| try testing.expectEqual(make, actual_handler.action.input),
             .value => |make| try testing.expectEqual(make, actual_handler.action.value),
             .scroll => |make| try testing.expectEqual(make, actual_handler.action.scroll),
+            .terminal => |make| try testing.expectEqual(make, actual_handler.action.terminal),
             // Context-menu handler entries carry one ?Msg per declared
             // item (separators are null slots); markup `<context-menu>`
             // and the Zig builder both produce them.
@@ -391,11 +392,11 @@ test "compiled on-scroll binds the ScrollState constructor identically to the in
 
     // Both engines dispatch the same typed scroll Msg for the container.
     const feed = fixture.findByKind(compiled.root, .scroll_view).?;
-    const state = canvas.ScrollState{ .offset = 40, .viewport_extent = 80, .content_extent = 200 };
-    try testing.expectEqual(@as(f32, 40), compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset);
+    const state = canvas.ScrollState{ .offset_y = 40, .viewport_extent_y = 80, .content_extent_y = 200 };
+    try testing.expectEqual(@as(f32, 40), compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset_y);
     try testing.expectEqual(
-        interpreted.msgForScroll(feed.id, state).?.feed_scrolled.offset,
-        compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset,
+        interpreted.msgForScroll(feed.id, state).?.feed_scrolled.offset_y,
+        compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset_y,
     );
 
     // And the same approach-end Msg (`on-reach-end`, the infinite-scroll
@@ -477,6 +478,133 @@ test "compiled split tween pair lowers into the layout-tween declaration identic
     try testing.expectEqual(canvas.Easing.spring, compiled_split.resize_easing);
     try testing.expectEqual(canvas.Easing.spring, interpreted_split.resize_easing);
     try testing.expectEqual(interpreted_split.value, compiled_split.value);
+}
+
+// ---------------------------------------- anchored-tooltip intent parity
+
+const tooltip_intent_markup =
+    \\<column gap="12">
+    \\  <stack>
+    \\    <text>Bold</text>
+    \\    <tooltip anchor="above" tooltip-delay="250">Bold the selection</tooltip>
+    \\  </stack>
+    \\  <stack>
+    \\    <text>Link</text>
+    \\    <tooltip anchor="below" anchor-offset="8">Insert a link</tooltip>
+    \\  </stack>
+    \\  <tooltip>Copied!</tooltip>
+    \\</column>
+;
+
+const TooltipIntentCompiled = canvas.CompiledMarkupView(EntriesModel, EntriesMsg, tooltip_intent_markup);
+
+test "compiled anchored tooltips stamp the hover-intent declaration identically to the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const entries = [_]Entry{.{ .id = 11, .label = "first" }};
+    const model = EntriesModel{ .entries = &entries };
+
+    var view = try markup_view.MarkupView(EntriesModel, EntriesMsg).init(arena, tooltip_intent_markup);
+    var interpreter_ui = EntriesUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    var compiled_ui = EntriesUi.init(arena);
+    const compiled = try compiled_ui.finalize(TooltipIntentCompiled.build(&compiled_ui, &model));
+    try expectSameTree(EntriesMsg, interpreted, compiled);
+
+    // Both engines stamp the declaration the runtime's hover-intent
+    // machine reads: the anchor floats the leaf against its parent, and
+    // tooltip-delay overrides the token default (-1 keeps it). The bare
+    // static tooltip keeps null anchor and the -1 default, so existing
+    // documents lower byte-identically.
+    inline for (.{ interpreted.root, compiled.root }) |root| {
+        const declared = fixture.findByText(root, .tooltip, "Bold the selection").?;
+        try testing.expectEqual(@as(i32, 250), declared.tooltip_delay_ms);
+        try testing.expectEqual(canvas.WidgetAnchorPlacement.above, declared.layout.anchor.?.placement);
+
+        const defaulted = fixture.findByText(root, .tooltip, "Insert a link").?;
+        try testing.expectEqual(@as(i32, -1), defaulted.tooltip_delay_ms);
+        try testing.expectEqual(canvas.WidgetAnchorPlacement.below, defaulted.layout.anchor.?.placement);
+        try testing.expectEqual(@as(f32, 8), defaulted.layout.anchor.?.offset);
+
+        const static = fixture.findByText(root, .tooltip, "Copied!").?;
+        try testing.expectEqual(@as(i32, -1), static.tooltip_delay_ms);
+        try testing.expectEqual(@as(?canvas.WidgetAnchor, null), static.layout.anchor);
+    }
+}
+
+// ------------------------------------------- tooltip-delay range guard
+
+const TooltipDelayModel = struct { delay: i64 = 0 };
+
+const tooltip_delay_binding_markup =
+    \\<stack>
+    \\  <text>Bold</text>
+    \\  <tooltip anchor="above" tooltip-delay="{delay}">Bold the selection</tooltip>
+    \\</stack>
+;
+
+const tooltip_delay_boundary_markup =
+    \\<column gap="12">
+    \\  <stack>
+    \\    <text>Bold</text>
+    \\    <tooltip anchor="above" tooltip-delay="0">Bold the selection</tooltip>
+    \\  </stack>
+    \\  <stack>
+    \\    <text>Link</text>
+    \\    <tooltip anchor="below" tooltip-delay="2147483647">Insert a link</tooltip>
+    \\  </stack>
+    \\</column>
+;
+
+const tooltip_delay_overflow_literal_markup =
+    \\<stack>
+    \\  <text>Bold</text>
+    \\  <tooltip anchor="above" tooltip-delay="2147483648">Bold the selection</tooltip>
+    \\</stack>
+;
+
+const TooltipDelayUi = canvas.Ui(EntriesMsg);
+const TooltipDelayBindingCompiled = canvas.CompiledMarkupView(TooltipDelayModel, EntriesMsg, tooltip_delay_binding_markup);
+const TooltipDelayBoundaryCompiled = canvas.CompiledMarkupView(TooltipDelayModel, EntriesMsg, tooltip_delay_boundary_markup);
+const TooltipDelayOverflowLiteralCompiled = canvas.CompiledMarkupView(TooltipDelayModel, EntriesMsg, tooltip_delay_overflow_literal_markup);
+
+test "compiled tooltip-delay past i32 max fails the build instead of trapping" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A literal one past maxInt(i32): the option field's own type is
+    // the bound (the grid-lines pattern), so the cast that used to
+    // trap latches the failed build the interpreter's teaching error
+    // mirrors, and finalize surfaces it.
+    var literal_ui = TooltipDelayUi.init(arena);
+    const literal_node = TooltipDelayOverflowLiteralCompiled.build(&literal_ui, &TooltipDelayModel{});
+    try testing.expect(literal_ui.failed);
+    try testing.expectError(error.OutOfMemory, literal_ui.finalize(literal_node));
+
+    // Bindings deliver i64 model values into the same cast seam, so an
+    // out-of-range model value fails the same way — per-build, since
+    // only the value (not the document) is wrong.
+    var overflow_ui = TooltipDelayUi.init(arena);
+    const overflow_model = TooltipDelayModel{ .delay = @as(i64, std.math.maxInt(i32)) + 1 };
+    const overflow_node = TooltipDelayBindingCompiled.build(&overflow_ui, &overflow_model);
+    try testing.expect(overflow_ui.failed);
+    try testing.expectError(error.OutOfMemory, overflow_ui.finalize(overflow_node));
+
+    // The same document lowers when the model holds an in-range value.
+    var ok_ui = TooltipDelayUi.init(arena);
+    const ok_model = TooltipDelayModel{ .delay = 250 };
+    const ok_tree = try ok_ui.finalize(TooltipDelayBindingCompiled.build(&ok_ui, &ok_model));
+    try testing.expectEqual(@as(i32, 250), fixture.findByText(ok_tree.root, .tooltip, "Bold the selection").?.tooltip_delay_ms);
+
+    // Boundary values pass: 0 (the instant-show escape hatch) and the
+    // type's exact max.
+    var boundary_ui = TooltipDelayUi.init(arena);
+    const boundary_tree = try boundary_ui.finalize(TooltipDelayBoundaryCompiled.build(&boundary_ui, &TooltipDelayModel{}));
+    try testing.expectEqual(@as(i32, 0), fixture.findByText(boundary_tree.root, .tooltip, "Bold the selection").?.tooltip_delay_ms);
+    try testing.expectEqual(@as(i32, std.math.maxInt(i32)), fixture.findByText(boundary_tree.root, .tooltip, "Insert a link").?.tooltip_delay_ms);
 }
 
 // --------------------- multi-child for bodies and the for-empty else
@@ -961,6 +1089,51 @@ test "compiled markdown element matches the interpreter and the hand-written Md.
     try testing.expectEqual(summary_item.id, fixture.findByKind(expanded_compiled.root, .list_item).?.id);
 }
 
+// ------------------------------------------------------ code element parity
+
+const CodeUi = fixture.CodeUi;
+const CodeInterpreter = markup_view.MarkupView(fixture.CodeModel, fixture.CodeMsg);
+const CodeCompiled = canvas.CompiledMarkupView(fixture.CodeModel, fixture.CodeMsg, fixture.code_markup_source);
+
+test "compiled code element matches the interpreter and Ui.code" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model = fixture.CodeModel{};
+
+    var view = try CodeInterpreter.init(arena, fixture.code_markup_source);
+    var interpreted_ui = CodeUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+    var compiled_ui = CodeUi.init(arena);
+    const compiled = try compiled_ui.finalize(CodeCompiled.build(&compiled_ui, &model));
+    var hand_ui = CodeUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handCodeView(&hand_ui, &model));
+
+    try expectSameTree(fixture.CodeMsg, hand, interpreted);
+    try expectSameTree(fixture.CodeMsg, hand, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+    try testing.expectEqual(canvas.ScrollAxes.horizontal, fixture.findByKind(compiled.root, .scroll_view).?.scroll_axes);
+
+    model.wrap_code = true;
+    model.show_lines = false;
+    var wrapped_ui = CodeUi.init(arena);
+    const wrapped = try wrapped_ui.finalize(CodeCompiled.build(&wrapped_ui, &model));
+    try testing.expect(fixture.findByKind(wrapped.root, .scroll_view) == null);
+    try testing.expect(fixture.findByText(wrapped.root, .text, "1") == null);
+
+    model.editable_code = true;
+    var editable_compiled_ui = CodeUi.init(arena);
+    const editable_compiled = try editable_compiled_ui.finalize(CodeCompiled.build(&editable_compiled_ui, &model));
+    var editable_interpreted_ui = CodeUi.init(arena);
+    const editable_interpreted = try editable_interpreted_ui.finalize(try view.build(&editable_interpreted_ui, &model));
+    var editable_hand_ui = CodeUi.init(arena);
+    const editable_hand = try editable_hand_ui.finalize(fixture.handCodeView(&editable_hand_ui, &model));
+    try expectSameTree(fixture.CodeMsg, editable_hand, editable_interpreted);
+    try expectSameTree(fixture.CodeMsg, editable_hand, editable_compiled);
+    try testing.expectEqual(canvas.WidgetKind.textarea, editable_compiled.root.kind);
+    try testing.expect(editable_compiled.root.code_editor);
+}
+
 // ------------------------------------------- template/use + style parity
 
 fn expectSameStyles(expected: canvas.Widget, actual: canvas.Widget) !void {
@@ -1089,6 +1262,185 @@ test "compiled avatar image binding matches the interpreter and the hand-written
     const empty = try empty_ui.finalize(AvatarCompiled.build(&empty_ui, &empty_model));
     try testing.expectEqual(@as(canvas.ImageId, 0), fixture.findByText(empty.root, .avatar, "CT").?.image_id);
     try testing.expectEqualStrings("CT", fixture.findByText(empty.root, .avatar, "CT").?.text);
+}
+
+// ------------------------------- negative id bindings fail, never trap
+
+const AvatarNegativeCompiled = canvas.CompiledMarkupView(fixture.AvatarModel, fixture.AvatarMsg, fixture.avatar_negative_markup_source);
+const SurfaceUi = fixture.SurfaceUi;
+const SurfaceCompiled = canvas.CompiledMarkupView(fixture.SurfaceModel, fixture.SurfaceMsg, fixture.surface_markup_source);
+const SurfaceNegativeCompiled = canvas.CompiledMarkupView(fixture.SurfaceModel, fixture.SurfaceMsg, fixture.surface_negative_markup_source);
+
+test "compiled avatar and media-surface id bindings refuse negative model values instead of trapping" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The u64 surface id resolves like the interpreter's.
+    var ok_ui = SurfaceUi.init(arena);
+    const ok_tree = try ok_ui.finalize(SurfaceCompiled.build(&ok_ui, &fixture.SurfaceModel{}));
+    const surface = ok_tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, surface.kind);
+    try testing.expectEqual(@as(canvas.ImageId, 5), surface.image_id);
+
+    // A negative i64 binding into either u64 id seam latches the
+    // failed build (the interpreter's teaching error mirrors it), and
+    // finalize surfaces the failure — never an @intCast trap.
+    var avatar_ui = AvatarUi.init(arena);
+    const avatar_node = AvatarNegativeCompiled.build(&avatar_ui, &fixture.AvatarModel{});
+    try testing.expect(avatar_ui.failed);
+    try testing.expectError(error.OutOfMemory, avatar_ui.finalize(avatar_node));
+
+    var surface_ui = SurfaceUi.init(arena);
+    const surface_node = SurfaceNegativeCompiled.build(&surface_ui, &fixture.SurfaceModel{});
+    try testing.expect(surface_ui.failed);
+    try testing.expectError(error.OutOfMemory, surface_ui.finalize(surface_node));
+}
+
+// ------------------------------------------------ image leaf id binding
+
+const ImageLeafUi = fixture.ImageLeafUi;
+const ImageLeafInterpreter = markup_view.MarkupView(fixture.ImageLeafModel, fixture.ImageLeafMsg);
+const ImageLeafCompiled = canvas.CompiledMarkupView(fixture.ImageLeafModel, fixture.ImageLeafMsg, fixture.image_markup_source);
+const ImageLeafNegativeCompiled = canvas.CompiledMarkupView(fixture.ImageLeafModel, fixture.ImageLeafMsg, fixture.image_negative_markup_source);
+
+test "compiled image leaf binding matches the interpreter and the hand-written view" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.ImageLeafModel{ .cover = 42 };
+
+    var view = try ImageLeafInterpreter.init(arena, fixture.image_markup_source);
+    var interpreted_ui = ImageLeafUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = ImageLeafUi.init(arena);
+    const compiled = try compiled_ui.finalize(ImageLeafCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = ImageLeafUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handImageLeafView(&hand_ui, &model));
+
+    try expectSameTree(fixture.ImageLeafMsg, hand, interpreted);
+    try expectSameTree(fixture.ImageLeafMsg, hand, compiled);
+
+    // The field binding and the fn binding both resolve to the
+    // widget's image id at comptime-unrolled access.
+    const cover = compiled.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
+    try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqual(@as(canvas.ImageId, 43), compiled.root.children[1].image_id);
+
+    // 0 draws nothing in both engines — the not-loaded-yet state.
+    const empty_model = fixture.ImageLeafModel{};
+    var empty_ui = ImageLeafUi.init(arena);
+    const empty = try empty_ui.finalize(ImageLeafCompiled.build(&empty_ui, &empty_model));
+    try testing.expectEqual(@as(canvas.ImageId, 0), empty.root.children[0].image_id);
+}
+
+test "compiled image leaf binding refuses negative model values instead of trapping" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A negative i64 binding into the u64 id seam latches the failed
+    // build (the interpreter's teaching error mirrors it), and
+    // finalize surfaces the failure — never an @intCast trap.
+    var image_ui = ImageLeafUi.init(arena);
+    const image_node = ImageLeafNegativeCompiled.build(&image_ui, &fixture.ImageLeafModel{});
+    try testing.expect(image_ui.failed);
+    try testing.expectError(error.OutOfMemory, image_ui.finalize(image_node));
+}
+
+// -------------------------------------------------- terminal element
+
+const TerminalElementUi = fixture.TerminalElementUi;
+const TerminalElementInterpreter = markup_view.MarkupView(fixture.TerminalElementModel, fixture.TerminalElementMsg);
+const TerminalElementCompiled = canvas.CompiledMarkupView(fixture.TerminalElementModel, fixture.TerminalElementMsg, fixture.terminal_markup_source);
+
+test "compiled terminal element matches the interpreter and the hand-written ui.terminal tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.TerminalElementModel{};
+
+    var view = try TerminalElementInterpreter.init(arena, fixture.terminal_markup_source);
+    var interpreted_ui = TerminalElementUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = TerminalElementUi.init(arena);
+    const compiled = try compiled_ui.finalize(TerminalElementCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = TerminalElementUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handTerminalElementView(&hand_ui, &model));
+
+    try expectSameTree(fixture.TerminalElementMsg, hand, interpreted);
+    try expectSameTree(fixture.TerminalElementMsg, hand, compiled);
+
+    // All three lowerings bind the model-owned key and the echo.
+    for ([_]TerminalElementUi.Tree{ hand, interpreted, compiled }) |tree| {
+        const widget = fixture.findWidgetKind(tree.root, .terminal) orelse return error.TestExpectedTerminal;
+        try testing.expectEqual(@as(u64, 7), widget.terminal.pty);
+        try testing.expectEqual(@as(u32, 4), widget.terminal.scrollback);
+        try testing.expect(widget.terminal.grid == null);
+    }
+}
+
+// --------------------------------------------- video playback element
+
+const VideoElementUi = fixture.VideoElementUi;
+const VideoElementInterpreter = markup_view.MarkupView(fixture.VideoElementModel, fixture.VideoElementMsg);
+const VideoElementCompiled = canvas.CompiledMarkupView(fixture.VideoElementModel, fixture.VideoElementMsg, fixture.video_markup_source);
+const VideoElementPlainCompiled = canvas.CompiledMarkupView(fixture.VideoElementModel, fixture.VideoElementMsg, fixture.video_plain_markup_source);
+
+test "compiled video element matches the interpreter and the hand-written ui.video tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.VideoElementModel{};
+
+    var view = try VideoElementInterpreter.init(arena, fixture.video_markup_source);
+    var interpreted_ui = VideoElementUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = VideoElementUi.init(arena);
+    const compiled = try compiled_ui.finalize(VideoElementCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = VideoElementUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handVideoElementView(&hand_ui, &model));
+
+    try expectSameTree(fixture.VideoElementMsg, hand, interpreted);
+    try expectSameTree(fixture.VideoElementMsg, hand, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+
+    // The compiled lowering binds the framework-owned playback surface
+    // and stamps the chrome's runtime-consumed verbs, exactly like the
+    // interpreter and the hand-written builder call.
+    const surface = compiled.root.children[0].children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, surface.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, surface.image_id);
+    const toggle = fixture.findVideoControl(compiled.root, .toggle) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.button, toggle.kind);
+    const scrub = fixture.findVideoControl(compiled.root, .scrub) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.slider, scrub.kind);
+
+    // Both engines recorded the same declaration for the app loop's
+    // reconcile.
+    const compiled_declaration = compiled_ui.video_declaration orelse return error.TestUnexpectedResult;
+    const interpreted_declaration = interpreted_ui.video_declaration orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(interpreted_declaration.src, compiled_declaration.src);
+    try testing.expectEqual(interpreted_declaration.autoplay, compiled_declaration.autoplay);
+    try testing.expectEqual(interpreted_declaration.loop, compiled_declaration.loop);
+    try testing.expectEqual(interpreted_declaration.muted, compiled_declaration.muted);
+
+    // The controls-less shape compiles to the bare surface: no chrome.
+    var plain_ui = VideoElementUi.init(arena);
+    const plain = try plain_ui.finalize(VideoElementPlainCompiled.build(&plain_ui, &model));
+    try testing.expectEqual(canvas.WidgetKind.media_surface, plain.root.children[0].kind);
+    try testing.expect(fixture.findVideoControl(plain.root, .toggle) == null);
+    try testing.expect(fixture.findVideoControl(plain.root, .scrub) == null);
 }
 
 // ------------------------------------------------------ text wrap parity
@@ -1299,6 +1651,37 @@ test "compiled anchored picker (anchor, on-dismiss, on-hold) matches the interpr
     try testing.expect(crumb.semantics.actions.press);
 }
 
+// ------------------------------------------------------- hover-pair parity
+
+const HoverCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.hover_markup_source);
+
+test "compiled hover pair (on-hover-enter, on-hover-leave) matches the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.Model{};
+
+    var view = try InboxInterpreter.init(arena, fixture.hover_markup_source);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(HoverCompiled.build(&compiled_ui, &model));
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+
+    // Both engines stamp the listener flag (hover-hittable, never
+    // pressable) and bind both edges through the handler table.
+    const panel = fixture.findByKind(compiled.root, .panel).?;
+    const row = fixture.findByKind(compiled.root, .row).?;
+    try testing.expect(panel.hover_msgs and row.hover_msgs);
+    try testing.expect(!row.semantics.actions.press);
+    try testing.expect(!canvas.widgetIsHitTarget(row));
+    try testing.expect(canvas.widgetIsHoverMsgHitTarget(row));
+    try testing.expectEqual(fixture.Msg.add, compiled.msgFor(panel.id, .hover_enter).?);
+    try testing.expectEqual(@as(u32, 0), compiled.msgFor(panel.id, .hover_leave).?.toggle);
+    try testing.expect(compiled.msgFor(row.id, .hover_leave) == null);
+}
+
 // -------------------------------------------------- split panes and trees
 
 const PaneCompiled = canvas.CompiledMarkupView(fixture.PaneModel, fixture.PaneMsg, fixture.pane_markup_source);
@@ -1502,6 +1885,35 @@ test "compiled charts match the interpreter and the hand-written Ui.chart tree" 
     try testing.expectEqual(canvas.WidgetKind.chart, compiled_chart.kind);
 }
 
+const ChartF64Interpreter = markup_view.MarkupView(fixture.ChartF64Model, fixture.ChartMsg);
+const ChartF64Compiled = canvas.CompiledMarkupView(fixture.ChartF64Model, fixture.ChartMsg, fixture.chart_f64_markup_source);
+
+test "compiled charts bind f64 series (the transpiled-core float class) identically to the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.ChartF64Model{};
+
+    var view = try ChartF64Interpreter.init(arena, fixture.chart_f64_markup_source);
+    var interpreted_ui = ChartUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+    var compiled_ui = ChartUi.init(arena);
+    const compiled = try compiled_ui.finalize(ChartF64Compiled.build(&compiled_ui, &model));
+
+    try expectSameTree(fixture.ChartMsg, interpreted, compiled);
+    const interpreted_chart = firstChartWidget(interpreted.root).?;
+    const compiled_chart = firstChartWidget(compiled.root).?;
+    try expectSameChartData(interpreted_chart.chart, compiled_chart.chart);
+
+    // The narrowing itself: f64 model samples land as exact f32 casts,
+    // NaN gaps preserved, in BOTH engines (field and arena-fn sources).
+    try testing.expectEqual(@as(f32, 0.25), compiled_chart.chart.series[0].values[0]);
+    try testing.expect(std.math.isNan(compiled_chart.chart.series[0].values[1]));
+    try testing.expectEqual(@as(f32, 0.125), compiled_chart.chart.series[1].values[0]);
+    try testing.expectEqual(@as(f32, 0.5), compiled_chart.chart.series[1].values[3]);
+}
+
 // ---------------------------------------------- input-group fixture parity
 
 const ComposerUi = fixture.ComposerUi;
@@ -1666,4 +2078,252 @@ test "compiled reactions lower onto the bubble's chrome-text channel exactly lik
     try testing.expectEqualStrings("182 GB +1", sent.text);
     try testing.expectEqual(canvas.TextAlign.start, sent.text_alignment);
     try testing.expectEqual(@as(usize, 0), compiled.root.children[2].text.len);
+}
+
+// ------------------------------------------- committed-model (pointer) shape
+
+const Track = struct {
+    id: i64,
+    title: []const u8,
+    plays: f64,
+    starred: bool,
+};
+
+const LibraryMeta = struct {
+    name: []const u8,
+    track_total: i64,
+};
+
+const LibraryMsg = union(enum) {
+    open_track: i64,
+    star_track: i64,
+    refresh,
+};
+
+/// The committed-model shape transpiled cores emit: record arrays are
+/// slices of shared `*const` nodes and nested records are `*const`
+/// fields. `reflect.Pointee` makes both bind exactly like their by-value
+/// counterparts.
+const LibraryModel = struct {
+    meta: *const LibraryMeta,
+    tracks: []const *const Track,
+    selected: ?i64 = null,
+};
+
+const library_markup =
+    \\<column gap="4">
+    \\  <text>{meta.name} holds {meta.track_total}</text>
+    \\  <if test="{selected}">
+    \\    <text>picked</text>
+    \\  </if>
+    \\  <for each="tracks" as="t" key="id">
+    \\    <row key="{t.id}" gap="2" cross="center">
+    \\      <text grow="1">{t.title} ({t.plays})</text>
+    \\      <if test="{t.starred}">
+    \\        <badge>starred</badge>
+    \\      </if>
+    \\      <button size="sm" on-press="open_track:{t.id}">Open</button>
+    \\    </row>
+    \\  </for>
+    \\  <else>
+    \\    <text>empty library</text>
+    \\  </else>
+    \\</column>
+;
+
+const LibraryUi = canvas.Ui(LibraryMsg);
+const LibraryInterpreter = markup_view.MarkupView(LibraryModel, LibraryMsg);
+const LibraryCompiled = canvas.CompiledMarkupView(LibraryModel, LibraryMsg, library_markup);
+
+fn interpretLibrary(arena: std.mem.Allocator, model: *const LibraryModel) !LibraryUi.Tree {
+    var view = try LibraryInterpreter.init(arena, library_markup);
+    var ui = LibraryUi.init(arena);
+    return ui.finalize(try view.build(&ui, model));
+}
+
+fn compileLibrary(arena: std.mem.Allocator, model: *const LibraryModel) !LibraryUi.Tree {
+    var ui = LibraryUi.init(arena);
+    return ui.finalize(LibraryCompiled.build(&ui, model));
+}
+
+test "compiled pointer-item lists and pointer-record paths match the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const meta = LibraryMeta{ .name = "field notes", .track_total = 2 };
+    const first = Track{ .id = 7, .title = "one", .plays = 3.5, .starred = false };
+    const second = Track{ .id = 9, .title = "two", .plays = 12, .starred = true };
+    const tracks = [_]*const Track{ &first, &second };
+    var model = LibraryModel{ .meta = &meta, .tracks = &tracks };
+
+    const interpreted = try interpretLibrary(arena, &model);
+    const compiled = try compileLibrary(arena, &model);
+    try expectSameTree(LibraryMsg, interpreted, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+
+    // Dotted paths through the `*const` record field interpolate its
+    // fields; pointer items bind their struct's fields, floats included.
+    try testing.expect(findText(compiled.root, "field notes holds 2") != null);
+    try testing.expect(findText(compiled.root, "one (3.5)") != null);
+    try testing.expect(findText(compiled.root, "two (12)") != null);
+    try testing.expect(findText(compiled.root, "starred") != null);
+    try testing.expect(findText(compiled.root, "picked") == null);
+    try testing.expect(findText(compiled.root, "empty library") == null);
+
+    // Message payloads built from pointer items dispatch identically.
+    const open_button = fixture.findByKind(compiled.root, .button).?;
+    try testing.expectEqual(
+        interpreted.msgForPointer(open_button.id, .up).?,
+        compiled.msgForPointer(open_button.id, .up).?,
+    );
+    try testing.expectEqual(@as(i64, 7), compiled.msgForPointer(open_button.id, .up).?.open_track);
+
+    // The optional scalar flips the gate at runtime, like every optional.
+    model.selected = 9;
+    const picked = try compileLibrary(arena, &model);
+    try testing.expect(findText(picked.root, "picked") != null);
+
+    // An empty pointer list renders the for-else branch.
+    model.tracks = &.{};
+    const emptied_interpreted = try interpretLibrary(arena, &model);
+    const emptied_compiled = try compileLibrary(arena, &model);
+    try expectSameTree(LibraryMsg, emptied_interpreted, emptied_compiled);
+    try testing.expect(findText(emptied_compiled.root, "empty library") != null);
+}
+
+test "the compiled engine binds on-input to a declared mirror union in parity with the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const source =
+        \\<column>
+        \\  <text-field text="{draft}" label="Draft" on-input="edit" on-submit="submit" />
+        \\</column>
+    ;
+    const model = fixture.MirrorModel{ .draft = "hi" };
+
+    const Compiled = canvas.CompiledMarkupView(fixture.MirrorModel, fixture.MirrorMsg, source);
+    var compiled_ui = canvas.Ui(fixture.MirrorMsg).init(arena);
+    const compiled = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+
+    var view = try markup_view.MarkupView(fixture.MirrorModel, fixture.MirrorMsg).init(arena, source);
+    var interpreter_ui = canvas.Ui(fixture.MirrorMsg).init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+
+    const field = fixture.findByKind(compiled.root, .text_field).?;
+    try testing.expectEqual(fixture.findByKind(interpreted.root, .text_field).?.id, field.id);
+
+    // Both engines translate the runtime event into the DECLARED union.
+    const compiled_insert = compiled.msgForTextEdit(field.id, .{ .insert_text = "abc" }).?;
+    const interpreted_insert = interpreted.msgForTextEdit(field.id, .{ .insert_text = "abc" }).?;
+    try testing.expectEqualStrings("abc", compiled_insert.edit.insert_text);
+    try testing.expectEqualStrings("abc", interpreted_insert.edit.insert_text);
+    const compiled_move = compiled.msgForTextEdit(field.id, .{ .move_caret = .{ .direction = .end, .extend = false } }).?;
+    try testing.expectEqual(fixture.MirrorCaretDirection.end, compiled_move.edit.move_caret.direction);
+    try testing.expectEqual(
+        interpreted.msgForTextEdit(field.id, .delete_backward).?,
+        compiled.msgForTextEdit(field.id, .delete_backward).?,
+    );
+}
+
+// ---------------------------- declared scroll-state + value arms (parity)
+
+test "compiled on-scroll binds a declared scroll-state mirror identically to the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const source =
+        \\<scroll value="{scroll_top}" on-scroll="library_scrolled">
+        \\  <text>rows</text>
+        \\</scroll>
+    ;
+    const model = fixture.MirrorControlsModel{};
+
+    const Compiled = canvas.CompiledMarkupView(fixture.MirrorControlsModel, fixture.MirrorControlsMsg, source);
+    var compiled_ui = canvas.Ui(fixture.MirrorControlsMsg).init(arena);
+    const compiled = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+
+    var view = try markup_view.MarkupView(fixture.MirrorControlsModel, fixture.MirrorControlsMsg).init(arena, source);
+    var interpreter_ui = canvas.Ui(fixture.MirrorControlsMsg).init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    try expectSameTree(fixture.MirrorControlsMsg, interpreted, compiled);
+
+    // Both engines translate the runtime state into the DECLARED record:
+    // float fields widen exactly, integer-classed fields round.
+    const region = fixture.findByKind(compiled.root, .scroll_view).?;
+    const state = canvas.ScrollState{ .offset_x = 12.5, .offset_y = 41.5, .velocity_y = -3.25, .viewport_extent_x = 320.2, .viewport_extent_y = 480.4, .content_extent_x = 960.7, .content_extent_y = 2000.6 };
+    const compiled_msg = compiled.msgForScroll(region.id, state).?;
+    try testing.expectEqual(@as(f64, 41.5), compiled_msg.library_scrolled.offsetY);
+    try testing.expectEqual(@as(f64, 12.5), compiled_msg.library_scrolled.offsetX);
+    try testing.expectEqual(@as(i64, 480), compiled_msg.library_scrolled.viewportExtentY);
+    try testing.expectEqual(@as(i64, 2001), compiled_msg.library_scrolled.contentExtentY);
+    try testing.expectEqual(@as(i64, 961), compiled_msg.library_scrolled.contentExtentX);
+    try testing.expectEqual(
+        interpreted.msgForScroll(region.id, state).?,
+        compiled.msgForScroll(region.id, state).?,
+    );
+}
+
+test "compiled slider on-change value arms match the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const source =
+        \\<column>
+        \\  <slider value="{seek_fraction}" label="Seek" on-change="scrubbed" />
+        \\  <slider value="{volume}" label="Volume" on-change="set_volume" />
+        \\  <slider value="{volume}" label="Nudge" on-change="nudged" />
+        \\</column>
+    ;
+    const model = fixture.MirrorControlsModel{};
+
+    const Compiled = canvas.CompiledMarkupView(fixture.MirrorControlsModel, fixture.MirrorControlsMsg, source);
+    var compiled_ui = canvas.Ui(fixture.MirrorControlsMsg).init(arena);
+    const compiled = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+
+    var view = try markup_view.MarkupView(fixture.MirrorControlsModel, fixture.MirrorControlsMsg).init(arena, source);
+    var interpreter_ui = canvas.Ui(fixture.MirrorControlsMsg).init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    try expectSameTree(fixture.MirrorControlsMsg, interpreted, compiled);
+
+    const seek = fixture.findByKind(compiled.root, .slider).?;
+    // The transpiled f64 arm carries the applied fraction widened exactly,
+    // through both engines' handler tables.
+    try testing.expectEqual(@as(f64, 0.25), compiled.msgForChange(seek.id, 0.25).?.scrubbed);
+    try testing.expectEqual(
+        interpreted.msgForChange(seek.id, 0.25).?,
+        compiled.msgForChange(seek.id, 0.25).?,
+    );
+}
+
+test "compiled split on-resize binds a declared float arm identically to the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const source =
+        \\<split value="{seek_fraction}" on-resize="scrubbed">
+        \\  <column><text>left</text></column>
+        \\  <column><text>right</text></column>
+        \\</split>
+    ;
+    const model = fixture.MirrorControlsModel{};
+
+    const Compiled = canvas.CompiledMarkupView(fixture.MirrorControlsModel, fixture.MirrorControlsMsg, source);
+    var compiled_ui = canvas.Ui(fixture.MirrorControlsMsg).init(arena);
+    const compiled = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+
+    var view = try markup_view.MarkupView(fixture.MirrorControlsModel, fixture.MirrorControlsMsg).init(arena, source);
+    var interpreter_ui = canvas.Ui(fixture.MirrorControlsMsg).init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    try expectSameTree(fixture.MirrorControlsMsg, interpreted, compiled);
+
+    try testing.expectEqual(
+        interpreted.msgForResize(interpreted.root.id, 0.25).?,
+        compiled.msgForResize(compiled.root.id, 0.25).?,
+    );
 }

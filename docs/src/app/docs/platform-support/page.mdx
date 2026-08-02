@@ -1,0 +1,426 @@
+import { Experimental, Tier, TierLegend } from "@/components/support-tier";
+
+# Platform Support
+
+Native SDK is the complete toolkit for building native desktop applications, with experimental mobile support riding the same runtime — one runtime model, with native affordances landing per platform. This page states exactly what each platform gets today, at what tier, with the caveats attached. Unsupported operations return explicit runtime errors instead of pretending every host can do the same thing.
+
+## Support Matrix
+
+macOS, Linux, and Windows run full desktop apps through their own platform hosts. Mobile is experimental — the marked columns are verified on the simulator and emulator, but APIs and tooling there may still change, and desktop is the mature surface. iOS and Android canvas apps are host-tier: the toolkit owns the entire mobile application — `native dev --target ios|android` and `native package --target ios|android` build and generate the platform host from app.zon, and your project carries zero host code. Embedding in a host app you own works on both mobile platforms and shares the same experimental status — see [Mobile](#mobile) below.
+
+<TierLegend />
+
+<table>
+  <thead>
+    <tr>
+      <th>What you get</th>
+      <th>macOS</th>
+      <th>Windows</th>
+      <th>Linux</th>
+      <th>iOS <Experimental /></th>
+      <th>Android <Experimental /></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Real OS windows</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="caveats" note="full-screen app in the toolkit-owned UIKit host; single window" fn={1} /></td>
+      <td><Tier tier="caveats" note="full-screen app in the toolkit-owned Android host; single window" fn={1} /></td>
+    </tr>
+    <tr>
+      <td>Native rendering</td>
+      <td><Tier tier="full" note="Metal presentation with OS scroll physics" fn={2} /></td>
+      <td><Tier tier="caveats" note="deterministic software renderer, GDI blit; per-monitor DPI aware" fn={2} /></td>
+      <td><Tier tier="caveats" note="deterministic software renderer, cairo blit" fn={2} /></td>
+      <td><Tier tier="caveats" note="deterministic software renderer; the toolkit host presents through Metal" fn={2} /></td>
+      <td><Tier tier="caveats" note="deterministic software renderer; the toolkit host copies pixels into the surface" fn={2} /></td>
+    </tr>
+    <tr>
+      <td>Text</td>
+      <td><Tier tier="full" note="the SDK's own TrueType pipeline plans every layout; CoreText measurement and Metal packet text resolve the same bundled faces" fn={3} /></td>
+      <td><Tier tier="full" note="bundled faces ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="full" note="bundled faces ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="full" note="the toolkit host presents the same reference-renderer pixels the desktop software hosts ink" fn={3} /></td>
+      <td><Tier tier="full" note="the toolkit host presents the same reference-renderer pixels the desktop software hosts ink" fn={3} /></td>
+    </tr>
+    <tr>
+      <td>Registered fonts</td>
+      <td><Tier tier="full" note="app-registered TrueType faces (CJK included); registered bytes reach CoreText at registration, so host measurement and drawn text resolve the exact face" fn={3} /></td>
+      <td><Tier tier="full" note="registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="full" note="registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="none" note="registered fonts unverified: the ink path is the same reference renderer, but no mobile test registers a font and host text measurement has no registered-font seam" fn={3} /></td>
+      <td><Tier tier="none" note="registered fonts unverified: the ink path is the same reference renderer, but no mobile test registers a font and host text measurement has no registered-font seam" fn={3} /></td>
+    </tr>
+    <tr>
+      <td>Pointer, keyboard &amp; IME input</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="caveats" note="IME composition is mapped; real-hardware IME verification is pending" fn={4} /></td>
+      <td><Tier tier="full" note="pointer, keyboard, scroll, IME composition, HiDPI" /></td>
+      <td><Tier tier="caveats" note="touch, system keyboard, and IME through the toolkit host" fn={4} /></td>
+      <td><Tier tier="caveats" note="touch, soft keyboard, and IME through the toolkit host" fn={4} /></td>
+    </tr>
+    <tr>
+      <td>Menus</td>
+      <td><Tier tier="full" note="native app menus and native context menus (NSMenu)" fn={5} /></td>
+      <td><Tier tier="full" note="native app menus and native context menus (TrackPopupMenu)" fn={5} /></td>
+      <td><Tier tier="full" note="native app menus and native context menus (GtkPopoverMenu)" fn={5} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
+      <td>System tray</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="none" note="returns UnsupportedService until a portable status-notifier implementation is selected" fn={6} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
+      <td>Menu-bar app lifecycle (<code>close_policy = "hide"</code>)</td>
+      <td><Tier tier="full" note="close hides, the Dock reopen re-shows, tray Open/Quit drive showWindow/quitApp" /></td>
+      <td><Tier tier="full" note="close hides (SW_HIDE); the tray icon is the re-show affordance" /></td>
+      <td><Tier tier="none" note="no status item exists to bring a hidden window back, so the declaration is refused at build/create time with a teaching" fn={5} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
+      <td>Web content (WebViews)</td>
+      <td><Tier tier="full" note="system WebView by default; optional bundled Chromium via CEF" fn={7} /></td>
+      <td><Tier tier="caveats" note="system WebView (WebView2); needs the WebView2 runtime, preinstalled on current Windows" fn={7} /></td>
+      <td><Tier tier="full" note="system WebView" fn={7} /></td>
+      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={7} /></td>
+      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={7} /></td>
+    </tr>
+    <tr>
+      <td>Packaging</td>
+      <td><Tier tier="full" note=".app bundle, DMG, generated icons" fn={8} /></td>
+      <td><Tier tier="caveats" note="directory artifact with icons and file-type registration; installer is future work" fn={8} /></td>
+      <td><Tier tier="caveats" note="install tree with desktop entry, icons, MIME metadata; AppImage and packages are future work" fn={8} /></td>
+      <td><Tier tier="caveats" note="complete generated Xcode project, archive-ready with zero edits; signing manual, no .ipa emit" fn={8} /></td>
+      <td><Tier tier="caveats" note="complete generated host project plus a debug APK assembled with zero edits; store signing manual" fn={8} /></td>
+    </tr>
+    <tr>
+      <td>Code signing</td>
+      <td><Tier tier="full" note="ad-hoc and identity signing with entitlements; notarization is a documented manual step" fn={9} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
+      <td>Automation</td>
+      <td><Tier tier="full" /></td>
+      <td><Tier tier="full" note="driven live on a real Windows desktop and in CI under emulation" fn={10} /></td>
+      <td><Tier tier="full" note="driven live under Xvfb: waits, assertions, input, screenshots" fn={10} /></td>
+      <td><Tier tier="caveats" note="file-based snapshots and actions inside the app container, exercised on the simulator" fn={10} /></td>
+      <td><Tier tier="caveats" note="file-based snapshots and actions inside the app files directory, exercised on the emulator" fn={10} /></td>
+    </tr>
+  </tbody>
+</table>
+
+1. iOS and Android canvas apps run full screen inside toolkit-owned hosts, which the SDK builds ON the [embed C ABI](/docs/embed) — `native dev` and `native package` with `--target ios|android` generate everything from app.zon, so the app project carries zero host code. Multi-window scenes are desktop-only. Embedding the runtime in a host app you control, driven over the same embed C ABI, works on both platforms and shares the mobile experimental status.
+2. macOS presents through Metal and hands scrolling to OS scroll drivers. Windows presents representable retained packets through Direct2D/DirectWrite and falls back to the deterministic software renderer for unsupported commands, transparent layered windows, or unavailable GPU resources. Linux uses the software renderer through its platform blit path. Frame events report the concrete `metal`, `direct2d`, or `software` backend. The iOS toolkit host reads the software renderer's pixels over the ABI and presents them through Metal with the macOS host's presentation discipline — presents are gated on the canvas revision (an idle app acquires no drawables and uploads nothing), the drawable is acquired only after the frame's CPU work is done, and the pump pauses in the background and re-presents the retained canvas on return; the Android toolkit host copies the same pixels into its surface's window buffer (mobile GPU rendering is a later phase); embed hosts present the pixels in their own surfaces.
+3. The SDK's own TrueType pipeline — parsing, outlines, rasterization — is text rendering's shared reference path on every platform (goldens, screenshots, and software presents all ink through it), and apps can [register additional faces](/docs/fonts) (a CJK face is the canonical case) that both renderers resolve exactly like the bundled ones. macOS hands registered bytes to CoreText, and Windows hands them to DirectWrite, so packet text presentation resolves the same face the reference renderer inks. Linux and Windows software fallback ink registered outlines directly; the full font-registry suite runs in CI on Linux, and CI additionally runs it natively on a Windows runner, including a receipt test that registers a committed subsetted CJK face and proves Chinese text renders as real glyphs, not tofu. Mobile hosts present the same reference-rendered pixels, but no mobile test registers a font today and the mobile hosts' text measurement has no registered-font seam, so registered fonts there are stated as unverified rather than supported.
+4. Windows maps native IME composition onto the shared IME events, with real-hardware IME verification still pending. The iOS toolkit host forwards touch, the system keyboard, and IME composition, verified with real injected input on the simulator; the Android toolkit host forwards touch, shows and hides the soft keyboard from the runtime's focus state, and routes committed text and IME composition through the same embed IME events, verified with injected input on the emulator.
+5. App menus and context menus are native on all three desktops: macOS presents `NSMenu`, Windows `TrackPopupMenu` (the tray menu's popup path), Linux `GtkPopoverMenu`. Hosts without a native context-menu presenter — the mobile toolkit hosts and embed hosts today — present the same declared context menu as an anchored canvas surface at the click point; authors declare one menu either way.
+6. Tray support is implemented on macOS (`NSStatusItem`) and Windows; Linux tray calls return `UnsupportedService` until a portable status-notifier implementation is selected.
+7. Web engines only apply to apps that embed web content; native-rendered apps carry none. The system WebView is the default engine on every desktop platform; bundled Chromium through CEF is available on macOS only, and Linux/Windows Chromium builds fail early instead of silently substituting an engine. The Windows system engine is WebView2: its Evergreen runtime ships with Windows 11 and current Windows 10 (older machines need the runtime installer; `native doctor` checks for it), and the build stages the vendored loader next to the executable automatically. See [Web Engines](/docs/web-engines). The mobile shell examples embed the platform WebView as the content workspace.
+8. `native package` targets all five platforms: macOS gets a `.app` bundle (plus `zig build dmg`), Linux an install tree, Windows a distributable directory with a per-user file-type registration script, iOS a complete generated Xcode project — toolkit host sources, Info.plist, asset catalog, shared scheme, and the device-slice embed library — that `xcodebuild archive` builds with zero edits (code signing stays a manual step, like notarization), and Android a complete generated host project whose debug APK assembles with zero edits, directly with the SDK's build tools (store signing keys stay a manual step). Every platform's icons generate from one square source image. See [Packaging](/docs/packaging).
+9. macOS signing supports `adhoc` and `identity` modes with entitlements; notarization is submitted manually with the platform tools after packaging. No signing tooling exists yet for the other platforms. See [Code Signing](/docs/packaging/signing).
+10. The automation server is a file-based protocol the runtime serves on every desktop platform: snapshots, assertions, synthetic input, screenshots, record/replay. Engine screenshots render through the deterministic CPU reference renderer on every platform, so they are byte-comparable across hosts. Mobile exposes accessibility snapshots and actions through the embed ABI; the iOS and Android toolkit hosts serve the same file-based protocol inside the app's data container when launched with automation enabled.
+
+## Desktop Hosts
+
+<table>
+  <thead>
+    <tr>
+      <th>Area</th>
+      <th>macOS system WebView</th>
+      <th>macOS Chromium</th>
+      <th>Linux system WebView</th>
+      <th>Linux Chromium</th>
+      <th>Windows system WebView</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Main WebView</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Child WebViews</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Native views</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Native control commands</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>App menus</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Native context menus</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Anchored fallback</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>System tray</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Keyboard shortcuts</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Dialogs</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Clipboard text</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Clipboard rich data</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Open URL / reveal path</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Notifications</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Recent documents</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Credentials</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported when a secret service is present</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>File drops</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>App activation events</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Supported</td>
+      <td>Unsupported</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Audio playback + streaming</td>
+      <td>Supported (one AVPlayer for local files, cache entries, and streams)</td>
+      <td>Unsupported</td>
+      <td>Supported when GStreamer with playbin is present (runtime-loaded, probed live)</td>
+      <td>Unsupported</td>
+      <td>Supported (one Media Foundation session)</td>
+    </tr>
+    <tr>
+      <td>Audio spectrum analysis</td>
+      <td>Supported (MTAudioProcessingTap + vDSP on the single player)</td>
+      <td>Unsupported</td>
+      <td>Supported when GStreamer's <code>spectrum</code> element is present (gst-plugins-good, probed live)</td>
+      <td>Unsupported</td>
+      <td>Supported on Windows 10 2004+ (process-scoped WASAPI loopback of this app only, probed live)</td>
+    </tr>
+  </tbody>
+</table>
+
+"Anchored fallback" for native context menus means the declared menu still presents — as an anchored canvas surface at the click point — because that host has no native menu presenter. All three desktop system engines present natively (`NSMenu` on macOS, `TrackPopupMenu` on Windows, `GtkPopoverMenu` on Linux). Authors declare one menu either way; the platform decides presentation.
+
+Audio spectrum analysis reads the app's OWN playback and nothing else: macOS taps the app's single player pre-effects, Windows captures the app's own audio session through process-scoped loopback (never system-wide — other apps' audio can never appear in the bands), and Linux analyzes inside the app's own playbin. Hosts that cannot analyze report `audio_spectrum` unsupported and simply never deliver `.spectrum` events; see the capabilities page for the band shape and cadence contract.
+
+## How Support Is Verified
+
+macOS is the primary development platform and carries the deepest support. The Linux and Windows columns are not aspirational: the repository carries reproducible live-verification loops that build every showcase app and drive it for real. `tools/linux-truth` runs the apps in real windows against the platform toolkit under Xvfb — clicks, keys, wheel input, multi-window flows, resize clamps, window-close paths, and both engine and X-server screenshots. `tools/windows-truth` drives the same scenarios on a real Windows desktop, plus clipboard round-trips, effect-stream cancellation, record/replay, and launching the packaged artifact. CI additionally runs headless Linux and Windows canvas smokes on every change. iOS is exercised on the simulator through the toolkit host and the embed library — the `native dev --target ios` loop launches real apps, and the input and layout verification scripts inject hardware-true touches and keyboard events; a fresh `native package --target ios` output is archived with `xcodebuild` as part of verification. Android is exercised on the emulator the same way: the `native dev --target android` loop assembles, installs, and launches real apps, input is injected over adb (taps, keys, soft-keyboard text), and a fresh `native package --target android` output assembles the debug APK; the embed ABI additionally cross-compiles for both Android architectures in CI.
+
+## Runtime Queries
+
+Use `Runtime.supports(...)` when native code needs to branch on the current host:
+
+```zig
+if (runtime.supports(.native_views)) {
+    try runtime.createView(.{
+        .label = "sidebar",
+        .kind = .sidebar,
+    });
+}
+```
+
+JavaScript can query the same support model through the built-in bridge when `js_window_api` or an explicit `builtin_bridge` policy allows `native-sdk.platform.supports`:
+
+```javascript
+const hasTray = await window.zero.platform.supports("tray");
+```
+
+Feature names match the Zig `PlatformFeature` enum and the TypeScript `NativeSdkPlatformFeature` union. JavaScript callers may use either snake_case names such as `native_views` or camelCase aliases such as `nativeViews`. Unsupported operations still reject explicitly if called; support checks are intended for choosing UI affordances before making those calls.
+
+## Native Surfaces
+
+The macOS, Linux, and Windows system-WebView hosts support `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `split`, `stack`, `button`, `icon_button`, `list_item`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` native view kinds. Their `gpu_surface` children present through Metal on macOS, retained Direct2D/DirectWrite packets on Windows, and the CPU reference renderer plus a Cairo pixel blit on Linux. Windows retains the GDI pixel path as an exact fallback.
+
+`ViewKind.webview` is the compatibility path for WebView-backed views. Existing `runtime.createWebView(...)` and `window.zero.webviews.*` APIs remain available.
+
+Window chrome control spans all three desktop hosts: `titlebar = "hidden_inset"`/`"hidden_inset_tall"`, the `window-drag` region channel, and the `on_chrome` inset hook are implemented on the macOS hosts (AppKit and Chromium), the Win32 host (the full system frame stays: the caption band is reclaimed for the app while DWM composites the real min/max/close buttons, and drag regions answer the native hit test as caption), and the GTK host (client-side decorations: a header bar with the desktop-themed window controls, honoring the user's `gtk-decoration-layout` for button side and order, with drag regions consumed at the press gesture). On every host the `on_chrome` hook reports where window controls land — top band height plus a leading or trailing controls inset — so a header pads the correct edge with no per-platform code. Mobile embed hosts answer the same `on_chrome` channel with the viewport's safe-area insets (notch, status bar, home indicator), and subscribing transfers safe-area padding ownership to the app — see [Mobile](#mobile).
+
+Chromium builds are currently enabled on macOS only. Linux and Windows Chromium host files are placeholders and build/package tooling rejects those targets until the native hosts are implemented.
+
+## Mobile
+
+<Experimental /> Mobile support is experimental — the host tier and the embedding path alike. Everything below is real and verified — iOS on the simulator, Android on the emulator — but the APIs and tooling on these platforms may still change, and desktop is the mature surface. The label describes maturity: what each platform does today is stated exactly.
+
+### The iOS host tier
+
+iOS canvas apps ship without you ever opening Xcode as an editor: the toolkit owns the entire iOS application, built on the same embed C ABI that standalone embedding uses. `native dev --target ios` builds the app's embed static library for the simulator, wraps it in the SDK's UIKit host — a full-screen canvas surface view with touch/keyboard/IME forwarding, CoreText text measurement, and safe-area reporting — installs and launches it via `simctl`, and streams the app log to your terminal. `native package --target ios` emits a complete, deterministic Xcode project around the same host (generated Info.plist, asset catalog from the single-source icon pipeline, shared scheme, device-slice library) that `xcodebuild archive` builds with zero edits; code signing stays a manual step, like macOS notarization.
+
+Safe-area insets (notch, status bar, home indicator) arrive through the same window-chrome channel macOS uses for the titlebar band: an app that subscribes to `on_chrome` pads with one code path on every platform and owns the safe-area padding; an app without the hook keeps the automatic runtime inset. The full audio effect family plays for real: the host registers the platform audio service over the embed ABI — AVAudioPlayer for local files and verified cache entries, AVPlayer for progressive URL streams filling the track cache in the app container's `Library/Caches/audio/` — with an honest playback audio session (activated on first play; a system interruption pauses the transport and reports the paused state through the ordinary event stream). Background audio and now-playing-center integration are not wired. Runtime-registered images decode for real too: the host registers the platform image decoder over the embed ABI — CGImageSource (ImageIO), the same codec family the macOS host decodes through — so `fx.registerImageBytes` registers real pixels (the soundboard's committed album covers, fetched avatars) instead of declining to the initials fallback. The remaining honest caveats: frames render through the deterministic CPU reference renderer (GPU rendering on iOS is a later phase), markup hot reload does not reach the simulator yet (edit, then rerun `native dev --target ios`), and device workflows beyond `xcodebuild archive` are not toolkit-managed.
+
+### The Android host tier
+
+Android canvas apps get the same ownership: the toolkit owns the entire Android application, built on the same embed C ABI. `native dev --target android` builds the app's embed static library for `aarch64-linux-android`, compiles the SDK's Android host around it — an edge-to-edge canvas `SurfaceView` with touch/soft-keyboard/IME forwarding, Paint-backed text measurement, and safe-area/keyboard inset reporting — assembles a debug-signed APK, installs and launches it on a running (or freshly booted) emulator via `adb`, and streams the app log to your terminal. `native package --target android` emits a complete generated host project and assembles the same debug APK with zero edits, directly with the Android SDK's build tools (aapt2, javac, d8, zipalign, apksigner) and the NDK compiler — no build-system project to maintain, no plugin/version matrix, and the dev and package paths share one assembly so they cannot drift.
+
+Display-cutout and system-bar insets ride the same `on_chrome` window-chrome channel, and the soft keyboard follows the runtime's focus state: the host shows the keyboard when an editable widget takes focus, routes committed text and composition through the embed IME events, and reports the keyboard's viewport inset so layout clears it (apps that own safe areas keep only the keyboard's residual overlap). Rotation keeps the activity alive, so the embedded runtime survives orientation changes as a resize. The full audio effect family plays for real: the host registers the platform audio service over the embed ABI — one `MediaPlayer` for local files, verified cache entries, and progressive URL streams filling the track cache in the app data directory's `cache/audio/` — with honest audio focus (requested on play; a focus loss pauses the transport and reports the paused state through the ordinary event stream, and regain never auto-resumes). Media-session and notification integration (lock screen controls, background playback beyond the cached process) are not wired. Runtime-registered images decode for real too: the host registers the platform image decoder over the embed ABI — BitmapFactory, the platform's in-box codec stack — so `fx.registerImageBytes` registers real pixels (the soundboard's committed album covers, fetched avatars) instead of declining to the initials fallback. The remaining honest caveats: one ABI ships today (`arm64-v8a`, every Android 11+ device; minSdk 30), the APK is debug-signed (store distribution keys and app bundles stay a manual step, like macOS notarization), and markup hot reload does not reach the device yet (edit, then rerun `native dev --target android`).
+
+### Embedded hosts
+
+Embedding works on both mobile platforms and carries the same experimental status as the rest of the mobile experience. The mobile examples own native header/navigation layout in UIKit or Android views, embed a `WKWebView` or Android `WebView` as the workspace, and drive the Native SDK through the C/JNI lifecycle, activation, resize, and command calls documented in [Embedded App](/docs/embed).
+
+<table>
+  <thead>
+    <tr>
+      <th>Area</th>
+      <th>iOS embedded host</th>
+      <th>Android embedded host</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Native header/navigation</td>
+      <td>UIKit header with Back and Refresh command buttons</td>
+      <td>Android view header with Back and Refresh command buttons</td>
+    </tr>
+    <tr>
+      <td>WebView content area</td>
+      <td><code>WKWebView</code> workspace</td>
+      <td>Android <code>WebView</code> workspace</td>
+    </tr>
+    <tr>
+      <td>Runtime lifecycle</td>
+      <td><code>native_sdk_app_create</code>, <code>start</code>, <code>activate</code>, <code>deactivate</code>, <code>stop</code>, and <code>destroy</code> from Swift</td>
+      <td>JNI bridge for <code>create</code>, <code>start</code>, <code>activate</code>, <code>deactivate</code>, <code>stop</code>, and <code>destroy</code></td>
+    </tr>
+    <tr>
+      <td>Resize and orientation</td>
+      <td><code>viewDidLayoutSubviews</code> forwards WebView size and screen scale</td>
+      <td>Orientation/screen-size changes stay in the activity; <code>surfaceChanged</code> forwards size, density, and <code>Surface</code></td>
+    </tr>
+    <tr>
+      <td>Keyboard avoidance</td>
+      <td>Keyboard frame notifications adjust the WebView bottom constraint</td>
+      <td><code>windowSoftInputMode="adjustResize"</code> lets Android relayout the content area</td>
+    </tr>
+    <tr>
+      <td>Back/navigation command</td>
+      <td>Native Back button dispatches <code>mobile.back</code></td>
+      <td>Native Back button and system Back dispatch <code>mobile.back</code></td>
+    </tr>
+    <tr>
+      <td>Touch forwarding</td>
+      <td>UIKit/WebKit own touch handling for the WebView workspace</td>
+      <td><code>MotionEvent</code> pointer data is forwarded through <code>native_sdk_app_touch</code></td>
+    </tr>
+    <tr>
+      <td>Generic <code>ShellView</code> mapping</td>
+      <td>Mobile shell metadata feeds generated UIKit host config for header labels, command buttons, and WebView workspace</td>
+      <td>Mobile shell metadata feeds generated Android host config for header labels, command buttons, and WebView workspace</td>
+    </tr>
+  </tbody>
+</table>
+
+Mobile hosts own safe areas, orientation, keyboard avoidance, back gestures, and platform lifecycle integration. The current mobile mapping is package-time shell metadata for native header/workspace structure; dynamic generic native view bridge commands should still be treated as desktop APIs until UIKit and Android runtime view mutation is added.
+
+Canvas-scene apps also run through a hand-written embed host: `addMobileLib` compiles a `Model`/`Msg`/`update`/`view` app into the embed static library with a single `gpu_surface` scene, frames render through the deterministic CPU reference renderer, and the host shim blits the presented pixels (`native_sdk_app_render_pixels`) into its own surface. The `examples/mobile-canvas` iOS shim — the same architecture the toolkit's own UIKit host uses — is exercised on the simulator: rendering, safe-area layout, real touch/keyboard/IME input, and accessibility snapshots. The Android `NativeActivity` shim cross-compiles for both Android arches from the same library build.
+
+`gpu_surface` is implemented for the macOS system-WebView host as a Metal-backed child surface, for the Windows system-WebView host as a retained Direct2D/DirectWrite child surface, and for the Linux system-WebView host through the deterministic CPU reference renderer plus a GTK pixel blit. Windows frame events report `backend=direct2d` while binary canvas packets remain representable; unrepresentable commands, transparent layered windows, or an unavailable Direct2D device fall back to the same CPU reference renderer plus a GDI DIB blit and report `backend=software`. Linux reports `backend=software`, and a manifest that declares another backend (for example `gpu_backend = "metal"`) falls back to software there instead of erroring. Windows maps native IME composition (`WM_IME_COMPOSITION`) onto the same shared IME events the macOS and Linux hosts emit — inline preedit, cursor position, and the commit contract — with real-hardware IME verification still pending. Other current hosts report unsupported operations for that view kind and `runtime.supports(.gpu_surfaces)` / `window.zero.platform.supports("gpuSurfaces")` return `false`.
+
+## Related Docs
+
+- [Native Controls](/docs/native-controls)
+- [Web Engines](/docs/web-engines)
+- [Capabilities](/docs/capabilities)
+- [Builtin Commands](/docs/bridge/builtin-commands)

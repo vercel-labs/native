@@ -1,6 +1,7 @@
 import { createWriteStream, mkdirSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { exec } from "./util.ts";
+import { parseUsageTokens } from "./efficiency.ts";
 import type { AgentRunResult } from "./types.ts";
 
 export const GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
@@ -15,6 +16,9 @@ const ALLOWED_TOOLS = [
   "Grep",
   "Bash(zig *)",
   "Bash(native *)",
+  // ts-core cases: the agent's check loop is the @native-sdk/core transpiler run
+  // through node, and the subset runs under node for behavioral pokes.
+  "Bash(node *)",
   "Bash(ls *)",
   "Bash(cat *)",
   "Bash(mkdir *)",
@@ -25,6 +29,20 @@ const ALLOWED_TOOLS = [
   "Bash(mv *)",
   "Bash(rm -rf .zig-cache*)",
   "Bash(rm -rf zig-out*)",
+  // Wave-2 friction, straight from the denial tallies: python one-liners
+  // (byte math, quick asset generation), everyday read-only git (log for
+  // orientation, show for a diff), and the agent invoking the repo's own
+  // `native` binary by ABSOLUTE path when it second-guesses PATH. `git
+  // stash` is deliberately NOT allowed: workspaces carry no .git, so any
+  // mutating git command walks up and operates on the FRAMEWORK repo's
+  // index (a stash apply once landed a months-old host stash as a merge
+  // conflict mid-battery). GIT_CEILING_DIRECTORIES in the agent env is the
+  // structural guard; the missing allow entry is belt and braces.
+  // Contamination stays closed: deny rules below are checked first.
+  "Bash(python3 -c *)",
+  "Bash(git log*)",
+  "Bash(git show*)",
+  "Bash(*zig-out/bin/native *)",
 ].join(",");
 
 /**
@@ -39,14 +57,20 @@ const ALLOWED_TOOLS = [
 const DISALLOWED_TOOLS = [
   "Read(//**/evals/cases/**)",
   "Read(//**/evals/results/**)",
+  "Read(//**/evals/harness-lib/**)",
   "Bash(cat *evals/cases*)",
   "Bash(cat *evals/results*)",
+  "Bash(cat *evals/harness-lib*)",
   // The cases are committed, so git plumbing can serve them without touching
   // the filesystem (observed: `git show HEAD:evals/cases/<case>/eval.json`).
-  "Bash(git show*)",
+  // `git show`/`git log` are allowed in general (workspace orientation) but
+  // any invocation naming evals content stays denied — deny rules win over
+  // allow rules. `git cat-file`/`git grep` reach blob content without an
+  // `evals` path in the command line, so they stay fully denied.
+  "Bash(git show*evals*)",
+  "Bash(git log*evals*)",
   "Bash(git cat-file*)",
   "Bash(git grep*)",
-  "Bash(git log*)",
 ].join(",");
 
 export function findGatewayKey(env: NodeJS.ProcessEnv): string | undefined {
@@ -72,6 +96,7 @@ export function assembleAgentEnv(
   gatewayKey: string,
   repoRoot: string,
   configDir: string,
+  workspaceDir: string,
 ): AgentEnv {
   const inherited: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -85,6 +110,11 @@ export function assembleAgentEnv(
     CLAUDE_CONFIG_DIR: configDir,
     // Native SDK CLI (markup check, automate, skills) on PATH for the agent.
     PATH: `${join(repoRoot, "zig-out", "bin")}${delimiter}${process.env.PATH ?? ""}`,
+    // Workspaces carry no .git; without a ceiling, any git command the
+    // agent runs walks up and operates on the FRAMEWORK repo. The ceiling
+    // makes git stop at the workspace parent: inside the workspace git
+    // sees "not a repository" instead of our index.
+    GIT_CEILING_DIRECTORIES: dirname(workspaceDir),
   };
   const redacted = { ...overrides, ANTHROPIC_AUTH_TOKEN: redact(gatewayKey) };
   return { env: { ...inherited, ...overrides }, redacted };
@@ -100,6 +130,19 @@ export interface AgentInvocation {
   cwd: string;
 }
 
+/**
+ * Harness guidance appended to every case prompt. Wave-2 showed 17 of 20
+ * failures were green-at-cap: agents whose checks were already passing
+ * burned the turn budget on app launches and extra verification, or lost
+ * turns writing scratch files to the blocked /tmp. Cases never restate
+ * these; the harness owns them.
+ */
+export const PROMPT_SUFFIX = [
+  "Harness notes:",
+  "- Stop once the README check loop is green; do not launch the app or perform extra verification.",
+  "- Scratch files go inside the workspace; /tmp is blocked.",
+].join("\n");
+
 export function buildInvocation(options: {
   prompt: string;
   model: string;
@@ -109,7 +152,7 @@ export function buildInvocation(options: {
 }): AgentInvocation {
   const argv = [
     "-p",
-    options.prompt,
+    `${options.prompt}\n\n${PROMPT_SUFFIX}`,
     "--output-format",
     "stream-json",
     "--verbose",
@@ -195,9 +238,26 @@ export async function runAgent(options: {
     if (typeof resultEvent.num_turns === "number") base.numTurns = resultEvent.num_turns;
     if (typeof resultEvent.total_cost_usd === "number") base.totalCostUsd = resultEvent.total_cost_usd;
     if (typeof resultEvent.session_id === "string") base.sessionId = resultEvent.session_id;
+    // Token accounting comes from here, not the per-message stream: the
+    // gateway zeroes usage on streamed assistant events, so the terminal
+    // result event's usage block is the only truthful total. Timeout kills
+    // never emit one — the token fields simply stay absent then.
+    const tokens = parseUsageTokens(resultEvent.usage);
+    if (tokens) {
+      base.inputTokens = tokens.inputTokens;
+      base.outputTokens = tokens.outputTokens;
+      base.cacheReadTokens = tokens.cacheReadTokens;
+      base.cacheCreationTokens = tokens.cacheCreationTokens;
+    }
   }
   if (run.timedOut) {
     return { ...base, status: "timeout", errorDetail: `wall-clock timeout after ${options.timeoutMs}ms` };
+  }
+  // Hitting --max-turns exits non-zero with is_error, but the workspace is
+  // whole and gradable — classify it BEFORE the generic error branches so
+  // green-at-cap scores as a pass with the cap recorded as cost.
+  if (resultEvent && (resultEvent.subtype === "error_max_turns" || resultEvent.terminal_reason === "max_turns")) {
+    return { ...base, status: "capped", cappedAtTurns: true, errorDetail: "hit --max-turns; grading the workspace as delivered" };
   }
   if (run.code !== 0) {
     const stderrTail = run.stderr.split("\n").filter(Boolean).slice(-8).join("\n");

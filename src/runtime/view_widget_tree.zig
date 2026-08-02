@@ -174,6 +174,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     .kind = node.widget.kind,
                     .text_len = source_text.len,
                     .text_hash = source_text.hash,
+                    .text_selection = node.widget.text_selection,
                 };
                 entry_count += 1;
             }
@@ -194,6 +195,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (anchored_count > canvas_limits.max_canvas_widget_anchored_per_view) return error.WidgetAnchoredSurfaceLimitReached;
             if (layout.nodes.len > 0 and layout.nodes.ptr == self.widget_layout_nodes[0..].ptr) {
                 self.widget_revision += 1;
+                self.canvas_widget_layout_adoptions +%= 1;
                 return;
             }
 
@@ -226,10 +228,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             );
 
             // Per-pass probe-table indices over the collected entry lists
-            // (shared threadlocal scratch; see the reconcile-id-index note
+            // (shared per-thread scratch; see the reconcile-id-index note
             // in canvas_widget_runtime.zig). Lookups return exactly what
             // the linear scans returned; only the search cost changes.
-            const index_scratch = &canvas_widget_runtime.canvas_widget_reconcile_index_scratch;
+            const index_scratch = canvas_widget_runtime.canvas_widget_reconcile_index_scratch.get();
             index_scratch.controls.build(previous_control_states);
             index_scratch.source_controls.build(self.widgetSourceControlEntries());
             index_scratch.texts.build(previous_text_states);
@@ -268,6 +270,20 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 }
             }
 
+            // ADOPTION begins here: the pool resets below are
+            // destructive, and a later per-node failure (an invalid
+            // command name escapes the pre-validation) leaves a TORN
+            // retained tree — so the witness the ui-app hover currency
+            // samples must move at this boundary, not at the
+            // function's successful return. Everything above —
+            // node/anchored/pool-budget validation — rejects with the
+            // previous tree fully applied and the witness unmoved. A
+            // torn copy also prunes hover containment against whatever
+            // partial tree it retained, so the owed leaves dispatch at
+            // the failure's own drain instead of waiting for the next
+            // pointer move.
+            self.canvas_widget_layout_adoptions +%= 1;
+            errdefer self.pruneCanvasWidgetHoverMsgChain();
             self.widget_layout_node_count = 0;
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;
@@ -295,6 +311,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 self.widget_tokens,
             );
 
+            // Anchored-tooltip hover intent survives the rebuild the way
+            // hover/press ids do: drop state whose tooltip unmounted,
+            // then re-stamp runtime-owned visibility BEFORE semantics
+            // collect, so the a11y snapshot (and the replay fingerprint
+            // riding it) always reflects the intent machine.
+            self.pruneCanvasTooltipIntent();
+            self.applyCanvasTooltipVisibility();
+
             const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
             applyCanvasWidgetSourceScrollSemantics(self.widget_semantics_nodes[0..semantics.len], &index_scratch.semantics);
             self.widget_semantics_node_count = semantics.len;
@@ -302,19 +326,31 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 const return_id = if (focus_return_id != 0 and self.widgetLayoutTree().focusTargetById(focus_return_id) != null) focus_return_id else 0;
                 self.canvas_widget_focused_id = return_id;
                 self.canvas_widget_focus_visible_id = return_id;
+                // The focus-return ring is not a keyboard ARRIVAL:
+                // reveals fire only on focus-visible transitions (the
+                // dismissal seam's rule), so the returned ring never
+                // grants adoption-time tooltip reveals either.
+                self.canvas_widget_focus_visible_keyboard = false;
             }
             if (self.canvas_widget_focus_visible_id != 0 and (self.canvas_widget_focus_visible_id != self.canvas_widget_focused_id or self.widgetLayoutTree().focusTargetById(self.canvas_widget_focus_visible_id) == null)) {
                 self.canvas_widget_focus_visible_id = 0;
+                self.canvas_widget_focus_visible_keyboard = false;
             }
             if (self.canvas_widget_hovered_id != 0 and !canvasWidgetInteractionTargetExists(self.widgetLayoutTree(), self.canvas_widget_hovered_id)) {
                 self.canvas_widget_hovered_id = 0;
             }
+            // Hover-Msg entries whose widgets this rebuild unmounted owe
+            // their leave edge; survivors keep standing (the adoption
+            // reconcile re-hit-tests the stored pointer position right
+            // after, wherever one exists).
+            self.pruneCanvasWidgetHoverMsgChain();
             // The hover point belongs to the hovered widget's detail
             // chrome; without a hovered widget it means nothing.
             if (self.canvas_widget_hovered_id == 0) self.canvas_widget_hover_point = null;
             if (self.canvas_widget_pressed_id != 0 and !canvasWidgetInteractionTargetExists(self.widgetLayoutTree(), self.canvas_widget_pressed_id)) {
                 self.canvas_widget_pressed_id = 0;
             }
+            self.pruneCanvasWidgetTextHistory();
             self.canvas_widget_cursor = self.canvasWidgetCursorForId(self.canvas_widget_hovered_id);
             self.widget_revision += 1;
         }
@@ -335,6 +371,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         pub fn canvasWidgetRenderState(self: *const RuntimeView) canvas.WidgetRenderState {
             const focused_id: ?canvas.ObjectId = if (!self.focused or self.canvas_widget_focused_id == 0) null else self.canvas_widget_focused_id;
             return .{
+                .keyboard_active = self.keyboard_active,
                 .focused_id = focused_id,
                 .focus_visible_id = if (focused_id) |id| if (self.canvas_widget_focus_visible_id == id) id else null else null,
                 .hovered_id = if (self.canvas_widget_hovered_id == 0) null else self.canvas_widget_hovered_id,
@@ -362,14 +399,45 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return layout.nodes[target_index].widget.id;
         }
 
+        /// Recompute the standing hover-Msg chain from a raw hit — the
+        /// pointer and scroll seams call this with the SAME raw hit the
+        /// wash resolution consumed, so containment and the wash always
+        /// agree on where the pointer stands.
+        pub fn setCanvasWidgetHoverMsgChainForHit(self: *RuntimeView, hit: ?canvas.WidgetHit) void {
+            const chain = self.widgetLayoutTree().hoverMsgChainForHit(hit, &self.canvas_widget_hover_msg_chain);
+            self.canvas_widget_hover_msg_chain_len = chain.len;
+        }
+
+        /// Point-blind prune of the standing hover-Msg chain: drop
+        /// entries whose widgets left the tree (their leave edge is
+        /// due), keep the rest — the wash's exact rebuild rule (an id
+        /// survives a rebuild until a re-hit-test says otherwise).
+        pub fn pruneCanvasWidgetHoverMsgChain(self: *RuntimeView) void {
+            const layout = self.widgetLayoutTree();
+            var kept: usize = 0;
+            for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len]) |id| {
+                // Survival is the HOVER predicate, not the interactive
+                // one: a hover-only listener must not be evicted (a
+                // false leave), and a widget whose hover bindings this
+                // rebuild removed must stop standing (its leave is
+                // owed) even though it still exists interactively.
+                if (!canvas_widget_runtime.canvasWidgetHoverMsgTargetExists(layout, id)) continue;
+                self.canvas_widget_hover_msg_chain[kept] = id;
+                kept += 1;
+            }
+            self.canvas_widget_hover_msg_chain_len = kept;
+        }
+
         pub fn reconcileCanvasWidgetRenderStateAfterScroll(self: *RuntimeView, point: ?geometry.PointF) void {
             const layout = self.widgetLayoutTree();
             if (self.canvas_widget_focused_id != 0 and layout.focusTargetById(self.canvas_widget_focused_id) == null) {
                 self.canvas_widget_focused_id = 0;
                 self.canvas_widget_focus_visible_id = 0;
+                self.canvas_widget_focus_visible_keyboard = false;
             }
             if (self.canvas_widget_focus_visible_id != 0 and (self.canvas_widget_focus_visible_id != self.canvas_widget_focused_id or layout.focusTargetById(self.canvas_widget_focus_visible_id) == null)) {
                 self.canvas_widget_focus_visible_id = 0;
+                self.canvas_widget_focus_visible_keyboard = false;
             }
 
             var next_hovered_id = self.canvas_widget_hovered_id;
@@ -379,12 +447,28 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 // Same hover-target walk as live pointer moves: the wash
                 // and cursor a scroll settles on must match what a real
                 // move to this point would produce.
-                const hit = layout.hoverTargetForHit(layout.hitTestWithTokens(value, self.widget_tokens));
+                const raw = layout.hitTestWithTokens(value, self.widget_tokens);
+                const hit = layout.hoverTargetForHit(raw);
                 next_hovered_id = if (hit) |target| target.id else 0;
                 next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
             } else if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
                 next_hovered_id = 0;
                 next_cursor = .arrow;
+            }
+            // The hover-Msg chain re-resolves whenever a hover-capable
+            // pointer stands, at that pointer's OWN anchor — content
+            // sliding out from under it fires the same leave a real
+            // move off it would, on the wheel path and the point-blind
+            // paths (kinetic, drivers, keyboard) alike. Never the
+            // passed point: that follows `canvas_last_pointer_position`,
+            // which any device updates — a touch drag must not steer
+            // the mouse's containment (on single-pointer hosts the two
+            // agree). Without a proven pointer, entries survive by id
+            // until their widgets leave the tree — the wash's rule.
+            if (self.canvas_widget_hover_pointer_live) {
+                self.setCanvasWidgetHoverMsgChainForHit(layout.hitTestHoverWithTokens(self.canvas_widget_hover_pointer_position, self.widget_tokens));
+            } else {
+                self.pruneCanvasWidgetHoverMsgChain();
             }
 
             var next_pressed_id = self.canvas_widget_pressed_id;
@@ -407,6 +491,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// would leave Escape dead. A focused editable with live IME
         /// composition always wins: Escape cancels the composition and
         /// never dismisses a surface, not even through the fallback.
+        /// With SEVERAL surfaces anchored on one stack (the select
+        /// trigger's focus-shown tooltip floating over its open menu),
+        /// each Escape peels exactly one, topmost (last-mounted) first —
+        /// the tooltip goes, then the menu.
         pub fn dismissCanvasWidgetSurfaceFromEscape(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             if (focused_id != 0) {
                 if (self.canvasWidgetNodeIndexById(focused_id)) |focused_index| {
@@ -424,12 +512,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// transient choice, so moving the keyboard on closes it WITHOUT
         /// committing, exactly like a click outside. Scoped to menu
         /// surfaces only: Tab through a persistent popover's form fields
-        /// must not tear the popover down.
+        /// must not tear the popover down. The lookup scans FOR menu
+        /// kinds rather than kind-checking whatever floats topmost — a
+        /// trigger can anchor a tooltip beside its menu, and the
+        /// focus-visible tooltip shadowing the open menu left Tab unable
+        /// to close it.
         pub fn dismissCanvasWidgetMenuSurfaceForFocusDeparture(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
-            const kind = self.widget_layout_nodes[surface_index].widget.kind;
-            if (kind != .menu_surface and kind != .dropdown_menu) return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .menu) orelse return null;
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
@@ -443,9 +533,16 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
+        /// Outside-click light dismissal targets INTERACTIVE surfaces
+        /// only. A tooltip's whole lifecycle already belongs to the
+        /// intent machine's own causes on any outside down — hover
+        /// leave, focus moving with the click, the press itself — so
+        /// letting the topmost tooltip absorb this gesture would both
+        /// double-cover those and leave the menu beneath it floating
+        /// after the user clicked away.
         pub fn dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId, route: []const canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetSurfaceDismissal {
             const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .interactive) orelse return null;
             if (self.canvasWidgetRouteDescendsFromIndex(route, surface_index)) return null;
             // Clicking the ANCHOR region of an anchored surface (the
             // trigger, or the stack that wraps trigger + surface) is the
@@ -466,6 +563,46 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (surface.semantics.hidden) return null;
             const dirty = self.canvasWidgetDirtyBounds(surface_index, surface.frame) orelse surface.frame;
             self.widget_layout_nodes[surface_index].widget.semantics.hidden = true;
+            // A dismissed anchored tooltip leaves the intent machine too,
+            // or the next visibility stamp would undo the dismissal. No
+            // warm window: Escape is a deliberate dismissal, not the
+            // pointer moving on to the next trigger.
+            if (surface.kind == .tooltip) {
+                if (self.canvas_tooltip_shown_id == surface.id) {
+                    // Covers the focus-shown path too: Escape on the
+                    // focused trigger clears the reason flag with the
+                    // slot, and focus (still on the trigger) does not
+                    // re-reveal — reveals fire only on focus-visible
+                    // TRANSITIONS, so tabbing away and back re-earns it.
+                    // The one non-transition reveal — the adoption
+                    // binding-reconcile, which honors a STANDING
+                    // keyboard ring when a rebuild swaps the tooltip it
+                    // owns — is blocked by consuming that standing
+                    // intent here: when the ring rests on the dismissed
+                    // tooltip's owner, the dismissal spends
+                    // `canvas_widget_focus_visible_keyboard` (its only
+                    // readers are the tooltip reveal gates; the ring
+                    // itself renders from `canvas_widget_focus_visible_id`
+                    // and stays painted), so a rebuild that rekeys the
+                    // tooltip cannot resurrect it one frame after
+                    // Escape. Same design as the keyboard-activation
+                    // dismissal seam in canvas_widget_events.zig.
+                    if (self.canvas_widget_focus_visible_id != 0 and
+                        self.canvas_widget_focus_visible_id == self.canvas_tooltip_shown_owner_id)
+                    {
+                        self.canvas_widget_focus_visible_keyboard = false;
+                    }
+                    self.canvas_tooltip_shown_id = 0;
+                    self.canvas_tooltip_shown_owner_id = 0;
+                    self.canvas_tooltip_transit_deadline_ns = 0;
+                    self.canvas_tooltip_shown_from_focus = false;
+                }
+                if (self.canvas_tooltip_armed_id == surface.id) {
+                    self.canvas_tooltip_armed_id = 0;
+                    self.canvas_tooltip_armed_owner_id = 0;
+                    self.canvas_tooltip_deadline_ns = 0;
+                }
+            }
             if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index)) {
                 // A dismissal that swallows the focus returns it to the
                 // surface's own trigger when the surface is anchored (the
@@ -474,33 +611,91 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 const return_id = self.canvasWidgetAnchorTriggerFocusId(surface_index) orelse 0;
                 self.canvas_widget_focused_id = return_id;
                 self.canvas_widget_focus_visible_id = return_id;
+                // Same rule as the rebuild's focus return: a returned
+                // ring is not a keyboard arrival, so it earns no
+                // reveal — here or at a later layout adoption.
+                self.canvas_widget_focus_visible_keyboard = false;
             }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focus_visible_id, surface_index)) self.canvas_widget_focus_visible_id = 0;
+            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focus_visible_id, surface_index)) {
+                self.canvas_widget_focus_visible_id = 0;
+                self.canvas_widget_focus_visible_keyboard = false;
+            }
             if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_hovered_id, surface_index)) {
                 self.canvas_widget_hovered_id = 0;
                 self.canvas_widget_cursor = .arrow;
             }
             if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_pressed_id, surface_index)) self.canvas_widget_pressed_id = 0;
+            // Hover-Msg listeners inside the dismissed surface owe their
+            // leave edge — the surface is gone from under the pointer;
+            // listeners outside it keep standing (the wash rule).
+            {
+                var kept: usize = 0;
+                for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len]) |id| {
+                    if (self.canvasWidgetIdDescendsFromIndex(id, surface_index)) continue;
+                    self.canvas_widget_hover_msg_chain[kept] = id;
+                    kept += 1;
+                }
+                self.canvas_widget_hover_msg_chain_len = kept;
+            }
 
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
             return .{ .id = surface.id, .dirty = dirty };
         }
 
+        /// Which anchored dismissible surfaces a lookup means to see. A
+        /// widget stack can anchor SEVERAL surfaces at once (a select
+        /// trigger with both its dropdown-menu and a tooltip), so every
+        /// consumer names the population it is really after — grabbing
+        /// "the anchored child" and kind-checking the winner let a
+        /// focus-visible tooltip shadow the open menu mounted before it.
+        pub const CanvasWidgetAnchoredSurfaceScope = enum {
+            /// Every dismissible surface, tooltips included. Escape and
+            /// the automation/accessibility dismiss actions peel
+            /// whatever floats TOPMOST, one surface per gesture.
+            any,
+            /// Surfaces that can hold interaction and keyboard focus —
+            /// everything but tooltips, which are hover chrome the
+            /// intent machine owns: outside-click dismissal and focus
+            /// scoping.
+            interactive,
+            /// Menu surfaces only (`menu_surface`/`dropdown_menu`): the
+            /// open-select keymap and Tab's focus-departure close.
+            menu,
+        };
+
+        fn canvasWidgetAnchoredSurfaceKindInScope(kind: canvas.WidgetKind, comptime scope: CanvasWidgetAnchoredSurfaceScope) bool {
+            if (!canvasWidgetDismissibleSurfaceKind(kind)) return false;
+            return switch (scope) {
+                .any => true,
+                .interactive => kind != .tooltip,
+                .menu => kind == .menu_surface or kind == .dropdown_menu,
+            };
+        }
+
         pub fn canvasWidgetDismissibleSurfaceIndexForTarget(self: *const RuntimeView, target_index: usize) ?usize {
+            return canvasWidgetSurfaceIndexForTargetInScope(self, target_index, .any);
+        }
+
+        /// The nearest in-scope surface up the target's chain: the first
+        /// visible dismissible ancestor, or an in-scope anchored surface
+        /// HANGING OFF an ancestor (the ancestor is its anchor) — Escape
+        /// on the focused trigger, or on the stack wrapping trigger +
+        /// surface, closes its own menu even though the surface is a
+        /// descendant, not an ancestor, of the focus. A visible ancestor
+        /// surface OUTSIDE the scope shields rather than defers: the
+        /// keyboard living in a persistent popover must not reach past
+        /// it to a menu further out.
+        fn canvasWidgetSurfaceIndexForTargetInScope(self: *const RuntimeView, target_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             if (target_index >= self.widget_layout_node_count) return null;
             var current: ?usize = target_index;
             while (current) |index| {
                 if (index >= self.widget_layout_node_count) return null;
                 const widget = self.widget_layout_nodes[index].widget;
-                if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) return index;
-                // An anchored dismissible surface HANGING OFF this
-                // ancestor (the ancestor is its anchor) is the nearest
-                // floating surface: Escape on the focused trigger — or on
-                // the stack wrapping trigger + surface — closes its own
-                // menu even though the surface is a descendant, not an
-                // ancestor, of the focus.
-                if (self.canvasWidgetAnchoredDismissibleChildIndex(index)) |surface_index| return surface_index;
+                if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) {
+                    return if (canvasWidgetAnchoredSurfaceKindInScope(widget.kind, scope)) index else null;
+                }
+                if (canvasWidgetAnchoredChildIndexInScope(self, index, scope)) |surface_index| return surface_index;
                 current = self.widget_layout_nodes[index].parent_index;
             }
             return null;
@@ -509,11 +704,19 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// The topmost (last-mounted) visible anchored dismissible surface
         /// whose anchor is `anchor_index`, or null.
         pub fn canvasWidgetAnchoredDismissibleChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
+            return canvasWidgetAnchoredChildIndexInScope(self, anchor_index, .any);
+        }
+
+        /// The topmost visible anchored child of `anchor_index` whose
+        /// kind is IN SCOPE — the scope filters DURING the scan, so an
+        /// out-of-scope sibling mounted later (the tooltip above the
+        /// menu) never masks the surface the caller asked for.
+        fn canvasWidgetAnchoredChildIndexInScope(self: *const RuntimeView, anchor_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             var found: ?usize = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.parent_index != anchor_index) continue;
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
-                if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) continue;
+                if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (node.widget.semantics.hidden) continue;
                 found = index;
             }
@@ -533,10 +736,164 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         fn canvasWidgetAnchoredMenuChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
-            const surface_index = self.canvasWidgetAnchoredDismissibleChildIndex(anchor_index) orelse return null;
-            const kind = self.widget_layout_nodes[surface_index].widget.kind;
-            if (kind != .menu_surface and kind != .dropdown_menu) return null;
-            return surface_index;
+            return canvasWidgetAnchoredChildIndexInScope(self, anchor_index, .menu);
+        }
+
+        /// The anchored tooltip a trigger owns: the last-mounted anchored
+        /// `.tooltip` child of the trigger itself or of its parent — the
+        /// stack wrapping trigger + tooltip, mirroring the anchored-menu
+        /// ownership shape. Deliberately IGNORES the hidden flag: the
+        /// runtime itself stamps non-shown anchored tooltips hidden, and
+        /// arming must find them to show them.
+        pub fn canvasWidgetOwnedTooltipIndex(self: *const RuntimeView, trigger_index: usize) ?usize {
+            return canvasWidgetOwnedTooltipIndexInNodes(self.widget_layout_nodes[0..self.widget_layout_node_count], trigger_index);
+        }
+
+        /// The ID of the anchored tooltip `owner_id` owns in the
+        /// CURRENT retained tree, or 0 (no such owner / no owned
+        /// tooltip). The layout-adoption reconcile compares this value
+        /// across a rebuild — captured against the outgoing tree in
+        /// `setCanvasWidgetLayout`, re-read against the adopted one —
+        /// to see a binding that changed beneath a STABLE owner: a
+        /// tooltip mounted, replaced, rekeyed, or reparented under a
+        /// trigger whose own ID survived produces no hover or focus
+        /// delta, so only this comparison can arm (or reveal) it.
+        pub fn canvasWidgetOwnedTooltipIdForOwner(self: *const RuntimeView, owner_id: canvas.ObjectId) canvas.ObjectId {
+            if (owner_id == 0) return 0;
+            const owner_index = self.canvasWidgetNodeIndexById(owner_id) orelse return 0;
+            const tooltip_index = self.canvasWidgetOwnedTooltipIndex(owner_index) orelse return 0;
+            return self.widget_layout_nodes[tooltip_index].widget.id;
+        }
+
+        /// Stamp hover-intent visibility onto every ANCHORED tooltip
+        /// node: hidden unless it is the intent machine's shown tooltip.
+        /// Anchored tooltips are runtime-owned chrome, so the stamp
+        /// overrides authored visibility; static (non-anchored) tooltips
+        /// are never touched. Runs at tree adoption (each rebuild) and
+        /// after every intent transition.
+        pub fn applyCanvasTooltipVisibility(self: *RuntimeView) void {
+            self.applyCanvasTooltipVisibilityToNodes(self.widget_layout_nodes[0..self.widget_layout_node_count]);
+        }
+
+        /// The same stamp over an arbitrary node slice, against the
+        /// view's LIVE shown register.
+        pub fn applyCanvasTooltipVisibilityToNodes(self: *const RuntimeView, nodes: []canvas.WidgetLayoutNode) void {
+            applyCanvasTooltipVisibilityToNodesForShownId(self, nodes, self.canvas_tooltip_shown_id);
+        }
+
+        /// The stamp against an EXPLICIT shown id. The rebuild path
+        /// normalizes the RECONCILED scratch tree with it BEFORE diffing
+        /// against the retained tree (see `setCanvasWidgetLayout`),
+        /// passing the PROSPECTIVE prune verdict from
+        /// `canvasTooltipShownIdSurvivingLayout` rather than mutating
+        /// the live registers first: the retained side carries the
+        /// intent machine's hidden stamps while the source declares
+        /// authored visibility, so diffing them un-normalized reported
+        /// the runtime's own stamp as a spurious visibility
+        /// invalidation on every rebuild that contained a hidden
+        /// anchored tooltip — and mutating the registers before the
+        /// fallible adoption steps left a FAILED adoption with the old
+        /// tree stamped visible and cleared registers (an unhideable
+        /// tooltip).
+        pub fn applyCanvasTooltipVisibilityToNodesForShownId(self: *const RuntimeView, nodes: []canvas.WidgetLayoutNode, shown_id: canvas.ObjectId) void {
+            _ = self;
+            for (nodes) |*node| {
+                if (node.widget.kind != .tooltip) continue;
+                if (!canvas.widgetIsAnchored(node.widget)) continue;
+                node.widget.semantics.hidden = node.widget.id == 0 or node.widget.id != shown_id;
+            }
+        }
+
+        /// Drop intent state whose tooltip OR owning trigger left the
+        /// tree on a rebuild — the interaction-id pruning policy
+        /// hovered/pressed ids follow, applied to both ends of the
+        /// tooltip binding. The tooltip node surviving is not enough:
+        /// a trigger that vanished, was rekeyed (a new id is a new
+        /// widget), re-parented away from its tooltip, or disabled
+        /// (disabled widgets leave both hover and focus routing, so
+        /// nothing could ever hide the tooltip again) invalidates the
+        /// slot, and the pruned slot re-stamps hidden through the
+        /// `applyCanvasTooltipVisibility` call that follows adoption.
+        /// The warm window survives rebuilds that keep the bindings
+        /// alive (warmth belongs to the pointer, not to any one
+        /// widget), but a pruned binding closes it: instant re-shows
+        /// earned against widgets the rebuild replaced are not earned
+        /// at all.
+        pub fn pruneCanvasTooltipIntent(self: *RuntimeView) void {
+            self.pruneCanvasTooltipIntentForLayout(self.widgetLayoutTree());
+        }
+
+        /// The same prune against an arbitrary layout. Runs inside
+        /// `copyWidgetLayoutTree` against the freshly retained tree —
+        /// AFTER every fallible adoption step has succeeded, which is
+        /// what keeps the registers transactional: the rebuild path's
+        /// pre-diff stamp reads only the VERDICT
+        /// (`canvasTooltipShownIdSurvivingLayout`) so a failed adoption
+        /// leaves both the old tree and the registers that can hide its
+        /// tooltip intact.
+        pub fn pruneCanvasTooltipIntentForLayout(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
+            if (self.canvas_tooltip_armed_id != 0 and !canvasTooltipIntentBindingAlive(layout, self.canvas_tooltip_armed_id, self.canvas_tooltip_armed_owner_id, false)) {
+                self.canvas_tooltip_armed_id = 0;
+                self.canvas_tooltip_armed_owner_id = 0;
+                self.canvas_tooltip_deadline_ns = 0;
+                self.canvas_tooltip_warm_until_ns = 0;
+            }
+            if (self.canvas_tooltip_shown_id != 0 and !canvasTooltipIntentBindingAlive(layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) {
+                self.canvas_tooltip_shown_id = 0;
+                self.canvas_tooltip_shown_owner_id = 0;
+                self.canvas_tooltip_shown_from_focus = false;
+                self.canvas_tooltip_warm_until_ns = 0;
+                self.canvas_tooltip_transit_deadline_ns = 0;
+            }
+        }
+
+        /// The shown-tooltip prune VERDICT against a prospective
+        /// layout, WITHOUT the register mutation: the shown id that
+        /// would survive adopting `layout`, or 0 when the rebuild kills
+        /// the binding. `setCanvasWidgetLayout` stamps the reconciled
+        /// scratch tree with this ahead of the diff (so the diff
+        /// reports the hide a binding-breaking rebuild really causes,
+        /// and an unchanged rebuild diffs clean) while the live
+        /// registers stay untouched until the fallible adoption steps —
+        /// the diff itself and the retained-pool validation/copy —
+        /// succeed; `copyWidgetLayoutTree`'s own prune then applies the
+        /// same verdict for real. A failed adoption therefore leaves
+        /// the OLD tree with the registers that own its stamps: the
+        /// tooltip that is still painted is still hideable.
+        pub fn canvasTooltipShownIdSurvivingLayout(self: *const RuntimeView, layout: canvas.WidgetLayoutTree) canvas.ObjectId {
+            if (self.canvas_tooltip_shown_id == 0) return 0;
+            if (!canvasTooltipIntentBindingAlive(layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) return 0;
+            return self.canvas_tooltip_shown_id;
+        }
+
+        /// Both ends of a tooltip intent slot are still live: the
+        /// tooltip node exists and is anchored, its recorded owner
+        /// still exists AND still resolves to this very tooltip
+        /// (`canvasWidgetOwnedTooltipIndex`, the inverse of the arming
+        /// walk), and the owner remains reachable by the routing that
+        /// earned the slot — focus targeting for focus-shown tooltips,
+        /// hover/interaction targeting for pointer ones. Both
+        /// predicates already reject disabled and hidden widgets, so
+        /// "the trigger can no longer be left" implies "the tooltip
+        /// must not stay".
+        fn canvasTooltipIntentBindingAlive(layout: canvas.WidgetLayoutTree, tooltip_id: canvas.ObjectId, owner_id: canvas.ObjectId, from_focus: bool) bool {
+            const tooltip_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, tooltip_id) orelse return false;
+            const tooltip_widget = layout.nodes[tooltip_index].widget;
+            if (tooltip_widget.kind != .tooltip or !canvas.widgetIsAnchored(tooltip_widget)) return false;
+            const owner_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, owner_id) orelse return false;
+            const owned_index = canvasWidgetOwnedTooltipIndexInNodes(layout.nodes, owner_index) orelse return false;
+            if (owned_index != tooltip_index) return false;
+            if (from_focus) return layout.focusTargetById(owner_id) != null;
+            return canvasWidgetInteractionTargetExists(layout, owner_id);
+        }
+
+        /// True while the intent machine needs presented frames to keep
+        /// coming: an armed show delay and a running transit grace both
+        /// fire only on a frame timestamp, so the frame pump
+        /// re-invalidates until they resolve (the render-animation
+        /// pump's policy exactly).
+        pub fn canvasTooltipIntentArmed(self: *const RuntimeView) bool {
+            return self.canvas_tooltip_armed_id != 0 or self.canvas_tooltip_transit_deadline_ns != 0;
         }
 
         /// Keyboard entry point into an anchored menu surface: the marked
@@ -611,9 +968,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return false;
         }
 
+        /// Tab cycling scopes to the INTERACTIVE surface around the
+        /// focus: a tooltip can never hold a focus target, so scoping to
+        /// one (the trigger's visible tooltip shadowing its popover or
+        /// menu) would always come up empty and spill the keyboard out
+        /// of the trap into the page's global walk.
         pub fn canvasWidgetScopedFocusTarget(self: *const RuntimeView, current_id: canvas.ObjectId, direction: canvas.WidgetFocusDirection) ?canvas.WidgetFocusTarget {
             const current_index = self.canvasWidgetNodeIndexById(current_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(current_index) orelse return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, current_index, .interactive) orelse return null;
             return self.canvasWidgetFocusTargetInScope(surface_index, current_index, direction);
         }
 
@@ -701,14 +1063,44 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             };
             return switch (self.widget_layout_nodes[index].widget.kind) {
                 .grid, .scroll_view, .list, .data_grid, .table => switch (direction) {
-                    .increment => "pagedown",
-                    .decrement => "pageup",
+                    // Page keys step the vertical axis on every keymap
+                    // except the horizontal-only one (which mirrors the
+                    // whole map sideways) — so a BOTH-axes region whose
+                    // live axis is horizontal needs the both-keymap's
+                    // horizontal keys instead, or the assistive step
+                    // would page a zero-range vertical axis and report
+                    // success without moving.
+                    .increment => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowright" else "pagedown",
+                    .decrement => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowleft" else "pageup",
                 },
                 else => switch (direction) {
                     .increment => "arrowright",
                     .decrement => "arrowleft",
                 },
             };
+        }
+
+        /// Whether a BOTH-axes scroll region's assistive step must take
+        /// the horizontal keys: the vertical axis has no range while
+        /// the horizontal one does. The extents come from the SEMANTICS
+        /// metrics — the same derivation the assistive node reports its
+        /// primary axis through, concealed-disclosure and anchored
+        /// exclusions included — so the key an increment synthesizes
+        /// can never disagree with the axis the node advertised.
+        /// Vertical-capable regions with vertical range — and
+        /// horizontal-only regions, whose keymap already maps the page
+        /// keys sideways — keep the page keys.
+        fn canvasWidgetStepAxisHorizontal(self: *const RuntimeView, index: usize) bool {
+            const node = self.widget_layout_nodes[index];
+            if (node.widget.kind != .scroll_view or node.widget.scroll_axes != .both) return false;
+            const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+            if (viewport.isEmpty()) return false;
+            const layout = self.widgetLayoutTree();
+            const vertical = canvas.widgetScrollAxisMetrics(layout, index, canvas.virtualWidgetScrollContentExtent, .vertical, viewport);
+            const horizontal = canvas.widgetScrollAxisMetrics(layout, index, canvas.virtualWidgetScrollContentExtent, .horizontal, viewport);
+            const vertical_range = vertical.present and vertical.content_extent > vertical.viewport_extent;
+            const horizontal_range = horizontal.present and horizontal.content_extent > horizontal.viewport_extent;
+            return !vertical_range and horizontal_range;
         }
 
         pub fn refreshCanvasWidgetSemantics(self: *RuntimeView) anyerror!void {
@@ -840,4 +1232,41 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.widget_span_entries[start..end];
         }
     };
+}
+
+/// Node index by widget id over a bare node slice — the retained
+/// tree's `canvasWidgetNodeIndexById` generalized so the tooltip
+/// binding checks can run against the RECONCILED scratch tree before
+/// adoption (the pre-diff visibility normalization) exactly as they
+/// run against the retained one.
+fn canvasWidgetNodeIndexByIdInNodes(nodes: []const canvas.WidgetLayoutNode, id: canvas.ObjectId) ?usize {
+    if (id == 0) return null;
+    for (nodes, 0..) |node, index| {
+        if (node.widget.id == id) return index;
+    }
+    return null;
+}
+
+/// The anchored tooltip a trigger owns, over a bare node slice: the
+/// last-mounted anchored `.tooltip` child of the trigger itself or of
+/// its parent — the stack-wraps-trigger-plus-tooltip ownership shape,
+/// mirroring the anchored-menu walk. Deliberately IGNORES the hidden
+/// flag: the runtime itself stamps non-shown anchored tooltips hidden,
+/// and arming must find them to show them.
+fn canvasWidgetOwnedTooltipIndexInNodes(nodes: []const canvas.WidgetLayoutNode, trigger_index: usize) ?usize {
+    if (trigger_index >= nodes.len) return null;
+    if (canvasWidgetAnchoredTooltipChildIndexInNodes(nodes, trigger_index)) |tooltip_index| return tooltip_index;
+    const parent_index = nodes[trigger_index].parent_index orelse return null;
+    return canvasWidgetAnchoredTooltipChildIndexInNodes(nodes, parent_index);
+}
+
+fn canvasWidgetAnchoredTooltipChildIndexInNodes(nodes: []const canvas.WidgetLayoutNode, anchor_index: usize) ?usize {
+    var found: ?usize = null;
+    for (nodes, 0..) |node, index| {
+        if (node.parent_index != anchor_index) continue;
+        if (node.widget.kind != .tooltip) continue;
+        if (!canvas.widgetIsAnchored(node.widget)) continue;
+        found = index;
+    }
+    return found;
 }

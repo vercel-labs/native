@@ -4,6 +4,7 @@ const canvas = @import("root.zig");
 const text_spans = @import("text_spans.zig");
 const text_metrics = @import("text_metrics.zig");
 const ui_model = @import("ui.zig");
+const widget_text_select = @import("widget_text_select.zig");
 
 const testing = std.testing;
 const TextSpan = text_spans.TextSpan;
@@ -75,6 +76,28 @@ test "mono spans measure and draw with the mono font id" {
     try testing.expectEqual(canvas.default_mono_font_id, result.runs[1].font_id);
     // Mono estimator advance: 0.6em per scalar.
     try testing.expectApproxEqAbs(@as(f32, 9 * 14 * 0.6), result.runs[1].width, 0.01);
+}
+
+test "mono spans preserve source indentation after line breaks" {
+    const spans = [_]TextSpan{
+        .{ .text = "fn main() {\n    ", .monospace = true },
+        .{ .text = "return", .monospace = true, .color = .info },
+        .{ .text = ";\n}", .monospace = true },
+    };
+    var runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const result = layout(&spans, .{ .size = 14, .max_width = 10_000 }, &runs);
+
+    var indent: ?TextSpanRun = null;
+    var keyword: ?TextSpanRun = null;
+    for (result.runs) |run| {
+        if (run.line_index == 1 and std.mem.eql(u8, run.text, "    ")) indent = run;
+        if (run.line_index == 1 and std.mem.eql(u8, run.text, "return")) keyword = run;
+    }
+    try testing.expect(indent != null);
+    try testing.expect(keyword != null);
+    try testing.expectEqual(@as(f32, 0), indent.?.x);
+    try testing.expect(keyword.?.x > 0);
+    try testing.expectApproxEqAbs(indent.?.width, keyword.?.x, 0.01);
 }
 
 const FakeMeasure = struct {
@@ -196,6 +219,112 @@ test "an oversized word cluster-wraps instead of overflowing" {
         total += run.text.len;
     }
     try testing.expectEqual(@as(usize, 20), total);
+}
+
+test "a later visual-line page retains an over-capacity wrapped paragraph" {
+    const spans = [_]TextSpan{.{ .text = "a" ** 140 }};
+    const options = text_spans.TextSpanLayoutOptions{ .size = 14, .max_width = 1 };
+    var first_runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const first = layout(&spans, options, &first_runs);
+
+    try testing.expectEqual(@as(usize, 140), first.line_count);
+    try testing.expectEqual(text_spans.max_text_span_lines_per_paragraph, first.runs.len);
+    try testing.expect(first.truncated);
+
+    var later_runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const later = text_spans.layoutTextSpansFromLine(
+        &spans,
+        options,
+        text_spans.max_text_span_lines_per_paragraph,
+        &later_runs,
+    );
+    try testing.expectEqual(first.line_count, later.line_count);
+    try testing.expectEqual(first.size.width, later.size.width);
+    try testing.expectEqual(first.size.height, later.size.height);
+    try testing.expectEqual(@as(usize, 12), later.runs.len);
+    try testing.expectEqual(@as(usize, 128), later.runs[0].line_index);
+    try testing.expectEqual(@as(usize, 139), later.runs[later.runs.len - 1].line_index);
+    try testing.expect(!later.truncated);
+}
+
+const VariableClusterMeasure = struct {
+    fn advance(text: []const u8) f32 {
+        return switch (text[0]) {
+            'a' => 3,
+            0xc3 => 10, // é
+            0xcc => 0, // combining acute: continuation of the é cluster
+            0xe7 => 20, // 界
+            'z' => 5,
+            'q' => 7,
+            else => 1,
+        };
+    }
+
+    fn measure(_: ?*anyopaque, _: canvas.FontId, _: f32, text: []const u8) f32 {
+        var width: f32 = 0;
+        var cursor: usize = 0;
+        while (cursor < text.len) {
+            width += advance(text[cursor..]);
+            const sequence_len = std.unicode.utf8ByteSequenceLength(text[cursor]) catch 1;
+            cursor += @min(sequence_len, text.len - cursor);
+        }
+        return width;
+    }
+
+    fn measureAdvances(
+        _: ?*anyopaque,
+        _: canvas.FontId,
+        _: f32,
+        text: []const u8,
+        advances: []f32,
+    ) bool {
+        @memset(advances, 0);
+        var cursor: usize = 0;
+        while (cursor < text.len) {
+            advances[cursor] = advance(text[cursor..]);
+            const sequence_len = std.unicode.utf8ByteSequenceLength(text[cursor]) catch 1;
+            cursor += @min(sequence_len, text.len - cursor);
+        }
+        return true;
+    }
+};
+
+test "visible run slicing follows measured cluster advances" {
+    const source = "a\xc3\xa9\xcc\x81\xe7\x95\x8czq";
+    const spans = [_]TextSpan{.{ .text = source }};
+    const batched_provider = text_metrics.TextMeasureProvider{
+        .measure_fn = VariableClusterMeasure.measure,
+        .measure_advances_fn = VariableClusterMeasure.measureAdvances,
+    };
+    const unbatched_provider = text_metrics.TextMeasureProvider{
+        .measure_fn = VariableClusterMeasure.measure,
+    };
+    var options = text_spans.TextSpanLayoutOptions{
+        .size = 14,
+        .max_width = 10_000,
+        .measure = &batched_provider,
+    };
+    var runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const result = layout(&spans, options, &runs);
+    try testing.expectEqual(@as(usize, 1), result.runs.len);
+
+    // The viewport begins inside 界. Keep the preceding é+combining-mark
+    // cluster and the following z guard, but neither the leading a nor q.
+    for ([_]*const text_metrics.TextMeasureProvider{
+        &batched_provider,
+        &unbatched_provider,
+    }) |provider| {
+        options.measure = provider;
+        const visible = text_spans.textSpanRunVisibleSlice(
+            spans[0],
+            result.runs[0],
+            options,
+            14,
+            20,
+        ).?;
+        try testing.expectEqualStrings("\xc3\xa9\xcc\x81\xe7\x95\x8cz", visible.text);
+        try testing.expectEqual(@as(f32, 3), visible.x);
+    }
 }
 
 test "center alignment shifts whole lines" {
@@ -505,6 +634,131 @@ test "span selection maps points to paragraph offsets and back to rects" {
 
     // A collapsed range selects nothing.
     try testing.expectEqual(@as(usize, 0), text_spans.textSpanSelectionRects(paragraph, &spans, options, .{ .start = 3, .end = 3 }, &rects).len);
+}
+
+test "preformatted span hit mapping preserves unpainted source whitespace" {
+    const trailing = "value \t\n";
+    const trailing_spans = [_]TextSpan{.{
+        .text = trailing,
+        .monospace = true,
+        .color = .syntax_plain,
+    }};
+    const options = text_spans.TextSpanLayoutOptions{ .size = 14, .max_width = 200 };
+    try testing.expectEqual(
+        trailing.len,
+        text_spans.textSpanOffsetForPoint(
+            trailing,
+            &trailing_spans,
+            options,
+            geometry.PointF.init(500, 2),
+        ).?,
+    );
+
+    const whitespace = "   \n\t";
+    const whitespace_spans = [_]TextSpan{.{
+        .text = whitespace,
+        .monospace = true,
+        .color = .syntax_plain,
+    }};
+    try testing.expectEqual(
+        @as(usize, 0),
+        text_spans.textSpanOffsetForPoint(
+            whitespace,
+            &whitespace_spans,
+            options,
+            geometry.PointF.init(-1, 2),
+        ).?,
+    );
+    try testing.expectEqual(
+        whitespace.len,
+        text_spans.textSpanOffsetForPoint(
+            whitespace,
+            &whitespace_spans,
+            options,
+            geometry.PointF.init(500, 500),
+        ).?,
+    );
+}
+
+test "span hit mapping and selection page beyond the first 128 visual lines" {
+    const paragraph = "a" ** 140;
+    const spans = [_]TextSpan{.{ .text = paragraph, .monospace = true }};
+    const options = text_spans.TextSpanLayoutOptions{ .size = 14, .max_width = 1 };
+    var runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const layout_result = layout(&spans, options, &runs);
+    try testing.expectEqual(@as(usize, 140), layout_result.line_count);
+
+    const later_line: usize = 132;
+    const y = (@as(f32, @floatFromInt(later_line)) + 0.5) * layout_result.line_height;
+    try testing.expectEqual(
+        later_line,
+        text_spans.textSpanOffsetForPoint(
+            paragraph,
+            &spans,
+            options,
+            geometry.PointF.init(-1, y),
+        ).?,
+    );
+
+    var rects: [16]canvas.TextSelectionRect = undefined;
+    const selection = text_spans.textSpanSelectionRects(
+        paragraph,
+        &spans,
+        options,
+        .{ .start = later_line, .end = paragraph.len },
+        &rects,
+    );
+    try testing.expectEqual(paragraph.len - later_line, selection.len);
+    try testing.expectEqual(later_line, selection[0].range.start);
+    try testing.expectEqual(
+        @as(f32, @floatFromInt(later_line)) * layout_result.line_height,
+        selection[0].rect.y,
+    );
+    try testing.expectEqual(paragraph.len, selection[selection.len - 1].range.end);
+
+    // The renderer's fixed rect budget folds every remaining line,
+    // including the second layout page, into its final highlight.
+    var bounded_rects: [widget_text_select.max_static_text_selection_rects]canvas.TextSelectionRect = undefined;
+    const bounded = text_spans.textSpanSelectionRects(
+        paragraph,
+        &spans,
+        options,
+        .{ .start = 0, .end = paragraph.len },
+        &bounded_rects,
+    );
+    try testing.expectEqual(bounded_rects.len, bounded.len);
+    try testing.expectEqual(@as(usize, 63), bounded[bounded.len - 1].range.start);
+    try testing.expectEqual(paragraph.len, bounded[bounded.len - 1].range.end);
+    try testing.expectApproxEqAbs(@as(f32, 0), bounded[bounded.len - 1].rect.x, 0.001);
+    try testing.expectApproxEqAbs(63 * layout_result.line_height, bounded[bounded.len - 1].rect.y, 0.001);
+    try testing.expectApproxEqAbs(
+        (paragraph.len - 63) * layout_result.line_height,
+        bounded[bounded.len - 1].rect.height,
+        0.001,
+    );
+}
+
+test "span selection crosses an empty interior visual-line page" {
+    const paragraph = "a\n" ++
+        ("\n" ** (text_spans.max_text_span_lines_per_paragraph * 2)) ++
+        "b";
+    const spans = [_]TextSpan{.{ .text = paragraph, .monospace = true }};
+    const options = text_spans.TextSpanLayoutOptions{ .size = 14, .max_width = 100 };
+
+    var rects: [4]canvas.TextSelectionRect = undefined;
+    const selection = text_spans.textSpanSelectionRects(
+        paragraph,
+        &spans,
+        options,
+        .{ .start = 0, .end = paragraph.len },
+        &rects,
+    );
+
+    try testing.expectEqual(@as(usize, 2), selection.len);
+    try testing.expectEqual(@as(usize, 0), selection[0].range.start);
+    try testing.expectEqual(@as(usize, 1), selection[0].range.end);
+    try testing.expectEqual(paragraph.len - 1, selection[1].range.start);
+    try testing.expectEqual(paragraph.len, selection[1].range.end);
 }
 
 test "span selection degrades to unsupported when spans alias other storage" {

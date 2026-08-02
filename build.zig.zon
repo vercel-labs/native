@@ -3,6 +3,13 @@
     .fingerprint = 0xc309966142f33087,
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
+    // No dependencies. The terminal emulator (libghostty-vt) is
+    // deliberately NOT pinned here: a pin in this file is materialized
+    // into every consumer's package directory even when lazy and
+    // unused. Apps that want live `<terminal>` sessions pin it in their
+    // own build.zig.zon and ask for it with
+    // `addAppArtifacts(.{ .terminal_sessions = true })` — see
+    // examples/workbench, which also owns that path's test coverage.
     .dependencies = .{},
     .paths = .{
         "README.md",
@@ -16,6 +23,7 @@
         "build.zig.zon",
         "docs",
         "examples",
+        "packages",
         "src",
         "templates",
         "tests",

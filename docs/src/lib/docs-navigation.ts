@@ -1,4 +1,5 @@
 import { componentPages } from "./components-pages";
+import { docsPath } from "./site";
 
 export type NavItem = {
   name: string;
@@ -10,7 +11,7 @@ export type NavSection = {
   items: NavItem[];
 };
 
-export const navSections: NavSection[] = [
+const unprefixedNavSections: NavSection[] = [
   {
     title: "Get Started",
     items: [
@@ -25,9 +26,14 @@ export const navSections: NavSection[] = [
     title: "Core Concepts",
     items: [
       { name: "App Model", href: "/app-model" },
+      { name: "TypeScript Cores", href: "/typescript" },
+      { name: "Where Packages Go", href: "/typescript/packages" },
       { name: "Native UI", href: "/native-ui" },
+      { name: "Dynamic Images", href: "/dynamic-images" },
+      { name: "Terminal", href: "/terminal" },
       { name: "State & Data Flow", href: "/state" },
       { name: "Theming", href: "/theming" },
+      { name: "Fonts", href: "/fonts" },
       { name: "Building Components", href: "/building-components" },
     ],
   },
@@ -73,7 +79,10 @@ export const navSections: NavSection[] = [
   },
   {
     title: "Mobile & Embedding",
-    items: [{ name: "Embedded App", href: "/embed" }],
+    items: [
+      { name: "Embedded App", href: "/embed" },
+      { name: "Media Producers", href: "/media-producers" },
+    ],
   },
   {
     title: "Web Content",
@@ -95,9 +104,36 @@ export const navSections: NavSection[] = [
       { name: "Platform Support", href: "/platform-support" },
       { name: "Debugging", href: "/debugging" },
       { name: "native doctor", href: "/debugging/doctor" },
+      { name: "Zig 0.16 Notes", href: "/zig" },
       { name: "Extensions", href: "/extensions" },
     ],
   },
 ];
 
-export const allDocsPages: NavItem[] = navSections.flatMap((s) => s.items);
+// Canonical pages that remain searchable and model-discoverable without
+// taking a permanent slot in the human navigation. The built-in overview is
+// a compatibility page that points readers into the component catalog.
+const unprefixedAdditionalDocsSections: NavSection[] = [
+  {
+    title: "Additional Guides",
+    items: [{ name: "Built-in Components", href: "/built-in-components" }],
+  },
+];
+
+function withDocsPrefix(sections: NavSection[]): NavSection[] {
+  return sections.map((section) => ({
+    ...section,
+    items: section.items.map((item) => ({ ...item, href: `${docsPath}${item.href}` })),
+  }));
+}
+
+/** All public docs links use the canonical /docs route space. */
+export const navSections: NavSection[] = withDocsPrefix(unprefixedNavSections);
+
+/** Complete canonical inventory for search, sitemap, and model discovery. */
+export const docsIndexSections: NavSection[] = [
+  ...navSections,
+  ...withDocsPrefix(unprefixedAdditionalDocsSections),
+];
+
+export const allDocsPages: NavItem[] = docsIndexSections.flatMap((s) => s.items);

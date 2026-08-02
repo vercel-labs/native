@@ -2,7 +2,8 @@
 
 import Image from "next/image";
 import { useTheme } from "next-themes";
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { LivePreview, PointerKind, type ThemePack, loadPreviewEngine } from "@/lib/live-preview";
 
 /**
@@ -158,7 +159,6 @@ export function ComponentPreviewLive({
   const [pack, setPack] = useState<ThemePack>("house");
   const packRef = useRef(pack);
   packRef.current = pack;
-  const packTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   /** Mirror the engine's cursor channel onto the canvas's CSS cursor. */
   const syncCursor = useCallback(() => {
@@ -423,52 +423,22 @@ export function ComponentPreviewLive({
         </span>
         {interactive ? (
           <div className="ml-auto flex items-center gap-1.5 pl-3">
-            {/* Theme-pack toggle, a titlebar control: the quiet
-                text-tab register (active foreground, inactive muted,
-                thin divider) in the same pill chrome as the badge.
-                Always visible once hydrated — activation is
-                visibility-driven, and a choice made before the engine
-                instance exists is carried by packRef and applied before
-                the first paint, so the affordance is honest even on the
-                brief static frame. Hidden only pre-hydration (no-JS
-                readers never meet a dead control). */}
-            <div
-              role="tablist"
-              aria-label="Preview theme pack"
-              className="inline-flex items-center gap-1.5 rounded-full border border-gray-alpha-400 bg-background-100/90 px-2 py-0.5 text-[11px] leading-4"
-            >
-              {pack_tabs.map((tab, index) => (
-                <Fragment key={tab.pack}>
-                  {index > 0 && <span aria-hidden className="h-3 w-px bg-gray-alpha-400" />}
-                  <button
-                    ref={(el) => {
-                      packTabRefs.current[index] = el;
-                    }}
-                    role="tab"
-                    aria-selected={pack === tab.pack}
-                    // Roving tabindex: one tab stop for the whole
-                    // toggle, arrows move within it — so tabbing past
-                    // the titlebar still reaches the canvas in one
-                    // step.
-                    tabIndex={pack === tab.pack ? 0 : -1}
-                    onClick={() => setPack(tab.pack)}
-                    onKeyDown={(event) => {
-                      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-                      event.preventDefault();
-                      const step = event.key === "ArrowRight" ? 1 : -1;
-                      const next = (index + step + pack_tabs.length) % pack_tabs.length;
-                      setPack(pack_tabs[next].pack);
-                      packTabRefs.current[next]?.focus();
-                    }}
-                    className={`transition-colors ${
-                      pack === tab.pack ? "text-gray-1000" : "text-gray-700 hover:text-gray-1000"
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                </Fragment>
-              ))}
-            </div>
+            {/* Theme-pack toggle, a titlebar control: the shared
+                SegmentedControl (this titlebar is where its register
+                was established). Always visible once hydrated —
+                activation is visibility-driven, and a choice made
+                before the engine instance exists is carried by packRef
+                and applied before the first paint, so the affordance
+                is honest even on the brief static frame. Hidden only
+                pre-hydration (no-JS readers never meet a dead
+                control). Roving tabindex means tabbing past the
+                titlebar still reaches the canvas in one step. */}
+            <SegmentedControl
+              label="Preview theme pack"
+              tabs={pack_tabs.map((tab) => ({ key: tab.pack, label: tab.label }))}
+              activeIndex={pack_tabs.findIndex((tab) => tab.pack === pack)}
+              onSelect={(index) => setPack(pack_tabs[index].pack)}
+            />
             <span
               aria-hidden
               className="pointer-events-none hidden items-center gap-1.5 rounded-full border border-gray-alpha-400 bg-background-100/90 px-2 py-0.5 text-[11px] leading-4 text-gray-900 sm:inline-flex"

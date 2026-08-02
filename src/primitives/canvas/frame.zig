@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const render_model = @import("render.zig");
@@ -598,7 +599,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
             storage.text_layout_cache_actions,
         );
 
-    const full_repaint = options.full_repaint or previous == null;
+    var full_repaint = options.full_repaint or previous == null;
     var changes: []const DiffChange = storage.changes[0..0];
     var dirty_bounds: ?geometry.RectF = null;
 
@@ -606,7 +607,26 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
     } else {
         changes = try DisplayList.diff(previous.?, next, storage.changes);
-        dirty_bounds = clippedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.surface_size);
+        // Incremental damage carries a one-device-pixel AA bleed
+        // allowance and lands snapped outward on the device-pixel grid
+        // (see the runtime planner's dirty finalization): the bleed
+        // covers the up-to-a-device-pixel ink past a command's bounds,
+        // and the snap keeps the cull region identical to the cleared
+        // pixels so a fractional dirty edge cannot erase an unchanged
+        // neighbor's boundary-pixel coverage without redrawing it.
+        dirty_bounds = bleedAlignedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.scale, 1, options.surface_size);
+        if (incrementalDamageIntersectsBackdropBlur(render_plan.commands, dirty_bounds)) {
+            // A backdrop blur reads pixels around its output from the
+            // destination as it existed at this point in draw order.
+            // Retained pixels outside an incremental scissor already
+            // contain the PREVIOUS frame's blur and later commands, so
+            // they cannot supply that pre-blur backdrop. Reconstruct it
+            // by replaying the complete list whenever damage reaches a
+            // blur's resolved read footprint.
+            full_repaint = true;
+            changes = storage.changes[0..0];
+            dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
+        }
     }
 
     return .{
@@ -641,12 +661,160 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     };
 }
 
+/// Whether incremental damage reaches a backdrop blur's resolved read
+/// footprint. Replaying only the dirty output is not sufficient: pixels
+/// outside the scissor hold the previous fully composited frame rather
+/// than the backdrop at the blur command's position in draw order.
+pub fn incrementalDamageIntersectsBackdropBlur(commands: []const RenderCommand, dirty_bounds: ?geometry.RectF) bool {
+    const dirty = dirty_bounds orelse return false;
+    const normalized_dirty = dirty.normalized();
+    for (commands) |command| {
+        switch (command.command) {
+            .blur => |blur| {
+                if (!(blur.radius > 0) or !(command.opacity > 0)) continue;
+                var output = command.transform.transformRect(blur.rect.normalized());
+                if (command.clip) |clip| output = geometry.RectF.intersection(output, clip.normalized());
+                if (output.isEmpty()) continue;
+
+                // Do not use `command.bounds` here: the render planner
+                // intersects that inflated bound with the output clip,
+                // while a clipped output pixel still samples backdrop
+                // pixels up to `radius` OUTSIDE the clip. Transforming
+                // the full local read footprint is a conservative AABB
+                // for every sample the surviving output can consume.
+                const read_footprint = command.transform.transformRect(
+                    blur.rect.normalized().inflate(geometry.InsetsF.all(@max(0, blur.radius))),
+                ).normalized();
+                if (read_footprint.intersects(normalized_dirty)) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn dirtyBoundsFromChanges(changes: []const DiffChange) ?geometry.RectF {
     var result: ?geometry.RectF = null;
     for (changes) |change| {
         result = unionOptionalBounds(result, change.dirty_bounds);
     }
     return result;
+}
+
+/// Bleed-and-snap for incremental damage, the twin of the runtime's
+/// `bleedAlignedCanvasDirtyBounds` (see that doc comment): whole device
+/// pixels of AA bleed folded in on integer device boundaries, edges
+/// chosen so the STORED rect's f32 round trip lands exactly on them.
+fn bleedAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32, surface_size: geometry.SizeF) ?geometry.RectF {
+    const dirty = bounds orelse return null;
+    const normalized = dirty.normalized();
+    const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
+    // Surface clipping happens on the integer device boundaries, never
+    // on the finished rect (see the runtime twin's doc comment).
+    const x_boundaries = surfaceClampedDirtyBoundaries(
+        @floor(normalized.minX() * device) - bleed_pixels,
+        @ceil(normalized.maxX() * device) + bleed_pixels,
+        surface_size.width,
+        device,
+    ) orelse return null;
+    const y_boundaries = surfaceClampedDirtyBoundaries(
+        @floor(normalized.minY() * device) - bleed_pixels,
+        @ceil(normalized.maxY() * device) + bleed_pixels,
+        surface_size.height,
+        device,
+    ) orelse return null;
+    const x_edges = dirtyAxisEdges(x_boundaries.min, x_boundaries.max, device);
+    const y_edges = dirtyAxisEdges(y_boundaries.min, y_boundaries.max, device);
+    if (x_edges.span <= 0 or y_edges.span <= 0) return null;
+    return geometry.RectF.init(x_edges.min, y_edges.min, x_edges.span, y_edges.span);
+}
+
+const DirtyBoundaries = struct { min: f32, max: f32 };
+
+/// Clamp one axis' device boundaries to the surface's device
+/// boundaries (see the runtime twin's doc comment).
+fn surfaceClampedDirtyBoundaries(min_boundary: f32, max_boundary: f32, surface_extent: f32, device: f32) ?DirtyBoundaries {
+    var min_b = min_boundary;
+    var max_b = max_boundary;
+    if (std.math.isFinite(surface_extent) and surface_extent > 0) {
+        const surface_boundary = @ceil(surface_extent * device);
+        if (std.math.isFinite(surface_boundary)) {
+            min_b = std.math.clamp(min_b, 0, surface_boundary);
+            max_b = std.math.clamp(max_b, 0, surface_boundary);
+            if (!(max_b > min_b)) return null;
+        }
+    }
+    return .{ .min = min_b, .max = max_b };
+}
+
+const DirtyAxisEdges = struct { min: f32, span: f32 };
+
+/// One axis of the bleed-aligned damage (see the runtime twin's doc
+/// comment): exact edge walks inside f32's exact-integer range, a
+/// finite non-collapsed superset beyond it.
+fn dirtyAxisEdges(min_boundary: f32, max_boundary: f32, device: f32) DirtyAxisEdges {
+    const walk_limit: f32 = 16_777_216;
+    const walkable = min_boundary >= -walk_limit and min_boundary <= walk_limit and
+        max_boundary >= -walk_limit and max_boundary <= walk_limit;
+    if (!walkable) {
+        const min_edge = nudgedFiniteDirtyEdge(min_boundary / device, -2);
+        const max_edge = nudgedFiniteDirtyEdge(max_boundary / device, 2);
+        var span = @max(0, nudgedFiniteDirtyEdge(max_edge - min_edge, 2));
+        // The reconstructed max edge must stay finite at the f32 range
+        // edge; shave the span until the sum stops overflowing.
+        while (span > 0 and !std.math.isFinite(min_edge + span)) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        return .{ .min = min_edge, .span = span };
+    }
+    const min_edge = dirtyEdgeForFloorBoundary(min_boundary, device);
+    return .{ .min = min_edge, .span = dirtySpanForCeilBoundary(min_edge, max_boundary, device) };
+}
+
+/// Finite superset value (see the runtime twin's doc comment): only
+/// NaN and the infinities are replaced, so far-but-representable
+/// content keeps its damage in place.
+fn nudgedFiniteDirtyEdge(value: f32, ulps: i8) f32 {
+    if (std.math.isNan(value)) return 0;
+    const limit = std.math.floatMax(f32);
+    var result = std.math.clamp(value, -limit, limit);
+    var remaining: i8 = if (ulps < 0) -ulps else ulps;
+    const toward: f32 = if (ulps < 0) -std.math.inf(f32) else std.math.inf(f32);
+    while (remaining > 0) : (remaining -= 1) result = std.math.nextAfter(f32, result, toward);
+    return std.math.clamp(result, -limit, limit);
+}
+
+/// Smallest representable coordinate whose product with `device`
+/// reaches `boundary`, judged in f64 — exact for f32 operands and what
+/// retained hosts compute (see the runtime twin's doc comment).
+fn dirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
+    var edge = boundary / device;
+    while (@as(f64, edge) * d >= b) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
+    while (@as(f64, edge) * d < b) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
+    // The walk can settle on negative zero (a boundary of zero steps
+    // below and back); canonicalize so serialized rects never carry a
+    // signed zero.
+    return if (edge == 0) 0 else edge;
+}
+
+/// Largest span whose reconstructed max edge (`min_edge + span`) keeps
+/// its product with `device` at or under `boundary`, judged in f64 (see
+/// the runtime twin's doc comment); the walk steps the edge value,
+/// never the span.
+fn dirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
+    var target = boundary / device;
+    while (@as(f64, target) * d <= b) target = std.math.nextAfter(f32, target, std.math.inf(f32));
+    while (@as(f64, target) * d > b) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
+    if (target <= min_edge) return 0;
+    var span = target - min_edge;
+    while (span > 0 and @as(f64, min_edge) + @as(f64, span) > @as(f64, target)) {
+        const next = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        if (next == span) return 0;
+        span = next;
+    }
+    return if (span <= 0) 0 else span;
 }
 
 fn fullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {

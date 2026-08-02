@@ -1,7 +1,6 @@
 #include "gtk_host.h"
 
 #include <gtk/gtk.h>
-#include <webkit/webkit.h>
 #include <glib/gstdio.h>
 #include <dlfcn.h>
 #include <limits.h>
@@ -10,6 +9,60 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+/* NATIVE_SDK_ALLOW_WEBKITGTK_STUB is the build graph's declaration that
+ * this app uses no web layer, and it wins over header visibility: on a
+ * machine with the WebKitGTK development package installed, testing
+ * __has_include first would compile the full embedded-web layer into a
+ * native-only build and reintroduce the libwebkitgtk link its executable
+ * must not carry (canvas apps are unaffected by the stub). Without the
+ * define the header is required: every web-declaring build graph links
+ * webkitgtk-6.0 (whose pkg-config flags provide the include path), so a
+ * web build that cannot see it is misconfigured — fail it loudly instead
+ * of shipping a host whose WebView loads report WebViewNotFound at
+ * runtime. The same seam as the Windows host's
+ * NATIVE_SDK_ALLOW_WEBVIEW2_STUB. */
+#if defined(NATIVE_SDK_ALLOW_WEBKITGTK_STUB)
+#define NATIVE_SDK_HAS_WEBKITGTK 0
+/* Deliberately NO compiler diagnostic in this branch — not even an
+ * informational #pragma message. The stub is the expected, configured
+ * state of every native-only Linux build, and zig renders every clang
+ * diagnostic of a failing translation unit as `error:` (its serialized
+ * clang diagnostics carry no severity into the error bundle), so an
+ * informational note here masquerades as the build-killing error the
+ * moment any unrelated real error appears anywhere in this file. The
+ * teaching lives where it is actionable instead: a stubbed host
+ * reports WebViewNotFound the moment an app actually uses a WebView.
+ *
+ * The stubbed web layer keeps the window/webview bookkeeping SHAPE so
+ * every GTK-only path (overlay reordering, focus lookups, window
+ * teardown) compiles unchanged: the web-view pointers below are opaque
+ * and permanently NULL — every path that could create one is compiled
+ * out — so the NULL checks that already guard the lazy main WebView
+ * also guard the compiled-out layer. These are LOCAL opaque types, not
+ * WebKitGTK declarations: no header, no webkit_* symbol, and no
+ * libwebkitgtk DT_NEEDED entry survives into the binary
+ * (tools/audit_web_layer.zig pins that on the built executable). */
+typedef struct native_sdk_absent_web_view WebKitWebView;
+typedef struct native_sdk_absent_content_manager WebKitUserContentManager;
+#elif __has_include(<webkit/webkit.h>)
+#include <webkit/webkit.h>
+#define NATIVE_SDK_HAS_WEBKITGTK 1
+#else
+#error "webkit/webkit.h not found: install the WebKitGTK 6.0 development package (libwebkitgtk-6.0-dev on Debian/Ubuntu), or define NATIVE_SDK_ALLOW_WEBKITGTK_STUB to build without the embedded web layer"
+#endif
+
+/* G_APPLICATION_DEFAULT_FLAGS arrived in GLib 2.74 as the
+ * non-deprecated spelling of "no flags". This host's GTK floor is 4.10
+ * (the GtkFileDialog family below), and GTK 4.10's own GLib floor is
+ * 2.72 — distros that backport GTK 4.10 onto a GLib 2.72 base (Ubuntu
+ * 22.04 derivatives) must still compile this file. Same value, gated to
+ * older GLib only; the pre-2.74 name G_APPLICATION_FLAGS_NONE is not
+ * used because it is deprecated from 2.74 on and would emit a warning
+ * exactly where the newer name exists. */
+#if !GLIB_CHECK_VERSION(2, 74, 0)
+#define G_APPLICATION_DEFAULT_FLAGS ((GApplicationFlags) 0)
+#endif
 
 #define NATIVE_SDK_MAX_WINDOWS 16
 #define NATIVE_SDK_MAX_WEBVIEWS 16
@@ -66,6 +119,40 @@ typedef struct native_sdk_gtk_menu_action {
     char *command;
     struct native_sdk_gtk_host *host;
 } native_sdk_gtk_menu_action_t;
+
+/* One presented context menu (GtkPopoverMenu): its GMenu dispatches
+ * through a per-invocation GSimpleActionGroup inserted on the presenting
+ * widget, so nothing ever lands in the application action map the menu
+ * bar owns. Exactly one CONTEXT_MENU_ACTION event is emitted per
+ * request: the selected item's action sets `emitted`, and the popover's
+ * "closed" teardown idle emits the dismissal (item 0) only when no
+ * selection did. `popover` and `parent` are weak pointers (GLib nulls
+ * them if the widgets die first, e.g. the owning window closes while
+ * the menu is up); `host->context_menu` tracks the single CURRENT
+ * instance and `host->context_menu_teardowns` every state whose
+ * teardown idle is queued, so destroy can cancel each pending source
+ * before the captured pointers go stale. */
+typedef struct native_sdk_gtk_context_menu {
+    struct native_sdk_gtk_host *host;
+    uint64_t window_id;
+    char *view_label;
+    uint64_t token;
+    /* Per-invocation action-group namespace ("native-sdk-context-<serial>").
+     * Popovers are asynchronous, so a re-click can install a successor
+     * menu while this one's deferred teardown idle is still queued; a
+     * shared namespace would let the stale teardown remove the action
+     * group the SUCCESSOR just inserted on the same parent, leaving the
+     * replacement menu inert. A unique name per request means teardown
+     * can only ever remove its own group. */
+    char group_name[48];
+    GtkWidget *popover;
+    GtkWidget *parent;
+    int emitted;
+    guint teardown_idle;
+    /* Link in `host->context_menu_teardowns` while `teardown_idle` is
+     * queued (threaded through the states themselves; no allocation). */
+    struct native_sdk_gtk_context_menu *next_teardown;
+} native_sdk_gtk_context_menu_t;
 
 /* One rectangle of the runtime-pushed window-drag mirror (markup
  * `window-drag="true"`), in the owning gpu_surface view's logical
@@ -156,6 +243,26 @@ typedef struct native_sdk_gtk_native_view {
      * matching release is swallowed too (no orphaned pointer_up). */
     native_sdk_gtk_drag_region_t *drag_regions;
     size_t drag_region_count;
+    /* Keys whose composition-consumed key_down was suppressed (see
+     * native_sdk_gpu_key_pressed): the matching key_up is swallowed too,
+     * so the runtime never sees an orphan release — the drag-region
+     * claimed-press discipline, applied to composition keys. Tracked by
+     * PHYSICAL KEYCODE, never keyval: releasing Shift before the key
+     * changes the keyval between press and release (Shift+A records A,
+     * the release reads a) while the keycode names the same key both
+     * ways. Zero means an empty slot; bounded rollover, and an
+     * overflowed press falls back to emitting its release (activation
+     * paths ignore a release without its press, so the fallback is
+     * hygiene, not correctness). */
+    guint gpu_suppressed_keycodes[8];
+    /* A plain (no converted commit) composition cancel was just emitted
+     * and its resolving key's own key_down is being suppressed: the
+     * runtime's cancel-to-commit grace armed by that cancel expects the
+     * key_down as its disarm, so the suppression emits a synthetic
+     * duplicate cancel instead — a no-op everywhere except the grace
+     * probe it disarms. Cleared when a converted commit's text_input
+     * follows the cancel (the text itself consumes the grace). */
+    int gpu_cancel_disarm_pending;
     int gpu_drag_claimed_press;
 } native_sdk_gtk_native_view_t;
 
@@ -246,6 +353,15 @@ typedef struct native_sdk_gtk_window {
     double emitted_width;
     double emitted_height;
     double emitted_scale;
+    int transparent;
+    int always_on_top;
+    int click_through;
+    int activate_on_show;
+    int show_on_first_present;
+    int shown;
+    /* One-second safety reveal for a canvas window whose first present
+     * never arrives. Zero once cancelled/fired. */
+    guint deferred_show_source;
     /* The window WebView's z-position among the overlay children. 0 is
      * the classic bottom-most main child; apps that layer native views
      * UNDER the WebView (or the WebView over a canvas) set it through
@@ -268,6 +384,12 @@ typedef struct native_sdk_gtk_window {
 
 struct native_sdk_gtk_host {
     GtkApplication *app;
+    /* Display providers are global and the display retains them until
+     * explicitly removed. Keep the transparent-window stylesheet once
+     * per host, rather than registering one immortal provider for every
+     * transparent window created over the process lifetime. */
+    GdkDisplay *transparent_css_display;
+    GtkCssProvider *transparent_css_provider;
     char *app_name;
     char *window_title;
     char *bundle_id;
@@ -281,6 +403,8 @@ struct native_sdk_gtk_host {
     int init_titlebar_style;
     double init_min_width;
     double init_min_height;
+    int init_show_policy;
+    uint32_t init_window_flags;
 
     native_sdk_gtk_event_callback_t callback;
     void *callback_context;
@@ -294,6 +418,13 @@ struct native_sdk_gtk_host {
     int did_shutdown;
     int app_active;
     guint frame_timer;
+    /* The quit verb's queued stop turn (native_sdk_gtk_stop), tracked
+     * like frame_timer so it can be coalesced while pending and
+     * removed at destroy — a bare g_idle_add would leave a second stop
+     * request (the shutdown handler's error path can make one) holding
+     * a freed host after the loop quits. Zero while none is queued;
+     * the idle clears it as its first act. */
+    guint stop_idle_source;
 
     char **allowed_origins;
     int allowed_origins_count;
@@ -306,10 +437,25 @@ struct native_sdk_gtk_host {
     GMenuModel *menu_model;
     native_sdk_gtk_menu_action_t menu_actions[NATIVE_SDK_MAX_MENU_ITEMS];
     int menu_action_count;
+    /* The one live context menu (menus are modal-per-pointer, so one at
+     * a time); owned here between show and the teardown idle. A
+     * superseded menu is no longer pointed to from here but stays alive
+     * until its own teardown idle runs — tracked below so destroy can
+     * still reach it. */
+    native_sdk_gtk_context_menu_t *context_menu;
+    /* Every menu state with a teardown idle queued (the "closed"
+     * handler pushes, native_sdk_context_menu_free unlinks) — tracked
+     * like stop_idle_source so destroy can g_source_remove each pending
+     * receipt and free its captured state inline instead of letting the
+     * idle fire into a freed host. Singly linked through the states. */
+    native_sdk_gtk_context_menu_t *context_menu_teardowns;
+    /* Feeds each context menu's per-invocation action-group name. */
+    uint64_t context_menu_serial;
     native_sdk_gtk_audio_t audio;
 };
 
 static void native_sdk_emit(native_sdk_gtk_host_t *host, native_sdk_gtk_event_t event);
+static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu);
 static gboolean native_sdk_nudge_chrome_requery(gpointer data);
 static gboolean native_sdk_on_file_drop(GtkDropTarget *target, const GValue *value, double x, double y, gpointer data);
 static GtkWindow *native_sdk_parent_window(native_sdk_gtk_host_t *host);
@@ -405,6 +551,7 @@ static void native_sdk_clear_window_source(native_sdk_gtk_window_t *win) {
     win->spa_fallback = 0;
 }
 
+#if NATIVE_SDK_HAS_WEBKITGTK
 static int native_sdk_strings_equal(const char *a, const char *b) {
     return a && b && strcmp(a, b) == 0;
 }
@@ -484,9 +631,43 @@ static void native_sdk_apply_webview_frame(native_sdk_gtk_webview_t *webview) {
     gtk_widget_set_margin_top(widget, native_sdk_webview_coord(webview->y));
     gtk_widget_set_size_request(widget, native_sdk_webview_extent(webview->width), native_sdk_webview_extent(webview->height));
 }
+#endif /* NATIVE_SDK_HAS_WEBKITGTK */
 
 static int native_sdk_valid_native_view_frame(double x, double y, double width, double height) {
     return x >= 0 && y >= 0 && width >= 0 && height >= 0;
+}
+
+/* String-parameter byte caps for the native-view calls, mirroring the
+ * runtime's platform limits (types.zig: max_view_label_bytes 64,
+ * max_view_role_bytes 64, max_view_accessibility_label_bytes 256,
+ * max_view_text_bytes 1024, and the command-id cap 128). The runtime
+ * validates the same bounds before ever calling in, so a length past
+ * them at THIS boundary means the arguments were corrupted in transit —
+ * a caller compiled with a broken C ABI hands over shifted stack slots
+ * where a pointer poses as a length. Refuse loudly and name the field
+ * instead of memcpy-ing from a garbage pointer and faulting. */
+#define NATIVE_SDK_MAX_VIEW_LABEL_BYTES 64
+#define NATIVE_SDK_MAX_VIEW_ROLE_BYTES 64
+#define NATIVE_SDK_MAX_VIEW_ACCESSIBILITY_LABEL_BYTES 256
+#define NATIVE_SDK_MAX_VIEW_TEXT_BYTES 1024
+#define NATIVE_SDK_MAX_VIEW_COMMAND_BYTES 128
+
+static int native_sdk_valid_native_view_string(const char *what, size_t len, size_t max_len) {
+    if (len <= max_len) return 1;
+    g_warning("native view %s length %zu exceeds the platform cap %zu; refusing the call - "
+              "the runtime never sends this, so the arguments likely arrived corrupted "
+              "(a miscompiled C-ABI boundary hands the host shifted stack slots)",
+        what, len, max_len);
+    return 0;
+}
+
+static int native_sdk_valid_native_view_strings(size_t label_len, size_t parent_len, size_t role_len, size_t accessibility_label_len, size_t text_len, size_t command_len) {
+    return native_sdk_valid_native_view_string("label", label_len, NATIVE_SDK_MAX_VIEW_LABEL_BYTES) &&
+        native_sdk_valid_native_view_string("parent", parent_len, NATIVE_SDK_MAX_VIEW_LABEL_BYTES) &&
+        native_sdk_valid_native_view_string("role", role_len, NATIVE_SDK_MAX_VIEW_ROLE_BYTES) &&
+        native_sdk_valid_native_view_string("accessibility_label", accessibility_label_len, NATIVE_SDK_MAX_VIEW_ACCESSIBILITY_LABEL_BYTES) &&
+        native_sdk_valid_native_view_string("text", text_len, NATIVE_SDK_MAX_VIEW_TEXT_BYTES) &&
+        native_sdk_valid_native_view_string("command", command_len, NATIVE_SDK_MAX_VIEW_COMMAND_BYTES);
 }
 
 static int native_sdk_native_extent(double value) {
@@ -694,6 +875,7 @@ static GtkWidget *native_sdk_make_native_widget(int kind, const char *label, con
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_SET_COMPOSITION 8
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_COMMIT_COMPOSITION 9
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION 10
+#define NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL 11
 
 static uint64_t native_sdk_gpu_timestamp_ns(void) {
     return (uint64_t)g_get_monotonic_time() * 1000ull;
@@ -776,6 +958,9 @@ static void native_sdk_gpu_im_commit(GtkIMContext *context, const char *text, gp
         native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION, "", 0, 0);
     }
     native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_TEXT_INPUT, text, 0, 0);
+    /* The converted commit's trailing text_input consumes the runtime's
+     * cancel grace itself; no synthetic disarm is owed. */
+    view->gpu_cancel_disarm_pending = 0;
 }
 
 /* IM context preedit (composition) changed. Mirrors AppKit's setMarkedText:
@@ -794,6 +979,11 @@ static void native_sdk_gpu_im_preedit_changed(GtkIMContext *context, gpointer da
         if (native_sdk_gpu_surface_has_preedit(view)) {
             native_sdk_gpu_surface_clear_preedit(view);
             native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION, "", 0, 0);
+            /* A PLAIN cancel (no converted commit follows within this
+             * filter pass): the resolving key's suppressed key_down owes
+             * the runtime's cancel grace its disarm (see
+             * gpu_cancel_disarm_pending). */
+            view->gpu_cancel_disarm_pending = 1;
         }
         return;
     }
@@ -1112,13 +1302,30 @@ static int native_sdk_gpu_point_in_drag_region(const native_sdk_gtk_native_view_
     return 0;
 }
 
+/* GDK numbers pointer buttons primary=1, MIDDLE=2, SECONDARY=3; the
+ * runtime's pointer contract is primary=0, secondary=1, middle=2 (the
+ * web/Win32 ordering, which the secondary-button context-menu check
+ * depends on). A plain subtract-one swaps secondary and middle, so map
+ * explicitly. Extra buttons (back/forward, 8+) keep the subtract-one
+ * offset the runtime already expects for indices above 2. */
+static int native_sdk_gpu_runtime_button(unsigned int gdk_button) {
+    switch (gdk_button) {
+        case GDK_BUTTON_PRIMARY: return 0;
+        case GDK_BUTTON_SECONDARY: return 1;
+        case GDK_BUTTON_MIDDLE: return 2;
+        case 0: return 0;
+        default: return (int)gdk_button - 1;
+    }
+}
+
 static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
     native_sdk_gtk_native_view_t *view = data;
     if (!view || !view->widget) return;
     gtk_widget_grab_focus(view->widget);
     view->gpu_pointer_x = x;
     view->gpu_pointer_y = y;
-    const int button = (int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)) - 1;
+    const unsigned int gdk_button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+    const int button = native_sdk_gpu_runtime_button(gdk_button);
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)));
     /* Stash the press for the widget `window_drag` channel: an
      * interactive window move must begin from the originating device,
@@ -1133,7 +1340,9 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
         }
         view->window->last_press_device = event ? gdk_event_get_device(event) : NULL;
         view->window->last_press_time = event ? gdk_event_get_time(event) : GDK_CURRENT_TIME;
-        view->window->last_press_button = button < 0 ? 0 : button + 1;
+        /* gdk_toplevel_begin_move takes the GDK button number, so the
+         * stash keeps GDK numbering — no runtime mapping here. */
+        view->window->last_press_button = (int)gdk_button;
         view->window->last_press_x = window_point.x;
         view->window->last_press_y = window_point.y;
     }
@@ -1155,7 +1364,7 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
         return;
     }
     view->gpu_pointer_down = 1;
-    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_DOWN, x, y, button < 0 ? 0 : button, 0, 0, "", "", modifiers);
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_DOWN, x, y, button, 0, 0, "", "", modifiers);
 }
 
 static void native_sdk_gpu_pointer_released(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
@@ -1171,9 +1380,31 @@ static void native_sdk_gpu_pointer_released(GtkGestureClick *gesture, int n_pres
         view->gpu_drag_claimed_press = 0;
         return;
     }
-    const int button = (int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)) - 1;
+    const int button = native_sdk_gpu_runtime_button(gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)));
-    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_UP, x, y, button < 0 ? 0 : button, 0, 0, "", "", modifiers);
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_UP, x, y, button, 0, 0, "", "", modifiers);
+}
+
+static void native_sdk_gpu_pointer_cancelled(GtkGesture *gesture, GdkEventSequence *sequence, gpointer data) {
+    (void)gesture;
+    (void)sequence;
+    native_sdk_gtk_native_view_t *view = data;
+    if (!view) return;
+    /* The pressed sequence was cancelled - the grab transferred (an
+     * interactive window move beginning) or broken (a compositor grab,
+     * widget reparenting). A drag-claimed press consumed the down before
+     * the widget pipeline heard it, so it rolls back silently; a press
+     * the pipeline DID see rolls back like a Win32 capture loss, so no
+     * widget stays pressed and later leave events are not suppressed by
+     * a stale pressed flag. */
+    if (view->gpu_drag_claimed_press) {
+        view->gpu_drag_claimed_press = 0;
+        view->gpu_pointer_down = 0;
+        return;
+    }
+    if (!view->gpu_pointer_down) return;
+    view->gpu_pointer_down = 0;
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", 0);
 }
 
 static void native_sdk_gpu_pointer_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data) {
@@ -1184,6 +1415,22 @@ static void native_sdk_gpu_pointer_motion(GtkEventControllerMotion *controller, 
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
     const int kind = view->gpu_pointer_down ? NATIVE_SDK_GTK_GPU_INPUT_POINTER_DRAG : NATIVE_SDK_GTK_GPU_INPUT_POINTER_MOVE;
     native_sdk_emit_gpu_surface_input(view, kind, x, y, 0, 0, 0, "", "", modifiers);
+}
+
+static void native_sdk_gpu_pointer_leave(GtkEventControllerMotion *controller, gpointer data) {
+    native_sdk_gtk_native_view_t *view = data;
+    if (!view) return;
+    /* The pointer left the canvas without a press in flight: the
+     * window-leave edge the runtime retires hover state on (washes,
+     * hover Msgs, tooltip intent), matching the AppKit host's
+     * mouseExited. A leave DURING a click-gesture press is the pointer
+     * wandering outside the widget mid-gesture, not abandoning it -
+     * the press's own release, gesture cancel, or the runtime's
+     * outside-release check settles that, so a mid-press leave emits
+     * nothing here. */
+    if (view->gpu_pointer_down) return;
+    const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", modifiers);
 }
 
 static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, double dx, double dy, gpointer data) {
@@ -1227,17 +1474,61 @@ static gboolean native_sdk_gpu_key_event(native_sdk_gtk_native_view_t *view, gui
 }
 
 static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
-    (void)keycode;
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return FALSE;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+    const int had_preedit = view->gpu_im_context && native_sdk_gpu_surface_has_preedit(view);
     if (view->gpu_im_context && event && gtk_im_context_filter_keypress(view->gpu_im_context, event)) {
-        /* The IM context consumed the key: committed text and preedit updates
-         * already flowed through the commit / preedit-changed handlers as
-         * text_input / ime_* events. Still surface a key_down with an empty
-         * text payload so activation keys (space, enter) and canvas key
-         * handlers keep firing; the runtime only inserts text from key_down
-         * events that carry text, so nothing is inserted twice. */
+        /* The IM context consumed the key. A key consumed WHILE a composition
+         * is active (before the filter ran, or opened by it) is composition
+         * machinery — candidate navigation, the confirming Enter, a
+         * cancelling Escape — and belongs wholly to the input method:
+         * surface nothing, or an app-level key consumer (a terminal) would
+         * double the confirm into its own key handling. This covers both
+         * synchronous IMs (the commit/cancel handlers ran inside the filter
+         * call, clearing the preedit had_preedit captured) and asynchronous
+         * ones (the preedit is still visible while the key is consumed). */
+        if (had_preedit || native_sdk_gpu_surface_has_preedit(view)) {
+            /* Remember the key — by PHYSICAL KEYCODE — so its release is
+             * swallowed too: a key_up without its key_down would be an
+             * orphan event, and the keyval would rename between press
+             * and release if Shift lifts first. DEDUPLICATED: autorepeat
+             * delivers many suppressed key_downs for one held key but
+             * only one final release, so a repeat must not stack entries
+             * a later ordinary release would then be eaten by. */
+            size_t free_slot = G_N_ELEMENTS(view->gpu_suppressed_keycodes);
+            gboolean recorded = FALSE;
+            for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keycodes); i++) {
+                if (view->gpu_suppressed_keycodes[i] == keycode) {
+                    recorded = TRUE;
+                    break;
+                }
+                if (view->gpu_suppressed_keycodes[i] == 0 && free_slot == G_N_ELEMENTS(view->gpu_suppressed_keycodes)) {
+                    free_slot = i;
+                }
+            }
+            if (!recorded && free_slot < G_N_ELEMENTS(view->gpu_suppressed_keycodes)) {
+                view->gpu_suppressed_keycodes[free_slot] = keycode;
+            }
+            /* A plain cancel armed the runtime's cancel-to-commit grace
+             * expecting THIS key_down as its disarm: suppression owes it
+             * a synthetic duplicate cancel instead (a no-op everywhere
+             * but the grace probe), or the next ordinary text_input
+             * would be mistaken for a converted commit. */
+            if (view->gpu_cancel_disarm_pending) {
+                view->gpu_cancel_disarm_pending = 0;
+                native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION, "", 0, 0);
+            }
+            return TRUE;
+        }
+        /* Consumed with no composition anywhere in sight (the everyday
+         * GtkIMContextSimple commit of a plain printable): committed text
+         * and preedit updates already flowed through the commit /
+         * preedit-changed handlers as text_input / ime_* events. Still
+         * surface a key_down with an empty text payload so activation keys
+         * (space, enter) and canvas key handlers keep firing; the runtime
+         * only inserts text from key_down events that carry text, so nothing
+         * is inserted twice. */
         (void)native_sdk_gpu_key_event(view, keyval, state, NATIVE_SDK_GTK_GPU_INPUT_KEY_DOWN, 0);
         return TRUE;
     }
@@ -1245,11 +1536,19 @@ static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, gu
 }
 
 static void native_sdk_gpu_key_released(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
-    (void)keycode;
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
     if (view->gpu_im_context && event) (void)gtk_im_context_filter_keypress(view->gpu_im_context, event);
+    /* A composition-consumed key whose key_down was suppressed swallows
+     * its release too (see gpu_suppressed_keycodes; matched by physical
+     * keycode so a modifier lifted mid-hold cannot rename the key). */
+    for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keycodes); i++) {
+        if (view->gpu_suppressed_keycodes[i] == keycode) {
+            view->gpu_suppressed_keycodes[i] = 0;
+            return;
+        }
+    }
     (void)native_sdk_gpu_key_event(view, keyval, state, NATIVE_SDK_GTK_GPU_INPUT_KEY_UP, 0);
 }
 
@@ -1272,6 +1571,11 @@ static void native_sdk_gpu_focus_leave(GtkEventControllerFocus *controller, gpoi
     }
     gtk_im_context_reset(view->gpu_im_context);
     gtk_im_context_focus_out(view->gpu_im_context);
+    /* Pending suppressed releases die with the focus: their key_ups go
+     * to whichever surface focuses next (or nowhere), and a stale entry
+     * here would eat the same key's legitimate release after refocus. */
+    memset(view->gpu_suppressed_keycodes, 0, sizeof(view->gpu_suppressed_keycodes));
+    view->gpu_cancel_disarm_pending = 0;
 }
 
 static void native_sdk_setup_gpu_surface_view(native_sdk_gtk_native_view_t *view) {
@@ -1283,10 +1587,12 @@ static void native_sdk_setup_gpu_surface_view(native_sdk_gtk_native_view_t *view
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
     g_signal_connect(click, "pressed", G_CALLBACK(native_sdk_gpu_pointer_pressed), view);
     g_signal_connect(click, "released", G_CALLBACK(native_sdk_gpu_pointer_released), view);
+    g_signal_connect(click, "cancel", G_CALLBACK(native_sdk_gpu_pointer_cancelled), view);
     gtk_widget_add_controller(view->widget, GTK_EVENT_CONTROLLER(click));
 
     GtkEventController *motion = gtk_event_controller_motion_new();
     g_signal_connect(motion, "motion", G_CALLBACK(native_sdk_gpu_pointer_motion), view);
+    g_signal_connect(motion, "leave", G_CALLBACK(native_sdk_gpu_pointer_leave), view);
     gtk_widget_add_controller(view->widget, motion);
 
     GtkEventController *scroll = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
@@ -1566,6 +1872,10 @@ static void native_sdk_clear_webviews(native_sdk_gtk_window_t *win) {
 
 static void native_sdk_clear_window(native_sdk_gtk_window_t *win) {
     if (!win) return;
+    if (win->deferred_show_source) {
+        g_source_remove(win->deferred_show_source);
+        win->deferred_show_source = 0;
+    }
     native_sdk_clear_native_views(win);
     native_sdk_clear_webviews(win);
     native_sdk_clear_window_source(win);
@@ -1622,6 +1932,7 @@ static int native_sdk_policy_list_matches(char **values, int count, const char *
     return matched;
 }
 
+#if NATIVE_SDK_HAS_WEBKITGTK
 static int native_sdk_path_is_safe(const char *path) {
     if (!path || !path[0]) return 0;
     if (path[0] == '/' || strchr(path, '\\')) return 0;
@@ -1882,6 +2193,7 @@ static void native_sdk_asset_scheme_request(WebKitURISchemeRequest *request, gpo
     g_free(path);
     g_free(relative);
 }
+#endif /* NATIVE_SDK_HAS_WEBKITGTK */
 
 static native_sdk_gtk_window_t *native_sdk_find_window(native_sdk_gtk_host_t *host, uint64_t id) {
     for (int i = 0; i < host->window_count; i++) {
@@ -2011,6 +2323,24 @@ static const char *native_sdk_accel_key_name(const char *key) {
     if (strcmp(key, "arrowright") == 0) return "Right";
     if (strcmp(key, "arrowup") == 0) return "Up";
     if (strcmp(key, "arrowdown") == 0) return "Down";
+    if (strcmp(key, "delete") == 0) return "Delete";
+    if (strcmp(key, "home") == 0) return "Home";
+    if (strcmp(key, "end") == 0) return "End";
+    if (strcmp(key, "pageup") == 0) return "Page_Up";
+    if (strcmp(key, "pagedown") == 0) return "Page_Down";
+    if (strcmp(key, "insert") == 0) return "Insert";
+    if (strcmp(key, "f1") == 0) return "F1";
+    if (strcmp(key, "f2") == 0) return "F2";
+    if (strcmp(key, "f3") == 0) return "F3";
+    if (strcmp(key, "f4") == 0) return "F4";
+    if (strcmp(key, "f5") == 0) return "F5";
+    if (strcmp(key, "f6") == 0) return "F6";
+    if (strcmp(key, "f7") == 0) return "F7";
+    if (strcmp(key, "f8") == 0) return "F8";
+    if (strcmp(key, "f9") == 0) return "F9";
+    if (strcmp(key, "f10") == 0) return "F10";
+    if (strcmp(key, "f11") == 0) return "F11";
+    if (strcmp(key, "f12") == 0) return "F12";
     return key;
 }
 
@@ -2256,6 +2586,30 @@ static const char *native_sdk_shortcut_key_for_keyval(guint keyval, char *buffer
         case GDK_KEY_Right: return "arrowright";
         case GDK_KEY_Up: return "arrowup";
         case GDK_KEY_Down: return "arrowdown";
+        case GDK_KEY_Delete:
+        case GDK_KEY_KP_Delete: return "delete";
+        case GDK_KEY_Home:
+        case GDK_KEY_KP_Home: return "home";
+        case GDK_KEY_End:
+        case GDK_KEY_KP_End: return "end";
+        case GDK_KEY_Page_Up:
+        case GDK_KEY_KP_Page_Up: return "pageup";
+        case GDK_KEY_Page_Down:
+        case GDK_KEY_KP_Page_Down: return "pagedown";
+        case GDK_KEY_Insert:
+        case GDK_KEY_KP_Insert: return "insert";
+        case GDK_KEY_F1: return "f1";
+        case GDK_KEY_F2: return "f2";
+        case GDK_KEY_F3: return "f3";
+        case GDK_KEY_F4: return "f4";
+        case GDK_KEY_F5: return "f5";
+        case GDK_KEY_F6: return "f6";
+        case GDK_KEY_F7: return "f7";
+        case GDK_KEY_F8: return "f8";
+        case GDK_KEY_F9: return "f9";
+        case GDK_KEY_F10: return "f10";
+        case GDK_KEY_F11: return "f11";
+        case GDK_KEY_F12: return "f12";
         default: return "";
     }
 }
@@ -2385,6 +2739,7 @@ static gboolean on_close_request(GtkWindow *window, gpointer data) {
     return FALSE;
 }
 
+#if NATIVE_SDK_HAS_WEBKITGTK
 static const char *native_sdk_decision_uri(WebKitPolicyDecision *decision, WebKitPolicyDecisionType type) {
     if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) return NULL;
     WebKitNavigationPolicyDecision *navigation = WEBKIT_NAVIGATION_POLICY_DECISION(decision);
@@ -2392,6 +2747,7 @@ static const char *native_sdk_decision_uri(WebKitPolicyDecision *decision, WebKi
     WebKitURIRequest *request = action ? webkit_navigation_action_get_request(action) : NULL;
     return request ? webkit_uri_request_get_uri(request) : NULL;
 }
+#endif /* NATIVE_SDK_HAS_WEBKITGTK */
 
 #if GTK_CHECK_VERSION(4, 10, 0)
 static void native_sdk_uri_launch_done(GObject *source_object, GAsyncResult *result, gpointer data) {
@@ -2417,6 +2773,7 @@ static void native_sdk_open_external_uri(GtkWindow *parent, const char *uri) {
 #endif
 }
 
+#if NATIVE_SDK_HAS_WEBKITGTK
 static gboolean on_decide_policy(WebKitWebView *web_view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer data) {
     (void)web_view;
     native_sdk_gtk_window_t *win = data;
@@ -2487,7 +2844,11 @@ static void on_bridge_message(WebKitUserContentManager *manager, JSCValue *js_re
             }
         }
     }
-    const char *uri = webkit_web_view_get_uri(source_webview);
+    /* source_webview is NULL only if the sending manager matched nothing
+     * (a message can only originate from a WebView this host created, so
+     * this is belt-and-braces); origin_for_uri already maps NULL to the
+     * inline origin. */
+    const char *uri = source_webview ? webkit_web_view_get_uri(source_webview) : NULL;
     char *computed_origin = win->bridge_origin && strcmp(label, "main") == 0 ? g_strdup(win->bridge_origin) : native_sdk_origin_for_uri(uri);
     host->bridge_callback(host->bridge_context, win->id, label, strlen(label), message, strlen(message), computed_origin, strlen(computed_origin));
     g_free(computed_origin);
@@ -2508,7 +2869,186 @@ static void native_sdk_setup_bridge(native_sdk_gtk_window_t *win) {
     webkit_user_script_unref(script);
 }
 
-static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+/* The zero:// custom scheme lives on the WebKitWebContext (every WebView
+ * this host creates shares the default context) and WebKit aborts on a
+ * second registration, so the first WebView actually created — window
+ * main or child, whichever an app reaches first — registers it and the
+ * host-level flag makes every later creation a no-op. */
+static void native_sdk_register_zero_scheme(native_sdk_gtk_host_t *host, WebKitWebView *web_view) {
+    if (!host || host->scheme_registered || !web_view) return;
+    webkit_web_context_register_uri_scheme(webkit_web_view_get_context(web_view), "zero", native_sdk_asset_scheme_request, host, NULL);
+    host->scheme_registered = 1;
+}
+
+/* WebKit owns its pointer stream, so a press never reaches the runtime's
+ * gpu_surface input seam. Observe without claiming the gesture and report
+ * which WebView the press will focus; the runtime can then blur its canvas
+ * sibling before WebKit receives the same event. */
+static void native_sdk_webview_pointer_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
+    (void)n_press;
+    (void)x;
+    (void)y;
+    native_sdk_gtk_window_t *win = data;
+    if (!win || !win->host) return;
+    GtkWidget *widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
+    const char *label = NULL;
+    if (win->web_view && widget == GTK_WIDGET(win->web_view)) {
+        label = "main";
+    } else {
+        for (int i = 0; i < win->webview_count; i++) {
+            if (win->webviews[i].web_view && widget == GTK_WIDGET(win->webviews[i].web_view)) {
+                label = win->webviews[i].label;
+                break;
+            }
+        }
+    }
+    if (!label) return;
+    native_sdk_emit(win->host, (native_sdk_gtk_event_t){
+        .kind = NATIVE_SDK_GTK_EVENT_VIEW_FOCUSED,
+        .window_id = win->id,
+        .view_label = label,
+        .view_label_len = strlen(label),
+    });
+}
+
+static void native_sdk_watch_webview_pointer_focus(native_sdk_gtk_window_t *win, WebKitWebView *web_view) {
+    if (!win || !web_view) return;
+    GtkGesture *click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
+    g_signal_connect(click, "pressed", G_CALLBACK(native_sdk_webview_pointer_pressed), win);
+    gtk_widget_add_controller(GTK_WIDGET(web_view), GTK_EVENT_CONTROLLER(click));
+}
+
+/* Create-on-first-use for a window's main WebView (the AppKit host's
+ * ensureMainWebViewForWindowId:). Pure peek reads (event emission,
+ * bridge completion echoes, reorder passes, focus) keep checking
+ * win->web_view and skip absent WebViews — a page that was never created
+ * has no listeners to miss. Paths that MATERIALIZE web content (load,
+ * frame/zoom/layer placement) ensure first, so webview-first apps behave
+ * exactly as before while canvas-first apps never boot the out-of-process
+ * WebKit stack (web + network helper processes) at all. */
+static WebKitWebView *native_sdk_ensure_main_webview(native_sdk_gtk_window_t *win) {
+    if (!win) return NULL;
+    if (win->web_view) return win->web_view;
+    if (!win->stack_root) return NULL;
+
+    win->content_manager = webkit_user_content_manager_new();
+    WebKitWebView *wv = WEBKIT_WEB_VIEW(
+        g_object_new(WEBKIT_TYPE_WEB_VIEW,
+            "user-content-manager", win->content_manager,
+            NULL));
+    if (win->transparent) {
+        GdkRGBA transparent_color = {0, 0, 0, 0};
+        webkit_web_view_set_background_color(wv, &transparent_color);
+    }
+    win->web_view = wv;
+    native_sdk_register_zero_scheme(win->host, wv);
+    native_sdk_setup_bridge(win);
+    g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), win);
+    native_sdk_watch_webview_pointer_focus(win, wv);
+
+    /* The overlay's main-child slot, where the eager create used to put
+     * it: the overlay allocates its main child the full stack area on the
+     * next layout pass, so materializing into an already-shown window
+     * sizes correctly like any other GTK4 child insertion. The reorder
+     * pass settles the sibling (paint) order among child views exactly
+     * like any other webview mutation. */
+    gtk_overlay_set_child(GTK_OVERLAY(win->stack_root), GTK_WIDGET(wv));
+    native_sdk_reorder_overlays(win);
+    return wv;
+}
+#endif /* NATIVE_SDK_HAS_WEBKITGTK */
+
+static void native_sdk_apply_overlay_surface_options(native_sdk_gtk_window_t *win) {
+    if (!win || !win->gtk_window) return;
+    GtkWidget *widget = GTK_WIDGET(win->gtk_window);
+    gtk_widget_realize(widget);
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(widget));
+    if (!surface) return;
+
+    if (win->click_through) {
+        cairo_region_t *empty = cairo_region_create();
+        gdk_surface_set_input_region(surface, empty);
+        cairo_region_destroy(empty);
+    }
+
+    if (win->always_on_top) {
+        /* GTK4 intentionally exposes no cross-compositor keep-above API.
+         * Honor it on X11 through the standard EWMH state set before
+         * map; Wayland compositors do not permit clients to demand this
+         * level, so the diagnostic is explicit rather than a silent lie. */
+        typedef unsigned long (*gdk_x11_surface_get_xid_fn)(GdkSurface *);
+        typedef void *(*gdk_x11_display_get_xdisplay_fn)(GdkDisplay *);
+        typedef unsigned long (*x_intern_atom_fn)(void *, const char *, int);
+        typedef int (*x_change_property_fn)(void *, unsigned long, unsigned long, unsigned long, int, int, const unsigned char *, int);
+        typedef int (*x_flush_fn)(void *);
+        gdk_x11_surface_get_xid_fn get_xid = (gdk_x11_surface_get_xid_fn)dlsym(RTLD_DEFAULT, "gdk_x11_surface_get_xid");
+        gdk_x11_display_get_xdisplay_fn get_xdisplay = (gdk_x11_display_get_xdisplay_fn)dlsym(RTLD_DEFAULT, "gdk_x11_display_get_xdisplay");
+        x_intern_atom_fn intern_atom = (x_intern_atom_fn)dlsym(RTLD_DEFAULT, "XInternAtom");
+        x_change_property_fn change_property = (x_change_property_fn)dlsym(RTLD_DEFAULT, "XChangeProperty");
+        x_flush_fn flush = (x_flush_fn)dlsym(RTLD_DEFAULT, "XFlush");
+        GdkDisplay *gdk_display = gdk_surface_get_display(surface);
+        const char *display_type = G_OBJECT_TYPE_NAME(gdk_display);
+        const int is_x11 = display_type && strstr(display_type, "X11") != NULL;
+        if (is_x11 && get_xid && get_xdisplay && intern_atom && change_property && flush) {
+            void *display = get_xdisplay(gdk_display);
+            const unsigned long xid = get_xid(surface);
+            const unsigned long state = intern_atom(display, "_NET_WM_STATE", 0);
+            const unsigned long above = intern_atom(display, "_NET_WM_STATE_ABOVE", 0);
+            change_property(display, xid, state, 4 /* XA_ATOM */, 32, 0 /* PropModeReplace */, (const unsigned char *)&above, 1);
+            flush(display);
+        } else {
+            fprintf(stderr, "native-sdk: always_on_top is unavailable on this Linux compositor (Wayland does not expose a reliable client-controlled topmost window level)\n");
+        }
+    }
+}
+
+static void native_sdk_show_window_implicit(native_sdk_gtk_window_t *win) {
+    if (!win || !win->gtk_window) return;
+    if (win->activate_on_show) {
+        gtk_window_present(win->gtk_window);
+    } else {
+        gtk_widget_set_visible(GTK_WIDGET(win->gtk_window), TRUE);
+    }
+    win->shown = 1;
+}
+
+static void native_sdk_cancel_deferred_show(native_sdk_gtk_window_t *win) {
+    if (!win || !win->deferred_show_source) return;
+    g_source_remove(win->deferred_show_source);
+    win->deferred_show_source = 0;
+}
+
+static gboolean native_sdk_deferred_show_timeout(gpointer data) {
+    native_sdk_gtk_window_t *win = data;
+    if (!win) return G_SOURCE_REMOVE;
+    win->deferred_show_source = 0;
+    if (!win->gtk_window || win->shown) return G_SOURCE_REMOVE;
+    /* This is the wedged-renderer safety path: map the GTK window even
+     * though the first canvas present never arrived. */
+    native_sdk_show_window_implicit(win);
+    native_sdk_emit_window_frame(win->host, win, 1);
+    return G_SOURCE_REMOVE;
+}
+
+static void native_sdk_ensure_transparent_css(native_sdk_gtk_host_t *host) {
+    if (!host || host->transparent_css_provider) return;
+    GdkDisplay *display = gdk_display_get_default();
+    if (!display) return;
+
+    GtkCssProvider *provider = gtk_css_provider_new();
+#if GTK_CHECK_VERSION(4, 12, 0)
+    gtk_css_provider_load_from_string(provider, ".native-sdk-transparent { background-color: transparent; }");
+#else
+    gtk_css_provider_load_from_data(provider, ".native-sdk-transparent { background-color: transparent; }", -1);
+#endif
+    gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    host->transparent_css_display = g_object_ref(display);
+    host->transparent_css_provider = provider;
+}
+
+static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     if (native_sdk_find_window(host, window_id)) return NULL;
 
     int slot = -1;
@@ -2531,6 +3071,11 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     win->y = restore_frame ? y : 0;
     win->label = native_sdk_strndup(label && label[0] ? label : "main", strlen(label && label[0] ? label : "main"));
     win->title = native_sdk_strndup(title && title[0] ? title : host->app_name, strlen(title && title[0] ? title : host->app_name));
+    win->transparent = (window_flags & (1u << 0)) != 0;
+    win->always_on_top = (window_flags & (1u << 1)) != 0;
+    win->click_through = (window_flags & (1u << 2)) != 0;
+    win->activate_on_show = (window_flags & (1u << 3)) == 0;
+    win->show_on_first_present = show_policy == 1;
     if (!win->label || !win->title) {
         free(win->label);
         free(win->title);
@@ -2539,6 +3084,10 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     }
 
     win->gtk_window = GTK_WINDOW(gtk_application_window_new(host->app));
+    if (win->transparent) {
+        native_sdk_ensure_transparent_css(host);
+        gtk_widget_add_css_class(GTK_WIDGET(win->gtk_window), "native-sdk-transparent");
+    }
     gtk_window_set_title(win->gtk_window, win->title);
     gtk_window_set_default_size(win->gtk_window, (int)width, (int)height);
     gtk_window_set_resizable(win->gtk_window, resizable ? TRUE : FALSE);
@@ -2591,18 +3140,11 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
         g_signal_connect(bar, "map", G_CALLBACK(native_sdk_on_header_bar_mapped), win->host);
     }
 
-    win->content_manager = webkit_user_content_manager_new();
-    WebKitWebView *wv = WEBKIT_WEB_VIEW(
-        g_object_new(WEBKIT_TYPE_WEB_VIEW,
-            "user-content-manager", win->content_manager,
-            NULL));
-    win->web_view = wv;
-    if (!host->scheme_registered) {
-        webkit_web_context_register_uri_scheme(webkit_web_view_get_context(wv), "zero", native_sdk_asset_scheme_request, host, NULL);
-        host->scheme_registered = 1;
-    }
-    native_sdk_setup_bridge(win);
-
+    /* The window's main WebView is NOT created here: it materializes on
+     * first use (native_sdk_ensure_main_webview), because instantiating
+     * a WebKitWebView boots the whole out-of-process WebKit stack — web
+     * and network helper processes — that a canvas-first app would carry
+     * forever under a view it never shows. */
     win->root_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     /* Declared content min-size floor: the size request on the content
      * box floors user resizes without inflating the default size (the
@@ -2617,10 +3159,13 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     gtk_widget_set_visible(win->menu_bar, host->menu_model != NULL);
     gtk_box_append(GTK_BOX(win->root_box), win->menu_bar);
 
+    /* The overlay expands to fill the window on its own (hexpand/vexpand
+     * on an expanding box slot), so it needs no main child to claim the
+     * stack area — the lazy WebView slots in later without a relayout of
+     * anything else. */
     win->stack_root = gtk_overlay_new();
     gtk_widget_set_hexpand(win->stack_root, TRUE);
     gtk_widget_set_vexpand(win->stack_root, TRUE);
-    gtk_overlay_set_child(GTK_OVERLAY(win->stack_root), GTK_WIDGET(wv));
     gtk_box_append(GTK_BOX(win->root_box), win->stack_root);
     gtk_window_set_child(win->gtk_window, win->root_box);
     native_sdk_install_file_drop_target(win);
@@ -2629,11 +3174,15 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     g_signal_connect(win->gtk_window, "notify::default-height", G_CALLBACK(on_resize), win);
     g_signal_connect(win->gtk_window, "notify::is-active", G_CALLBACK(on_focus), win);
     g_signal_connect(win->gtk_window, "close-request", G_CALLBACK(on_close_request), win);
-    g_signal_connect(win->web_view, "decide-policy", G_CALLBACK(on_decide_policy), win);
     GtkEventController *shortcut_controller = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(shortcut_controller, GTK_PHASE_CAPTURE);
     g_signal_connect(shortcut_controller, "key-pressed", G_CALLBACK(on_shortcut_key_pressed), win);
     gtk_widget_add_controller(GTK_WIDGET(win->gtk_window), shortcut_controller);
+
+    native_sdk_apply_overlay_surface_options(win);
+    if (win->show_on_first_present) {
+        win->deferred_show_source = g_timeout_add(1000, native_sdk_deferred_show_timeout, win);
+    }
 
     return win;
 }
@@ -2648,10 +3197,11 @@ static void on_activate(GtkApplication *app, gpointer data) {
         host->init_width > 0 ? host->init_width : 720,
         host->init_height > 0 ? host->init_height : 480,
         host->restore_frame, host->init_resizable, host->init_titlebar_style,
-        host->init_min_width, host->init_min_height);
+        host->init_min_width, host->init_min_height,
+        host->init_show_policy, host->init_window_flags);
     if (!win) return;
 
-    gtk_window_present(win->gtk_window);
+    if (!win->show_on_first_present) native_sdk_show_window_implicit(win);
     native_sdk_emit_app_active_if_changed(host);
 
     native_sdk_emit(host, (native_sdk_gtk_event_t){ .kind = NATIVE_SDK_GTK_EVENT_START });
@@ -2671,7 +3221,8 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     const char *window_label, size_t window_label_len,
     double x, double y, double width, double height,
     int restore_frame, int resizable, int titlebar_style,
-    double min_width, double min_height)
+    double min_width, double min_height, int show_policy,
+    uint32_t window_flags)
 {
     native_sdk_gtk_host_t *host = calloc(1, sizeof(native_sdk_gtk_host_t));
     if (!host) return NULL;
@@ -2690,6 +3241,8 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     host->init_titlebar_style = titlebar_style;
     host->init_min_width = min_width;
     host->init_min_height = min_height;
+    host->init_show_policy = show_policy;
+    host->init_window_flags = window_flags;
 
     host->allowed_origins = NULL;
     host->allowed_origins_count = 0;
@@ -2707,12 +3260,37 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
      * anything else goes away; everything runs on this thread. */
     native_sdk_audio_release(host, 1);
     if (host->frame_timer) g_source_remove(host->frame_timer);
+    /* A stop turn still queued at teardown (the loop quit before the
+     * idle ran) must not fire into freed memory. */
+    if (host->stop_idle_source) {
+        g_source_remove(host->stop_idle_source);
+        host->stop_idle_source = 0;
+    }
     for (int i = 0; i < NATIVE_SDK_MAX_TIMERS; i++) {
         if (host->timers[i].in_use && host->timers[i].source) g_source_remove(host->timers[i].source);
         host->timers[i].in_use = 0;
     }
+    /* Before the windows go: an open context menu's popover is owned by
+     * a widget inside one of them, and the state's weak pointers must
+     * be unhooked while the objects are still alive. Then drain the
+     * pending-teardown list: a superseded menu's deferred teardown idle
+     * still captures its state (and this host) raw, so each pending
+     * source is removed and its state freed inline — the weak pointers
+     * only cover the WIDGETS dying first; the host dying is covered
+     * here. Cancelling swallows the superseded request's owed dismissal
+     * event, which is correct: the runtime that would gate on that
+     * token is being torn down with the host. */
+    if (host->context_menu) native_sdk_context_menu_free(host->context_menu);
+    while (host->context_menu_teardowns) native_sdk_context_menu_free(host->context_menu_teardowns);
     for (int i = 0; i < host->window_count; i++) {
         native_sdk_clear_window(&host->windows[i]);
+    }
+    if (host->transparent_css_provider) {
+        gtk_style_context_remove_provider_for_display(
+            host->transparent_css_display,
+            GTK_STYLE_PROVIDER(host->transparent_css_provider));
+        g_object_unref(host->transparent_css_provider);
+        g_object_unref(host->transparent_css_display);
     }
     g_object_unref(host->app);
     free(host->app_name);
@@ -2735,7 +3313,15 @@ void native_sdk_gtk_run(native_sdk_gtk_host_t *host, native_sdk_gtk_event_callba
     g_application_run(G_APPLICATION(host->app), 0, NULL);
 }
 
-void native_sdk_gtk_stop(native_sdk_gtk_host_t *host) {
+/* Runs on the GLib main loop: the quit verb's deferred stop turn. The
+ * same emitShutdown-then-quit the last window's close-request runs,
+ * just one loop turn later (see native_sdk_gtk_stop). */
+static gboolean native_sdk_stop_idle(gpointer data) {
+    native_sdk_gtk_host_t *host = data;
+    /* This turn is running: clear the tracked id FIRST, so the source
+     * cannot be double-removed (destroy) or wrongly treated as still
+     * pending (a re-quit during the shutdown dispatch below). */
+    host->stop_idle_source = 0;
     if (!host->did_shutdown) {
         host->did_shutdown = 1;
         native_sdk_emit(host, (native_sdk_gtk_event_t){ .kind = NATIVE_SDK_GTK_EVENT_SHUTDOWN });
@@ -2745,6 +3331,33 @@ void native_sdk_gtk_stop(native_sdk_gtk_host_t *host) {
         host->frame_timer = 0;
     }
     g_application_quit(G_APPLICATION(host->app));
+    return G_SOURCE_REMOVE;
+}
+
+void native_sdk_gtk_stop(native_sdk_gtk_host_t *host) {
+    /* Queued, never synchronous: this stop is the quit verb's landing
+     * point, and the verb arrives MID DISPATCH (a menu command's
+     * update returned it), so a synchronous SHUTDOWN emit would nest
+     * the shutdown dispatch inside the requesting command's — the
+     * session recorder commits nested events innermost-first and seals
+     * the journal on shutdown, so the nested seal drops the command
+     * record and replay diverges. The idle hop (the same seam the wake
+     * and frame-request paths ride) emits the identical
+     * emitShutdown + quit on the next loop turn, after the requesting
+     * dispatch has committed; g_application_run keeps pumping until
+     * the queued g_application_quit lands, so a quit that is the last
+     * thing an app ever does still exits promptly.
+     *
+     * Exactly-once hygiene: once the shutdown has emitted there is
+     * nothing left to stop, and while a stop turn is already queued a
+     * second request coalesces into it — a second bare g_idle_add
+     * (the shutdown handler's error path can request one) would leave
+     * an untracked source holding this host after the loop quits and
+     * the host is freed. The pending source id is tracked on the host
+     * (stop_idle_source, cleared by the idle itself) and removed at
+     * native_sdk_gtk_destroy. */
+    if (host->did_shutdown || host->stop_idle_source) return;
+    host->stop_idle_source = g_idle_add(native_sdk_stop_idle, host);
 }
 
 /* Runs on the GLib main loop: emit the wake event there, so the runtime
@@ -2847,8 +3460,31 @@ void native_sdk_gtk_load_webview(native_sdk_gtk_host_t *host, const char *source
 }
 
 void native_sdk_gtk_load_window_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    /* Web layer compiled out: the runtime's web-layer gate answers every
+     * webview path with error.WebViewLayerNotBuilt before it can reach
+     * the host, so this stub (like the Windows host's) is belt-and-braces
+     * for a caller that bypassed the gate — a quiet no-op, never a
+     * half-started WebKit stack. */
+    (void)host;
+    (void)window_id;
+    (void)source;
+    (void)source_len;
+    (void)source_kind;
+    (void)asset_root;
+    (void)asset_root_len;
+    (void)asset_entry;
+    (void)asset_entry_len;
+    (void)asset_origin;
+    (void)asset_origin_len;
+    (void)spa_fallback;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
-    if (!win || !win->web_view) return;
+    /* Loading a source is what materializes the window's lazy main
+     * WebView; the runtime never issues a load for a canvas-first app
+     * with the default empty source (sceneNeedsMainWebView), so a window
+     * that never reaches here never starts WebKit. */
+    if (!win || !native_sdk_ensure_main_webview(win)) return;
 
     char *src = native_sdk_strndup(source, source_len);
     if (!src) return;
@@ -2899,6 +3535,7 @@ void native_sdk_gtk_load_window_webview(native_sdk_gtk_host_t *host, uint64_t wi
         webkit_web_view_load_html(win->web_view, src, "zero://inline");
     }
     free(src);
+#endif
 }
 
 void native_sdk_gtk_set_bridge_callback(native_sdk_gtk_host_t *host, native_sdk_gtk_bridge_callback_t callback, void *context) {
@@ -2915,12 +3552,25 @@ void native_sdk_gtk_bridge_respond_window(native_sdk_gtk_host_t *host, uint64_t 
 }
 
 void native_sdk_gtk_bridge_respond_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *webview_label, size_t webview_label_len, const char *response, size_t response_len) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    /* No web layer, no page that could have sent the request. */
+    (void)host;
+    (void)window_id;
+    (void)webview_label;
+    (void)webview_label_len;
+    (void)response;
+    (void)response_len;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
-    if (!win || !win->web_view) return;
+    if (!win) return;
     char *label = webview_label_len > 0 ? native_sdk_strndup(webview_label, webview_label_len) : native_sdk_strndup("main", 4);
     if (!label) return;
     WebKitWebView *target = NULL;
     if (strcmp(label, "main") == 0) {
+        /* Peek, never ensure: a completion can only answer a request a
+         * live page sent, so a still-lazy main WebView has nothing to
+         * deliver to (and a child webview's response must not be dropped
+         * just because the window's main WebView never materialized). */
         target = win->web_view;
     } else {
         native_sdk_gtk_webview_t *webview = native_sdk_find_webview(win, label);
@@ -2945,10 +3595,22 @@ void native_sdk_gtk_bridge_respond_webview(native_sdk_gtk_host_t *host, uint64_t
         free(script);
     }
     free(resp);
+#endif
 }
 
 void native_sdk_gtk_emit_window_event(native_sdk_gtk_host_t *host, uint64_t window_id, const char *name, size_t name_len, const char *detail_json, size_t detail_json_len) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    /* No web layer, no page with listeners to miss. */
+    (void)host;
+    (void)window_id;
+    (void)name;
+    (void)name_len;
+    (void)detail_json;
+    (void)detail_json_len;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    /* Peek, never ensure: a still-lazy main WebView has no page and so
+     * no listeners to miss. */
     if (!win || !win->web_view) return;
     char *event_name = native_sdk_strndup(name, name_len);
     char *detail = native_sdk_strndup(detail_json, detail_json_len);
@@ -2970,6 +3632,7 @@ void native_sdk_gtk_emit_window_event(native_sdk_gtk_host_t *host, uint64_t wind
     g_string_free(script, TRUE);
     free(event_name);
     free(detail);
+#endif
 }
 
 void native_sdk_gtk_set_security_policy(native_sdk_gtk_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action) {
@@ -3018,6 +3681,12 @@ void native_sdk_gtk_set_menus(native_sdk_gtk_host_t *host, const char *const *me
                 free(command);
                 free(key);
                 continue;
+            }
+            /* Canonicalize to lowercase, the shortcut-storage rule: key
+             * names validate case-insensitively, and the accelerator
+             * translation below matches the canonical spellings. */
+            for (char *p = key; *p; p++) {
+                if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
             }
 
             native_sdk_gtk_menu_action_t *menu_action = &host->menu_actions[host->menu_action_count];
@@ -3095,15 +3764,15 @@ void native_sdk_gtk_set_shortcuts(native_sdk_gtk_host_t *host, const char *const
     }
 }
 
-int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     char *title = window_title_len > 0 ? native_sdk_strndup(window_title, window_title_len) : NULL;
     char *label = window_label_len > 0 ? native_sdk_strndup(window_label, window_label_len) : NULL;
-    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, min_width, min_height);
+    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, min_width, min_height, show_policy, window_flags);
     free(title);
     free(label);
     if (!win) return 0;
 
-    gtk_window_present(win->gtk_window);
+    if (!win->show_on_first_present) native_sdk_show_window_implicit(win);
     return 1;
 }
 
@@ -3273,7 +3942,19 @@ int native_sdk_gtk_window_chrome(native_sdk_gtk_host_t *host, uint64_t window_id
 int native_sdk_gtk_focus_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->gtk_window) return 0;
+    native_sdk_cancel_deferred_show(win);
     gtk_window_present(win->gtk_window);
+    win->shown = 1;
+    native_sdk_emit_window_frame(host, win, 1);
+    return 1;
+}
+
+int native_sdk_gtk_show_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
+    native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    if (!win || !win->gtk_window) return 0;
+    native_sdk_cancel_deferred_show(win);
+    if (!win->activate_on_show) gtk_window_unminimize(win->gtk_window);
+    native_sdk_show_window_implicit(win);
     native_sdk_emit_window_frame(host, win, 1);
     return 1;
 }
@@ -3299,6 +3980,7 @@ int native_sdk_gtk_create_view(native_sdk_gtk_host_t *host, uint64_t window_id, 
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->stack_root || label_len == 0 || !native_sdk_valid_native_view_frame(x, y, width, height)) return 0;
     if (!native_sdk_is_supported_native_view_kind(kind)) return 0;
+    if (!native_sdk_valid_native_view_strings(label_len, parent_len, role_len, accessibility_label_len, text_len, command_len)) return 0;
     if (win->native_view_count >= NATIVE_SDK_MAX_NATIVE_VIEWS) return 0;
 
     char *label_copy = native_sdk_strndup(label, label_len);
@@ -3406,6 +4088,224 @@ int native_sdk_gtk_create_view(native_sdk_gtk_host_t *host, uint64_t window_id, 
     return 1;
 }
 
+/* --------------------------------------------------------------------
+ * Native context menus (GtkPopoverMenu).
+ *
+ * GTK-only — deliberately OUTSIDE the WebKit fences, so the menu path
+ * compiles identically in web and native-only (stub) builds.
+ */
+
+/* Emit the one CONTEXT_MENU_ACTION event this request may produce (the
+ * macOS host's payload contract: widget_id echoes the token,
+ * menu_item_id 0 means dismissed). */
+static void native_sdk_context_menu_emit(native_sdk_gtk_context_menu_t *menu, uint32_t item_id) {
+    if (!menu || menu->emitted) return;
+    menu->emitted = 1;
+    native_sdk_emit(menu->host, (native_sdk_gtk_event_t){
+        .kind = NATIVE_SDK_GTK_EVENT_CONTEXT_MENU_ACTION,
+        .window_id = menu->window_id,
+        .view_label = menu->view_label ? menu->view_label : "",
+        .view_label_len = menu->view_label ? strlen(menu->view_label) : 0,
+        .widget_id = menu->token,
+        .menu_item_id = item_id,
+    });
+}
+
+/* Drop `menu` from the host's pending-teardown list if it is there.
+ * Called only from native_sdk_context_menu_free, so a state is unlinked
+ * on every exit path — the teardown idle running normally (it frees
+ * as its last act), a supersession freeing a dead-popover state, or
+ * destroy draining the list. */
+static void native_sdk_context_menu_unlink_teardown(native_sdk_gtk_context_menu_t *menu) {
+    if (!menu->host) return;
+    native_sdk_gtk_context_menu_t **cursor = &menu->host->context_menu_teardowns;
+    while (*cursor) {
+        if (*cursor == menu) {
+            *cursor = menu->next_teardown;
+            break;
+        }
+        cursor = &(*cursor)->next_teardown;
+    }
+    menu->next_teardown = NULL;
+}
+
+/* Balanced teardown of one presented menu (NO event emission): remove
+ * the per-invocation action group from the presenting widget, drop the
+ * weak pointers, unparent the popover (the parent holds the only ref,
+ * so unparent finalizes it), and free the state. This may run from a
+ * STALE teardown idle after a re-click already installed a successor
+ * menu, so it must only ever touch its own per-invocation state: the
+ * group removal names this request's unique namespace, never the
+ * successor's. (Only GTK needs this guard: popovers are asynchronous.
+ * The Windows host's TrackPopupMenu blocks the message-loop thread and
+ * emits inline from a moved-out request, and the macOS host's
+ * presentation block captures its menu, target, and token as locals
+ * while popUpMenuPositioningItem blocks the main queue — neither can
+ * interleave a successor with a pending teardown.) */
+static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu) {
+    if (!menu) return;
+    if (menu->teardown_idle) {
+        g_source_remove(menu->teardown_idle);
+        menu->teardown_idle = 0;
+    }
+    native_sdk_context_menu_unlink_teardown(menu);
+    if (menu->parent) {
+        gtk_widget_insert_action_group(menu->parent, menu->group_name, NULL);
+        g_object_remove_weak_pointer(G_OBJECT(menu->parent), (gpointer *)&menu->parent);
+    }
+    if (menu->popover) {
+        g_object_remove_weak_pointer(G_OBJECT(menu->popover), (gpointer *)&menu->popover);
+        gtk_widget_unparent(menu->popover);
+    }
+    if (menu->host && menu->host->context_menu == menu) menu->host->context_menu = NULL;
+    free(menu->view_label);
+    free(menu);
+}
+
+/* Runs one main-loop turn after the popover closed: a selection's
+ * action activation (delivered around the close) has already landed by
+ * now, so an un-emitted request is honestly a dismissal — the same
+ * one-turn-later emission discipline the macOS host applies after its
+ * tracking loop ends. */
+static gboolean native_sdk_context_menu_teardown_idle(gpointer data) {
+    native_sdk_gtk_context_menu_t *menu = data;
+    menu->teardown_idle = 0;
+    native_sdk_context_menu_emit(menu, 0);
+    native_sdk_context_menu_free(menu);
+    return G_SOURCE_REMOVE;
+}
+
+static void native_sdk_context_menu_closed(GtkPopover *popover, gpointer data) {
+    (void)popover;
+    native_sdk_gtk_context_menu_t *menu = data;
+    if (!menu->teardown_idle) {
+        /* The idle captures `menu` (and through it the host) raw, so
+         * its receipt goes on the host's pending-teardown list the
+         * moment it exists — `host->context_menu` alone cannot reach a
+         * superseded state, and an idle outliving the host would fire
+         * into freed memory. */
+        menu->teardown_idle = g_idle_add(native_sdk_context_menu_teardown_idle, menu);
+        menu->next_teardown = menu->host->context_menu_teardowns;
+        menu->host->context_menu_teardowns = menu;
+    }
+}
+
+static void native_sdk_context_menu_item_activate(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)parameter;
+    native_sdk_gtk_context_menu_t *menu = data;
+    uint32_t item_id = (uint32_t)GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(action), "native-sdk-item-id"));
+    native_sdk_context_menu_emit(menu, item_id);
+}
+
+int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const native_sdk_gtk_context_menu_item_t *items, size_t count) {
+    if (!host || !items || count == 0) return 0;
+    native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    if (!win) return 0;
+    /* Present on the view that took the click when the label resolves —
+     * gtk_popover_set_pointing_to takes the PARENT widget's logical
+     * coordinates, which is exactly the space the gpu-surface input
+     * path reported the click's x/y in (widget-local logical doubles,
+     * no scale conversion on either leg). Fall back to the window's
+     * view host, mirroring the macOS contentView fallback. */
+    GtkWidget *parent = win->stack_root;
+    char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
+    native_sdk_gtk_native_view_t *view = native_sdk_find_native_view(win, label_copy);
+    if (view && view->widget) parent = view->widget;
+    if (!parent) {
+        free(label_copy);
+        return 0;
+    }
+
+    /* A menu already up (re-click while open): dismiss it — its closed
+     * handler schedules its own teardown and dismissal event. That
+     * teardown runs a loop turn from now, AFTER this successor is
+     * installed, and still emits the superseded request's one dismissal
+     * (with the old request's token — the runtime's token gate resolves
+     * or swallows it against ITS pending request, never the
+     * successor's), while the per-invocation group namespace keeps its
+     * cleanup off the successor's action group. A state whose popover
+     * already died with its window (weak pointer nulled, "closed" never
+     * delivered) has no handler coming: free it here. */
+    if (host->context_menu) {
+        if (host->context_menu->popover) {
+            gtk_popover_popdown(GTK_POPOVER(host->context_menu->popover));
+        } else {
+            native_sdk_context_menu_free(host->context_menu);
+        }
+    }
+
+    native_sdk_gtk_context_menu_t *menu_state = calloc(1, sizeof(*menu_state));
+    if (!menu_state) {
+        free(label_copy);
+        return 0;
+    }
+    menu_state->host = host;
+    menu_state->window_id = window_id;
+    menu_state->view_label = label_copy;
+    menu_state->token = token;
+    snprintf(menu_state->group_name, sizeof(menu_state->group_name), "native-sdk-context-%llu", (unsigned long long)++host->context_menu_serial);
+    menu_state->parent = parent;
+    g_object_add_weak_pointer(G_OBJECT(parent), (gpointer *)&menu_state->parent);
+
+    /* The declared items become a sectioned GMenu — separators split
+     * sections, the GMenu convention — wired to a fresh action group
+     * inserted on the presenting widget under this request's unique
+     * namespace. Every builder ref is dropped as soon as the next owner
+     * holds its own (the set_menus discipline). */
+    GSimpleActionGroup *group = g_simple_action_group_new();
+    GMenu *menu = g_menu_new();
+    GMenu *section = g_menu_new();
+    for (size_t i = 0; i < count; i++) {
+        if (items[i].separator) {
+            if (g_menu_model_get_n_items(G_MENU_MODEL(section)) > 0) {
+                g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
+            }
+            g_object_unref(section);
+            section = g_menu_new();
+            continue;
+        }
+        char action_name[32];
+        snprintf(action_name, sizeof(action_name), "item-%u", items[i].item_id);
+        GSimpleAction *action = g_simple_action_new(action_name, NULL);
+        g_simple_action_set_enabled(action, items[i].enabled != 0);
+        g_object_set_data(G_OBJECT(action), "native-sdk-item-id", GUINT_TO_POINTER(items[i].item_id));
+        g_signal_connect(action, "activate", G_CALLBACK(native_sdk_context_menu_item_activate), menu_state);
+        g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
+        g_object_unref(action); /* the group holds its own ref */
+        char *item_label = native_sdk_strndup(items[i].label ? items[i].label : "", items[i].label_len);
+        char detailed[80];
+        snprintf(detailed, sizeof(detailed), "%s.item-%u", menu_state->group_name, items[i].item_id);
+        GMenuItem *gitem = g_menu_item_new(item_label ? item_label : "", detailed);
+        g_menu_append_item(section, gitem);
+        g_object_unref(gitem); /* the section holds its own ref */
+        free(item_label);
+    }
+    if (g_menu_model_get_n_items(G_MENU_MODEL(section)) > 0) {
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
+    }
+    g_object_unref(section);
+
+    gtk_widget_insert_action_group(parent, menu_state->group_name, G_ACTION_GROUP(group));
+    g_object_unref(group); /* the widget holds its own ref */
+
+    GtkWidget *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+    g_object_unref(menu); /* the popover holds its own model ref */
+    gtk_widget_set_parent(popover, parent); /* sinks the floating ref; the parent owns it */
+    gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
+    GdkRectangle pointing_to = { (int)x, (int)y, 1, 1 };
+    gtk_popover_set_pointing_to(GTK_POPOVER(popover), &pointing_to);
+    menu_state->popover = popover;
+    g_object_add_weak_pointer(G_OBJECT(popover), (gpointer *)&menu_state->popover);
+    g_signal_connect(popover, "closed", G_CALLBACK(native_sdk_context_menu_closed), menu_state);
+    host->context_menu = menu_state;
+    /* Popovers are asynchronous (no nested tracking loop): popup returns
+     * immediately and the selection arrives through the action group,
+     * so presenting synchronously from the requesting dispatch is safe —
+     * the macOS host defers a turn only because NSMenu's popUp blocks. */
+    gtk_popover_popup(GTK_POPOVER(popover));
+    return 1;
+}
+
 int native_sdk_gtk_request_gpu_surface_frame(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
@@ -3474,18 +4374,33 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
         view->gpu_sample_color = ((uint32_t)sa << 24) | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | (uint32_t)sb;
     }
 
-    gtk_widget_queue_draw(view->widget);
     /* A present is the completion producer on the surface's single
      * frame-event scheduler: the completion event it arms is what
      * drives the runtime's frame loop (an armed animation presents,
      * this echo steps it again). The first present also retires the
      * placeholder pump — from here on frames exist only on demand. */
+    const int first_present = !view->gpu_presented;
     view->gpu_presented = 1;
+    if (first_present && win && !win->shown) {
+        native_sdk_cancel_deferred_show(win);
+        native_sdk_show_window_implicit(win);
+        native_sdk_emit_window_frame(host, win, 1);
+    }
+    /* GTK discards queue_draw while a widget is unmapped. Map a deferred
+     * first-present window above, then queue the draw that consumes the
+     * newly installed canvas buffer. */
+    gtk_widget_queue_draw(view->widget);
     native_sdk_gpu_surface_schedule_frame_emission(view);
     return 1;
 }
 
 int native_sdk_gtk_update_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_accessibility_label, const char *accessibility_label, size_t accessibility_label_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len) {
+    if (!native_sdk_valid_native_view_strings(label_len,
+            0,
+            has_role ? role_len : 0,
+            has_accessibility_label ? accessibility_label_len : 0,
+            has_text ? text_len : 0,
+            has_command ? command_len : 0)) return 0;
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
     native_sdk_gtk_native_view_t *view = native_sdk_find_native_view(win, label_copy);
@@ -3538,6 +4453,8 @@ int native_sdk_gtk_focus_view(native_sdk_gtk_host_t *host, uint64_t window_id, c
         return 0;
     }
     if (label_copy && strcmp(label_copy, "main") == 0) {
+        /* Peek, never ensure: focusing cannot mean "start a web page",
+         * so a still-lazy main WebView is an honest failure. */
         GtkWidget *widget = win->web_view ? GTK_WIDGET(win->web_view) : NULL;
         free(label_copy);
         if (!widget || !gtk_widget_get_visible(widget) || !gtk_widget_get_sensitive(widget)) return 0;
@@ -3568,6 +4485,24 @@ int native_sdk_gtk_close_view(native_sdk_gtk_host_t *host, uint64_t window_id, c
 }
 
 int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    /* Web layer compiled out: creation honestly fails (the runtime's
+     * gate reports error.WebViewLayerNotBuilt before ever calling in). */
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)url;
+    (void)url_len;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)layer;
+    (void)transparent;
+    (void)bridge_enabled;
+    return 0;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->stack_root || label_len == 0 || url_len == 0 || !native_sdk_valid_webview_frame(x, y, width, height)) return 0;
     if (win->webview_count >= NATIVE_SDK_MAX_WEBVIEWS) return 0;
@@ -3607,6 +4542,11 @@ int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_i
         free(url_copy);
         return 0;
     }
+    /* A child webview can be the FIRST WebView a canvas-first app ever
+     * creates (the window's main WebView stays lazy), so it must be able
+     * to claim the zero:// scheme registration itself before its first
+     * load resolves an asset URL. */
+    native_sdk_register_zero_scheme(host, web_view);
 
     native_sdk_gtk_webview_t *webview = &win->webviews[win->webview_count++];
     memset(webview, 0, sizeof(*webview));
@@ -3620,6 +4560,7 @@ int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_i
     webview->transparent = transparent != 0;
     webview->bridge_enabled = bridge_enabled != 0;
     webview->content_manager = manager;
+    native_sdk_watch_webview_pointer_focus(win, web_view);
     native_sdk_apply_webview_frame(webview);
     gtk_overlay_add_overlay(GTK_OVERLAY(win->stack_root), GTK_WIDGET(web_view));
     if (transparent) {
@@ -3631,12 +4572,27 @@ int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_i
     webkit_web_view_load_uri(web_view, url_copy);
     free(url_copy);
     return 1;
+#endif
 }
 
 int native_sdk_gtk_set_webview_frame(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    return 0;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
-    if (label_copy && strcmp(label_copy, "main") == 0 && win && win->web_view && native_sdk_valid_webview_frame(x, y, width, height)) {
+    /* Placing the main WebView is a materializing operation (the AppKit
+     * host's setWebViewFrameInWindow: ensures the same way): the runtime
+     * only positions "main" for scenes that declare a main webview view. */
+    if (label_copy && strcmp(label_copy, "main") == 0 && native_sdk_valid_webview_frame(x, y, width, height) && native_sdk_ensure_main_webview(win)) {
         GtkWidget *widget = GTK_WIDGET(win->web_view);
         gtk_widget_set_halign(widget, GTK_ALIGN_START);
         gtk_widget_set_valign(widget, GTK_ALIGN_START);
@@ -3655,9 +4611,19 @@ int native_sdk_gtk_set_webview_frame(native_sdk_gtk_host_t *host, uint64_t windo
     webview->height = height;
     native_sdk_apply_webview_frame(webview);
     return 1;
+#endif
 }
 
 int native_sdk_gtk_navigate_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)url;
+    (void)url_len;
+    return 0;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
     char *url_copy = url_len > 0 ? native_sdk_strndup(url, url_len) : NULL;
@@ -3671,12 +4637,21 @@ int native_sdk_gtk_navigate_webview(native_sdk_gtk_host_t *host, uint64_t window
     free(label_copy);
     free(url_copy);
     return 1;
+#endif
 }
 
 int native_sdk_gtk_set_webview_zoom(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double zoom) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)zoom;
+    return 0;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
-    if (label_copy && strcmp(label_copy, "main") == 0 && win && win->web_view && zoom >= 0.25 && zoom <= 5.0) {
+    if (label_copy && strcmp(label_copy, "main") == 0 && zoom >= 0.25 && zoom <= 5.0 && native_sdk_ensure_main_webview(win)) {
         webkit_web_view_set_zoom_level(win->web_view, zoom);
         free(label_copy);
         return 1;
@@ -3686,12 +4661,21 @@ int native_sdk_gtk_set_webview_zoom(native_sdk_gtk_host_t *host, uint64_t window
     if (!webview || !webview->web_view || zoom < 0.25 || zoom > 5.0) return 0;
     webkit_web_view_set_zoom_level(webview->web_view, zoom);
     return 1;
+#endif
 }
 
 int native_sdk_gtk_set_webview_layer(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int layer) {
+#if !NATIVE_SDK_HAS_WEBKITGTK
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)layer;
+    return 0;
+#else
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
-    if (label_copy && strcmp(label_copy, "main") == 0 && win && win->web_view) {
+    if (label_copy && strcmp(label_copy, "main") == 0 && native_sdk_ensure_main_webview(win)) {
         free(label_copy);
         win->main_webview_layer = layer;
         native_sdk_reorder_overlays(win);
@@ -3703,8 +4687,11 @@ int native_sdk_gtk_set_webview_layer(native_sdk_gtk_host_t *host, uint64_t windo
     webview->layer = layer;
     native_sdk_reorder_overlays(win);
     return 1;
+#endif
 }
 
+/* No stub needed: a stub build can never create a webview, so the label
+ * scan below is honestly empty and every close answers 0. */
 int native_sdk_gtk_close_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len) {
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;

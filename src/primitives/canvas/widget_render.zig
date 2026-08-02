@@ -4,6 +4,7 @@ const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
 const text_spans_model = @import("text_spans.zig");
+const code_model = @import("code.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
@@ -113,35 +114,27 @@ pub const sliderWidgetKnobRect = widget_render_controls.sliderWidgetKnobRect;
 
 const max_widget_depth: usize = 32;
 
-// Widget-built path elements (`.chart` lines/bands, the `.spinner` arc
-// and segments, the `.checkbox` check mark — unlike icons, whose
-// elements are comptime-static) allocate from the display-list builder's
-// own store (`Builder.allocPathElements`), so the emitted commands'
-// element slices share the builder's lifetime instead of pointing into
-// shared scratch that a later emission could overwrite.
+// Emit-built bytes that emitted commands RETAIN live in the builder,
+// never in per-emit-reset scratch: path elements (`.chart` lines/bands,
+// the `.spinner` arc and segments, the `.checkbox` check mark — unlike
+// icons, whose elements are comptime-static) allocate from
+// `Builder.allocPathElements`, formatted chart labels from
+// `Builder.allocChartLabelBytes`, and presented single-line values from
+// `Builder.allocTextBytes`, so every emitted command's slices share the
+// builder's lifetime — a display list accumulated across several emit
+// calls, or held while another builder emits, stays intact.
 
-/// Frame-lifetime scratch for formatted chart label text (y tick values
-/// and hover-detail rows): `drawText` commands slice into it. The event
-/// loop is single-threaded and the runtime copies the display list into
-/// per-view storage within the same emit call stack, so one threadlocal
-/// buffer per frame is sound — reset at each emit entry point. Overflow
-/// fails loudly by budget name.
-threadlocal var frame_label_bytes: [chart_model.max_chart_label_bytes_per_frame]u8 = undefined;
-threadlocal var frame_label_len: usize = 0;
-
-fn resetFrameLabelScratch() void {
-    frame_label_len = 0;
-}
-
-/// Persist a formatted label into the frame scratch so the emitted
-/// command outlives the local formatting buffer.
-fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
-    if (frame_label_len + text.len > frame_label_bytes.len) return error.ChartLabelBytesFull;
-    const start = frame_label_len;
-    frame_label_len += text.len;
-    @memcpy(frame_label_bytes[start..frame_label_len], text);
-    return frame_label_bytes[start..frame_label_len];
-}
+/// Transient chart scratch, lazily heap-allocated per thread: init on
+/// first chart use of a thread — the emitting thread by construction —
+/// so threads that never emit charts never allocate it. Purely
+/// intra-emit (polyline points are copied into the builder's
+/// path-element store before the emitter returns), so nothing emitted
+/// retains slices into it. The array carries no default and stays
+/// uninitialized, exactly like the `= undefined` static it replaces.
+const WidgetRenderScratch = struct {
+    chart_polyline_points: [chart_model.max_chart_points_per_series]geometry.PointF,
+};
+const widget_render_scratch = @import("lazy_tls.zig").LazyTls(WidgetRenderScratch);
 
 /// Frame-lifetime scratch (same single-threaded emit contract as the
 /// label scratch above) holding the root bounds of the tree being
@@ -150,9 +143,17 @@ fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
 /// the entry points record it here.
 threadlocal var scrim_viewport: ?geometry.RectF = null;
 
+/// Visible bounds for the direct widget-tree walk, in the coordinate
+/// space active at the current recursion depth. The layout walk derives
+/// the same value from retained parent links; the direct walk carries it
+/// alongside the builder transform/clip stack so code paragraphs use the
+/// bounded emitter through both public rendering entry points.
+threadlocal var tree_visible_bounds: ?geometry.RectF = null;
+
 pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    resetFrameLabelScratch();
     scrim_viewport = widget.frame.normalized();
+    tree_visible_bounds = widget.frame.normalized();
+    defer tree_visible_bounds = null;
     try emitWidgetDepth(builder, widget, tokens, 0);
 }
 
@@ -161,7 +162,6 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 }
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
-    resetFrameLabelScratch();
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
     try emitWidgetLayoutAnchored(builder, layout, tokens, state);
@@ -178,6 +178,64 @@ pub fn widgetLayoutRootBounds(layout: anytype) ?geometry.RectF {
         bounds = if (bounds) |current| geometry.RectF.unionWith(current, frame) else frame;
     }
     return bounds;
+}
+
+/// Accumulated transform active while `node_index` emits. Anchored surfaces
+/// are hoisted into the late top-level pass, so their original ancestors do
+/// not contribute transforms there.
+fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+    if (node_index >= layout.nodes.len) return null;
+    var indices: [widget_layout.max_widget_depth]usize = undefined;
+    var len: usize = 0;
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len or len >= indices.len) return null;
+        indices[len] = index;
+        len += 1;
+        if (widget_tree.widgetIsAnchored(layout.nodes[index].widget)) break;
+        current = layout.nodes[index].parent_index;
+    }
+
+    var transform = Affine.identity();
+    while (len > 0) {
+        len -= 1;
+        transform = transform.multiply(widgetTransform(layout.nodes[indices[len]].widget));
+    }
+    return transform;
+}
+
+/// The rectangular part of one layout node that can reach the surface,
+/// returned in the node's untransformed layout coordinate space. Window
+/// and ancestor clip bounds are intersected in device space, then mapped
+/// back through the exact transform stack active at node emission. Code
+/// paragraphs use this so transformed sources neither disappear nor lose
+/// later pages while still charging only visible runs to display budgets.
+fn widgetLayoutNodeVisibleBounds(layout: anytype, node_index: usize, bounds: geometry.RectF) ?geometry.RectF {
+    if (node_index >= layout.nodes.len) return null;
+    var device_visible = (widgetLayoutRootBounds(layout) orelse return null).normalized();
+
+    var current = node_index;
+    while (true) {
+        // Hoisted anchored surfaces escape their original ancestor clips,
+        // but the window intersection still bounds display-list demand.
+        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) break;
+        const parent_index = layout.nodes[current].parent_index orelse break;
+        if (parent_index >= layout.nodes.len) return null;
+        const parent = layout.nodes[parent_index];
+        if (widgetClipsContent(parent.widget)) {
+            const parent_transform = widgetLayoutNodeEmissionTransform(layout, parent_index) orelse return null;
+            const device_clip = parent_transform.transformRect(parent.frame.normalized());
+            device_visible = geometry.RectF.intersection(device_visible, device_clip);
+            if (device_visible.isEmpty()) return null;
+        }
+        current = parent_index;
+    }
+
+    const transform = widgetLayoutNodeEmissionTransform(layout, node_index) orelse return null;
+    const inverse = transform.inverse() orelse return null;
+    const local_visible = inverse.transformRect(device_visible);
+    const clipped = geometry.RectF.intersection(bounds.normalized(), local_visible.normalized());
+    return if (clipped.isEmpty()) null else clipped;
 }
 
 /// The late z-pass for anchored floating surfaces: they are skipped by
@@ -209,9 +267,19 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
     const wrap_transform = !affinesEqual(transform, Affine.identity());
     const inverse_transform = if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
-    if (wrap_transform) try builder.transform(transform);
-    try emitWidgetDepthContent(builder, widget, tokens, depth);
-    if (wrap_transform) try builder.transform(inverse_transform);
+    if (wrap_transform) {
+        const parent_visible_bounds = tree_visible_bounds;
+        defer tree_visible_bounds = parent_visible_bounds;
+        tree_visible_bounds = if (parent_visible_bounds) |bounds|
+            inverse_transform.transformRect(bounds).normalized()
+        else
+            null;
+        try builder.transform(transform);
+        try emitWidgetDepthContent(builder, widget, tokens, depth);
+        try builder.transform(inverse_transform);
+    } else {
+        try emitWidgetDepthContent(builder, widget, tokens, depth);
+    }
     if (wrap_opacity) try builder.popOpacity();
 }
 
@@ -219,7 +287,11 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .stack, .row, .column => {
+            try emitLayoutContainerBackground(builder, paint_widget);
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
+        .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
         .button_group => try emitButtonGroupWidget(builder, paint_widget, tokens, depth),
         .table, .data_grid => {
             try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
@@ -241,15 +313,35 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .resizable, .panel => try emitPanelWidget(builder, paint_widget, tokens, depth),
         .popover => try emitPopoverWidget(builder, paint_widget, tokens, depth),
         .menu_surface, .dropdown_menu => try emitMenuSurfaceWidget(builder, paint_widget, tokens, depth),
-        .text => try emitTextWidget(builder, paint_widget, tokens),
+        .text => {
+            if (isSyntaxCodeParagraph(paint_widget)) {
+                if (tree_visible_bounds) |visible_bounds| {
+                    const clipped = geometry.RectF.intersection(
+                        paint_widget.frame.normalized(),
+                        visible_bounds.normalized(),
+                    );
+                    if (!clipped.isEmpty()) {
+                        try emitVisibleCodeTextSpansWidget(builder, paint_widget, tokens, clipped, .{});
+                    }
+                }
+            } else {
+                try emitTextWidget(builder, paint_widget, tokens);
+            }
+        },
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
+        .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
+        .terminal => try emitTerminalWidget(builder, paint_widget, tokens, paint_widget.state.focused),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try widget_render_controls.emitIconButtonWidget(builder, paint_widget, tokens),
         .select => try widget_render_controls.emitSelectWidget(builder, paint_widget, tokens),
-        .input, .text_field, .textarea => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
+        .input, .text_field => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
+        .textarea => if (paint_widget.code_editor)
+            try emitCodeEditorWidget(builder, paint_widget, tokens)
+        else
+            try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field, .combobox => try widget_render_controls.emitSearchFieldWidget(builder, paint_widget, tokens),
         .tooltip => try widget_render_controls.emitTooltipWidget(builder, paint_widget, tokens),
         .menu_item => try widget_render_controls.emitMenuItemWidget(builder, paint_widget, tokens),
@@ -399,6 +491,11 @@ fn buttonGroupSegmentAt(ordinal: usize, visible_total: usize) widget_model.Widge
 /// docs scene and a live app would render different bars.
 fn emitButtonGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     if (!buttonGroupStampsSegments(widget, tokens)) return emitWidgetClippedChildren(builder, widget, tokens, depth);
+    const parent_visible_bounds = tree_visible_bounds;
+    defer tree_visible_bounds = parent_visible_bounds;
+    if (widget.layout.clip_content) {
+        tree_visible_bounds = visibleBoundsInsideClip(parent_visible_bounds, widgetContentClip(widget, tokens).rect);
+    }
     if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
     var emitted: usize = 0;
     var previous: ?WidgetPaintOrder = null;
@@ -496,7 +593,8 @@ fn emitWidgetLayoutNodeContent(
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
+        .stack, .row, .column => try emitLayoutContainerBackground(builder, paint_widget),
+        .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
         .data_row => try emitDataRowWidgetWash(builder, paint_widget, tokens),
         .tabs => try widget_render_surfaces.emitTabsListWidgetChrome(builder, paint_widget, tokens),
         .table, .data_grid => {
@@ -519,7 +617,14 @@ fn emitWidgetLayoutNodeContent(
             try builder.popClip();
             // Native scroll drivers own the (OS overlay) scrollbar.
             if (!paint_widget.native_scroll) {
-                try widget_render_scroll.emitScrollViewScrollbar(builder, paint_widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, paint_widget.id);
+                try widget_render_scroll.emitScrollViewScrollbars(
+                    builder,
+                    paint_widget.frame,
+                    widgetScrollAxisMetrics(layout, node_index, .vertical),
+                    widgetScrollAxisMetrics(layout, node_index, .horizontal),
+                    tokens,
+                    paint_widget.id,
+                );
             }
             return;
         },
@@ -575,15 +680,29 @@ fn emitWidgetLayoutNodeContent(
         .resizable, .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, paint_widget, tokens),
         .popover => try widget_render_surfaces.emitPopoverWidgetChrome(builder, paint_widget, tokens),
         .menu_surface, .dropdown_menu => try widget_render_surfaces.emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
-        .text => try emitTextWidget(builder, paint_widget, tokens),
+        .text => {
+            if (isSyntaxCodeParagraph(paint_widget)) {
+                if (widgetLayoutNodeVisibleBounds(layout, node_index, paint_widget.frame)) |visible_bounds| {
+                    try emitVisibleCodeTextSpansWidget(builder, paint_widget, tokens, visible_bounds, .{});
+                }
+            } else {
+                try emitTextWidget(builder, paint_widget, tokens);
+            }
+        },
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
+        .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
+        .terminal => try emitTerminalWidget(builder, paint_widget, tokens, widgetHasLogicalFocus(paint_widget, state)),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
         .icon_button => try widget_render_controls.emitIconButtonWidget(builder, paint_widget, tokens),
         .select => try widget_render_controls.emitSelectWidget(builder, paint_widget, tokens),
-        .input, .text_field, .textarea => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
+        .input, .text_field => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
+        .textarea => if (paint_widget.code_editor)
+            try emitCodeEditorWidget(builder, paint_widget, tokens)
+        else
+            try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field, .combobox => try widget_render_controls.emitSearchFieldWidget(builder, paint_widget, tokens),
         .tooltip => try widget_render_controls.emitTooltipWidget(builder, paint_widget, tokens),
         .menu_item => try widget_render_controls.emitMenuItemWidget(builder, paint_widget, tokens),
@@ -622,6 +741,20 @@ fn emitWidgetLayoutNodeContent(
     try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
 }
 
+/// Flow and stacking containers have no implicit surface treatment, but
+/// an author background is real chrome: it fills the laid-out frame
+/// before any children, with the same optional radius accepted by the
+/// builder and markup grammar.
+fn emitLayoutContainerBackground(builder: *Builder, widget: Widget) Error!void {
+    const background = widget.style.background orelse return;
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = Radius.all(nonNegative(widget.style.radius orelse 0)),
+        .fill = colorFill(background),
+    });
+}
+
 fn emitWidgetLayoutScrollableChildren(
     builder: *Builder,
     layout: anytype,
@@ -637,9 +770,18 @@ fn emitWidgetLayoutScrollableChildren(
     try builder.pushClip(clip);
     try emitWidgetLayoutChildren(builder, layout, parent_index, tokens, state);
     try builder.popClip();
-    // Native scroll drivers own the (OS overlay) scrollbar.
+    // Native scroll drivers own the (OS overlay) scrollbar. These are
+    // the virtualized containers — vertical machinery, so only the
+    // vertical bar can exist.
     if (!widget.native_scroll) {
-        try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widgetScrollSemantics(layout, parent_index).metrics, tokens, widget.id);
+        try widget_render_scroll.emitScrollViewScrollbars(
+            builder,
+            widget.frame,
+            widgetScrollAxisMetrics(layout, parent_index, .vertical),
+            .{},
+            tokens,
+            widget.id,
+        );
     }
 }
 
@@ -867,23 +1009,56 @@ fn emitMenuSurfaceWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
 }
 
 fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+    const parent_visible_bounds = tree_visible_bounds;
+    defer tree_visible_bounds = parent_visible_bounds;
+    tree_visible_bounds = visibleBoundsInsideClip(parent_visible_bounds, widget.frame);
     try builder.pushClip(.{ .id = widgetPartId(widget.id, 1), .rect = widget.frame });
     try emitWidgetChildren(builder, widget.children, tokens, depth);
     try builder.popClip();
     // Native scroll drivers own the (OS overlay) scrollbar.
     if (!widget.native_scroll) {
-        try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widget_render_scroll.widgetScrollMetricsForWidget(widget, tokens), tokens, widget.id);
+        try widget_render_scroll.emitScrollViewScrollbars(
+            builder,
+            widget.frame,
+            widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .vertical),
+            widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .horizontal),
+            tokens,
+            widget.id,
+        );
     }
 }
 
 fn emitWidgetClippedChildren(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
-    if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
+    if (!widget.layout.clip_content) return emitWidgetChildren(builder, widget.children, tokens, depth);
+    const parent_visible_bounds = tree_visible_bounds;
+    defer tree_visible_bounds = parent_visible_bounds;
+    const clip = widgetContentClip(widget, tokens);
+    tree_visible_bounds = visibleBoundsInsideClip(parent_visible_bounds, clip.rect);
+    try builder.pushClip(clip);
     try emitWidgetChildren(builder, widget.children, tokens, depth);
-    if (widget.layout.clip_content) try builder.popClip();
+    try builder.popClip();
+}
+
+fn visibleBoundsInsideClip(bounds: ?geometry.RectF, clip: geometry.RectF) ?geometry.RectF {
+    const clipped = geometry.RectF.intersection(
+        (bounds orelse return null).normalized(),
+        clip.normalized(),
+    );
+    return if (clipped.isEmpty()) null else clipped;
 }
 
 fn widgetScrollSemantics(layout: anytype, node_index: usize) widget_semantics.WidgetScrollSemantics {
     return widget_semantics.widgetScrollSemantics(layout, node_index, widget_layout.virtualWidgetScrollContentExtent);
+}
+
+/// Per-axis scrollbar metrics for a layout-walk scroll region (present
+/// = false on an ungranted axis or an empty viewport).
+fn widgetScrollAxisMetrics(layout: anytype, node_index: usize, comptime axis: canvas.ScrollAxis) event_model.WidgetScrollMetrics {
+    if (node_index >= layout.nodes.len) return .{};
+    const node = layout.nodes[node_index];
+    const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+    if (viewport.isEmpty()) return .{};
+    return widget_semantics.widgetScrollAxisMetrics(layout, node_index, widget_layout.virtualWidgetScrollContentExtent, axis, viewport);
 }
 
 fn emitWidgetLayoutClippedChildren(
@@ -937,6 +1112,151 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     if (clip_overflow) try builder.popClip();
 }
 
+/// Editable code is a textarea behaviorally and a bare code surface
+/// visually. Selection/caret geometry comes from the shared text-input
+/// seam while glyphs come from the same syntax-span emitter as read-only
+/// code; there is intentionally no textarea chrome or component inset.
+fn emitCodeEditorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const text_size = widgetTextInputSize(widget, tokens);
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const layout_options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
+    const draw_text = widget_text_input.widgetTextInputDrawText(
+        widget,
+        tokens,
+        text_size,
+        origin,
+        widgetForegroundColor(widget, tokens, tokens.colors.text),
+        layout_options,
+    );
+    const selection_range = widget_access.widgetTextSelectionRange(widget);
+    const composition_range = widget_access.widgetTextCompositionRange(widget);
+    const active_row = codeEditorActiveRowRect(widget, draw_text, layout_options, selection_range);
+
+    try builder.pushClip(.{ .id = widgetPartId(widget.id, 16), .rect = widget.frame });
+    if (active_row) |row| {
+        try builder.fillRect(.{
+            .id = codeEditorActiveRowCommandId(widget.id, 0),
+            .rect = pixelSnapGeometryRect(tokens, row),
+            .fill = colorFill(tokens.colors.surface_subtle),
+        });
+    }
+    if (selection_range) |range| {
+        if (!range.isCollapsed(widget.text.len)) {
+            try widget_render_controls.emitWidgetTextSelectionRects(
+                builder,
+                widget,
+                draw_text,
+                layout_options,
+                range,
+                3,
+                13,
+                4,
+                tokens,
+            );
+        }
+    }
+    try emitVisibleCodeTextSpansWidget(builder, widget, tokens, widget.frame, .{});
+    if (selection_range) |range| {
+        if (!range.isCollapsed(widget.text.len)) {
+            try emitCodeEditorSelectedGlyphs(
+                builder,
+                widget,
+                draw_text,
+                layout_options,
+                range,
+                tokens,
+            );
+        }
+    }
+    if (composition_range) |range| {
+        if (!range.isCollapsed(widget.text.len)) {
+            try widget_render_controls.emitWidgetTextCompositionLines(
+                builder,
+                widget,
+                draw_text,
+                layout_options,
+                range,
+                5,
+                10,
+                4,
+                tokens,
+            );
+        }
+    }
+    if (widget.state.focused) {
+        if (selection_range) |range| {
+            if (range.isCollapsed(widget.text.len)) {
+                try widget_render_controls.emitWidgetTextCaret(
+                    builder,
+                    widget,
+                    draw_text,
+                    layout_options,
+                    range.start,
+                    6,
+                    tokens,
+                );
+            }
+        }
+    }
+    // Wrapped code emits its gutter beside the wrapped span rows. The
+    // viewport-owned gutter below is the no-wrap path: emitting both would
+    // duplicate the retained line-number command IDs and place a second set
+    // of markers at logical-line rather than visual-row positions.
+    if (widget.text_no_wrap) {
+        try emitVisibleEditableCodeLineNumberGutter(builder, widget, tokens, widget.frame, active_row);
+    }
+    try builder.popClip();
+}
+
+/// Repaint selected code from the same viewport-bounded syntax runs as the
+/// base pass. Ordinary text inputs can safely repeat their one small text
+/// command under each selection clip; an editor may retain hundreds of KiB,
+/// so repeating its full `DrawText` would overflow the 32 KiB display-list
+/// text store even when only a few visible glyphs are selected.
+fn emitCodeEditorSelectedGlyphs(
+    builder: *Builder,
+    widget: Widget,
+    text: text_model.DrawText,
+    options: TextLayoutOptions,
+    range: text_model.TextRange,
+    tokens: DesignTokens,
+) Error!void {
+    var rect_buffer: [4]text_model.TextSelectionRect = undefined;
+    const rects = text_model.layoutTextSelectionRects(text, options, range, &rect_buffer);
+    for (rects, 0..) |selection, ordinal| {
+        const visible = geometry.RectF.intersection(selection.rect, widget.frame);
+        if (visible.isEmpty()) continue;
+        try builder.pushClip(.{
+            .id = textSpanCommandId(0x5eed_59a2_0000_0017, widget.id, ordinal),
+            .rect = pixelSnapGeometryRect(tokens, selection.rect),
+        });
+        try emitVisibleCodeTextSpansWidget(builder, widget, tokens, visible, .{
+            .color = textSelectionTextColor(widget, tokens),
+            .selection_ordinal = ordinal,
+        });
+        try builder.popClip();
+    }
+}
+
+/// The visual row containing the rendered caret. It derives from the
+/// same scroll/wrap-aware text command as the caret itself, then spans
+/// the editor viewport instead of the caret's one-point width.
+fn codeEditorActiveRowRect(
+    widget: Widget,
+    draw_text: text_model.DrawText,
+    layout_options: TextLayoutOptions,
+    selection_range: ?text_model.TextRange,
+) ?geometry.RectF {
+    if (!widget.state.focused) return null;
+    const range = selection_range orelse return null;
+    if (!range.isCollapsed(widget.text.len)) return null;
+    const caret = text_model.layoutTextCaretRect(draw_text, layout_options, range.start) orelse return null;
+    const row = geometry.RectF.init(widget.frame.x, caret.y, widget.frame.width, caret.height);
+    const clipped = geometry.RectF.intersection(row, widget.frame);
+    return if (clipped.isEmpty()) null else clipped;
+}
+
 /// Wrap budget for text painted inside a pixel-snapped frame — the
 /// shared quantum hand-back (`widget_metrics.textWrapMaxWidth`), aliased
 /// for the emit sites here.
@@ -946,11 +1266,22 @@ const textWrapMaxWidth = widget_metrics.textWrapMaxWidth;
 /// of a `.text` widget (plain or span paragraph). Command ids are hashed
 /// per line ordinal like span runs, so retained diffing stays stable.
 fn emitStaticTextSelection(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    return emitStaticTextSelectionBounded(builder, widget, tokens, builder.commands.len);
+}
+
+fn emitStaticTextSelectionBounded(
+    builder: *Builder,
+    widget: Widget,
+    tokens: DesignTokens,
+    command_ceiling: usize,
+) Error!void {
+    if (builder.len >= command_ceiling) return;
     const range = widget_access.widgetTextSelectionRange(widget) orelse return;
     if (range.isCollapsed(widget.text.len)) return;
     var rect_buffer: [widget_text_select.max_static_text_selection_rects]text_model.TextSelectionRect = undefined;
     const rects = widget_text_select.staticTextSelectionRects(widget, tokens, range, &rect_buffer);
     for (rects, 0..) |selection, ordinal| {
+        if (builder.len >= command_ceiling) break;
         try builder.fillRoundedRect(.{
             .id = textSelectionCommandId(widget.id, ordinal),
             .rect = pixelSnapGeometryRect(tokens, selection.rect),
@@ -965,14 +1296,20 @@ fn emitStaticTextSelection(builder: *Builder, widget: Widget, tokens: DesignToke
 /// decorations get stable hashed command ids derived from the widget id
 /// and their ordinal, so retained diffing works across frames.
 fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const content = widget.frame.inset(widget.layout.padding);
+    const content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
+    const layout_options = widget_metrics.widgetTextSpanLayoutOptions(
+        widget,
+        tokens,
+        textWrapMaxWidth(tokens, content.width),
+    );
     var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
     const layout = text_spans_model.layoutTextSpans(
         widget.spans,
-        widget_metrics.widgetTextSpanLayoutOptions(widget, tokens, textWrapMaxWidth(tokens, content.width)),
+        layout_options,
         &runs,
     );
 
+    try emitCodeLineNumberGutter(builder, widget, widget.spans, tokens, content, widget.frame, layout_options, null);
     // Span background highlights (intra-line diff emphasis): one
     // full-line-height rect per run, the same geometry selection rects
     // use, painted before selection and glyphs. Edge-snapped rects of
@@ -1063,6 +1400,781 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
     }
 }
 
+fn isSyntaxColor(color: text_spans_model.TextSpanColor) bool {
+    return switch (color) {
+        .syntax_plain,
+        .syntax_comment,
+        .syntax_keyword,
+        .syntax_literal,
+        .syntax_function,
+        .syntax_property,
+        .syntax_constant,
+        => true,
+        else => false,
+    };
+}
+
+/// `Ui.code` lowers to ordinary text widgets whose spans are all monospace
+/// syntax-token runs. Keep that marker structural instead of adding another
+/// public widget kind solely for an emission optimization.
+fn isSyntaxCodeParagraph(widget: Widget) bool {
+    if (widget.kind != .text or widget.spans.len == 0) return false;
+    for (widget.spans) |span| {
+        if (!span.monospace or
+            !isSyntaxColor(span.color orelse return false) or
+            span.background != null or
+            span.underline or
+            span.strikethrough or
+            span.link.len != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A code surface shares the frame's fixed display-list stores with every
+// widget emitted around it. Hold back the same practical tail as the
+// terminal painter: enough commands and referenced text for trailing
+// siblings, transform/clip epilogues, and window chrome. Small direct
+// builders retain seven eighths of their capacity so focused unit tests
+// remain representative while still leaving their enclosing epilogue room.
+const code_widget_command_reserve: usize = 256;
+const code_widget_text_reserve: usize = 8192;
+
+const CodeEmissionBudget = struct {
+    command_ceiling: usize,
+    text_ceiling: usize,
+    text_total: usize,
+
+    fn init(builder: *const Builder) CodeEmissionBudget {
+        const command_reserve = @min(
+            code_widget_command_reserve,
+            @max(@as(usize, 1), builder.commands.len / 8),
+        );
+        return .{
+            .command_ceiling = builder.commands.len -| command_reserve,
+            .text_ceiling = canvas.max_display_list_text_bytes -| code_widget_text_reserve,
+            .text_total = displayListTextBytes(builder.displayList()),
+        };
+    }
+
+    fn hasCommand(self: CodeEmissionBudget, builder: *const Builder) bool {
+        return builder.len < self.command_ceiling;
+    }
+
+    fn remainingText(self: CodeEmissionBudget) usize {
+        return self.text_ceiling -| self.text_total;
+    }
+
+    fn chargeText(self: *CodeEmissionBudget, len: usize) void {
+        self.text_total += len;
+    }
+};
+
+fn displayListTextBytes(list: canvas.DisplayList) usize {
+    var total: usize = 0;
+    for (list.commands) |command| {
+        if (command == .draw_text) total += command.draw_text.text.len;
+    }
+    return total;
+}
+
+/// Keep a text-budget truncation on a UTF-8 scalar boundary. Code source
+/// accepts arbitrary bytes, so invalid leading/continuation bytes simply
+/// degrade to the maximal prefix the display store can retain.
+fn codeTextPrefix(text: []const u8, max_len: usize) []const u8 {
+    var end = @min(text.len, max_len);
+    while (end > 0 and end < text.len and text[end] & 0xc0 == 0x80) end -= 1;
+    return text[0..end];
+}
+
+/// Viewport-aware code emission: the full source remains in retained
+/// paragraph widgets for layout, selection, copy, and scroll extents, while
+/// the display list contains only line runs that intersect the current
+/// window/scroll clip. Long no-wrap runs are sliced horizontally as well.
+const CodeTextPaint = struct {
+    color: ?Color = null,
+    selection_ordinal: ?usize = null,
+};
+
+fn emitVisibleCodeTextSpansWidget(
+    builder: *Builder,
+    widget: Widget,
+    tokens: DesignTokens,
+    visible_bounds: geometry.RectF,
+    paint: CodeTextPaint,
+) Error!void {
+    if (widget.code_editor and widget.text_no_wrap) {
+        return emitVisibleEditableCodeLines(builder, widget, tokens, visible_bounds, paint);
+    }
+    if (widget.code_editor) {
+        return emitVisibleWrappedEditableCodeLines(builder, widget, tokens, visible_bounds, paint);
+    }
+    const spans = widget.spans;
+    const content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
+    const layout_options = widget_metrics.widgetTextSpanLayoutOptions(
+        widget,
+        tokens,
+        textWrapMaxWidth(tokens, content.width),
+    );
+    const line_height = text_spans_model.textSpanLineHeight(spans, layout_options);
+    const visible_line: usize = if (line_height > 0 and
+        std.math.isFinite(line_height) and
+        std.math.isFinite(visible_bounds.y - content.y) and
+        visible_bounds.y > content.y)
+        @intFromFloat(@floor((visible_bounds.y - content.y) / line_height))
+    else
+        0;
+    const last_visible_line: usize = if (line_height > 0 and
+        std.math.isFinite(line_height) and
+        std.math.isFinite(visible_bounds.maxY() - content.y) and
+        visible_bounds.maxY() > content.y)
+        @intFromFloat(@floor((visible_bounds.maxY() - content.y) / line_height))
+    else
+        visible_line;
+    var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+    var budget = CodeEmissionBudget.init(builder);
+    if (!budget.hasCommand(builder)) return;
+
+    if (paint.selection_ordinal == null) {
+        try emitCodeLineNumberGutter(builder, widget, spans, tokens, content, visible_bounds, layout_options, &budget);
+        try emitStaticTextSelectionBounded(builder, widget, tokens, budget.command_ceiling);
+    }
+    if (!budget.hasCommand(builder) or budget.remainingText() == 0) return;
+    var page_first_line = visible_line -| 1;
+    while (true) {
+        const layout = text_spans_model.layoutTextSpansFromLine(
+            spans,
+            layout_options,
+            page_first_line,
+            &runs,
+        );
+        for (layout.runs) |run| {
+            if (run.text.len == 0) continue;
+            const local_bounds = text_spans_model.textSpanRunBounds(layout, run);
+            const run_bounds = geometry.RectF.init(
+                content.x + local_bounds.x,
+                content.y + local_bounds.y,
+                local_bounds.width,
+                local_bounds.height,
+            );
+            if (!run_bounds.intersects(visible_bounds)) continue;
+
+            const span = spans[run.span_index];
+            const absolute_x = content.x + run.x;
+            const visible = text_spans_model.textSpanRunVisibleSlice(
+                span,
+                run,
+                layout_options,
+                visible_bounds.x - absolute_x,
+                visible_bounds.maxX() - absolute_x,
+            ) orelse continue;
+            if (!budget.hasCommand(builder)) return;
+            const admitted_text = codeTextPrefix(visible.text, budget.remainingText());
+            if (admitted_text.len == 0) return;
+            const color = paint.color orelse text_spans_model.textSpanColorValue(tokens.colors, span.color.?);
+            const origin = pixelSnapTextPoint(tokens, geometry.PointF.init(absolute_x + visible.x, content.y + run.baseline));
+            try builder.drawText(.{
+                .id = codeTextPaintCommandId(codeTextSpanRunCommandId(widget, spans, run), paint),
+                .font_id = run.font_id,
+                .size = run.size,
+                .origin = origin,
+                .color = color,
+                .text = admitted_text,
+                .text_layout = .{
+                    .max_width = 0,
+                    .line_height = layout.line_height,
+                    .wrap = .none,
+                    .alignment = .start,
+                    .measure = tokens.text_measure,
+                },
+            });
+            budget.chargeText(admitted_text.len);
+        }
+
+        const next_first_line = page_first_line +| text_spans_model.max_text_span_lines_per_paragraph;
+        if (next_first_line <= page_first_line or
+            next_first_line > last_visible_line or
+            next_first_line >= layout.line_count)
+        {
+            break;
+        }
+        page_first_line = next_first_line;
+    }
+}
+
+/// Wrapped editors cannot retain one syntax span for every token in a large
+/// document. Tokenize one logical line at a time while advancing lexer state
+/// through the prefix, then paint only lines intersecting the viewport. Each
+/// line gets the full bounded span budget without dropping later syntax.
+fn emitVisibleWrappedEditableCodeLines(
+    builder: *Builder,
+    widget: Widget,
+    tokens: DesignTokens,
+    visible_bounds: geometry.RectF,
+    paint: CodeTextPaint,
+) Error!void {
+    var content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
+    content.x -= widget.value_x;
+    content.y -= widget.value;
+    const layout_options = widget_metrics.widgetTextSpanLayoutOptions(
+        widget,
+        tokens,
+        // Interactive glyphs must wrap on the exact same width as caret,
+        // selection, composition, and hit-test geometry. The pixel-snap
+        // hand-back is safe only for non-interactive paragraph painting.
+        content.width,
+    );
+    const line_height = text_spans_model.textSpanLineHeight(widget.spans, layout_options);
+    if (line_height <= 0 or !std.math.isFinite(line_height)) return;
+
+    var budget = CodeEmissionBudget.init(builder);
+    if (!budget.hasCommand(builder)) return;
+    if (paint.selection_ordinal == null) {
+        var gutter_content = content;
+        gutter_content.x += widget.value_x;
+        try emitCodeLineNumberGutter(
+            builder,
+            widget,
+            widget.spans,
+            tokens,
+            gutter_content,
+            visible_bounds,
+            layout_options,
+            &budget,
+        );
+    }
+    if (!budget.hasCommand(builder) or budget.remainingText() == 0) return;
+
+    var state: code_model.HighlightState = .{};
+    var span_storage: [text_spans_model.max_text_spans_per_paragraph]text_spans_model.TextSpan = undefined;
+    var line_runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+    var line_start: usize = 0;
+    var logical_line: usize = 0;
+    var visual_line: usize = 0;
+
+    while (line_start <= widget.text.len) : (logical_line += 1) {
+        const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n');
+        const line_end = if (newline) |index| index + 1 else widget.text.len;
+        const line_source = widget.text[line_start..line_end];
+        const highlighted = if (line_source.len == 0) blk: {
+            span_storage[0] = .{
+                .text = line_source,
+                .monospace = true,
+                .color = .syntax_plain,
+            };
+            break :blk span_storage[0..1];
+        } else code_model.highlightWithState(
+            line_source,
+            widget.code_language,
+            &span_storage,
+            &state,
+        );
+        const line_layout = text_spans_model.layoutTextSpans(
+            highlighted,
+            layout_options,
+            &line_runs,
+        );
+        const visual_count = @max(1, line_layout.line_count);
+        const line_top = content.y + @as(f32, @floatFromInt(visual_line)) * line_height;
+        const line_bottom = line_top + @as(f32, @floatFromInt(visual_count)) * line_height;
+        if (line_top > visible_bounds.maxY()) return;
+
+        if (line_bottom >= visible_bounds.y) {
+            const first_visible_line: usize = if (visible_bounds.y > line_top and
+                std.math.isFinite(visible_bounds.y - line_top))
+                @intFromFloat(@floor((visible_bounds.y - line_top) / line_height))
+            else
+                0;
+            const last_visible_line: usize = if (visible_bounds.maxY() > line_top and
+                std.math.isFinite(visible_bounds.maxY() - line_top))
+                @intFromFloat(@floor((visible_bounds.maxY() - line_top) / line_height))
+            else
+                first_visible_line;
+            var page_first_line = first_visible_line -| 1;
+            while (true) {
+                const page_layout = if (page_first_line == 0)
+                    line_layout
+                else
+                    text_spans_model.layoutTextSpansFromLine(
+                        highlighted,
+                        layout_options,
+                        page_first_line,
+                        &line_runs,
+                    );
+                for (page_layout.runs) |run| {
+                    if (run.text.len == 0) continue;
+                    const local_bounds = text_spans_model.textSpanRunBounds(page_layout, run);
+                    const run_bounds = geometry.RectF.init(
+                        content.x + local_bounds.x,
+                        line_top + local_bounds.y,
+                        local_bounds.width,
+                        local_bounds.height,
+                    );
+                    if (!run_bounds.intersects(visible_bounds)) continue;
+                    const span = highlighted[run.span_index];
+                    const absolute_x = content.x + run.x;
+                    const visible = text_spans_model.textSpanRunVisibleSlice(
+                        span,
+                        run,
+                        layout_options,
+                        visible_bounds.x - absolute_x,
+                        visible_bounds.maxX() - absolute_x,
+                    ) orelse continue;
+                    if (!budget.hasCommand(builder)) return;
+                    const admitted_text = codeTextPrefix(visible.text, budget.remainingText());
+                    if (admitted_text.len == 0) return;
+                    const color_ref = span.color orelse .syntax_plain;
+                    try builder.drawText(.{
+                        .id = codeTextPaintCommandId(editableCodeRunCommandId(widget, logical_line, run), paint),
+                        .font_id = run.font_id,
+                        .size = run.size,
+                        .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(
+                            absolute_x + visible.x,
+                            line_top + run.baseline,
+                        )),
+                        .color = paint.color orelse text_spans_model.textSpanColorValue(tokens.colors, color_ref),
+                        .text = admitted_text,
+                        .text_layout = .{
+                            .max_width = 0,
+                            .line_height = line_height,
+                            .wrap = .none,
+                            .alignment = .start,
+                            .measure = tokens.text_measure,
+                        },
+                    });
+                    budget.chargeText(admitted_text.len);
+                }
+
+                const next_first_line = page_first_line +| text_spans_model.max_text_span_lines_per_paragraph;
+                if (next_first_line <= page_first_line or
+                    next_first_line > last_visible_line or
+                    next_first_line >= line_layout.line_count)
+                {
+                    break;
+                }
+                page_first_line = next_first_line;
+            }
+        }
+
+        visual_line += visual_count;
+        if (newline == null) break;
+        line_start = line_end;
+    }
+}
+
+/// Large no-wrap editors retain one plain source span, then tokenize just
+/// the logical lines intersecting the viewport. Lexer state is advanced
+/// across the offscreen prefix so multiline comments, strings, and JSX
+/// constructs remain correct without retaining an unbounded run list.
+fn emitVisibleEditableCodeLines(
+    builder: *Builder,
+    widget: Widget,
+    tokens: DesignTokens,
+    visible_bounds: geometry.RectF,
+    paint: CodeTextPaint,
+) Error!void {
+    var content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
+    content.x -= widget.value_x;
+    content.y -= widget.value;
+    const layout_options = widget_metrics.widgetTextSpanLayoutOptions(
+        widget,
+        tokens,
+        0,
+    );
+    const line_height = text_spans_model.textSpanLineHeight(widget.spans, layout_options);
+    if (line_height <= 0 or !std.math.isFinite(line_height)) return;
+
+    const first_visible: usize = if (visible_bounds.y > content.y and
+        std.math.isFinite(visible_bounds.y - content.y))
+        @intFromFloat(@floor((visible_bounds.y - content.y) / line_height))
+    else
+        0;
+    const last_visible: usize = if (visible_bounds.maxY() > content.y and
+        std.math.isFinite(visible_bounds.maxY() - content.y))
+        @intFromFloat(@floor((visible_bounds.maxY() - content.y) / line_height))
+    else
+        first_visible;
+    const first_line = first_visible -| 1;
+    const last_line = last_visible +| 1;
+
+    var line_start: usize = 0;
+    var logical_line: usize = 0;
+    while (logical_line < first_line and line_start < widget.text.len) : (logical_line += 1) {
+        const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n') orelse {
+            line_start = widget.text.len;
+            break;
+        };
+        line_start = newline + 1;
+    }
+
+    var state: code_model.HighlightState = .{};
+    var span_storage: [text_spans_model.max_text_spans_per_paragraph]text_spans_model.TextSpan = undefined;
+    if (line_start > 0) {
+        _ = code_model.highlightWithState(
+            widget.text[0..line_start],
+            widget.code_language,
+            &span_storage,
+            &state,
+        );
+    }
+
+    var budget = CodeEmissionBudget.init(builder);
+    if (!budget.hasCommand(builder)) return;
+    var line_runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+
+    while (line_start <= widget.text.len and logical_line <= last_line) : (logical_line += 1) {
+        const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n');
+        const line_end = if (newline) |index| index + 1 else widget.text.len;
+        const line_source = widget.text[line_start..line_end];
+        const highlighted = if (line_source.len == 0) blk: {
+            span_storage[0] = .{
+                .text = line_source,
+                .monospace = true,
+                .color = .syntax_plain,
+            };
+            break :blk span_storage[0..1];
+        } else code_model.highlightWithState(
+            line_source,
+            widget.code_language,
+            &span_storage,
+            &state,
+        );
+        const line_layout = text_spans_model.layoutTextSpans(
+            highlighted,
+            layout_options,
+            &line_runs,
+        );
+        const line_top = content.y + @as(f32, @floatFromInt(logical_line)) * line_height;
+
+        for (line_layout.runs) |run| {
+            if (run.text.len == 0) continue;
+            const local_bounds = text_spans_model.textSpanRunBounds(line_layout, run);
+            const run_bounds = geometry.RectF.init(
+                content.x + local_bounds.x,
+                line_top + local_bounds.y,
+                local_bounds.width,
+                local_bounds.height,
+            );
+            if (!run_bounds.intersects(visible_bounds)) continue;
+            const span = highlighted[run.span_index];
+            const absolute_x = content.x + run.x;
+            const visible = text_spans_model.textSpanRunVisibleSlice(
+                span,
+                run,
+                layout_options,
+                visible_bounds.x - absolute_x,
+                visible_bounds.maxX() - absolute_x,
+            ) orelse continue;
+            if (!budget.hasCommand(builder)) return;
+            const admitted_text = codeTextPrefix(visible.text, budget.remainingText());
+            if (admitted_text.len == 0) return;
+            const color_ref = span.color orelse .syntax_plain;
+            try builder.drawText(.{
+                .id = codeTextPaintCommandId(editableCodeRunCommandId(widget, logical_line, run), paint),
+                .font_id = run.font_id,
+                .size = run.size,
+                .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(
+                    absolute_x + visible.x,
+                    line_top + run.baseline,
+                )),
+                .color = paint.color orelse text_spans_model.textSpanColorValue(tokens.colors, color_ref),
+                .text = admitted_text,
+                .text_layout = .{
+                    .max_width = 0,
+                    .line_height = line_height,
+                    .wrap = .none,
+                    .alignment = .start,
+                    .measure = tokens.text_measure,
+                },
+            });
+            budget.chargeText(admitted_text.len);
+        }
+
+        if (newline == null) break;
+        line_start = line_end;
+    }
+}
+
+/// The editable no-wrap code path scrolls source glyphs beneath a pinned
+/// line-number gutter. Paint that gutter last so source, selection, IME
+/// decoration, and the caret all disappear cleanly behind its opaque
+/// surface instead of clashing with the anchored markers.
+fn emitVisibleEditableCodeLineNumberGutter(
+    builder: *Builder,
+    widget: Widget,
+    tokens: DesignTokens,
+    visible_bounds: geometry.RectF,
+    active_row: ?geometry.RectF,
+) Error!void {
+    if (widget.code_line_number_digits == 0) return;
+
+    var content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
+    content.y -= widget.value;
+    const layout_options = widget_metrics.widgetTextSpanLayoutOptions(widget, tokens, 0);
+    const line_height = text_spans_model.textSpanLineHeight(widget.spans, layout_options);
+    if (line_height <= 0 or !std.math.isFinite(line_height)) return;
+
+    const padded = widget.frame.inset(widget.layout.padding);
+    const marker_width = @max(0, content.x - 12 - padded.x);
+    const gutter_bounds = geometry.RectF.intersection(
+        geometry.RectF.init(
+            widget.frame.x,
+            widget.frame.y,
+            @max(0, content.x - widget.frame.x),
+            widget.frame.height,
+        ),
+        visible_bounds,
+    );
+    if (!gutter_bounds.isEmpty()) {
+        try builder.fillRect(.{
+            .id = codeLineNumberGutterCommandId(widget.id),
+            .rect = pixelSnapGeometryRect(tokens, gutter_bounds),
+            .fill = colorFill(widgetBackgroundColor(widget, tokens.colors.background)),
+        });
+    }
+    if (active_row) |row| {
+        const active_gutter = geometry.RectF.intersection(gutter_bounds, row);
+        if (!active_gutter.isEmpty()) {
+            try builder.fillRect(.{
+                .id = codeEditorActiveRowCommandId(widget.id, 1),
+                .rect = pixelSnapGeometryRect(tokens, active_gutter),
+                .fill = colorFill(tokens.colors.surface_subtle),
+            });
+        }
+    }
+
+    const first_visible: usize = if (visible_bounds.y > content.y and
+        std.math.isFinite(visible_bounds.y - content.y))
+        @intFromFloat(@floor((visible_bounds.y - content.y) / line_height))
+    else
+        0;
+    const last_visible: usize = if (visible_bounds.maxY() > content.y and
+        std.math.isFinite(visible_bounds.maxY() - content.y))
+        @intFromFloat(@floor((visible_bounds.maxY() - content.y) / line_height))
+    else
+        first_visible;
+    const first_line = first_visible -| 1;
+    const last_line = last_visible +| 1;
+
+    var line_start: usize = 0;
+    var logical_line: usize = 0;
+    while (logical_line < first_line and line_start < widget.text.len) : (logical_line += 1) {
+        const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n') orelse {
+            line_start = widget.text.len;
+            break;
+        };
+        line_start = newline + 1;
+    }
+
+    while (line_start <= widget.text.len and logical_line <= last_line) : (logical_line += 1) {
+        const line_top = content.y + @as(f32, @floatFromInt(logical_line)) * line_height;
+        const marker_bounds = geometry.RectF.init(padded.x, line_top, marker_width, line_height);
+        if (marker_bounds.intersects(visible_bounds)) {
+            var marker_buffer: [20]u8 = undefined;
+            const marker_formatted = std.fmt.bufPrint(
+                &marker_buffer,
+                "{d}",
+                .{logical_line + 1},
+            ) catch "";
+            const marker_text = builder.allocTextBytes(marker_formatted) catch "";
+            if (marker_text.len > 0) {
+                try builder.drawText(.{
+                    .id = codeLineNumberCommandId(widget.id, logical_line + 1),
+                    .font_id = tokens.typography.mono_font_id,
+                    .size = layout_options.size,
+                    .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(
+                        padded.x,
+                        line_top + layout_options.size,
+                    )),
+                    .color = tokens.colors.text_muted,
+                    .text = marker_text,
+                    .text_layout = .{
+                        .max_width = marker_width,
+                        .line_height = line_height,
+                        .wrap = .none,
+                        .alignment = .end,
+                        .measure = tokens.text_measure,
+                    },
+                });
+            }
+        }
+
+        const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n') orelse break;
+        line_start = newline + 1;
+    }
+}
+
+/// Muted logical-line markers for one coherent code paragraph. Each
+/// logical line is measured independently with the same monospace layout
+/// options; summing those wrapped extents places the next marker on the
+/// exact first visual line occupied by its source.
+fn emitCodeLineNumberGutter(
+    builder: *Builder,
+    widget: Widget,
+    spans: []const text_spans_model.TextSpan,
+    tokens: DesignTokens,
+    content: geometry.RectF,
+    visible_bounds: geometry.RectF,
+    layout_options: text_spans_model.TextSpanLayoutOptions,
+    budget: ?*CodeEmissionBudget,
+) Error!void {
+    if (widget.code_line_number_digits == 0) return;
+    const line_height = text_spans_model.textSpanLineHeight(spans, layout_options);
+    if (line_height <= 0 or !std.math.isFinite(line_height)) return;
+
+    const padded = widget.frame.inset(widget.layout.padding);
+    const marker_width = @max(0, content.x - 12 - padded.x);
+    var line_runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+    var logical_line: usize = 1;
+    var visual_line: usize = 0;
+    var line_start: usize = 0;
+    while (line_start <= widget.text.len) : (logical_line += 1) {
+        // A terminal newline closes the preceding painted line; the span
+        // breaker intentionally does not reserve another empty visual line.
+        if (line_start == widget.text.len and widget.text.len > 0 and !widget.code_editor) break;
+        const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n');
+        const line_end = newline orelse widget.text.len;
+        const baseline = content.y + layout_options.size +
+            @as(f32, @floatFromInt(visual_line)) * line_height;
+        const marker_bounds = geometry.RectF.init(
+            padded.x,
+            baseline - layout_options.size,
+            marker_width,
+            line_height,
+        );
+        if (marker_bounds.intersects(visible_bounds)) {
+            var marker_buffer: [20]u8 = undefined;
+            const marker_formatted = std.fmt.bufPrint(
+                &marker_buffer,
+                "{d}",
+                .{logical_line},
+            ) catch "";
+            const marker_text = builder.allocTextBytes(marker_formatted) catch "";
+            if (budget) |admission| {
+                if (!admission.hasCommand(builder)) return;
+                if (marker_text.len > admission.remainingText()) return;
+            }
+            try builder.drawText(.{
+                .id = codeLineNumberCommandId(widget.id, logical_line),
+                .font_id = tokens.typography.mono_font_id,
+                .size = layout_options.size,
+                .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(padded.x, baseline)),
+                .color = tokens.colors.text_muted,
+                .text = marker_text,
+                .text_layout = .{
+                    .max_width = marker_width,
+                    .line_height = line_height,
+                    .wrap = .none,
+                    .alignment = .end,
+                    .measure = tokens.text_measure,
+                },
+            });
+            if (budget) |admission| admission.chargeText(marker_text.len);
+        }
+
+        const line = widget.text[line_start..line_end];
+        if (line.len == 0) {
+            visual_line += 1;
+        } else {
+            const line_spans = [_]text_spans_model.TextSpan{.{
+                .text = line,
+                .monospace = true,
+                .color = .syntax_plain,
+            }};
+            const line_layout = text_spans_model.layoutTextSpans(
+                &line_spans,
+                layout_options,
+                &line_runs,
+            );
+            visual_line += @max(1, line_layout.line_count);
+        }
+        if (newline == null) break;
+        line_start = line_end + 1;
+    }
+}
+
+fn codeTextSpanRunCommandId(widget: Widget, spans: []const text_spans_model.TextSpan, run: text_spans_model.TextSpanRun) ObjectId {
+    if (text_spans_model.textSpanRunParagraphRange(widget.text, run)) |range| {
+        var hasher = std.hash.Wyhash.init(0x5eed_59a2_0000_0011);
+        hasher.update(std.mem.asBytes(&widget.id));
+        hasher.update(std.mem.asBytes(&run.line_index));
+        hasher.update(std.mem.asBytes(&range.start));
+        const value = hasher.final();
+        return if (value == 0) 1 else value;
+    }
+
+    // An editable widget's runtime-owned text allocation can briefly be
+    // distinct from the source allocation its freshly highlighted spans
+    // reference. Paragraph-relative pointer arithmetic is unavailable in
+    // that state, but every layout run still belongs to one span. Key the
+    // fallback by that span and the run's offset within it; collapsing all
+    // detached runs to byte zero gives every token on a line the same id
+    // and makes the retained display-list diff reject the frame.
+    var hasher = std.hash.Wyhash.init(0x5eed_59a2_0000_0013);
+    hasher.update(std.mem.asBytes(&widget.id));
+    hasher.update(std.mem.asBytes(&run.line_index));
+    hasher.update(std.mem.asBytes(&run.span_index));
+    if (run.span_index < spans.len) {
+        const span = spans[run.span_index];
+        const span_start = @intFromPtr(span.text.ptr);
+        const run_start = @intFromPtr(run.text.ptr);
+        if (run_start >= span_start and run_start - span_start + run.text.len <= span.text.len) {
+            const span_offset = run_start - span_start;
+            hasher.update(std.mem.asBytes(&span_offset));
+            const value = hasher.final();
+            return if (value == 0) 1 else value;
+        }
+    }
+    hasher.update(std.mem.asBytes(&run.x));
+    hasher.update(std.mem.asBytes(&run.text.len));
+    hasher.update(run.text);
+    const value = hasher.final();
+    return if (value == 0) 1 else value;
+}
+
+fn editableCodeRunCommandId(
+    widget: Widget,
+    logical_line: usize,
+    run: text_spans_model.TextSpanRun,
+) ObjectId {
+    var hasher = std.hash.Wyhash.init(0x5eed_59a2_0000_0014);
+    hasher.update(std.mem.asBytes(&widget.id));
+    hasher.update(std.mem.asBytes(&logical_line));
+    const text_start = @intFromPtr(widget.text.ptr);
+    const run_start = @intFromPtr(run.text.ptr);
+    if (run_start >= text_start and run_start - text_start <= widget.text.len) {
+        const offset = run_start - text_start;
+        hasher.update(std.mem.asBytes(&offset));
+    } else {
+        hasher.update(run.text);
+    }
+    const value = hasher.final();
+    return if (value == 0) 1 else value;
+}
+
+fn codeTextPaintCommandId(base_id: ObjectId, paint: CodeTextPaint) ObjectId {
+    const ordinal = paint.selection_ordinal orelse return base_id;
+    var hasher = std.hash.Wyhash.init(0x5eed_59a2_0000_0018);
+    hasher.update(std.mem.asBytes(&base_id));
+    hasher.update(std.mem.asBytes(&ordinal));
+    const value = hasher.final();
+    return if (value == 0) 1 else value;
+}
+
+fn codeLineNumberCommandId(widget_id: ObjectId, logical_line: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_0012, widget_id, logical_line);
+}
+
+fn codeLineNumberGutterCommandId(widget_id: ObjectId) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_0015, widget_id, 0);
+}
+
+fn codeEditorActiveRowCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_0016, widget_id, ordinal);
+}
+
 pub fn textSpanRunCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
     return textSpanCommandId(0x5eed_59a2_0000_0001, widget_id, ordinal);
 }
@@ -1136,6 +2248,267 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
         .opacity = widget.image_opacity,
         .fit = widget.image_fit,
         .sampling = widget.image_sampling,
+    });
+    if (clips_image) try builder.popClip();
+}
+
+/// The deterministic placeholder color a media surface paints under its
+/// texture: a muted flat fill DERIVED FROM THE SURFACE ID alone, so
+/// every renderer — and every replay, with or without a producer
+/// attached — derives the identical pixels from the identical display
+/// list. Channels land in the 0x40..0x7F band: distinct per surface,
+/// never garish, honest "no frame yet" chrome.
+pub fn mediaSurfacePlaceholderColor(surface_id: u64) Color {
+    const hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&surface_id));
+    return Color.rgba8(
+        0x40 + @as(u8, @truncate(hash)) % 0x40,
+        0x40 + @as(u8, @truncate(hash >> 8)) % 0x40,
+        0x40 + @as(u8, @truncate(hash >> 16)) % 0x40,
+        0xff,
+    );
+}
+
+/// The video stream's reported dimensions for a contain-fitted media
+/// surface (`Widget.stream_size`, stamped by `Ui.stampVideoSurfaceFit`
+/// from the LOADED event's journaled report). Null until the
+/// dimensions are honestly known, so the fit math never runs on
+/// guessed or zero geometry — and only under `.contain`, the video
+/// surface's mode.
+fn mediaSurfaceStreamSize(widget: Widget) ?geometry.SizeF {
+    if (widget.image_fit != .contain) return null;
+    const size = widget.stream_size orelse return null;
+    if (size.width <= 0 or size.height <= 0) return null;
+    return size;
+}
+
+/// A letterbox bar extent below this is nothing to draw: the quad
+/// covers the frame on that axis (float wobble from centering math
+/// never conjures a phantom bar, and a full-frame quad keeps the
+/// frame's own corner radius).
+const media_surface_bar_epsilon: f32 = 0.001;
+
+/// The tight rounded-rect mask for a fitted quad inset `bar` inside a
+/// frame corner of radius `corner`: `max(0, corner - bar)`. The mask's
+/// corner circle is then INTERNALLY TANGENT to the frame's corner
+/// circle (center distance equals the radius difference exactly), so
+/// the masked quad never paints outside the surface's rounded
+/// silhouette while removing the provable minimum of picture — any
+/// smaller radius leaks square corners past the silhouette, any larger
+/// notches more picture than the silhouette demands. Bars at or past
+/// the corner radius mask nothing (0): the quad's corners sit fully
+/// inside the straight-edged part of the frame.
+fn mediaSurfaceQuadRadius(radius: Radius, bar: f32) Radius {
+    return .{
+        .top_left = @max(0, radius.top_left - bar),
+        .top_right = @max(0, radius.top_right - bar),
+        .bottom_right = @max(0, radius.bottom_right - bar),
+        .bottom_left = @max(0, radius.bottom_left - bar),
+    };
+}
+
+/// The media surface: an id-derived placeholder fill with the surface's
+/// externally produced texture composited over it. ONE display list
+/// serves both renderers — the texture rides a `draw_image` whose
+/// resource is marked `presentation_only`, so the deterministic
+/// reference renderer (goldens, screenshots, replay pixel marks) skips
+/// the draw and shows the placeholder, while live GPU/packet hosts
+/// composite the real texture. `image_id` is the SURFACE id (0 = the
+/// unbound sentinel: placeholder only, like an image leaf with id 0
+/// draws nothing).
+///
+/// CONTAIN fit is the video-surface mode (`Ui` stamps it on every
+/// surface the video channel feeds): with the stream's reported
+/// dimensions known (`Widget.stream_size`), THIS emit computes the
+/// aspect-fitted quad — centered, letterboxed/pillarboxed — so every
+/// host composites the identical geometry with no fit math of its own.
+/// The fitted shape is three commands: a BLACK fill over the whole
+/// frame at the frame's own radius (the letterbox field, so the
+/// surface silhouette is exact by construction — no per-bar corner
+/// The terminal leaf: the widget's RESOLVED grid snapshot painted
+/// through the terminal grid painter — real text runs, geometric box
+/// drawing, selection, cursor, and the scrollback thumb, clipped to the
+/// frame and degrading row-atomically under the shared per-view budgets
+/// (`terminal_grid.widget_command_reserve` and friends hold back room
+/// for the widgets around it). Unbound — no session published a grid
+/// yet — it paints the honest empty surface: the theme background under
+/// the widget's frame, so a terminal awaiting its pty reads as an empty
+/// terminal, never a hole. Focus wears the house ring like every other
+/// focusable control.
+fn emitTerminalWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, focused: bool) Error!void {
+    const frame = widget.frame.normalized();
+    if (frame.isEmpty()) return;
+    if (widget.terminal.grid) |grid| {
+        // The grid text region sits inside the widget's own padding
+        // (the house inset when none is declared), on a full-bleed
+        // background — one seamless surface edge to edge.
+        const padding = widget.layout.padding;
+        const declared = padding.left + padding.top + padding.right + padding.bottom > 0;
+        const inset: geometry.InsetsF = if (declared) padding else geometry.InsetsF.all(8);
+        const content = geometry.RectF.init(
+            frame.x + inset.left,
+            frame.y + inset.top,
+            @max(0, frame.width - inset.left - inset.right),
+            @max(0, frame.height - inset.top - inset.bottom),
+        );
+        // The command budget the grid degrades against: the builder's
+        // capacity minus the reserve held back for the widgets around it.
+        // When the whole builder is smaller than that reserve (a tiny
+        // test buffer), there is no room to hold back for siblings, so
+        // the grid gets the whole capacity — flooring to 1 instead would
+        // fall under the painter's fixed prologue overhead and paint
+        // nothing at all. Capacity is never 0 here (the frame is
+        // non-empty), so this never hands the painter its unbounded (0)
+        // mode.
+        const capacity = builder.commands.len;
+        const command_budget = if (capacity > canvas.terminal_grid.widget_command_reserve)
+            capacity - canvas.terminal_grid.widget_command_reserve
+        else
+            capacity;
+        try canvas.terminal_grid.paint(grid.*, builder, .{
+            .frame = content,
+            .background_frame = frame,
+            .tokens = tokens,
+            .focused = focused,
+            .id_base = widget.id,
+            .command_budget = command_budget,
+            .text_reserve = canvas.terminal_grid.widget_text_reserve,
+            .path_reserve = canvas.terminal_grid.widget_path_reserve,
+            .glyph_budget = canvas.terminal_grid.widget_glyph_budget,
+        });
+    } else {
+        try builder.fillRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = frame,
+            .fill = colorFill(widget.style.background orelse tokens.colors.surface),
+        });
+    }
+    if (widget.state.focused) {
+        // The ring id must be disjoint from whatever the surface below
+        // emitted. A BOUND terminal's grid owns the painter's id space
+        // (`paintIdBase(widget.id)` spread across the u64 range), which a
+        // `widgetPartId(widget.id, 2)` ring can alias; take the ring from
+        // the painter's own reserved offset so the two never collide. The
+        // UNBOUND surface uses `widgetPartId(widget.id, 1)`, so its ring
+        // stays the adjacent part slot.
+        const ring_id = if (widget.terminal.grid != null)
+            canvas.terminal_grid.paintIdBase(widget.id) +% canvas.terminal_grid.reserved_id_offset
+        else
+            widgetPartId(widget.id, 2);
+        try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+            .id = ring_id,
+            .rect = widget_render_style.focusRingRect(frame, tokens),
+            .radius = widget_render_style.focusRingRadius(widgetRadius(widget, 0), tokens),
+            .stroke = .{
+                .fill = widget_render_style.widgetFocusRingFill(widget, tokens),
+                .width = tokens.stroke.focus,
+            },
+        }));
+    }
+}
+
+/// approximation), the deterministic placeholder confined to the quad
+/// (goldens and replay screenshots, which skip the texture by policy,
+/// show the placeholder exactly where the picture goes, in the
+/// journaled-truth black field), and the picture quad — always the
+/// WHOLE frame at the stream's aspect (`image_src` crops do not apply
+/// here: see the coordinate-space teaching at the quad computation).
+/// Unknown dimensions (pre-LOADED) keep the plain full-frame
+/// placeholder draw: no guessed geometry, no divide-by-zero.
+fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
+    if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
+    const frame = widget.frame.normalized();
+    // The frame's EFFECTIVE corner radius: renderers clamp every corner
+    // to half the rect's short side, so the tangent-mask math below must
+    // start from the same value — an unbounded style radius (100 on a
+    // 32x16 surface) otherwise derives an inset-quad mask far past the
+    // real silhouette and renderers clamp THAT into a circular picture.
+    const radius = Radius.all(std.math.clamp(
+        widget.style.radius orelse 0,
+        0,
+        @min(frame.width, frame.height) * 0.5,
+    ));
+    // The fitted quad, computed once here: one authority for the
+    // geometry, always the STREAM's reported aspect. A declared
+    // `image_src` crop does NOT ride the fitted draw: `DrawImage.src`
+    // is adopted-TEXTURE pixel coordinates, and the video texture's
+    // size is unknowable at emit time (macOS budget-fits large decodes
+    // — a 3840x2160 stream lands as a smaller texture — so a
+    // stream-coordinate crop cannot be translated here, and forwarding
+    // it raw would sample the wrong region or nothing). Crops remain a
+    // GENERIC-producer facility in texture coordinates; the video
+    // surface always composites the whole frame.
+    const stream_size = mediaSurfaceStreamSize(widget);
+    const dst = if (stream_size) |size|
+        canvas.containDestinationRect(frame, size.width, size.height)
+    else
+        frame;
+    const draw_src = if (stream_size != null) null else widget.image_src;
+    const letterboxed = frame.height - dst.height > media_surface_bar_epsilon;
+    const pillarboxed = frame.width - dst.width > media_surface_bar_epsilon;
+    const fitted = letterboxed or pillarboxed;
+    const bar_extent = if (letterboxed)
+        (frame.height - dst.height) * 0.5
+    else if (pillarboxed)
+        (frame.width - dst.width) * 0.5
+    else
+        0;
+    const quad_radius = if (fitted) mediaSurfaceQuadRadius(radius, bar_extent) else radius;
+    if (fitted) {
+        // The letterbox field: black across the whole frame at the
+        // frame's radius — the silhouette, exactly.
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = frame,
+            .radius = radius,
+            .fill = colorFill(Color.rgba8(0x00, 0x00, 0x00, 0xff)),
+        });
+        // The placeholder, confined to the quad under the picture
+        // (same tight mask, so it tracks the picture's shape).
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 4),
+            .rect = dst,
+            .radius = quad_radius,
+            .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
+        });
+    } else {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = frame,
+            .radius = radius,
+            .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
+        });
+    }
+    // Cover fit expands the drawn texture past the widget frame on one
+    // axis; the rectangular clip is what crops the overflow — exactly
+    // emitImageWidget's cover clip. The draw's own radius mask below is
+    // NOT a substitute: hosts that only mask radii paint a zero-radius
+    // cover surface outside its bounds, over its siblings. (Cover and
+    // the fitted path are mutually exclusive: stream geometry rides
+    // only `.contain` surfaces.)
+    const clips_image = widget.image_fit == .cover;
+    if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 3), .rect = frame });
+    try builder.drawImage(.{
+        .id = widgetPartId(widget.id, 2),
+        .image_id = canvas.mediaSurfaceTextureImageId(widget.image_id),
+        .src = draw_src,
+        .dst = dst,
+        .opacity = widget.image_opacity,
+        // Known geometry draws STRETCH: the quad is the fit, computed
+        // once from the reported dimensions. A
+        // second host-side contain against the real texture would open
+        // sub-pixel seams whenever a decoder's true dimensions round
+        // off the report (macOS floors scaled decode sizes); the
+        // sub-percent aspect nudge stretch absorbs is invisible, the
+        // seam is not — and any residue lands on the black field, not
+        // a colored fringe. Without known geometry the widget's own
+        // fit passes through.
+        .fit = if (stream_size != null) .stretch else widget.image_fit,
+        .sampling = widget.image_sampling,
+        // The render plan flattens clip stacks to rects, so a rounded
+        // surface masks on the draw itself (the avatar convention); a
+        // fitted quad carries the TIGHT inset mask
+        // (`mediaSurfaceQuadRadius`), tangent to the silhouette.
+        .radius = quad_radius,
     });
     if (clips_image) try builder.popClip();
 }
@@ -1820,7 +3193,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
         for (0..lattice.count) |ordinal| {
             const value = lattice.value(ordinal);
             const formatted = chart_model.formatChartValue(&buffer, value, lattice.decimals);
-            const text = try allocFrameLabelBytes(formatted);
+            const text = try builder.allocChartLabelBytes(formatted);
             const width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size);
             const line_y = chartMapY(value, domain, plot, 0);
             const top = std.math.clamp(line_y - line_height * 0.5, content.y, @max(content.y, content.maxY() - line_height));
@@ -2062,27 +3435,27 @@ fn emitChartBand(
 }
 
 /// Map a series into plot-space points, skipping non-finite values.
-/// Returned points live in a threadlocal scratch valid until the next
-/// series maps (each emitter consumes them before returning).
-threadlocal var chart_polyline_points: [chart_model.max_chart_points_per_series]geometry.PointF = undefined;
-
+/// Returned points live in per-thread scratch (`WidgetRenderScratch`)
+/// valid until the next series maps (each emitter consumes them before
+/// returning).
 fn chartPolylinePoints(
     values: []const f32,
     domain: chart_model.ChartDomain,
     plot: geometry.RectF,
     inset: f32,
 ) Error![]const geometry.PointF {
-    const count = @min(values.len, chart_polyline_points.len);
+    const points = &widget_render_scratch.get().chart_polyline_points;
+    const count = @min(values.len, points.len);
     var len: usize = 0;
     for (values[0..count], 0..) |value, index| {
         if (!std.math.isFinite(value)) continue;
-        chart_polyline_points[len] = geometry.PointF.init(
+        points[len] = geometry.PointF.init(
             chartMapX(index, count, plot, inset),
             chartMapY(value, domain, plot, inset),
         );
         len += 1;
     }
-    return chart_polyline_points[0..len];
+    return points[0..len];
 }
 
 const chart_grid_seed: u64 = 0x5eed_c4a8_0000_0001;
@@ -2324,7 +3697,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
     const line_height = size * 1.25;
     var title_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
     const title = chartHoverDetailTitle(data, detail.index, &title_buffer);
-    const title_text = try allocFrameLabelBytes(title);
+    const title_text = try builder.allocChartLabelBytes(title);
     var row_y = card.y + chart_detail_pad_v;
     try builder.drawText(.{
         .id = chartCommandId(widget.id, chart_hover_seed, 0, 4),
@@ -2354,7 +3727,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .text = chartDetailRowName(series),
         });
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
-        const value_text = try allocFrameLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
+        const value_text = try builder.allocChartLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
         const value_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, value_text, size);
         try builder.drawText(.{
             .id = chartCommandId(widget.id, chart_hover_row_seed, series_index, 2),
@@ -2505,6 +3878,20 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
         copy.state.pressed = copy.id != 0 and copy.id == pressed_id;
     }
     return copy;
+}
+
+/// The terminal cursor follows logical keyboard focus, not merely
+/// focus-visible: the outer ring is a modality affordance, while the
+/// filled-vs-hollow cursor answers whether typed bytes go to this pty.
+/// With no runtime state, a baked focused widget remains the static
+/// scene/test source of truth.
+fn widgetHasLogicalFocus(widget: Widget, state: WidgetRenderState) bool {
+    if (!state.keyboard_active) return false;
+    if (state.focused_id != null or state.focus_visible_id != null) {
+        const focused_id = state.focused_id orelse return false;
+        return widget.id != 0 and widget.id == focused_id;
+    }
+    return widget.state.focused;
 }
 
 fn accordionChildrenVisible(widget: Widget) bool {

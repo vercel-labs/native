@@ -1,6 +1,8 @@
 const std = @import("std");
+const geometry = @import("geometry");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
+const text_model = @import("text.zig");
 const text_spans_model = @import("text_spans.zig");
 
 const Density = token_model.Density;
@@ -70,18 +72,26 @@ pub fn widgetLineHeight(text_size: f32) f32 {
 }
 
 /// Wrap budget for text painted inside a pixel-snapped frame. Geometry
-/// snapping can shave up to half a device pixel off the layout frame
-/// that intrinsic sizing measured with the exact same metrics — enough
-/// to word-wrap an exact-fit line mid-word ("Sort" painting as
-/// "Sor"/"t"). Hand the shaved quantum back to the wrap so snapping
-/// never changes line breaks; glyph origins still snap independently.
-/// (Elision has its own exact-fit slack — `text_elision_slack` — so
-/// label budgets stay byte-identical for alignment.)
+/// snapping rounds each frame EDGE to the device grid independently
+/// (`pixelSnapGeometryRect`), so a frame at a fractional position can
+/// lose up to a FULL device pixel of width — the left edge rounds up by
+/// as much as half a pixel while the right edge rounds down by as much
+/// as half — off the layout frame that intrinsic sizing measured with
+/// the exact same metrics. That shave is enough to word-wrap an
+/// exact-fit line mid-word ("Sort" painting as "Sor"/"t") or to elide a
+/// hug-sized digit into "…" (the TS scaffold's centered counter on
+/// Windows at scale 1, where the shave is coarsest). Hand the whole
+/// snap quantum back to the budget so snapping never changes line
+/// breaks or elision; glyph origins still snap independently. Epsilon
+/// policy: a run's painted width may exceed its snapped frame by less
+/// than `1/scale + text_elision_slack` before eliding — always below
+/// the smallest real overflow (a glyph), so genuinely overflowing text
+/// still elides and any admitted overhang stays sub-pixel-scale.
 pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
     if (!tokens.pixel_snap.geometry) return width;
     const scale = tokens.pixel_snap.scale;
     if (!std.math.isFinite(scale) or scale <= 0) return width;
-    return width + 0.5 / scale;
+    return width + 1.0 / scale;
 }
 
 /// The single source of truth for how a span paragraph (`.text` widget
@@ -95,11 +105,43 @@ pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_wid
     return .{
         .size = widgetBodyTextSize(widget, tokens),
         .max_width = max_width,
-        .wrap = .word,
+        .wrap = if (widget.text_no_wrap) .none else .word,
         .alignment = widget.text_alignment,
         .typography = tokens.typography,
         .measure = tokens.text_measure,
     };
+}
+
+const min_code_line_number_digits: usize = 3;
+
+/// Width reserved before a numbered code paragraph: at least three muted
+/// monospace marker columns (or the largest marker when it is wider) plus
+/// the component's fixed marker-to-source gap. Marker bytes never live in
+/// `Widget.text`; paint selects them from a compile-time table.
+pub fn widgetCodeLineNumberGutterWidth(widget: Widget, tokens: DesignTokens) f32 {
+    if (widget.code_line_number_digits == 0) return 0;
+    const zeros: [20]u8 = @splat('0');
+    const digits = @min(
+        @max(@as(usize, widget.code_line_number_digits), min_code_line_number_digits),
+        zeros.len,
+    );
+    return text_model.measureTextWidthForFont(
+        tokens.text_measure,
+        tokens.typography.mono_font_id,
+        zeros[0..digits],
+        widgetBodyTextSize(widget, tokens),
+    ) + 12;
+}
+
+/// Span paragraph content after authored padding and the engine-owned code
+/// gutter. Layout, painting, hit mapping, and selection all use this exact
+/// frame so numbered source stays one coherent text model.
+pub fn widgetTextSpanContentFrame(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    var content = widget.frame.inset(widget.layout.padding);
+    const gutter = @min(content.width, widgetCodeLineNumberGutterWidth(widget, tokens));
+    content.x += gutter;
+    content.width -= gutter;
+    return content;
 }
 
 /// The ONE control height register — buttons, inputs, and select
@@ -190,6 +232,37 @@ pub fn widgetButtonInset(widget: Widget, tokens: DesignTokens) f32 {
 
 pub fn widgetControlInset(widget: Widget, tokens: DesignTokens, base: f32) f32 {
     return densityValue(tokens, widgetSizedTokenValue(widget, tokens, base));
+}
+
+/// Tab-trigger metrics split at the register boundary. House pill tabs
+/// keep using the shared label/control ladder exactly as before; the
+/// underline register owns the taller, label-hugging geometry measured
+/// from the Geist primary Tabs component.
+pub fn widgetTabTriggerTextSize(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.controls.tabs_indicator == .pill) return widgetLabelTextSize(widget, tokens);
+    return widgetTypographySize(widget, @max(8, tokens.typography.label_size + tokens.metrics.tabs_label_size_step));
+}
+
+pub fn widgetTabTriggerHeight(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.controls.tabs_indicator == .pill) return widgetControlHeight(widget, tokens);
+    return widgetSizedDensityValue(widget, tokens, @max(0, tokens.metrics.tabs_trigger_height));
+}
+
+pub fn widgetTabTriggerInset(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.controls.tabs_indicator == .pill) return widgetControlInset(widget, tokens, tokens.spacing.md);
+    return widgetControlInset(widget, tokens, @max(0, tokens.metrics.tabs_trigger_inset));
+}
+
+pub fn widgetTabTriggerIconExtent(widget: Widget, tokens: DesignTokens) f32 {
+    return widgetTabTriggerTextSize(widget, tokens) + tokens.metrics.icon_text_step;
+}
+
+pub fn widgetTabTriggerIconGap(tokens: DesignTokens) f32 {
+    return densityValue(tokens, tokens.metrics.button_icon_gap);
+}
+
+pub fn underlineTabsListInset(tokens: DesignTokens) f32 {
+    return densityValue(tokens, @max(0, tokens.metrics.tabs_list_inset));
 }
 
 pub fn widgetSizedDensityValue(widget: Widget, tokens: DesignTokens, value: f32) f32 {

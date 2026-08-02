@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import vocab from "@/lib/component-vocab.json";
 import { componentPages } from "@/lib/components-pages";
+import { docsPath } from "@/lib/site";
 
 const previews = vocab.previews as Record<string, { width: number; height: number }>;
 
@@ -25,7 +26,7 @@ export function ComponentIndexGrid() {
         return (
           <Link
             key={page.slug}
-            href={`/components/${page.slug}`}
+            href={`${docsPath}/components/${page.slug}`}
             className="group block rounded-md border border-gray-alpha-400 bg-background-100 transition-colors hover:border-gray-alpha-500"
           >
             {/* Hero tiles render at exactly 16:9, so the image fills the

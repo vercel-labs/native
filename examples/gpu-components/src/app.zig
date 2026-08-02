@@ -26,6 +26,7 @@ const surface_close_command = model.surface_close_command;
 const canvas_label = model.canvas_label;
 const environment_select_id = model.environment_select_id;
 const content_scroll_id = model.content_scroll_id;
+const component_tree_scroll_id = model.component_tree_scroll_id;
 const canvas_toolbar_theme_id = model.canvas_toolbar_theme_id;
 const canvas_toolbar_refresh_id = model.canvas_toolbar_refresh_id;
 const canvas_sidebar_resize_handle_id = model.canvas_sidebar_resize_handle_id;
@@ -49,6 +50,8 @@ const environmentOptionIndex = model.environmentOptionIndex;
 const environmentCommandIndex = model.environmentCommandIndex;
 const componentSectionLabel = model.componentSectionLabel;
 const componentSectionFromCommand = model.componentSectionFromCommand;
+const componentTreeItemIndex = model.componentTreeItemIndex;
+const componentTreeItemIndexFromCommand = model.componentTreeItemIndexFromCommand;
 const surfaceOverlayLabel = model.surfaceOverlayLabel;
 
 const installComponentsCanvasModel = component_scene.installComponentsCanvasModel;
@@ -98,6 +101,7 @@ pub const GpuComponentsApp = struct {
     environment_index: usize = 0,
     surface_overlay: ComponentSurfaceOverlay = .none,
     section: ComponentSection = .controls,
+    selected_component: usize = 0,
     sidebar_width: f32 = canvas_sidebar_width,
     canvas_size: geometry.SizeF = default_canvas_size,
     pixel_snap_scale: f32 = 1,
@@ -174,6 +178,8 @@ pub const GpuComponentsApp = struct {
                     try self.refresh(runtime, command);
                 } else if (themeModeFromCommand(command.name)) |mode| {
                     try self.changeTheme(runtime, command, mode);
+                } else if (componentTreeItemIndexFromCommand(command.name)) |index| {
+                    try self.changeComponent(runtime, command, index);
                 } else if (componentSectionFromCommand(command.name)) |section| {
                     try self.changeSection(runtime, command, section);
                 }
@@ -181,9 +187,10 @@ pub const GpuComponentsApp = struct {
             .gpu_surface_frame => |frame_event| try self.handleGpuFrame(runtime, frame_event),
             .canvas_widget_pointer => |pointer_event| try self.handleWidgetPointer(runtime, pointer_event),
             .canvas_widget_keyboard => |keyboard_event| try self.handleWidgetKeyboard(runtime, keyboard_event),
+            .canvas_widget_scroll => |scroll_event| try self.handleWidgetScroll(runtime, scroll_event),
             .canvas_widget_dismiss => |dismiss_event| try self.handleWidgetDismiss(runtime, dismiss_event),
             .appearance_changed => |appearance| try self.applySystemAppearance(runtime, appearance),
-            .gpu_surface_resized, .gpu_surface_input, .shortcut, .timer, .effects_wake, .audio, .files_dropped, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_request, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance, .lifecycle => {},
+            .gpu_surface_resized, .gpu_surface_input, .shortcut, .timer, .effects_wake, .audio, .video, .files_dropped, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_shown, .canvas_widget_context_menu_dismissed, .canvas_widget_context_menu_request, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance, .lifecycle => {},
         }
     }
 
@@ -242,6 +249,12 @@ pub const GpuComponentsApp = struct {
                     target.id == 176 or
                     target.id == 177 or
                     target.id == surface_overlay_close_id) return;
+                // Explorer rows already report their more useful route
+                // status from the command handler. Avoid a second model
+                // rebuild here: it would also turn a source-controlled
+                // tree selection into a replay of the runtime's
+                // pre-command row state after a real pointer click.
+                if (componentTreeItemIndex(target.id) != null) return;
                 if (self.environment_select_open) {
                     self.environment_select_open = false;
                     try self.updateComponentsCanvasModel(runtime, pointer_event.window_id);
@@ -269,7 +282,26 @@ pub const GpuComponentsApp = struct {
         if (keyboard_event.keyboard.phase != .key_down) return;
         const target = keyboard_event.target orelse return;
         const scrolled_id = try self.scrollVirtualWidgetFromKeyboard(runtime, keyboard_event) orelse target.id;
+        // Explorer-row activation already installed the route status in
+        // its command handler. Keyboard scrolling still runs above, but
+        // do not replace that useful status with a generic key report.
+        if (componentTreeItemIndex(target.id) != null) return;
         try self.reportWidgetInteraction(runtime, keyboard_event.window_id, "Keyed", scrolled_id);
+    }
+
+    /// Plain scroll views are runtime-scrolled, unlike the catalog's
+    /// model-driven virtual lists. Echo their observed offset back into
+    /// the app model and rebuild once so a later programmatic reset is a
+    /// real source-side change instead of an unchanged zero that retained
+    /// reconciliation replaces with the old runtime offset.
+    fn handleWidgetScroll(self: *@This(), runtime: *native_sdk.Runtime, scroll_event: native_sdk.runtime.CanvasWidgetScrollEvent) anyerror!void {
+        if (!std.mem.eql(u8, scroll_event.view_label, canvas_label)) return;
+        switch (scroll_event.id) {
+            component_tree_scroll_id, content_scroll_id => {},
+            else => return,
+        }
+        try self.setComponentVirtualScrollState(scroll_event.id, scroll_event.scroll.axis(.vertical));
+        try self.updateComponentsCanvasModel(runtime, scroll_event.window_id);
     }
 
     /// The engine's dismissal (Escape, outside click, automation) hands
@@ -409,6 +441,7 @@ pub const GpuComponentsApp = struct {
         self.environment_select_open = false;
         self.surface_overlay = .none;
         self.section = .controls;
+        self.selected_component = 0;
         _ = runtime.clearCanvasRenderAnimations(command.window_id, canvas_label) catch {};
         const gpu_frame = try runtime.gpuSurfaceFrame(command.window_id, canvas_label);
         _ = self.updateCanvasSize(componentSurfaceSize(gpu_frame.size));
@@ -431,6 +464,19 @@ pub const GpuComponentsApp = struct {
         var status_buffer: [96]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buffer, "Showing {s}.", .{componentSectionLabel(section)});
         try self.updateStatus(runtime, command.window_id, status);
+    }
+
+    fn changeComponent(self: *@This(), runtime: *native_sdk.Runtime, command: native_sdk.CommandEvent, index: usize) anyerror!void {
+        self.section = .components;
+        self.selected_component = @min(index, canvas.builtin_component_names.len - 1);
+        self.environment_select_open = false;
+        self.surface_overlay = .none;
+        self.virtual_scroll.page = 0;
+        var status_buffer: [112]u8 = undefined;
+        const status = try std.fmt.bufPrint(&status_buffer, "Showing {s} component.", .{canvas.builtin_component_names[self.selected_component]});
+        self.setStatusText(status);
+        _ = runtime.clearCanvasRenderAnimations(command.window_id, canvas_label) catch {};
+        try self.updateComponentsCanvasModel(runtime, command.window_id);
     }
 
     fn toggleEnvironmentSelect(self: *@This(), runtime: *native_sdk.Runtime, command: native_sdk.CommandEvent) anyerror!void {
@@ -676,6 +722,7 @@ pub const GpuComponentsApp = struct {
             .environment_index = self.environment_index,
             .surface_overlay = self.surface_overlay,
             .section = self.section,
+            .selected_component = self.selected_component,
             .sidebar_width = self.sidebar_width,
             .status_text = self.statusText(),
         };
@@ -703,6 +750,7 @@ pub const GpuComponentsApp = struct {
 
     fn componentVirtualScrollValue(self: *@This(), id: canvas.ObjectId) ?f32 {
         return switch (id) {
+            component_tree_scroll_id => self.virtual_scroll.tree,
             120 => self.virtual_scroll.nav,
             130 => self.virtual_scroll.behavior,
             150 => self.virtual_scroll.data,
@@ -713,6 +761,7 @@ pub const GpuComponentsApp = struct {
 
     fn componentVirtualScrollVelocity(self: *@This(), id: canvas.ObjectId) ?f32 {
         return switch (id) {
+            component_tree_scroll_id => self.virtual_scroll.tree_velocity,
             120 => self.virtual_scroll.nav_velocity,
             130 => self.virtual_scroll.behavior_velocity,
             150 => self.virtual_scroll.data_velocity,
@@ -721,7 +770,7 @@ pub const GpuComponentsApp = struct {
         };
     }
 
-    fn componentVirtualScrollState(self: *@This(), id: canvas.ObjectId, viewport_extent: f32, content_extent: f32) ?canvas.ScrollState {
+    fn componentVirtualScrollState(self: *@This(), id: canvas.ObjectId, viewport_extent: f32, content_extent: f32) ?canvas.ScrollAxisState {
         const offset = self.componentVirtualScrollValue(id) orelse return null;
         const velocity = self.componentVirtualScrollVelocity(id) orelse return null;
         return .{
@@ -734,6 +783,10 @@ pub const GpuComponentsApp = struct {
 
     fn setComponentVirtualScrollValue(self: *@This(), id: canvas.ObjectId, value: f32) anyerror!void {
         switch (id) {
+            component_tree_scroll_id => {
+                self.virtual_scroll.tree = value;
+                self.virtual_scroll.tree_velocity = 0;
+            },
             120 => {
                 self.virtual_scroll.nav = value;
                 self.virtual_scroll.nav_velocity = 0;
@@ -754,8 +807,12 @@ pub const GpuComponentsApp = struct {
         }
     }
 
-    fn setComponentVirtualScrollState(self: *@This(), id: canvas.ObjectId, state: canvas.ScrollState) anyerror!void {
+    fn setComponentVirtualScrollState(self: *@This(), id: canvas.ObjectId, state: canvas.ScrollAxisState) anyerror!void {
         switch (id) {
+            component_tree_scroll_id => {
+                self.virtual_scroll.tree = state.offset;
+                self.virtual_scroll.tree_velocity = state.velocity;
+            },
             120 => {
                 self.virtual_scroll.nav = state.offset;
                 self.virtual_scroll.nav_velocity = state.velocity;

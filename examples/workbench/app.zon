@@ -1,0 +1,36 @@
+.{
+    .id = "dev.native_sdk.workbench",
+    .name = "workbench",
+    .display_name = "Workbench",
+    .description = "A live terminal beside a browser: the <terminal> element's runtime-owned pty session and a webview pane in one resizable split.",
+    .version = "0.1.0",
+    .platforms = .{ "macos", "linux" },
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "webview" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Workbench",
+                .width = 1280,
+                .height = 800,
+                .min_width = 900,
+                .min_height = 560,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .titlebar = "hidden_inset",
+                .views = .{
+                    .{ .label = "workbench-canvas", .kind = "gpu_surface", .fill = true, .role = "Workbench canvas", .accessibility_label = "Workbench", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                    .{ .label = "workbench-web", .kind = "webview", .parent = "workbench-canvas", .url = "https://ziglang.org", .x = 0, .y = 0, .width = 1, .height = 1, .layer = 20 },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "*" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+}

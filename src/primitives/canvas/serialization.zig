@@ -504,16 +504,20 @@ const max_packet_text_layout_lines: usize = 64;
 /// they can never disagree on line breaks. Returns null when the run
 /// exceeds the line budget, which keeps the host's legacy wrapping
 /// fallback.
-fn packetTextLayout(value: CanvasGpuText, options: TextLayoutOptions, lines: []TextLine) ?text_model.TextLayout {
-    return text_model.layoutTextRun(.{
+fn packetDrawText(value: CanvasGpuText) text_model.DrawText {
+    return .{
         .font_id = value.font_id,
         .size = value.size,
         .origin = value.origin,
         .color = value.color,
         .text = value.text,
         .glyphs = value.glyphs,
-        .text_layout = options,
-    }, options, lines) catch null;
+        .text_layout = value.text_layout,
+    };
+}
+
+fn packetTextLayout(value: CanvasGpuText, options: TextLayoutOptions, lines: []TextLine) ?text_model.TextLayout {
+    return text_model.layoutTextRun(packetDrawText(value), options, lines) catch null;
 }
 
 fn writeCanvasGpuTextLinesJson(value: CanvasGpuText, options: TextLayoutOptions, writer: anytype) !void {
@@ -976,22 +980,19 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v4).
+// Compact binary gpu-surface packet encoding (wire format v5).
 //
 // The version this comment names, the `binary_packet_version` constant
-// below, and the host decoder's spec comment (appkit_host.m) must agree;
+// below, and both host decoders' spec comments (appkit_host.m and the
+// Windows gpu_surface_renderer.cpp) must agree;
 // the `test-wire-format-version-prose` build check pins all three, so
 // bumping the constant without updating the prose fails the suite.
 //
-// Little-endian, length-prefixed throughout, no field names, no decimal
-// formatting, and no glyph arrays (the packet host draws text through the
-// system text stack from the run's UTF-8 text plus the engine-measured
-// lines, so glyph payloads — the bulk of a text-heavy JSON packet — never
-// ride the wire). The AppKit host decoder
-// (`NativeSdkPacketDictionaryFromBinary` in appkit_host.m) pins the same
-// layout and tag tables independently; a disagreement fails the host
-// decode loudly (refused present -> recorded fallback) instead of drawing
-// garbage. Bump `binary_packet_version` on ANY layout change.
+// Little-endian, length-prefixed throughout, with no field names or decimal
+// formatting. The AppKit and Windows host decoders pin the same layout
+// and tag tables independently; a disagreement fails host decode loudly
+// (refused present -> recorded fallback) instead of drawing garbage. Bump
+// `binary_packet_version` on ANY layout change.
 //
 // v2 (from v1): every header carries a retained-state `generation`, every
 // command rides behind an explicit retain `key` (its ObjectId, or a
@@ -1013,6 +1014,11 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // (the checkbox mark, the spinner arc) with the same cap the reference
 // renderer rasterizes instead of their engine default.
 //
+// v5 (from v4): text commands carry optional compact positioned-glyph runs
+// after their UTF-8 text. Each glyph preserves its engine-resolved index,
+// font override, final pen x/baseline, and advance; synthesized elision
+// markers ride as positioned UTF-8 fragments.
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1030,7 +1036,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 4;
+pub const binary_packet_version: u8 = 5;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1422,7 +1428,11 @@ fn writeBinaryImage(image: CanvasGpuImage, writer: anytype) !void {
 }
 
 /// Text draw: font_id u64 | size f32 | origin f32[2] | color f32[4]
-/// | text u32+bytes | has_layout u8 | layout { max_width f32,
+/// | text u32+bytes | has_positioned_glyphs u8 | [glyph_count u32,
+/// glyphs { id u16, flags u8 (bit0 font override), [font_id u64],
+/// x f32, baseline f32, advance f32 }, fragment_count u32, fragments
+/// { x f32, baseline f32, text u32+bytes }] | has_layout u8 | layout {
+/// max_width f32,
 /// line_height f32, wrap u8 (0 none / 1 word / 2 character), align u8
 /// (0 start / 1 center / 2 end), has_lines u8, [line_count u32, lines
 /// { x f32, baseline f32, text u32+bytes }] }. Lines carry the same
@@ -1435,6 +1445,9 @@ fn writeBinaryText(text: CanvasGpuText, writer: anytype) !void {
     try writeBinaryPoint(text.origin, writer);
     try writeBinaryColor(text.color, writer);
     try writeBinarySlice(text.text, writer);
+    var lines: [max_packet_text_layout_lines]TextLine = undefined;
+    const layout = if (text.text_layout) |options| packetTextLayout(text, options, &lines) else null;
+    try writeBinaryPositionedText(text, layout, writer);
     const options = text.text_layout orelse {
         try writer.writeByte(0);
         return;
@@ -1452,14 +1465,13 @@ fn writeBinaryText(text: CanvasGpuText, writer: anytype) !void {
         .center => 1,
         .end => 2,
     });
-    var lines: [max_packet_text_layout_lines]TextLine = undefined;
-    const layout = packetTextLayout(text, options, &lines) orelse {
+    const planned_layout = layout orelse {
         try writer.writeByte(0);
         return;
     };
     try writer.writeByte(1);
-    try writer.writeInt(u32, @intCast(layout.lines.len), .little);
-    for (layout.lines) |line| {
+    try writer.writeInt(u32, @intCast(planned_layout.lines.len), .little);
+    for (planned_layout.lines) |line| {
         // Elided lines ship painted bytes (kept prefix + ellipsis),
         // mirroring the JSON encoding, so both packet hosts draw the
         // measured extent verbatim.
@@ -1472,6 +1484,123 @@ fn writeBinaryText(text: CanvasGpuText, writer: anytype) !void {
         try writer.writeAll(text.text[start..end]);
         try writer.writeAll(ellipsis);
     }
+}
+
+/// Resolve shaped glyphs onto the same final per-line positions the reference
+/// renderer uses. Packet hosts can draw these glyph indices directly instead
+/// of reshaping UTF-8 and discarding authoritative x/y placement. Elision
+/// markers are separate positioned text fragments because they are synthesized
+/// by layout and have no source glyph id.
+fn writeBinaryPositionedText(text: CanvasGpuText, layout: ?text_model.TextLayout, writer: anytype) !void {
+    if (text.glyphs.len == 0) {
+        try writer.writeByte(0);
+        return;
+    }
+    try writer.writeByte(1);
+
+    var glyph_count: usize = 0;
+    if (layout) |planned| {
+        for (planned.lines) |line| {
+            if (line.glyph_start >= text.glyphs.len) continue;
+            glyph_count += @min(line.paintedGlyphLen(), text.glyphs.len - line.glyph_start);
+        }
+    } else {
+        glyph_count = text.glyphs.len;
+    }
+    try writer.writeInt(u32, @intCast(glyph_count), .little);
+
+    const draw_text = packetDrawText(text);
+    if (layout) |planned| {
+        for (planned.lines) |line| {
+            if (line.glyph_start >= text.glyphs.len) continue;
+            const count = @min(line.paintedGlyphLen(), text.glyphs.len - line.glyph_start);
+            if (count == 0) continue;
+            const line_glyphs = text.glyphs[line.glyph_start..][0..count];
+            const raw_bounds = text_model.textLineBounds(
+                draw_text,
+                line.text_start,
+                line.paintedTextLen(),
+                line.glyph_start,
+                count,
+                line.baseline,
+                line.bounds.height,
+            );
+            const first_x = line_glyphs[0].x;
+            const dx = line.bounds.x - raw_bounds.x;
+            for (line_glyphs) |glyph| {
+                try writeBinaryPositionedGlyph(
+                    text,
+                    glyph,
+                    text.origin.x + glyph.x - first_x + dx,
+                    line.baseline + glyph.y,
+                    writer,
+                );
+            }
+        }
+    } else {
+        const first_x = text.glyphs[0].x;
+        for (text.glyphs) |glyph| {
+            try writeBinaryPositionedGlyph(
+                text,
+                glyph,
+                text.origin.x + glyph.x - first_x,
+                text.origin.y + glyph.y,
+                writer,
+            );
+        }
+    }
+
+    var fragment_count: usize = 0;
+    if (layout) |planned| {
+        for (planned.lines) |line| {
+            const visible_glyphs = if (line.glyph_start < text.glyphs.len)
+                @min(line.paintedGlyphLen(), text.glyphs.len - line.glyph_start)
+            else
+                0;
+            const start = @min(line.text_start, text.text.len);
+            const end = @min(text.text.len, start + line.paintedTextLen());
+            if ((visible_glyphs == 0 and end > start) or line.hasEllipsis()) fragment_count += 1;
+        }
+    }
+    try writer.writeInt(u32, @intCast(fragment_count), .little);
+    if (layout) |planned| {
+        for (planned.lines) |line| {
+            const visible_glyphs = if (line.glyph_start < text.glyphs.len)
+                @min(line.paintedGlyphLen(), text.glyphs.len - line.glyph_start)
+            else
+                0;
+            const start = @min(line.text_start, text.text.len);
+            const end = @min(text.text.len, start + line.paintedTextLen());
+            const ellipsis = packetLineEllipsis(line);
+            if (visible_glyphs != 0 and ellipsis.len == 0) continue;
+            if (visible_glyphs == 0 and end == start and ellipsis.len == 0) continue;
+            try writeBinaryF32(if (visible_glyphs == 0) line.bounds.x else line.bounds.maxX() - line.ellipsis_advance, writer);
+            try writeBinaryF32(line.baseline, writer);
+            if (visible_glyphs == 0) {
+                try writer.writeInt(u32, @intCast(end - start + ellipsis.len), .little);
+                try writer.writeAll(text.text[start..end]);
+                try writer.writeAll(ellipsis);
+            } else {
+                try writeBinarySlice(ellipsis, writer);
+            }
+        }
+    }
+}
+
+fn writeBinaryPositionedGlyph(
+    text: CanvasGpuText,
+    glyph: Glyph,
+    x: f32,
+    baseline: f32,
+    writer: anytype,
+) !void {
+    try writer.writeInt(u16, @intCast(glyph.id), .little);
+    const has_font_override = glyph.font_id != 0;
+    try writer.writeByte(if (has_font_override) 1 else 0);
+    if (has_font_override) try writer.writeInt(u64, glyph.font_id, .little);
+    try writeBinaryF32(x, writer);
+    try writeBinaryF32(baseline, writer);
+    try writeBinaryF32(text_model.estimatedGlyphAdvance(glyph, text.size), writer);
 }
 
 /// Effect: tag u8 (1 shadow / 2 blur) + payload.

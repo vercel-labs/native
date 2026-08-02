@@ -389,7 +389,13 @@ fn emptyState(ui: *Ui, model: *const Model) Ui.Node {
             ui.text(.{}, "Waiting for the first sample…")
         else
             ui.text(.{}, ui.fmt("No matches for \"{s}\"", .{model.search()})),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Filter matches command names and pids."),
+        // The honest scope hint: search only sees the top-K-by-CPU
+        // selection the sampler keeps (`sampler.max_rows`), so a miss
+        // may simply be a quiet process outside it.
+        if (model.samples_taken == 0)
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Filter matches command names and pids.")
+        else
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("Search sees the top {d} processes by CPU — filter matches command names and pids.", .{sampler.max_rows})),
     }));
 }
 

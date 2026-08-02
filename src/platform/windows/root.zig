@@ -4,11 +4,16 @@ const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
 
+const bundled_geist_regular = @embedFile("../../primitives/canvas/fonts/Geist-Regular.ttf");
+const bundled_geist_mono = @embedFile("../../primitives/canvas/fonts/GeistMono-Regular.ttf");
+
 pub const Error = error{
     CallbackFailed,
     CreateFailed,
     FocusFailed,
     CloseFailed,
+    UnsupportedWindowClosePolicy,
+    UnsupportedWindowTransparency,
 };
 
 const WindowsHost = opaque {};
@@ -33,6 +38,8 @@ const WindowsEventKind = enum(c_int) {
     timer = 16,
     appearance = 17,
     audio = 18,
+    context_menu_action = 19,
+    view_focused = 20,
 };
 
 const WindowsEvent = extern struct {
@@ -45,6 +52,9 @@ const WindowsEvent = extern struct {
     y: f64,
     open: c_int,
     focused: c_int,
+    /// Nonzero while the window is alive but hidden by its close_policy
+    /// (`open` stays 1 for the whole hidden stretch).
+    hidden: c_int,
     label: [*]const u8,
     label_len: usize,
     title: [*]const u8,
@@ -66,10 +76,19 @@ const WindowsEvent = extern struct {
     frame_interval_ns: u64,
     nonblank: c_int,
     sample_color: u32,
+    /// Concrete Windows presenter plus the most recent accepted packet's
+    /// decode/draw durations. The host clears timings before dispatch so
+    /// a synchronous next present cannot be clobbered after the callback.
+    gpu_backend: c_int,
+    packet_decode_ns: u64,
+    packet_draw_ns: u64,
     /// Nonzero when the frame completed logically while the top-level
     /// window was minimized (heartbeat pacing; nothing painted) — its
     /// timestamp is pacing policy, never a latency endpoint.
     occluded: c_int,
+    /// Nonzero when the Direct2D presenter lost its retained resources and
+    /// this completion must rebuild the canvas from a full packet.
+    force_full_repaint: c_int,
     input_kind: c_int,
     button: c_int,
     delta_x: f64,
@@ -97,6 +116,12 @@ const WindowsEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// CONTEXT_MENU_ACTION payload (same field names as the macOS host):
+    /// `widget_id` echoes the request's correlation token and
+    /// `menu_item_id` is the selected item's id (0 = dismissed without a
+    /// selection).
+    widget_id: u64,
+    menu_item_id: u32,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -108,7 +133,7 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) ?*WindowsHost;
+extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) ?*WindowsHost;
 extern fn native_sdk_windows_destroy(host: *WindowsHost) void;
 extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
@@ -116,16 +141,16 @@ extern fn native_sdk_windows_wake(host: *WindowsHost) void;
 extern fn native_sdk_windows_request_frame(host: *WindowsHost) void;
 extern fn native_sdk_windows_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, out_width: *usize, out_height: *usize) c_int;
 extern fn native_sdk_windows_load_webview(host: *WindowsHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
-extern fn native_sdk_windows_load_window_webview(host: *WindowsHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
+extern fn native_sdk_windows_load_window_webview(host: *WindowsHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) c_int;
 extern fn native_sdk_windows_set_bridge_callback(host: *WindowsHost, callback: WindowsBridgeCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_bridge_respond(host: *WindowsHost, response: [*]const u8, response_len: usize) void;
 extern fn native_sdk_windows_bridge_respond_window(host: *WindowsHost, window_id: u64, response: [*]const u8, response_len: usize) void;
 extern fn native_sdk_windows_bridge_respond_webview(host: *WindowsHost, window_id: u64, webview_label: [*]const u8, webview_label_len: usize, response: [*]const u8, response_len: usize) void;
 extern fn native_sdk_windows_emit_window_event(host: *WindowsHost, window_id: u64, name: [*]const u8, name_len: usize, detail_json: [*]const u8, detail_json_len: usize) void;
 extern fn native_sdk_windows_set_security_policy(host: *WindowsHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
-extern fn native_sdk_windows_set_menus(host: *WindowsHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
+extern fn native_sdk_windows_set_menus(host: *WindowsHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) c_int;
 extern fn native_sdk_windows_set_shortcuts(host: *WindowsHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) c_int;
 extern fn native_sdk_windows_start_window_drag(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_drag_regions(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_windows_window_chrome(host: *WindowsHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -134,7 +159,9 @@ extern fn native_sdk_windows_cancel_timer(host: *WindowsHost, timer_id: u64) voi
 extern fn native_sdk_windows_focus_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64) c_int;
-extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
+extern fn native_sdk_windows_show_window(host: *WindowsHost, window_id: u64) c_int;
+extern fn native_sdk_windows_set_window_close_policy(host: *WindowsHost, window_id: u64, close_policy: c_int) c_int;
+extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend_request: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_update_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_set_view_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_set_view_visible(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
@@ -143,6 +170,11 @@ extern fn native_sdk_windows_close_view(host: *WindowsHost, window_id: u64, labe
 extern fn native_sdk_windows_request_gpu_surface_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_note_gpu_surface_input(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_present_gpu_surface_pixels(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn native_sdk_windows_present_gpu_surface_packet_binary(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, packet: [*]const u8, packet_len: usize) c_int;
+extern fn native_sdk_windows_upload_gpu_surface_image(host: *WindowsHost, id: u64, width: usize, height: usize, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn native_sdk_windows_remove_gpu_surface_image(host: *WindowsHost, id: u64) c_int;
+extern fn native_sdk_windows_register_gpu_surface_font(host: *WindowsHost, id: u64, ttf: [*]const u8, ttf_len: usize, token: *u64) c_int;
+extern fn native_sdk_windows_unregister_gpu_surface_font(host: *WindowsHost, id: u64, token: u64) c_int;
 extern fn native_sdk_windows_create_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn native_sdk_windows_set_webview_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_navigate_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -175,6 +207,17 @@ extern fn native_sdk_windows_audio_stop(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_audio_seek(host: *WindowsHost, position_ms: u64) c_int;
 extern fn native_sdk_windows_audio_set_volume(host: *WindowsHost, volume: f64) c_int;
 extern fn native_sdk_windows_audio_spectrum_supported(host: *WindowsHost) c_int;
+extern fn native_sdk_windows_show_context_menu(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const WindowsContextMenuItem, count: usize) c_int;
+
+/// One context-menu entry crossing the C ABI (the same shape the macOS
+/// host takes): labels ride as pointer+length, flags as ints.
+const WindowsContextMenuItem = extern struct {
+    item_id: u32,
+    label: [*]const u8,
+    label_len: usize,
+    enabled: c_int,
+    separator: c_int,
+};
 
 const WindowsOpenDialogOpts = extern struct {
     title: [*]const u8,
@@ -219,12 +262,59 @@ const WindowsMessageDialogOpts = extern struct {
     tertiary_button_len: usize,
 };
 
+/// The startup-window twin of the runtime's create-time `.hide` gate:
+/// on windows, hide-on-close is honest only when the app declares a
+/// tray (status item) — SW_HIDE removes the taskbar entry and windows
+/// has no dock-reopen path, so without a tray a hidden window is a
+/// running, invisible, unreachable app. The generated runner refuses
+/// the declaration at comptime, the runtime refuses secondary windows
+/// at create (through the conditional `window_hide_on_close` answer
+/// below), and this refuses the platform-created main window at init.
+/// Pure (no Win32 externs), so the refusal is unit-testable on every
+/// host.
+fn refuseUnsupportedMainWindowClosePolicy(app_info: platform_mod.AppInfo) Error!void {
+    if (app_info.resolvedMainWindow().close_policy != .hide) return;
+    if (app_info.declares_tray) return;
+    std.debug.print("window close_policy \"hide\" on windows requires the \"tray\" capability: hiding removes the taskbar entry and windows has no dock-reopen path, so only a status item (tray) could bring the hidden window back - add \"tray\" to .capabilities and install a status item, or declare \"quit\" (the default)\n", .{});
+    return error.UnsupportedWindowClosePolicy;
+}
+
+/// A Win32 per-pixel-alpha window is painted as one top-level layered
+/// bitmap: child HWNDs and non-client chrome do not participate in that
+/// bitmap. Canvas children are redirected explicitly by the host, but
+/// standard/hidden titlebars and an HMENU would otherwise be silently
+/// erased by the transparent DIB. Keep that limitation explicit at the
+/// create/configure seams instead of accepting an unusable combination.
+fn refuseUnsupportedTransparentWindow(options: platform_mod.WindowOptions, menus_active: bool) Error!void {
+    if (!options.transparent) return;
+    if (options.titlebar != .chromeless or menus_active) {
+        std.debug.print("transparent windows on windows require titlebar = \"chromeless\" and cannot be combined with application menus because Win32 layered windows cannot composite non-client chrome\n", .{});
+        return error.UnsupportedWindowTransparency;
+    }
+}
+
 pub const WindowsPlatform = struct {
     host: *WindowsHost,
     web_engine: platform_mod.WebEngine,
     app_info: platform_mod.AppInfo,
     surface_value: platform_mod.Surface,
     state: RunState = .{},
+    /// Mirrors the successfully installed native menu model so a
+    /// later runtime-created alpha window can fail with the precise
+    /// transparency error before crossing the C ABI.
+    menus_active: bool = false,
+    /// Latched when the runtime's effects teardown abandons an
+    /// in-flight channel `wake_fn` call (see
+    /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale
+    /// call still holds this platform as its context and may execute
+    /// into it at any later time, so `deinit` must skip destruction
+    /// and leak the host, process-lived — and the wrapper struct the
+    /// context actually points at (the wake thunk casts to
+    /// `*WindowsPlatform` before reaching the host) must outlive the
+    /// call too, which is why runners allocate it through
+    /// `createWithOptions` and retire it through `destroy`, the
+    /// latch-gated free.
+    channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!WindowsPlatform {
         return initWithEngine(title, size, .system);
@@ -236,9 +326,34 @@ pub const WindowsPlatform = struct {
 
     pub fn initWithOptions(size: geometry.SizeF, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) Error!WindowsPlatform {
         const window_options = app_info.resolvedMainWindow();
+        // The MAIN window is created right here, before any runtime
+        // exists, so the runtime's create-time `.hide` gate (the
+        // window_hide_on_close feature check) never sees it — the same
+        // seam the GTK host holds for its unconditional refusal. On
+        // windows the refusal is conditional: hiding removes the
+        // taskbar entry and windows has no dock-reopen path, so a
+        // declared tray (status item) is the ONLY re-show affordance.
+        try refuseUnsupportedMainWindowClosePolicy(app_info);
+        try refuseUnsupportedTransparentWindow(window_options, false);
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
+        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        // Packet text must use the same Geist metrics the engine planned
+        // against. Register both built-in faces directly from their
+        // compile-time bytes; custom application fonts keep the public
+        // side-channel and ids >= 64. If either required face cannot be
+        // registered, disable packet rendering as one capability and keep
+        // the exact reference-pixel fallback — never draw system faces
+        // against Geist-planned layout.
+        if (web_engine == .system) {
+            var font_token: u64 = 0;
+            _ = native_sdk_windows_register_gpu_surface_font(host, 1, bundled_geist_regular.ptr, bundled_geist_regular.len, &font_token);
+            _ = native_sdk_windows_register_gpu_surface_font(host, 2, bundled_geist_mono.ptr, bundled_geist_mono.len, &font_token);
+        }
+        // The manifest's declared close policy rides right after the
+        // create, like the min-size floor: close handling is host
+        // window state fixed for the window's life.
+        applyWindowClosePolicy(host, window_options.id, window_options.close_policy);
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -251,7 +366,44 @@ pub const WindowsPlatform = struct {
         };
     }
 
+    /// Heap-allocate the wrapper (process allocator) and initialize it
+    /// in place. Runners must use this over a stack `initWithOptions`
+    /// value: `platform().services.context` is this wrapper's ADDRESS,
+    /// worker threads dereference it inside the channel wake path, and
+    /// a wake call teardown abandons may do so at any later time —
+    /// after a runner's stack frame would have unwound. Pair with
+    /// `destroy`, the latch-gated free.
+    pub fn createWithOptions(size: geometry.SizeF, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) Error!*WindowsPlatform {
+        const self = std.heap.page_allocator.create(WindowsPlatform) catch return error.CreateFailed;
+        errdefer std.heap.page_allocator.destroy(self);
+        self.* = try initWithOptions(size, web_engine, app_info);
+        return self;
+    }
+
+    /// `deinit` plus the wrapper's own storage, gated by the same
+    /// latch: an abandoned channel wake call dereferences this wrapper
+    /// (its context) BEFORE it reaches the native host, so on abandon
+    /// both are leaked, process-lived — deinit-gating extended to
+    /// lifetime-gating, the honest completion of the abandoned-worker
+    /// idiom. No cross-thread race on the gate: the latch is set
+    /// synchronously on the loop thread during effects teardown, which
+    /// runs before the runner's deferred destroy.
+    pub fn destroy(self: *WindowsPlatform) void {
+        self.deinit();
+        if (self.channel_wake_abandoned.load(.seq_cst)) return;
+        std.heap.page_allocator.destroy(self);
+    }
+
     pub fn deinit(self: *WindowsPlatform) void {
+        // An abandoned channel wake call may still enter this host at
+        // any later time (see `channel_wake_abandoned`): destroying it
+        // would turn that stale call into a use-after-free, so the
+        // host is deliberately leaked, process-lived — the
+        // abandoned-worker idiom, applied to the platform itself.
+        if (self.channel_wake_abandoned.load(.seq_cst)) {
+            std.debug.print("windows platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
+            return;
+        }
         native_sdk_windows_destroy(self.host);
     }
 
@@ -277,6 +429,8 @@ pub const WindowsPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .show_window_fn = showWindow,
+                .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .set_window_drag_regions_fn = setWindowDragRegions,
                 .window_chrome_fn = windowChrome,
@@ -289,6 +443,12 @@ pub const WindowsPlatform = struct {
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .note_gpu_surface_input_fn = noteGpuSurfaceInput,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                .present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary,
+                .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
+                .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
+                .register_gpu_surface_font_fn = registerGpuSurfaceFont,
+                .unregister_gpu_surface_font_fn = unregisterGpuSurfaceFont,
+                .show_context_menu_fn = showContextMenu,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -316,6 +476,11 @@ pub const WindowsPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                // The video load verbs are teaching refusals (see
+                // `videoLoad`); the transport verbs stay null — the
+                // channel never activates without a successful load.
+                .video_load_fn = videoLoad,
+                .video_load_url_fn = videoLoadUrl,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
@@ -323,6 +488,7 @@ pub const WindowsPlatform = struct {
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
                 .wake_fn = wake,
+                .note_channel_wake_abandoned_fn = noteChannelWakeAbandoned,
                 .request_frame_fn = requestFrame,
                 .decode_image_fn = decodeImage,
             },
@@ -354,16 +520,34 @@ pub const WindowsPlatform = struct {
             .audio_playback,
             .audio_streaming,
             => self.web_engine == .system,
+            // close_policy .hide: WM_CLOSE hides (ShowWindow SW_HIDE),
+            // the window stays in the host map, and the tray is the
+            // ONLY re-show affordance — SW_HIDE removes the taskbar
+            // entry and windows has no dock-reopen path. An app that
+            // declares no tray gets an honest false, so the runtime's
+            // create-time gates refuse a `.hide` declaration instead of
+            // stranding a hidden window nothing could re-show.
+            .window_hide_on_close => self.web_engine == .system and self.app_info.declares_tray,
             // Spectrum analysis captures the app's OWN audio session
             // through process-scoped WASAPI loopback, which the OS grew
             // in Windows 10 2004 — the host probes the activation
             // support live instead of assuming the build.
             .audio_spectrum => self.web_engine == .system and audioSpectrumAvailable(self.host),
-            // Native scroll drivers, native context menus, and app-owned
-            // view-surface adoption are macOS-only today; Win32 keeps
-            // the engine's wheel physics (TrackPopupMenu is the natural
-            // future context-menu seam — the tray already uses it).
-            .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption => false,
+            // Native context menus present through TrackPopupMenu (the
+            // same popup path the tray menu uses), so the answer rides
+            // the same system-engine gate as the tray.
+            .context_menus => self.web_engine == .system,
+            // Native scroll drivers and app-owned view-surface adoption
+            // are macOS-only today; Win32 keeps the engine's wheel
+            // physics.
+            .gpu_surface_scroll_drivers, .view_surface_adoption => false,
+            // Video decode (a Media Foundation session feeding the
+            // media-surface texture channel) is not implemented yet:
+            // an honest false rather than a half-implemented player.
+            // The load verbs teach and refuse (see `videoLoad`), so an
+            // app that skips the capability check still learns exactly
+            // what is missing.
+            .video_playback => false,
         };
     }
 
@@ -454,8 +638,13 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
                 .scale_factor = @floatCast(event.scale),
                 .open = event.open != 0,
                 .focused = event.focused != 0,
+                .hidden = event.hidden != 0,
             } });
         },
+        .view_focused => state.emit(.{ .view_focused = .{
+            .window_id = event.window_id,
+            .label = event.view_label[0..event.view_label_len],
+        } }),
         .shortcut => state.emit(.{ .shortcut = .{
             .id = event.shortcut_id[0..event.shortcut_id_len],
             .key = event.shortcut_key[0..event.shortcut_key_len],
@@ -472,25 +661,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .window_id = event.window_id,
         } }),
         .tray_action => state.emit(.{ .tray_action = event.tray_item_id }),
-        .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
-            .window_id = event.window_id,
-            .label = event.view_label[0..event.view_label_len],
-            .size = geometry.SizeF.init(@floatCast(event.width), @floatCast(event.height)),
-            .scale_factor = @floatCast(event.scale),
-            .frame_index = event.frame_index,
-            .timestamp_ns = event.timestamp_ns,
-            .frame_interval_ns = event.frame_interval_ns,
-            .nonblank = event.nonblank != 0,
-            .sample_color = event.sample_color,
-            .occluded = event.occluded != 0,
-            .backend = .software,
-            .pixel_format = .bgra8_unorm,
-            .present_mode = .timer,
-            .alpha_mode = .@"opaque",
-            .color_space = .srgb,
-            .vsync = true,
-            .status = .ready,
-        } }),
+        .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = gpuSurfaceFrameEventFromWindowsEvent(event) }),
         .gpu_surface_resize => state.emit(.{ .gpu_surface_resized = .{
             .window_id = event.window_id,
             .label = event.view_label[0..event.view_label_len],
@@ -516,7 +687,46 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .buffering = event.audio_buffering != 0,
             .bands = event.audio_bands,
         } }),
+        .context_menu_action => state.emit(.{ .context_menu_action = contextMenuActionEventFromWindowsEvent(event) }),
     }
+}
+
+fn gpuSurfaceFrameEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.GpuSurfaceFrameEvent {
+    return .{
+        .window_id = event.window_id,
+        .label = event.view_label[0..event.view_label_len],
+        .size = geometry.SizeF.init(@floatCast(event.width), @floatCast(event.height)),
+        .scale_factor = @floatCast(event.scale),
+        .frame_index = event.frame_index,
+        .timestamp_ns = event.timestamp_ns,
+        .frame_interval_ns = event.frame_interval_ns,
+        .nonblank = event.nonblank != 0,
+        .sample_color = event.sample_color,
+        .packet_decode_ns = event.packet_decode_ns,
+        .packet_draw_ns = event.packet_draw_ns,
+        .occluded = event.occluded != 0,
+        .backend = if (event.gpu_backend == 1) .direct2d else .software,
+        .pixel_format = .bgra8_unorm,
+        .present_mode = .timer,
+        .alpha_mode = .@"opaque",
+        .color_space = .srgb,
+        .vsync = true,
+        .status = .ready,
+        .canvas_frame_full_repaint = event.force_full_repaint != 0,
+    };
+}
+
+/// Pure event mapping (no host calls), unit-testable on every build
+/// host: the C event's `widget_id` is the request's correlation token
+/// and `menu_item_id` the selected item (0 = dismissed) — the same
+/// payload contract as the macOS host, so replay is shape-identical.
+fn contextMenuActionEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.ContextMenuActionEvent {
+    return .{
+        .window_id = event.window_id,
+        .view_label = event.view_label[0..event.view_label_len],
+        .token = event.widget_id,
+        .item_id = event.menu_item_id,
+    };
 }
 
 /// Ordinals match the audio report kinds in webview2_host.cpp (the same
@@ -609,7 +819,7 @@ fn loadWebView(context: ?*anyopaque, source: platform_mod.WebViewSource) anyerro
 fn loadWindowWebView(context: ?*anyopaque, window_id: platform_mod.WindowId, source: platform_mod.WebViewSource) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     const assets: platform_mod.WebViewAssetSource = source.asset_options orelse .{ .root_path = "", .entry = "", .origin = "", .spa_fallback = false };
-    native_sdk_windows_load_window_webview(
+    const result = native_sdk_windows_load_window_webview(
         self.host,
         window_id,
         source.bytes.ptr,
@@ -627,6 +837,8 @@ fn loadWindowWebView(context: ?*anyopaque, window_id: platform_mod.WindowId, sou
         assets.origin.len,
         if (assets.spa_fallback) 1 else 0,
     );
+    if (result < 0) return error.UnsupportedWindowTransparency;
+    if (result == 0) return error.CreateFailed;
 }
 
 fn completeBridge(context: ?*anyopaque, response: []const u8) anyerror!void {
@@ -650,11 +862,21 @@ fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name:
     native_sdk_windows_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
 }
 
-/// Thread-safe: `PostMessage` into the existing message loop, whose
-/// window procedure emits `.wake` on the loop thread.
+/// Thread-safe: `PostMessageW` into the existing message loop (the
+/// enqueue-only shape the wake contract requires — never the
+/// synchronous `SendMessage`), whose window procedure emits `.wake` on
+/// the loop thread.
 fn wake(context: ?*anyopaque) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_windows_wake(self.host);
+}
+
+/// Teardown abandoned an in-flight channel wake call: latch the flag
+/// `deinit` consults so this host is leaked rather than destroyed (see
+/// `WindowsPlatform.channel_wake_abandoned`).
+fn noteChannelWakeAbandoned(context: ?*anyopaque) void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    self.channel_wake_abandoned.store(true, .seq_cst);
 }
 
 /// Thread-safe like `wake`: `PostMessage` into the message loop, whose
@@ -664,6 +886,15 @@ fn wake(context: ?*anyopaque) anyerror!void {
 fn requestFrame(context: ?*anyopaque) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_windows_request_frame(self.host);
+}
+
+/// Headless image codec for session replay: the SAME WIC decode a live
+/// host serves (see `decodeImage` below — a context-free bytes-to-pixels
+/// call, no window, no message loop), so journaled image bytes
+/// re-register the identical pixels under a headless replay on the same
+/// platform.
+pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {
+    services.decode_image_fn = decodeImage;
 }
 
 /// WIC-backed image decoding (PNG, JPEG, ... — every codec the OS
@@ -688,17 +919,49 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
     };
 }
 
+fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
+    return switch (mode) {
+        .immediate => 0,
+        .on_first_present => 1,
+    };
+}
+
+fn windowFlags(options: platform_mod.WindowOptions) u32 {
+    var flags: u32 = 0;
+    if (options.transparent) flags |= 1 << 0;
+    if (options.always_on_top) flags |= 1 << 1;
+    if (options.click_through) flags |= 1 << 2;
+    if (!options.activate_on_show) flags |= 1 << 3;
+    return flags;
+}
+
 /// Zero/negative/non-finite floors are the "no floor" sentinel (the
 /// host leaves that axis at its natural minimum).
+fn closePolicyInt(policy: platform_mod.WindowClosePolicy) c_int {
+    return switch (policy) {
+        .quit => 0,
+        .hide => 1,
+    };
+}
+
+/// Register a window's declared close policy with the host right after
+/// create. `.quit` skips the call — it IS the host default.
+fn applyWindowClosePolicy(host: *WindowsHost, window_id: u64, policy: platform_mod.WindowClosePolicy) void {
+    if (policy == .quit) return;
+    _ = native_sdk_windows_set_window_close_policy(host, window_id, closePolicyInt(policy));
+}
+
 fn minSizeFloor(value: f32) f64 {
     return if (std.math.isFinite(value) and value > 0) value else 0;
 }
 
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    try refuseUnsupportedTransparentWindow(options, self.menus_active);
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
+    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
+    applyWindowClosePolicy(self.host, options.id, options.close_policy);
     return .{
         .id = options.id,
         .label = options.label,
@@ -706,7 +969,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .frame = frame,
         .scale_factor = 1,
         .open = true,
-        .focused = false,
+        .focused = options.activate_on_show and options.show == .immediate,
     };
 }
 
@@ -723,6 +986,19 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_windows_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_windows_show_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+/// The graceful quit: stop the message loop the same way the last
+/// window's WM_DESTROY does (PostQuitMessage); the run loop's exit
+/// emits the same shutdown event.
+fn quitApp(context: ?*anyopaque) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_windows_stop(self.host);
 }
 
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
@@ -805,6 +1081,7 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         options.label.ptr,
         options.label.len,
         viewKindInt(options.kind),
+        if (options.kind == .gpu_surface) gpuSurfaceBackendRequestInt(options.gpu_surface.backend) else 0,
         parent.ptr,
         parent.len,
         frame.x,
@@ -921,6 +1198,156 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
         pixels.rgba8.ptr,
         pixels.rgba8.len,
     ) == 0) return error.ViewNotFound;
+}
+
+fn presentGpuSurfacePacketBinary(context: ?*anyopaque, packet: platform_mod.GpuSurfacePacket) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const result = native_sdk_windows_present_gpu_surface_packet_binary(
+        self.host,
+        packet.window_id,
+        packet.label.ptr,
+        packet.label.len,
+        packet.surface_size.width,
+        packet.surface_size.height,
+        packet.scale_factor,
+        packet.clear_color_rgba8[0],
+        packet.clear_color_rgba8[1],
+        packet.clear_color_rgba8[2],
+        packet.clear_color_rgba8[3],
+        if (packet.requires_render) 1 else 0,
+        packet.command_count,
+        packet.unsupported_command_count,
+        if (packet.representable) 1 else 0,
+        packet.binary.ptr,
+        packet.binary.len,
+    );
+    switch (result) {
+        1 => return,
+        0 => return error.UnsupportedService,
+        -1 => return error.ViewNotFound,
+        else => return error.InvalidGpuSurfacePacket,
+    }
+}
+
+fn uploadGpuSurfaceImage(context: ?*anyopaque, image: platform_mod.GpuSurfaceImagePixels) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    return gpuSurfaceImageUploadResult(native_sdk_windows_upload_gpu_surface_image(
+        self.host,
+        image.id,
+        image.width,
+        image.height,
+        image.rgba8.ptr,
+        image.rgba8.len,
+    ));
+}
+
+fn gpuSurfaceImageUploadResult(result: c_int) anyerror!void {
+    switch (result) {
+        1 => return,
+        0 => return error.UnsupportedService,
+        else => return error.InvalidGpuSurfaceImage,
+    }
+}
+
+fn removeGpuSurfaceImage(context: ?*anyopaque, id: u64) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (native_sdk_windows_remove_gpu_surface_image(self.host, id) == 0) return error.InvalidGpuSurfaceImage;
+}
+
+fn registerGpuSurfaceFont(context: ?*anyopaque, font: platform_mod.GpuSurfaceFontData) anyerror!u64 {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    var token: u64 = 0;
+    return gpuSurfaceFontRegistrationResult(
+        native_sdk_windows_register_gpu_surface_font(self.host, font.id, font.ttf.ptr, font.ttf.len, &token),
+        token,
+    );
+}
+
+fn gpuSurfaceFontRegistrationResult(result: c_int, token: u64) anyerror!u64 {
+    return switch (result) {
+        1 => token,
+        0 => error.UnsupportedService,
+        else => error.InvalidGpuSurfaceFont,
+    };
+}
+
+fn unregisterGpuSurfaceFont(context: ?*anyopaque, id: u64, token: u64) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    switch (native_sdk_windows_unregister_gpu_surface_font(self.host, id, token)) {
+        1 => return,
+        0 => return error.UnsupportedService,
+        else => return error.InvalidGpuSurfaceFont,
+    }
+}
+
+/// Win32 menus treat `&` in an item label as a mnemonic marker —
+/// AppendMenuW eats the ampersand and underlines the next character —
+/// so an app-authored label like "R&D" must cross the ABI with the
+/// ampersand doubled ("R&&D") to render literally. Labels without an
+/// ampersand pass through uncopied; a label whose escaped form does
+/// not fit the remaining pool also passes through raw, because an
+/// accidental mnemonic on a pathological label beats dropping bytes.
+fn escapeMenuLabelAmpersands(label: []const u8, pool: []u8, used: *usize) []const u8 {
+    const ampersands = std.mem.count(u8, label, "&");
+    if (ampersands == 0) return label;
+    if (label.len + ampersands > pool.len - used.*) return label;
+    const start = used.*;
+    var out = start;
+    for (label) |byte| {
+        pool[out] = byte;
+        out += 1;
+        if (byte == '&') {
+            pool[out] = '&';
+            out += 1;
+        }
+    }
+    used.* = out;
+    return pool[start..out];
+}
+
+/// Translate the request's items to the C ABI shape, escaping mnemonic
+/// ampersands into `label_pool` (the host copies every label before
+/// returning, so a caller stack pool is safe). Pure (no host calls), so
+/// the separator/disabled/label mapping is unit-testable on every build
+/// host.
+fn contextMenuItemsToWindows(items: []const platform_mod.ContextMenuItem, buffer: []WindowsContextMenuItem, label_pool: []u8) []const WindowsContextMenuItem {
+    const count = @min(items.len, buffer.len);
+    var pool_used: usize = 0;
+    for (items[0..count], 0..) |item, index| {
+        const label = escapeMenuLabelAmpersands(item.label, label_pool, &pool_used);
+        buffer[index] = .{
+            .item_id = item.id,
+            .label = label.ptr,
+            .label_len = label.len,
+            .enabled = if (item.enabled) 1 else 0,
+            .separator = if (item.separator) 1 else 0,
+        };
+    }
+    return buffer[0..count];
+}
+
+fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuRequest) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    var items: [platform_mod.max_context_menu_items]WindowsContextMenuItem = undefined;
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToWindows(request.items, &items, &label_pool);
+    if (native_sdk_windows_show_context_menu(
+        self.host,
+        request.window_id,
+        request.view_label.ptr,
+        request.view_label.len,
+        request.point.x,
+        request.point.y,
+        request.token,
+        translated.ptr,
+        translated.len,
+    ) == 0) return error.WindowNotFound;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
@@ -1057,10 +1484,15 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
     var label_lens: [max_tray_items]usize = undefined;
     var separators: [max_tray_items]c_int = undefined;
     var enabled_flags: [max_tray_items]c_int = undefined;
+    // Tray labels are app-supplied too, so they get the same mnemonic
+    // escape as context-menu items (the host copies before returning).
+    var label_pool: [max_tray_items * 64]u8 = undefined;
+    var pool_used: usize = 0;
     for (items[0..count], 0..) |item, index| {
+        const label = escapeMenuLabelAmpersands(item.label, &label_pool, &pool_used);
         ids[index] = item.id;
-        labels[index] = item.label.ptr;
-        label_lens[index] = item.label.len;
+        labels[index] = label.ptr;
+        label_lens[index] = label.len;
         separators[index] = if (item.separator) 1 else 0;
         enabled_flags[index] = if (item.enabled) 1 else 0;
     }
@@ -1194,6 +1626,26 @@ fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
     _ = native_sdk_windows_audio_set_volume(self.host, volume);
 }
 
+/// The video tier's teaching refusal: the load verbs exist so a video
+/// source fails with a NAMED explanation instead of a bare
+/// unsupported-service, while the transport verbs stay null — the
+/// channel never activates without a successful load. Pure (no Win32
+/// externs), so the teaching is unit-testable on every host.
+fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
+    _ = context;
+    _ = path;
+    _ = token;
+    _ = sink;
+    std.debug.print("video playback is not implemented on windows yet: the Win32 host has no Media Foundation decode path into the media-surface texture channel - the app receives one failed video event (scope video sources to macos builds, or compose a media-surface with your own producer)\n", .{});
+    return error.UnsupportedService;
+}
+
+/// The URL twin rides the same teaching — a stream would need the same
+/// missing decode path a file does.
+fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
+    return videoLoad(context, url, token, sink);
+}
+
 fn configureSecurityPolicy(context: ?*anyopaque, policy: security.Policy) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     var origins_buffer: [4096]u8 = undefined;
@@ -1249,7 +1701,7 @@ fn configureMenus(context: ?*anyopaque, menus: []const platform_mod.Menu) anyerr
         }
     }
 
-    native_sdk_windows_set_menus(
+    if (native_sdk_windows_set_menus(
         self.host,
         menu_titles[0..menus.len].ptr,
         menu_title_lens[0..menus.len].ptr,
@@ -1266,7 +1718,8 @@ fn configureMenus(context: ?*anyopaque, menus: []const platform_mod.Menu) anyerr
         item_enabled[0..item_count].ptr,
         item_checked[0..item_count].ptr,
         item_count,
-    );
+    ) == 0) return error.UnsupportedWindowTransparency;
+    self.menus_active = menus.len > 0;
 }
 
 fn configureShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shortcut) anyerror!void {
@@ -1342,6 +1795,25 @@ test "windows supports native container and control kinds" {
     try std.testing.expect(isSupportedNativeViewKind(.gpu_surface));
 }
 
+test "windows GPU frame maps Direct2D recovery to a full repaint" {
+    const label = "canvas";
+    var event = std.mem.zeroes(WindowsEvent);
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.width = 640;
+    event.height = 360;
+    event.scale = 2;
+    event.gpu_backend = 1;
+    event.force_full_repaint = 1;
+
+    const frame = gpuSurfaceFrameEventFromWindowsEvent(&event);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), frame.window_id);
+    try std.testing.expectEqualStrings(label, frame.label);
+    try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.direct2d, frame.backend);
+    try std.testing.expect(frame.canvas_frame_full_repaint);
+}
+
 test "windows gpu surface input preserves key and text" {
     const label = "canvas";
     const key = "enter";
@@ -1377,6 +1849,61 @@ test "windows gpu surface input preserves key and text" {
     try std.testing.expectEqualStrings("\n", input.text);
     try std.testing.expect(input.modifiers.primary);
     try std.testing.expect(input.modifiers.shift);
+}
+
+test "windows context menu items translate separators, disabled flags, and labels" {
+    const items = [_]platform_mod.ContextMenuItem{
+        .{ .id = 1, .label = "Complete" },
+        .{ .separator = true },
+        .{ .id = 3, .label = "Delete", .enabled = false },
+        .{ .id = 4, .label = "Move to R&D" },
+    };
+    var buffer: [platform_mod.max_context_menu_items]WindowsContextMenuItem = undefined;
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToWindows(&items, &buffer, &label_pool);
+    try std.testing.expectEqual(@as(usize, 4), translated.len);
+    try std.testing.expectEqual(@as(u32, 1), translated[0].item_id);
+    try std.testing.expectEqualStrings("Complete", translated[0].label[0..translated[0].label_len]);
+    try std.testing.expectEqual(@as(c_int, 1), translated[0].enabled);
+    try std.testing.expectEqual(@as(c_int, 0), translated[0].separator);
+    try std.testing.expectEqual(@as(c_int, 1), translated[1].separator);
+    try std.testing.expectEqual(@as(u32, 3), translated[2].item_id);
+    try std.testing.expectEqual(@as(c_int, 0), translated[2].enabled);
+    // A literal `&` doubles on the way to AppendMenuW so Win32 renders
+    // it instead of eating it as a mnemonic marker; ampersand-free
+    // labels pass through pointing at the caller's bytes.
+    try std.testing.expectEqualStrings("Move to R&&D", translated[3].label[0..translated[3].label_len]);
+    try std.testing.expectEqual(items[0].label.ptr, translated[0].label);
+}
+
+test "windows menu label escape passes a label through raw when the pool cannot hold it" {
+    var pool: [4]u8 = undefined;
+    var used: usize = 0;
+    const label = "R&D";
+    // Escaped form needs 4 bytes and fits exactly.
+    try std.testing.expectEqualStrings("R&&D", escapeMenuLabelAmpersands(label, &pool, &used));
+    // The pool is spent: the next ampersand label rides unescaped
+    // (accidental mnemonic) rather than truncated.
+    const passed_through = escapeMenuLabelAmpersands(label, &pool, &used);
+    try std.testing.expectEqualStrings("R&D", passed_through);
+    try std.testing.expectEqual(label.ptr, passed_through.ptr);
+}
+
+test "windows context menu action event maps token and item id" {
+    const label = "canvas";
+    var event = std.mem.zeroes(WindowsEvent);
+    event.kind = .context_menu_action;
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.widget_id = 42;
+    event.menu_item_id = 3;
+
+    const action = contextMenuActionEventFromWindowsEvent(&event);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), action.window_id);
+    try std.testing.expectEqualStrings("canvas", action.view_label);
+    try std.testing.expectEqual(@as(u64, 42), action.token);
+    try std.testing.expectEqual(@as(u32, 3), action.item_id);
 }
 
 test "windows gpu surface input maps pointer cancel" {
@@ -1437,6 +1964,7 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .gpu_surfaces));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .audio_playback));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .audio_streaming));
+    try std.testing.expect(WindowsPlatform.supportsFeature(&system, .context_menus));
 
     var chromium = testPlatformWithEngine(.chromium);
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .main_webview));
@@ -1448,6 +1976,385 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .gpu_surfaces));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_playback));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_streaming));
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .context_menus));
+}
+
+test "windows hide-on-close support requires the declared tray (the only re-show affordance)" {
+    // A system-engine host with a declared tray keeps hide-on-close.
+    var with_tray = testPlatformWithEngine(.system);
+    with_tray.app_info.declares_tray = true;
+    try std.testing.expect(WindowsPlatform.supportsFeature(&with_tray, .window_hide_on_close));
+    // Without the declaration the answer is an honest false: SW_HIDE
+    // removes the taskbar entry and windows has no dock-reopen path, so
+    // the runtime's create-time gates must refuse a `.hide` declaration
+    // instead of stranding a hidden window nothing could re-show.
+    var without_tray = testPlatformWithEngine(.system);
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&without_tray, .window_hide_on_close));
+    // The chromium engine answers false regardless, tray or not.
+    var chromium = testPlatformWithEngine(.chromium);
+    chromium.app_info.declares_tray = true;
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .window_hide_on_close));
+}
+
+test "windows refuses a tray-less .hide main window at platform init instead of stranding it hidden" {
+    // The pre-created MAIN window never passes through the runtime's
+    // create gate, so the platform's init gate must hold the same line
+    // (the GTK host's init refusal is the unconditional twin).
+    const hide_no_tray: platform_mod.AppInfo = .{ .app_name = "player", .main_window = .{ .close_policy = .hide } };
+    try std.testing.expectError(error.UnsupportedWindowClosePolicy, refuseUnsupportedMainWindowClosePolicy(hide_no_tray));
+    // The declared tray is the re-show affordance: with it, the same
+    // declaration passes.
+    const hide_with_tray: platform_mod.AppInfo = .{ .app_name = "player", .declares_tray = true, .main_window = .{ .close_policy = .hide } };
+    try refuseUnsupportedMainWindowClosePolicy(hide_with_tray);
+    // The default (.quit) never consults the tray.
+    const quit_app: platform_mod.AppInfo = .{ .app_name = "player" };
+    try refuseUnsupportedMainWindowClosePolicy(quit_app);
+}
+
+test "windows WM_CLOSE hide consults the live tray state and downgrades to a real close without it" {
+    // The downgrade branch is C++ this test suite cannot execute, so
+    // this pins the tray-alive consult and the loud downgrade line
+    // textually: a refactor that drops either fails here. Compilation
+    // is covered by the cross-target syntax checks the packaging path
+    // runs; live close behavior stays windows-host territory.
+    const host_source = @embedFile("webview2_host.cpp");
+    const close_at = std.mem.indexOf(u8, host_source, "case WM_CLOSE:");
+    try std.testing.expect(close_at != null);
+    const close_hook = host_source[close_at.?..];
+    const consult_at = std.mem.indexOf(u8, close_hook, "if (!host->tray_active)");
+    const hide_at = std.mem.indexOf(u8, close_hook, "ShowWindow(hwnd, SW_HIDE);");
+    try std.testing.expect(consult_at != null);
+    try std.testing.expect(hide_at != null);
+    // The consult sits INSIDE the close hook, BEFORE the hide.
+    try std.testing.expect(consult_at.? < hide_at.?);
+    try std.testing.expect(std.mem.indexOf(u8, close_hook, "downgraded to a real close") != null);
+}
+
+test "windows passive show never foregrounds or focuses the window" {
+    const host_source = @embedFile("webview2_host.cpp");
+    const show_at = std.mem.indexOf(u8, host_source, "int native_sdk_windows_show_window(") orelse return error.TestExpectedEqual;
+    const tail = host_source[show_at..];
+    const next_at = std.mem.indexOf(u8, tail, "int native_sdk_windows_set_window_close_policy(") orelse return error.TestExpectedEqual;
+    const show_fn = tail[0..next_at];
+    const passive_at = std.mem.indexOf(u8, show_fn, "ShowWindow(found->second.hwnd, SW_SHOWNOACTIVATE);") orelse return error.TestExpectedEqual;
+    const focused_at = std.mem.indexOf(u8, show_fn, "SetFocus(found->second.hwnd);") orelse return error.TestExpectedEqual;
+    const active_branch_end = std.mem.indexOfPos(u8, show_fn, focused_at, "} else {") orelse return error.TestExpectedEqual;
+    try std.testing.expect(focused_at < active_branch_end);
+    try std.testing.expect(std.mem.indexOfPos(u8, show_fn, passive_at, "SetForegroundWindow(") == null);
+    try std.testing.expect(std.mem.indexOfPos(u8, show_fn, passive_at, "SetFocus(") == null);
+
+    // Passive is a SHOW policy, not a permanent interaction policy:
+    // WS_EX_NOACTIVATE would also suppress activation on a later user
+    // click, making an interactive passive overlay impossible to focus.
+    const style_at = std.mem.indexOf(u8, host_source, "static DWORD windowExtendedStyle(") orelse return error.TestExpectedEqual;
+    const style_tail = host_source[style_at..];
+    const style_end = std.mem.indexOf(u8, style_tail, "static bool createNativeWindow(") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, style_tail[0..style_end], "WS_EX_NOACTIVATE") == null);
+}
+
+test "windows passive canvas creation does not focus its child hwnd" {
+    const host_source = @embedFile("webview2_host.cpp");
+    const create_at = std.mem.indexOf(u8, host_source, "int native_sdk_windows_create_view(") orelse return error.TestExpectedEqual;
+    const tail = host_source[create_at..];
+    const next_at = std.mem.indexOf(u8, tail, "int native_sdk_windows_request_gpu_surface_frame(") orelse return error.TestExpectedEqual;
+    const create_fn = tail[0..next_at];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        create_fn,
+        "if (window->second.activate_on_show) SetFocus(hwnd);",
+    ) != null);
+}
+
+test "windows software GPU backend request stays on the pixel presenter" {
+    try std.testing.expectEqual(@as(c_int, 0), gpuSurfaceBackendRequestInt(.metal));
+    try std.testing.expectEqual(@as(c_int, 1), gpuSurfaceBackendRequestInt(.software));
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "view.gpu_backend_request != kGpuBackendRequestSoftware",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (view.gpu_backend_request == kGpuBackendRequestSoftware) return 0;",
+    ) != null);
+}
+
+test "windows unavailable image uploader negotiates pixel fallback" {
+    try gpuSurfaceImageUploadResult(1);
+    try std.testing.expectError(error.UnsupportedService, gpuSurfaceImageUploadResult(0));
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, gpuSurfaceImageUploadResult(-1));
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (!host->gpu_renderer) return 0;",
+    ) != null);
+}
+
+test "windows packet renderer requires deterministic font and caption seams" {
+    try std.testing.expectEqual(@as(u64, 37), try gpuSurfaceFontRegistrationResult(1, 37));
+    try std.testing.expectError(error.UnsupportedService, gpuSurfaceFontRegistrationResult(0, 0));
+    try std.testing.expectError(error.InvalidGpuSurfaceFont, gpuSurfaceFontRegistrationResult(-1, 0));
+
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "fallback_builder->CreateFontFallback(&font_fallback_)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "layout2->SetFontFallback(renderer_->fontFallback())",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_GDI_COMPATIBLE",
+    ) != null);
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (id == 1 || id == 2) host->gpu_renderer.reset();",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "view.gpu_surface->readColorAt(sample_x, sample_y, &packed)",
+    ) != null);
+}
+
+test "windows packet renderer preserves text baselines and disjoint dirty regions" {
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "draw_line(text.text, text.origin.x, text.origin.y)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "backing_target_->DrawGlyphRun(\n                    D2D1::Point2F(glyph.x, glyph.baseline)",
+    ) != null);
+
+    const draw_list_at = std.mem.indexOf(
+        u8,
+        renderer_source,
+        "bool drawCommandList(const std::vector<const Command *> &commands",
+    ) orelse return error.TestExpectedEqual;
+    const draw_list = renderer_source[draw_list_at..];
+    const blur_target_at = std.mem.indexOf(
+        u8,
+        draw_list,
+        "const Rect target = blurTarget(*command, outer_clip);",
+    ) orelse return error.TestExpectedEqual;
+    const segment_end_at = std.mem.indexOf(
+        u8,
+        draw_list,
+        "const HRESULT segment = backing_target_->EndDraw();",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(blur_target_at < segment_end_at);
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "gpuSurfaceUpdateRegionRects(\n                hwnd, paint_rects, kGpuPaintRegionRectCap)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "view->gpu_surface->paint(paint_rects, paint_rect_count)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "InvalidateRect(view.hwnd, &info.dirty_rects[index], FALSE)",
+    ) != null);
+}
+
+test "windows packet renderer keeps square rectangle stroke joins" {
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "style.lineJoin = D2D1_LINE_JOIN_MITER;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "command.shape.kind == Shape::Kind::stroke_rect\n                ? rect_stroke_",
+    ) != null);
+}
+
+test "windows click-through uses a layered surface even when visually opaque" {
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (window.transparent || window.click_through) style |= WS_EX_LAYERED;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (window.click_through && !window.transparent &&\n        !SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA))",
+    ) != null);
+}
+
+test "windows transparent windows compose canvas siblings and reject unredirectable children" {
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "static bool presentTransparentWindow(Host *host, Window &window)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "std::sort(surfaces.begin(), surfaces.end()",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "compositePremultipliedChannel(128, 128, 64) == 160",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (window->second.transparent && kind != kViewGpuSurface) return 0;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (window->second.transparent) return 0;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (window->second.transparent) return -1;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (window.transparent && (!windowIsChromeless(window) || !host->menus.empty())) return false;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (menu_count > 0) {\n        for (const auto &entry : host->windows) {\n            if (entry.second.transparent) return 0;",
+    ) != null);
+}
+
+test "windows transparent resize frame remains hit-testable without filling the client" {
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "static constexpr uint8_t kTransparentResizeHitAlpha = 1;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "outsideTransparentClientBounds(6, 100, 7, 7, 713, 513)",
+    ) != null);
+    const present_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "static bool presentTransparentWindow(Host *host, Window &window)",
+    ) orelse return error.TestExpectedEqual;
+    const present = host_source[present_at..];
+    const seed_at = std.mem.indexOf(
+        u8,
+        present,
+        "if (window.resizable) {\n        seedTransparentResizeHitFrame(",
+    ) orelse return error.TestExpectedEqual;
+    const surfaces_at = std.mem.indexOf(
+        u8,
+        present,
+        "std::vector<NativeView *> surfaces;",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(seed_at < surfaces_at);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        present,
+        "if (input_window && input_window->click_through && message == WM_NCHITTEST) return HTTRANSPARENT;",
+    ) != null);
+}
+
+test "windows transparent windows require chromeless chrome and no menus" {
+    try refuseUnsupportedTransparentWindow(.{
+        .titlebar = .chromeless,
+        .transparent = true,
+    }, false);
+    try std.testing.expectError(error.UnsupportedWindowTransparency, refuseUnsupportedTransparentWindow(.{
+        .titlebar = .standard,
+        .transparent = true,
+    }, false));
+    try std.testing.expectError(error.UnsupportedWindowTransparency, refuseUnsupportedTransparentWindow(.{
+        .titlebar = .hidden_inset,
+        .transparent = true,
+    }, false));
+    try std.testing.expectError(error.UnsupportedWindowTransparency, refuseUnsupportedTransparentWindow(.{
+        .titlebar = .chromeless,
+        .transparent = true,
+    }, true));
+    // The constraint is only about per-pixel alpha: ordinary menu
+    // windows keep every titlebar style.
+    try refuseUnsupportedTransparentWindow(.{}, true);
+}
+
+test "windows first-present windows have a fallback reveal deadline" {
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "constexpr ULONGLONG kDeferredShowDeadlineMs = 1000;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "showDeferredWindowIfDeadlinePassed(entry.second);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "window.deferred_show_started_ms = window.show_on_first_present ? GetTickCount64() : 0;",
+    ) != null);
+}
+
+test "windows window focus includes focused native child views" {
+    // This predicate lives in the C++ host, where the real HWND tree is
+    // available. Pin the two parts of its contract textually: focus is
+    // resolved through GA_ROOT, and every emitted window frame uses
+    // that shared answer. Cross-target host builds compile the code;
+    // the Windows canvas smoke supplies the live child-focus exercise.
+    const host_source = @embedFile("webview2_host.cpp");
+    const predicate_at = std.mem.indexOf(u8, host_source, "static bool windowOwnsKeyboardFocus(const Window &window)");
+    try std.testing.expect(predicate_at != null);
+    const predicate = host_source[predicate_at.?..];
+    try std.testing.expect(std.mem.indexOf(u8, predicate, "GetAncestor(focused, GA_ROOT) == window.hwnd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.focused = windowOwnsKeyboardFocus(window);") != null);
+    const focus_edge_at = std.mem.indexOf(u8, host_source, "case WM_SETFOCUS:");
+    try std.testing.expect(focus_edge_at != null);
+    const focus_edge = host_source[focus_edge_at.?..];
+    try std.testing.expect(std.mem.indexOf(u8, focus_edge, "HWND root = GetAncestor(hwnd, GA_ROOT);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, focus_edge, "entry.second.hwnd == root") != null);
+}
+
+test "windows webview focus reports the focused child label" {
+    // WebView2 owns the page HWND and its input; GotFocus is the
+    // controller-level edge that mirrors keyboard ownership back into
+    // the runtime's per-view register.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "add_GotFocus(Callback<ICoreWebView2FocusChangedEventHandler>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.kind = kViewFocused;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.view_label = focused->second.label.c_str();") != null);
 }
 
 test "windows audio event maps kinds and payload" {
@@ -1496,6 +2403,10 @@ fn viewKindInt(kind: platform_mod.ViewKind) c_int {
         .progress_indicator => 15,
         .segmented_control => 16,
     };
+}
+
+fn gpuSurfaceBackendRequestInt(backend: platform_mod.GpuSurfaceBackend) c_int {
+    return if (backend == .software) 1 else 0;
 }
 
 fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {

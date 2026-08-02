@@ -168,6 +168,24 @@ pub const Model = struct {
     // in-window theme control by design).
     note_storage: [max_note]u8 = undefined,
     note_len: usize = 0,
+    /// A note that clears itself on the next applied sample LAUNCHED
+    /// after it was set (`note_stamp_generation`): the kill path's
+    /// "terminate request delivered" is a moment, not a state — the
+    /// following tick (whose ps output is the delivery's visible
+    /// consequence) retires it instead of letting it sit forever.
+    note_clears_on_sample: bool = false,
+    /// Generation counter for ps sample LAUNCHES (not applies), bumped
+    /// in `requestSample` when the spawn actually issues. Launches never
+    /// overlap (`ps_inflight` gates them), so the value is stable from a
+    /// sample's launch to its applied `ps_done` — at apply time it IS
+    /// the applying sample's launch generation. Pure Msg-driven state,
+    /// no clock anywhere near it, so replay walks the same values.
+    sample_generation: u32 = 0,
+    /// The generation current when the transient note was set: the note
+    /// retires only with a sample launched AFTER this stamp. A sample
+    /// already in flight at kill time collected its rows BEFORE the
+    /// kill, so its pre-termination rows must never retire the notice.
+    note_stamp_generation: u32 = 0,
     appearance: native_sdk.Appearance = .{},
     /// Chrome overlay geometry from `on_chrome` (tall hidden-inset
     /// titlebar): the header leads with a spacer this wide so its
@@ -196,11 +214,22 @@ pub const Model = struct {
     }
 
     pub fn setNote(model: *Model, comptime fmt: []const u8, args: anytype) void {
+        model.note_clears_on_sample = false;
         const written = std.fmt.bufPrint(&model.note_storage, fmt, args) catch {
             model.note_len = 0;
             return;
         };
         model.note_len = written.len;
+    }
+
+    /// A `setNote` that retires itself on the next applied ps sample
+    /// launched after this moment (see `note_clears_on_sample`). The
+    /// generation stamp keeps a sample already in flight — whose rows
+    /// predate whatever this note reports — from retiring it early.
+    pub fn setTransientNote(model: *Model, comptime fmt: []const u8, args: anytype) void {
+        model.setNote(fmt, args);
+        model.note_clears_on_sample = true;
+        model.note_stamp_generation = model.sample_generation;
     }
 
     pub fn colorScheme(model: *const Model) native_sdk.ColorScheme {
@@ -326,7 +355,7 @@ pub const Model = struct {
         if (model.samples_taken == 0) {
             appendPart(buffer, &len, "Waiting for the first sample…", .{});
         } else {
-            appendPart(buffer, &len, "{d} processes · sampled at {s}", .{
+            appendPart(buffer, &len, "{d} processes · sampled at {s} UTC", .{
                 model.process_count, formatClockMs(arena, model.sampled_at_ms),
             });
             if (model.paused) appendPart(buffer, &len, " · paused", .{});
@@ -414,6 +443,15 @@ pub const Model = struct {
     }
 
     fn applyPsSample(model: *Model, sample: sampler.PsSample, sampled_at_ms: i64) void {
+        // A transient note ("terminate request delivered") retires with
+        // the first sample LAUNCHED after it — those rows show the
+        // delivery's outcome. A sample already in flight when the note
+        // was stamped collected its rows before the kill, so it applies
+        // without retiring the notice (the generation gate).
+        if (model.note_clears_on_sample and model.sample_generation > model.note_stamp_generation) {
+            model.note_len = 0;
+            model.note_clears_on_sample = false;
+        }
         model.process_count = sample.process_count;
         model.uptime_seconds = sample.uptime_seconds;
         model.rows = sample.rows;
@@ -471,8 +509,13 @@ pub fn formatUptime(arena: std.mem.Allocator, seconds: u64) []const u8 {
     return std.fmt.allocPrint(arena, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hours, minutes, seconds % 60 }) catch "";
 }
 
-/// Wall-clock ms -> local-agnostic `HH:MM:SS` (UTC; the point is "how
-/// fresh", not a calendar).
+/// Wall-clock ms -> local-agnostic `HH:MM:SS` (UTC, and the footer SAYS
+/// so; the point is "how fresh", not a calendar). Local rendering would
+/// need the host's tz offset as journaled data — the core is pure and
+/// replay checkpoints fingerprint the rendered view, so an OS timezone
+/// read anywhere in model or view would replay differently across
+/// machines. Until a journaled tz channel exists, the label is the
+/// honest fix.
 pub fn formatClockMs(arena: std.mem.Allocator, wall_ms: i64) []const u8 {
     const total_seconds = @divFloor(wall_ms, 1000);
     const day_seconds: u64 = @intCast(@mod(total_seconds, 86_400));
@@ -541,7 +584,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .toggle_sampling => setSampling(model, fx, model.paused),
         .search_edit => |edit| model.search_buffer.apply(edit),
-        .table_scrolled => |state| model.table_scroll = state.offset,
+        .table_scrolled => |state| model.table_scroll = state.offset_y,
         .set_sort => |key| {
             if (model.sort_key == key) {
                 model.sort_descending = !model.sort_descending;
@@ -581,7 +624,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .kill_done => |exit| {
             if (exit.reason == .exited and exit.code == 0) {
-                model.setNote("terminate request delivered", .{});
+                // Transient: the next LAUNCHED sample's rows ARE the
+                // outcome, so the delivery notice retires with them
+                // instead of sitting in the footer forever (a sample
+                // already in flight predates the kill and cannot).
+                model.setTransientNote("terminate request delivered", .{});
             } else {
                 model.setNote("kill failed (code {d} — not your process?)", .{exit.code});
             }
@@ -658,6 +705,7 @@ fn requestSample(model: *Model, fx: *Effects) void {
         model.ticks_skipped += 1;
         return;
     }
+    model.sample_generation += 1;
     model.ps_inflight = true;
     fx.spawn(.{
         .key = ps_key,

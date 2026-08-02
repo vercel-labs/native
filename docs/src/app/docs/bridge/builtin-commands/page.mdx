@@ -1,0 +1,500 @@
+# Builtin Commands
+
+The Native SDK provides built-in bridge commands for app command routing, window management, generic native views, layered WebViews, platform support queries, native dialogs, selected OS capabilities, and credential storage. These are controlled by the `builtin_bridge` policy in `RuntimeOptions`, separate from app-defined bridge handlers.
+
+## Command Routing
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.command.invoke</code></td>
+      <td><code>command</code></td>
+      <td>Dispatch an <code>Event.command</code> into the app runtime from the calling WebView</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.command.list</code></td>
+      <td><code>command</code></td>
+      <td>List the manifest command catalog loaded into the runtime</td>
+    </tr>
+  </tbody>
+</table>
+
+Command routing is available through `window.zero.commands.invoke(...)` when `js_window_api` is `true`. The manifest command catalog is available through `window.zero.commands.list()`. When runtime permissions are configured, command helpers require the `command` permission; the legacy `window` permission is still accepted for compatibility. The runtime emits a `CommandEvent` with `source = .bridge`, the calling `window_id`, and the calling view label when the request comes from a named child WebView.
+
+Native controls can also bind a `command` when created with `runtime.createView(...)` or `window.zero.views.create(...)`. On macOS, Linux, and Windows system WebView builds, native button-style controls dispatch the command with the native `window_id` and the originating view label. Controls inside a toolbar report `source = .toolbar`; other native controls report `source = .native_view`.
+
+## Platform Support Commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.platform.supports</code></td>
+      <td><code>window</code></td>
+      <td>Return whether the current platform and web engine support a feature</td>
+    </tr>
+  </tbody>
+</table>
+
+Platform support queries are available through `window.zero.platform.supports(...)` when `js_window_api` is `true`. The command accepts every feature name from `PlatformFeature`: `main_webview`, `child_webviews`, `native_views`, `native_control_commands`, `menus`, `tray`, `shortcuts`, `dialogs`, `clipboard_text`, `clipboard_rich_data`, `open_url`, `reveal_path`, `notifications`, `recent_documents`, `credentials`, `file_drops`, `app_activation_events`, `gpu_surfaces`, `gpu_surface_scroll_drivers`, `context_menus`, `view_surface_adoption`, `audio_playback`, `audio_streaming`, `audio_spectrum`, and `window_hide_on_close`. JavaScript callers can also use the camelCase aliases — `mainWebView`, `childWebViews`, `nativeViews`, `nativeControlCommands`, `clipboardText`, `clipboardRichData`, `openUrl`, `revealPath`, `recentDocuments`, `fileDrops`, `appActivationEvents`, `gpuSurfaces`, `gpuSurfaceScrollDrivers`, `contextMenus`, `viewSurfaceAdoption`, `audioPlayback`, `audioStreaming`, `audioSpectrum`, and `windowHideOnClose`. The helper accepts either a string or a selector object with `feature` or `name`; raw bridge payloads may use the same fields. Use an explicit `builtin_bridge` policy when you want per-command origin lists.
+
+## Window commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.window.list</code></td>
+      <td><code>window</code></td>
+      <td>List all open windows</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.window.create</code></td>
+      <td><code>window</code></td>
+      <td>Create a new window</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.window.focus</code></td>
+      <td><code>window</code></td>
+      <td>Focus a window by ID</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.window.close</code></td>
+      <td><code>window</code></td>
+      <td>Close a window by ID</td>
+    </tr>
+  </tbody>
+</table>
+
+Window commands are available through `window.zero.windows.*` when `js_window_api` is `true`, but the runtime still checks the request origin and the `window` permission when permissions are configured. Use an explicit `builtin_bridge` policy when you want per-command origin lists.
+
+## View Commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.view.create</code></td>
+      <td><code>view</code></td>
+      <td>Create a generic native view or WebView-backed view in the calling window</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.view.list</code></td>
+      <td><code>view</code></td>
+      <td>List generic views and WebViews in the calling window</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.view.update</code></td>
+      <td><code>view</code></td>
+      <td>Patch frame, layer, visibility, enabled state, role, text, command, or WebView URL</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.view.setFrame</code></td>
+      <td><code>view</code></td>
+      <td>Move or resize a view</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.view.setVisible</code></td>
+      <td><code>view</code></td>
+      <td>Show or hide a view</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.view.focus</code></td>
+      <td><code>view</code></td>
+      <td>Focus a view when the backend supports native focus for that kind</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.view.focusNext</code> / <code>native-sdk.view.focusPrevious</code></td>
+      <td><code>view</code></td>
+      <td>Move focus through visible, enabled native controls and WebView-backed views</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.view.close</code></td>
+      <td><code>view</code></td>
+      <td>Close a generic view or child WebView</td>
+    </tr>
+  </tbody>
+</table>
+
+View commands are available through `window.zero.views.*` when `js_window_api` is `true`. They use origin checks and the `view` permission when runtime permissions are configured; the legacy `window` permission is still accepted for compatibility. `windowId` must match the calling window when provided. The `update(label, patch)`, `focus(label)`, and `close(label)` helpers accept string labels for the calling window; pass selector objects when you need an explicit `windowId`. View responses include frame, layer, visibility, enabled, focus, role, accessibility label, text, command, cursor, and open state. GPU responses also include surface presentation fields, input latency budget fields, retained canvas frame counters, and retained widget counters. `kind: "webview"` routes through the WebView backend. The macOS, Linux, and Windows system-WebView backends support native `toolbar`, `titlebar_accessory`, `sidebar`, `statusbar`, `split`, `stack`, `button`, `icon_button`, `list_item`, `checkbox`, `toggle`, `segmented_control`, `text_field`, `search_field`, `label`, `spacer`, and `progress_indicator` views. The macOS system-WebView backend also supports `gpu_surface`; Chromium hosts and unsupported native kinds return explicit unsupported-backend errors until implemented.
+
+## WebView Commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.webview.create</code></td>
+      <td><code>window</code></td>
+      <td>Create a named WebView in a window</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.webview.list</code></td>
+      <td><code>window</code></td>
+      <td>List WebViews in the calling window</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.webview.setFrame</code></td>
+      <td><code>window</code></td>
+      <td>Move or resize a WebView</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.webview.navigate</code></td>
+      <td><code>window</code></td>
+      <td>Navigate a WebView</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.webview.setZoom</code></td>
+      <td><code>window</code></td>
+      <td>Set page zoom from <code>0.25</code> to <code>5.0</code></td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.webview.setLayer</code></td>
+      <td><code>window</code></td>
+      <td>Change native stack order</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.webview.close</code></td>
+      <td><code>window</code></td>
+      <td>Close a WebView</td>
+    </tr>
+  </tbody>
+</table>
+
+WebView commands are available through `window.zero.webviews.*` when `js_window_api` is `true`. They use the same origin and `window` permission checks as window commands. WebView URLs are also checked against `security.navigation.allowed_origins`. Backend-specific gaps reject with `invalid_request` and an actionable unsupported-backend message.
+
+If `windowId` is omitted, the runtime uses the window that sent the bridge message. If provided, `windowId` must match that same calling window. Child WebViews are isolated by default and receive `window.zero` only when created with `bridge: true`. The startup WebView is always listed as `main`; that label is reserved and cannot be used for child WebView creation.
+
+## Dialog commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.dialog.openFile</code></td>
+      <td><code>dialog</code></td>
+      <td>Show a file open dialog</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.dialog.saveFile</code></td>
+      <td><code>dialog</code></td>
+      <td>Show a file save dialog</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.dialog.showMessage</code></td>
+      <td><code>dialog</code></td>
+      <td>Show a message dialog</td>
+    </tr>
+  </tbody>
+</table>
+
+Dialog commands are **always default-deny** and require an explicit `builtin_bridge` policy.
+
+## OS Commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.os.openUrl</code></td>
+      <td><code>network</code></td>
+      <td>Open an allowed <code>http://</code> or <code>https://</code> URL in the system browser</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.os.showNotification</code></td>
+      <td><code>notifications</code></td>
+      <td>Show a native system notification with a title, optional subtitle, and optional body</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.os.revealPath</code></td>
+      <td><code>filesystem</code></td>
+      <td>Reveal a local file or folder path in the platform file manager</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.os.addRecentDocument</code></td>
+      <td><code>filesystem</code></td>
+      <td>Add a local path to the platform recent documents list</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.os.clearRecentDocuments</code></td>
+      <td><code>filesystem</code></td>
+      <td>Clear recent documents registered by the application where the platform supports it</td>
+    </tr>
+  </tbody>
+</table>
+
+OS commands are **always default-deny** and require an explicit `builtin_bridge` policy. `native-sdk.os.openUrl` also checks `security.navigation.external_links`; the URL must match the external link allowlist before the platform service is called. macOS, Linux, and Windows system WebView hosts implement `openUrl`, `revealPath`, notifications, and recent-document commands; macOS Chromium also implements the current OS command set. Other platform hosts return `invalid_request` with the standard unsupported-service message until implemented.
+
+## Credential Commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.credentials.set</code></td>
+      <td><code>credentials</code></td>
+      <td>Store a secret by <code>service</code> and <code>account</code></td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.credentials.get</code></td>
+      <td><code>credentials</code></td>
+      <td>Read a secret by <code>service</code> and <code>account</code>, returning <code>null</code> when it is missing</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.credentials.delete</code></td>
+      <td><code>credentials</code></td>
+      <td>Delete a stored secret by <code>service</code> and <code>account</code></td>
+    </tr>
+  </tbody>
+</table>
+
+Credential commands are **always default-deny** and require an explicit `builtin_bridge` policy. The macOS system WebView and macOS Chromium hosts store secrets in Keychain. The Linux system WebView host stores secrets through Secret Service/libsecret when available. The Windows system WebView host stores secrets in Credential Manager. Other platform hosts return `invalid_request` with the standard unsupported-service message until implemented.
+
+## Clipboard Commands
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Required permission</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.clipboard.readText</code></td>
+      <td><code>clipboard</code></td>
+      <td>Read <code>text/plain</code> from the system clipboard</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.clipboard.writeText</code></td>
+      <td><code>clipboard</code></td>
+      <td>Write <code>text/plain</code> to the system clipboard</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.clipboard.read</code></td>
+      <td><code>clipboard</code></td>
+      <td>Read clipboard data by MIME type and return <code>{'{ mimeType, data }'}</code></td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.clipboard.write</code></td>
+      <td><code>clipboard</code></td>
+      <td>Write clipboard data by MIME type</td>
+    </tr>
+  </tbody>
+</table>
+
+Clipboard commands are **always default-deny** and require an explicit `builtin_bridge` policy. Supported clipboard hosts provide <code>text/plain</code> through the existing text clipboard path. macOS system WebView, macOS Chromium, Linux system WebView, and Windows system WebView also support <code>text/html</code>, <code>text/rtf</code>, and <code>application/rtf</code>.
+
+## Enabling builtin commands
+
+```zig
+const app_permissions = [_][]const u8{
+    native_sdk.security.permission_command,
+    native_sdk.security.permission_view,
+    native_sdk.security.permission_dialog,
+    native_sdk.security.permission_window,
+    native_sdk.security.permission_network,
+    native_sdk.security.permission_filesystem,
+    native_sdk.security.permission_clipboard,
+    native_sdk.security.permission_notifications,
+    native_sdk.security.permission_credentials,
+};
+
+.security = .{
+    .permissions = &app_permissions,
+    .navigation = .{
+        .allowed_origins = &.{ "zero://app" },
+        .external_links = .{
+            .action = .open_system_browser,
+            .allowed_urls = &.{ "https://example.com/docs/*" },
+        },
+    },
+},
+.builtin_bridge = .{
+    .enabled = true,
+    .commands = &.{
+        .{ .name = "native-sdk.window.list", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.command.invoke", .permissions = .{ "command" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.command.list", .permissions = .{ "command" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.platform.supports", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.window.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.create", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.list", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.update", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.setFrame", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.setVisible", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.focus", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.focusNext", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.focusPrevious", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.view.close", .permissions = .{ "view" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.list", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.setFrame", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.navigate", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.setZoom", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.setLayer", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.webview.close", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.openFile", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.saveFile", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.dialog.showMessage", .permissions = .{ "dialog" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.openUrl", .permissions = .{ "network" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.showNotification", .permissions = .{ "notifications" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.revealPath", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.addRecentDocument", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = .{ "filesystem" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.readText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.writeText", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.read", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.clipboard.write", .permissions = .{ "clipboard" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.set", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.get", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+        .{ .name = "native-sdk.credentials.delete", .permissions = .{ "credentials" }, .origins = .{ "zero://app" } },
+    },
+},
+```
+
+## JavaScript usage
+
+Window creation accepts `titlebar` (`standard`, `hidden_inset`, `hidden_inset_tall`, or `chromeless`) plus the overlay fields `transparent`, `alwaysOnTop`, `clickThrough`, and `activateOnShow`. A transparent create without `url` stays source-less instead of inheriting the app WebView; transparent Windows windows also require `titlebar: "chromeless"` and cannot host WebView content.
+
+```javascript
+await window.zero.windows.create({
+  label: "tools",
+  title: "Tools",
+  width: 420,
+  height: 320,
+});
+
+const preview = await window.zero.webviews.create({
+  label: "preview",
+  url: "https://example.com",
+  frame: { x: 24, y: 24, width: 480, height: 320 },
+  layer: 10,
+  bridge: false,
+});
+
+await preview.setZoom(1.25);
+await preview.setLayer(20);
+await preview.close();
+
+const toolbar = await window.zero.views.create({
+  label: "toolbar",
+  kind: "toolbar",
+  frame: { x: 0, y: 0, width: 720, height: 44 },
+  role: "toolbar",
+});
+
+await window.zero.views.create({
+  label: "refresh",
+  kind: "button",
+  parent: "toolbar",
+  frame: { x: 12, y: 8, width: 96, height: 28 },
+  accessibilityLabel: "Refresh workspace",
+  text: "Refresh",
+  command: "app.refresh",
+});
+
+await toolbar.setVisible(false);
+
+await window.zero.commands.invoke("app.save");
+const commands = await window.zero.commands.list();
+
+const hasNativeViews = await window.zero.platform.supports("native_views");
+
+const files = await window.zero.invoke("native-sdk.dialog.openFile", {
+  title: "Select a file",
+  allowMultiple: true,
+});
+
+const result = await window.zero.invoke("native-sdk.dialog.showMessage", {
+  style: "warning",
+  title: "Confirm",
+  message: "Are you sure?",
+  primaryButton: "Yes",
+  secondaryButton: "No",
+});
+
+await window.zero.os.openUrl("https://example.com/docs/start");
+await window.zero.os.showNotification({
+  title: "Build finished",
+  subtitle: "native-sdk",
+  body: "All checks passed.",
+});
+await window.zero.os.revealPath("/Users/me/Downloads/report.pdf");
+await window.zero.os.addRecentDocument("/Users/me/Downloads/report.pdf");
+await window.zero.os.clearRecentDocuments();
+
+await window.zero.clipboard.writeText("Copied from Native SDK");
+const text = await window.zero.clipboard.readText();
+await window.zero.clipboard.write({
+  mimeType: "text/html",
+  data: "<strong>Copied from Native SDK</strong>",
+});
+const html = await window.zero.clipboard.read({ mimeType: "text/html" });
+
+await window.zero.credentials.set({
+  service: "com.example.app",
+  account: "current-user",
+  secret: "session-token",
+});
+const token = await window.zero.credentials.get({
+  service: "com.example.app",
+  account: "current-user",
+});
+await window.zero.credentials.delete({
+  service: "com.example.app",
+  account: "current-user",
+});
+```
+
+See also: [Multiple WebViews](/docs/webviews) for frame and layer semantics, [Dialogs](/docs/dialogs) for the full dialog type reference, [Capabilities](/docs/capabilities) for OS capability support, and [Security](/docs/security) for policy details.

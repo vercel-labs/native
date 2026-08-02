@@ -1,0 +1,29 @@
+{
+  "name": "ts-countdown-bugfix",
+  "description": "Bug-fix in an existing subset core: a countdown timer whose tick/reset/set_duration transitions drifted from the spec; fix the update logic without changing the contract.",
+  "prompt": "This workspace holds a TypeScript app core (see README.md; the deliverable is src/core.ts, written in the app-core subset — the authoring guide is .claude/skills/ts-core/SKILL.md). src/core.ts is a countdown-timer core driven by a host that dispatches one \"tick\" message per elapsed second. Users report it misbehaves. Fix the update logic so the intended behavior below holds exactly — the Model fields, Msg arms, and exports must stay as they are.\n\nIntended behavior:\n- \"start\" begins or resumes the countdown, but only when time remains; it never restarts a finished session by itself.\n- \"pause\" stops the countdown; the remaining time is untouched.\n- \"tick\" only counts down while running, by exactly one second per tick. When the countdown reaches zero the session completes: the completed-session count goes up by one and the timer stops. Remaining time never goes below zero, and ticks while paused, idle, or already finished change nothing.\n- \"reset\" stops the timer and restores the remaining time to the configured duration (whatever it currently is), keeping the completed-session count.\n- \"set_duration\" configures a new positive duration and resets the remaining time to it, but is ignored while the timer is running (and for zero or negative values).\n\nCheck your work with the transpiler command in README.md until it exits clean, and make sure the behavior above actually holds (node can import the module directly). When you are done, list the bugs you found and how you fixed them.",
+  "frontend": "ts-core",
+  "timeoutMs": 900000,
+  "maxTurns": 50,
+  "checks": [
+    {
+      "type": "ts_transpile"
+    },
+    {
+      "type": "ts_harness",
+      "description": "tick gating while paused, completion exactly once with stop and floor at zero, reset to the configured duration, set_duration guards"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The fixes are surgical: each bug is corrected at its cause inside update, with no contract changes and no unrelated rewrites.",
+        "The completion transition is modeled soundly: stopping, counting, and flooring at zero cannot disagree with each other.",
+        "The code stays idiomatic immutable TypeScript in the file's existing style."
+      ],
+      "files": ["src/core.ts"],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the bug fixes beyond compliance"
+    }
+  ]
+}

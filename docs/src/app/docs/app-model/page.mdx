@@ -1,0 +1,163 @@
+import { CodeToggle } from "@/components/code-toggle";
+
+# App Model
+
+A Native SDK app is one loop with four parts:
+
+- **Model** — a plain data structure holding all app state.
+- **Msg** — a tagged union of everything that can happen.
+- **update(model, msg)** — the only place state changes.
+- **View** — a Native markup file (`.native`, or a Zig view function) that derives the UI from the model.
+
+The runtime owns everything else: window creation, GPU presentation, resize, pointer and keyboard dispatch, timers, accessibility, and hot reload. Your code never handles a raw event — input lands on a widget, the widget's bound message dispatches into `update`, the view rebuilds from the new model, and the engine repaints what changed.
+
+The loop is the same in both authoring languages. By default the core is TypeScript (`src/core.ts`, compiled to native code at build time — [TypeScript Cores](/docs/typescript) covers that tier in depth); a Zig core (`src/main.zig`, from `native init --template zig-core`) is first-class by choice, and the rest of this page — wiring, identity, hot reload — applies to both. The Zig-specific wiring sections below are exactly what the build generates for a TypeScript app, so they double as its eject story.
+
+## The loop in full
+
+A minimal counter is the complete shape — state, transitions, one pure `update`:
+
+<CodeToggle>
+
+```ts:src/core.ts
+export interface Model {
+  readonly count: number;
+}
+
+export type Msg =
+  | { readonly kind: "increment" }
+  | { readonly kind: "decrement" }
+  | { readonly kind: "reset" };
+
+export function initialModel(): Model {
+  return { count: 0 };
+}
+
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "increment":
+      return { ...model, count: model.count + 1 };
+    case "decrement":
+      return { ...model, count: model.count - 1 };
+    case "reset":
+      return { ...model, count: 0 };
+  }
+}
+```
+
+```zig:src/main.zig
+pub const Msg = union(enum) {
+    increment,
+    decrement,
+    reset,
+};
+
+pub const Model = struct {
+    count: i64 = 0,
+};
+
+pub fn update(model: *Model, msg: Msg) void {
+    switch (msg) {
+        .increment => model.count += 1,
+        .decrement => model.count -= 1,
+        .reset => model.count = 0,
+    }
+}
+```
+
+</CodeToggle>
+
+The view in `src/app.native` binds the model and names the messages:
+
+```html
+<row gap="8" main="center" cross="center" grow="1">
+  <button variant="secondary" on-press="decrement">-</button>
+  <text>{count}</text>
+  <button variant="primary" on-press="increment">+</button>
+</row>
+```
+
+Markup can never mutate state. `{count}` is a read; `on-press="increment"` names a `Msg` variant (in a TypeScript core, the arm's `kind`). Every state change flows through `update`, which makes the app's behavior testable as a plain function — the Zig template's generated `src/tests.zig` drives it with no GUI at all, and a TypeScript core runs under node the same way (`native dev --core`).
+
+## Wiring
+
+`native_sdk.UiApp(Model, Msg)` ties the loop to the runtime. A zero-config app never writes this — the build graph generates it (for a TypeScript core, over the transpiled model) — but it is ordinary code you can own any time. From the Zig template's `main`:
+
+```zig
+const CounterApp = native_sdk.UiApp(Model, Msg);
+
+pub fn main(init: std.process.Init) !void {
+    // `create` heap-allocates the multi-MB app struct and constructs the
+    // Model in place — neither ever rides the stack.
+    const app_state = try CounterApp.create(std.heap.page_allocator, .{
+        .name = "my_app",
+        .scene = shell_scene,             // one window, one gpu_surface view
+        .canvas_label = "main-canvas",    // must match the scene's view label
+        .update_fx = update,              // update(model, msg, fx) - or .update for a pure app
+        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
+    });
+    defer app_state.destroy();
+    app_state.model = initialModel();     // boot state: assign through the pointer
+
+    try runner.runWithOptions(app_state.app(), .{ ... }, init);
+}
+```
+
+`create` requires every `Model` field to carry a default; the model starts as `.{}` and boot state is assigned through the returned pointer. The `scene` declares the native window and its GPU surface view — see [Windows](/docs/windows) and [Native Surfaces](/docs/native-surfaces) for multi-view scenes.
+
+## Rebuilds and widget identity
+
+After every `update`, the runtime rebuilds the view from the model. Rebuilds are cheap and safe by design:
+
+- **Widget identity is structural.** A widget keeps its id across rebuilds, reorders, and hot reloads, so engine-owned state — scroll offsets, text carets, focus — survives. List items carry `key` (or `global-key` for items that move between containers) to keep identity through reorders. Unkeyed same-kind siblings take positional identity (sibling index), so an `<if>` that inserts or removes an earlier same-kind sibling re-disambiguates the trailing ones — engine-owned state like carets and scroll can hop; keyed items and keyed ancestors hold identity.
+- **The source wins.** Engine-retained state (a scroll offset, a toggle) survives rebuilds until the model asserts a different value; then the model's value applies. This is why controlled patterns echo runtime-applied values back through the model — see [State & Data Flow](/docs/state).
+- **Errors degrade, they never crash.** A failing `update` arm is caught, recorded in a bounded error ring (visible in [automation](/docs/automation) snapshots as `dispatch_errors=`), and the app keeps running.
+
+## Hot reload in development
+
+With `watch_path` set, the runtime watches the `.native` file while the app runs. Edits apply within about two seconds, preserving model state and widget identity. Parse failures keep the last good view on screen and record a diagnostic (`app_state.markup_diagnostic` carries line, column, and message).
+
+## Compile the markup for release
+
+In release builds the markup compiles at comptime — no parser in the binary, and markup or binding mistakes become compile errors with line and column:
+
+```zig
+const dev = @import("builtin").mode == .Debug;
+const App = native_sdk.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev });
+const CompiledView = canvas.CompiledMarkupView(Model, Msg, @embedFile("app.native"));
+// options:
+.view = CompiledView.build,
+.markup = if (dev) .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io } else null,
+```
+
+Both engines produce the identical widget tree — same structural ids, same typed handler table — so tests, automation scripts, and goldens hold across dev and release.
+
+## Hybrid views: a Zig root composing markup fragments
+
+Compiled markup views compose the other way too: a hand-written Zig builder root can build markup fragments as ordinary children. This is the pattern for any UI that mixes custom Zig panes with declarative markup — the root places what the closed grammar cannot express (a scaled `ui.paragraph` display block, a `.band`-series `ui.chart`, per-row native context menus), and the markup keeps everything it can:
+
+```zig
+const CompiledHeaderView = canvas.CompiledMarkupView(Model, Msg, @embedFile("header.native"));
+
+pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
+    return ui.column(.{ .gap = 12, .grow = 1 }, .{
+        CompiledHeaderView.build(ui, model), // the markup fragment, as a child
+        ui.paragraph(.{}, &.{
+            .{ .text = model.readout(ui.arena), .monospace = true, .scale = 1.6 },
+        }),
+    });
+}
+// options: .view = rootView,
+```
+
+`examples/calculator` is the smallest live reference (`CompiledKeypadView.build(ui, model)` inside a hand-written root); `system-monitor`, `soundboard`, and `deck` use the same shape. Widget ids, handlers, and dispatch are identical to a pure-markup tree, so tests and automation address the fragment's widgets the usual way.
+
+A Zig-root app keeps dev-time hot reload for its embedded fragments too: build with `UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev_markup_reload })` and pass `.markup = .{ .source = ..., .watch_path = "src/header.native", .io = init.io }` gated on `builtin.mode == .Debug` (`null` otherwise) — the wiring in `examples/notes`. Debug builds then reload edits to the watched file in place; release builds compile the runtime engine out entirely.
+
+## Side effects
+
+`update` stays pure by routing anything asynchronous — subprocesses, HTTP, file persistence, timers, clipboard — through the effects channel, and results come back as ordinary messages. In a TypeScript core, effects are `Cmd` data returned from `update` and recurring timers are declared `Sub` data — see [TypeScript Cores: Effects](/docs/typescript#effects-are-cmd-data). In a Zig core, declare `.update_fx` instead of `.update` and spawn from message arms; boot-time work goes in `.init_fx`, which runs exactly once before the first paint. See [Native UI: Effects](/docs/native-ui#effects).
+
+## Dropping down
+
+`UiApp` is a layer over the lower-level `App`/`Runtime` pair, which any app can use directly — for custom lifecycle callbacks, imperative window and view management, or embedding [web content](/docs/frontend). The [App & Runtime](/docs/runtime) reference documents that layer, and [Embedded App](/docs/embed) covers driving the runtime from an existing host (including iOS and Android).

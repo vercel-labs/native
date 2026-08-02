@@ -1,0 +1,166 @@
+# Building Components
+
+The library's built-ins cover the common register, and [theming](/docs/theming) restyles all of them at once. This page is about the pieces the library does not hand you: how to build a component of your own — first as a markup template, then as a Zig view function when the shape needs one — how it themes, and how component files spread across an app. Component code is toolkit-extension territory, so the Zig here applies whatever language the app core is written in: a TypeScript app that needs one custom widget writes that widget in Zig and keeps its core in TypeScript. The mechanics (template grammar, import rules, slots) are specified in [Native UI](/docs/native-ui#templates); this page builds one real component end to end.
+
+The ownership model in one line: **use and theme the built-ins by default; eject a library composite when you need to own its shape; build new composites from primitives when the library has no shape for it.** The last two are this page.
+
+## A component in markup
+
+A dashboard needs the same labeled stat tile three times. That repetition is a `<template>` — define the subtree once at the top of the view file, give its varying parts names in `args`, and stamp it with `<use>`:
+
+```html
+<template name="stat-card" args="label value">
+  <column background="surface" border-color="border" radius="lg" padding="12" gap="4" role="group" label="{label}">
+    <text size="sm" foreground="text_muted">{label}</text>
+    <text size="heading">{value}</text>
+  </column>
+</template>
+<column gap="12" padding="16">
+  <row gap="12">
+    <use template="stat-card" label="CPU" value="{cpuPercent}" />
+    <use template="stat-card" label="Memory" value="{memoryUsed}" />
+  </row>
+</column>
+```
+
+Inside the body, args bind exactly like model bindings: `{label}` in text, `label="{label}"` in attributes. At the use site an arg's value may be a literal (`label="CPU"`), a binding (`value="{cpuPercent}"`), or an expression — and the attributes must match the declared args exactly, so a typo is a check error, never a silently ignored prop. The body is built in place of the `<use>`: widget ids hash as if you had written it out by hand, which means converting copy-pasted markup into a template changes no identity, no retained state, no automation target.
+
+Optional args declare a literal default with `name=value` (`args="label value hint="` gives `hint` an empty-string default), and the body can branch on them — this is how the card grows an optional footnote without a second template:
+
+```html
+<template name="stat-card" args="label value hint=">
+  <column background="surface" border-color="border" radius="lg" padding="12" gap="4" role="group" label="{label}">
+    <text size="sm" foreground="text_muted">{label}</text>
+    <text size="heading">{value}</text>
+    <if test="{hint}">
+      <text size="sm" foreground="text_muted">{hint}</text>
+    </if>
+  </column>
+</template>
+```
+
+## Moving it to a component file
+
+Once a second view wants the card, move the template into its own file. A file of templates and nothing else is a **component file** — it has no view root, and that is what makes it importable:
+
+```html
+<!-- src/components/stat-card.native -->
+<template name="stat-card" args="label value hint=">
+  <column background="surface" border-color="border" radius="lg" padding="12" gap="4" role="group" label="{label}">
+    <text size="sm" foreground="text_muted">{label}</text>
+    <text size="heading">{value}</text>
+    <if test="{hint}">
+      <text size="sm" foreground="text_muted">{hint}</text>
+    </if>
+  </column>
+</template>
+```
+
+The view imports it at the very top, before anything else, and uses it exactly as before:
+
+```html
+<import src="components/stat-card.native"/>
+<column gap="12" padding="16" background="background">
+  <row gap="12">
+    <use template="stat-card" label="CPU" value="{cpuPercent}" hint="last minute" />
+    <use template="stat-card" label="Memory" value="{memoryUsed}" />
+    <use template="stat-card" label="Uptime" value="{uptimeText}" />
+  </row>
+</column>
+```
+
+Validate as you go: `native markup check src/app.native` follows the import closure from disk, and a component file also checks standalone (`native markup check src/components/stat-card.native`). `native check` walks everything under `src/` in one pass.
+
+## Passing children with a slot
+
+Args carry values; a `<slot/>` carries markup. A template body may mark one insertion point, and the use site's children build there — in the consumer's scope, so they see the model paths and loop variables where the `<use>` is written:
+
+```html
+<template name="empty-state" args="title">
+  <column main="center" cross="center" gap="8" padding="24" role="group" label="{title}">
+    <text foreground="text_muted">{title}</text>
+    <slot/>
+  </column>
+</template>
+<column grow="1">
+  <use template="empty-state" title="No results yet">
+    <button variant="primary" on-press="refresh">Refresh</button>
+  </use>
+</column>
+```
+
+This is the container-component pattern: the template owns the frame, the caller owns the content. The full rules (one slot per body, children without a slot are an error, ids hash as if inlined) are in [Native UI § Components](/docs/native-ui#components).
+
+## When a component needs Zig
+
+The markup grammar is deliberately closed, and a few shapes sit outside it — the honest list is in [Native UI § Elements](/docs/native-ui#elements): components that carry **image ids** (pixels registered at runtime; the avatar's `image="{binding}"` is the one declarative exception), **per-cell templates** (a data grid's arbitrary render-per-column callbacks), and **Zig-side floating surfaces** (`popover`, `menu_surface`; the anchored `dropdown-menu` covers the declarative case). Beyond those, anything needing per-state styling past tokens (`ElementOptions.style`) or logic past the expression language belongs in Zig.
+
+A Zig component is just a function that takes the view builder and returns a node — the same primitives markup lowers to, with the same structural identity rules:
+
+```zig
+const canvas = native_sdk.canvas;
+const Ui = canvas.Ui(Msg);
+
+/// A contact row with an avatar image. Image pixels are registered at
+/// runtime and referenced by ImageId — a runtime value markup attributes
+/// cannot carry — so this component is a Zig view function.
+fn contactRow(ui: *Ui, name: []const u8, initials: []const u8, image: canvas.ImageId) Ui.Node {
+    return ui.el(.row, .{
+        .gap = 10,
+        .padding = 8,
+        .cross = .center,
+        .style_tokens = .{ .background = .surface, .radius = .md },
+        .semantics = .{ .role = .listitem, .label = name },
+    }, .{
+        // A zero id keeps the initials fallback — write the id into the
+        // model only on successful registration, and loading states cost
+        // no extra branch here.
+        ui.avatar(.{ .image = image, .size = .sm }, initials),
+        ui.text(.{ .grow = 1 }, name),
+    });
+}
+```
+
+Call it from any Zig view (`contactRow(ui, contact.name, contact.initials, contact.avatar_image)`), key it inside `ui.each` loops like any node, and compose it with everything else the builder makes. Markup views and Zig views are not either/or per app — a markup root can be paired with Zig-built windows, and a Zig root can embed compiled markup fragments — but one component is one form: pick markup when the grammar covers it (hot reload and `native check` come free), Zig when it does not.
+
+## Theming your component
+
+Your component themes the same way the built-ins do: through the token system, never through hardcoded values.
+
+In markup, the style attributes (`background`, `foreground`, `border-color`, `radius`, ...) are token **references** — the stat card above says `background="surface"`, not a hex value. References resolve against the app's live tokens on every rebuild, so the card follows dark mode, a theme-pack switch, and every override with zero component code. Unknown token names are check/compile errors.
+
+In a Zig view, `ElementOptions.style_tokens` is the same channel — `.style_tokens = .{ .background = .surface, .radius = .md }` records the reference, and the app loop resolves it against the current `DesignTokens` when the tree finalizes (`finalizeWithTokens`), re-resolving on every retheme. Explicit values through `ElementOptions.style` always win over a token reference; use them only for the values that are genuinely not design tokens (a user-picked highlight color, a data-derived fill).
+
+State washes follow one rule: hover feedback belongs to acting controls. List rows, menu items, buttons, and tab triggers wash on hover because the fill is the affordance — it names the thing you are about to act on. An image-forward content tile is the opposite case — a cover-art grid, a photo card — where the pointer rests on content, not a control register, and a wash over the artwork reads as a smudge. Those surfaces go quiet with the quiet-surface knob, `.style = .{ .quiet_hover = true }`, which silences only the hover fill: the pressed wash still marks the moment of commitment, and the focus ring, cursor intent, and hit testing keep their own channels. Like everything per-state beyond tokens, it is a Zig-side style decision; markup stays in the token vocabulary.
+
+And the parts of your component that are built-in controls stay themed for free: the `<button>` inside the empty-state template wears `controls.button_primary` from the active theme, the `text` leaves read the typography rungs, the focus ring follows the token geometry. A template or view function composes primitives, so it inherits the whole register through them — retheme the app and your components move with it. That inheritance is the reason to reach for tokens before props: a component that takes a `color` arg has opted out of every future theme.
+
+## Distributing components across an app
+
+Component files live wherever you like under the markup root (the root view file's directory) — `src/components/` is the convention the tooling writes to, and subdirectories work (`<import src="components/cards/stat-card.native"/>`). Paths are relative to the importing file, imports are transitive, and everything must stay under the markup root. Cycles are reported with the chain spelled out, and the same template name defined in two files is an error naming both sites — imports never shadow silently.
+
+Two build details to know as an app grows:
+
+- The runtime interpreter re-resolves imports from disk on hot reload, so `native dev` picks up edits to component files, not just the root view.
+- The compiled engine and the runtime share one embedded source set — add each component file to it once:
+
+```zig
+pub const app_markup_files = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "app.native", .source = @embedFile("app.native") },
+    .{ .path = "components/stat-card.native", .source = @embedFile("components/stat-card.native") },
+};
+// runtime: .markup = .{ .source = app_markup, .sources = &app_markup_files, ... }
+// tests:   canvas.ui_markup.resolveImports(arena, "app.native", app_markup, loader, &diagnostic)
+```
+
+Zig components distribute the ordinary Zig way: a file per component (or a `components/` module), imported with `@import`.
+
+## Use, eject, or build
+
+Three moves, in order of preference:
+
+**Theme it.** Every built-in reads the token register, and [theme packs, overrides, and full design systems](/docs/theming) reach every visual decision — colors, radii, control metrics, state washes, type. If your need is "the stepper, but in our palette," that is a token change, not a component.
+
+**Eject it.** When you need to own a composite's *shape* — reorder its parts, change its structure, grow it a feature — `native eject component <name>` writes the library composite's canonical source into `src/components/`, and from then on it is your code: edit freely, SDK updates never touch it. The ejectable set is exactly the library views that are honest compositions of primitives — today `stepper` and `timeline-item` (Zig view functions; their conditional structure and formatted text sit outside the markup grammar) and `timeline` (a markup template, since the container is pure composition). Each ejected file builds a widget tree identical to its library form at the moment of ejection — held by tests in the SDK — so ejecting changes ownership, never pixels. Ejected templates are reached through `<use template="timeline" ...>`, never a new element name, so the built-in element keeps working at unmigrated call sites; ejecting twice errors instead of overwriting your edits. Engine controls (buttons, text fields, tabs, ...) are deliberately not on the menu: their behavior lives in the runtime, and the way to change them is the token system, not a fork.
+
+**Build it.** When the library has no shape for it, compose one from primitives — the stat card and empty-state above, or a Zig view function when the shape needs Zig. Your component then themes, tests, and automates exactly like a built-in, because it is made of the same parts.

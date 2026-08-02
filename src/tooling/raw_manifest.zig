@@ -12,10 +12,13 @@ pub const RawManifest = struct {
     capabilities: []const []const u8 = &.{},
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
+    webview_layer: []const u8 = "auto",
     theme: ?[]const u8 = null,
+    theme_accent: ?[]const u8 = null,
     cef: RawCef = .{},
     frontend: ?RawFrontend = null,
     security: RawSecurity = .{},
+    assets: RawAssets = .{},
     windows: []const RawWindow = &.{},
     shell: RawShell = .{},
     commands: []const RawCommand = &.{},
@@ -58,6 +61,19 @@ pub const RawSecurity = struct {
     navigation: RawNavigation = .{},
 };
 
+/// Launch-registered assets (the TypeScript-core wiring's image channel):
+/// each image is read once at launch and registered on the installing
+/// frame under its declared `ImageId` — the id markup avatar bindings
+/// reference.
+pub const RawAssets = struct {
+    images: []const RawImageAsset = &.{},
+};
+
+pub const RawImageAsset = struct {
+    id: u64,
+    path: []const u8,
+};
+
 pub const RawNavigation = struct {
     allowed_origins: []const []const u8 = &.{},
     external_links: RawExternalLinks = .{},
@@ -78,8 +94,13 @@ pub const RawWindow = struct {
     resizable: bool = true,
     restore_state: bool = true,
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
 };
 
 pub const RawShell = struct {
@@ -115,8 +136,13 @@ pub const RawShellWindow = struct {
     restore_state: bool = true,
     restore_policy: []const u8 = "clamp_to_visible_screen",
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
     views: []const RawShellView = &.{},
 };
 

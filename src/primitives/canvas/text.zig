@@ -2,6 +2,12 @@ const text_atlas = @import("text_atlas.zig");
 const text_layout = @import("text_layout.zig");
 const text_interaction = @import("text_interaction.zig");
 
+/// Largest retained widget-text pool a view may expose. Text-event
+/// sanitization and defensive single-line presentation share this ceiling
+/// with the runtime so an insert the editor can accept is never too large for
+/// those correctness seams to rewrite.
+pub const max_widget_text_bytes_per_view: usize = 512 * 1024;
+
 pub const Glyph = text_atlas.Glyph;
 pub const GlyphAtlasKey = text_atlas.GlyphAtlasKey;
 pub const GlyphAtlasEntry = text_atlas.GlyphAtlasEntry;
@@ -39,11 +45,15 @@ pub const layoutTextRunPlan = text_layout.layoutTextRunPlan;
 pub const TextLineIterator = text_layout.TextLineIterator;
 pub const textBounds = text_layout.textBounds;
 pub const layoutTextCaretRect = text_layout.layoutTextCaretRect;
+pub const layoutTextCaretRectWithAffinity = text_layout.layoutTextCaretRectWithAffinity;
 pub const textCaretRectForLayout = text_layout.textCaretRectForLayout;
+pub const textCaretRectForLayoutWithAffinity = text_layout.textCaretRectForLayoutWithAffinity;
 pub const layoutTextSelectionRects = text_layout.layoutTextSelectionRects;
 pub const textSelectionRectsForLayout = text_layout.textSelectionRectsForLayout;
 pub const layoutTextOffsetForPoint = text_layout.layoutTextOffsetForPoint;
+pub const layoutTextCaretPositionForPoint = text_layout.layoutTextCaretPositionForPoint;
 pub const textOffsetForLayoutPoint = text_layout.textOffsetForLayoutPoint;
+pub const textCaretPositionForLayoutPoint = text_layout.textCaretPositionForLayoutPoint;
 pub const nextTextLineEnd = text_layout.nextTextLineEnd;
 pub const textLineRange = text_layout.textLineRange;
 pub const textLineCaretX = text_layout.textLineCaretX;
@@ -62,6 +72,8 @@ pub const isTextBreakByte = text_layout.isTextBreakByte;
 pub const TextRange = text_interaction.TextRange;
 pub const TextSelectionRect = text_interaction.TextSelectionRect;
 pub const TextSelection = text_interaction.TextSelection;
+pub const TextCaretAffinity = text_interaction.TextCaretAffinity;
+pub const TextCaretPosition = text_interaction.TextCaretPosition;
 pub const TextCaretDirection = text_interaction.TextCaretDirection;
 pub const TextCaretMove = text_interaction.TextCaretMove;
 pub const TextCompositionUpdate = text_interaction.TextCompositionUpdate;
@@ -70,6 +82,8 @@ pub const TextEditState = text_interaction.TextEditState;
 pub const TextBuffer = text_interaction.TextBuffer;
 pub const applyTextInputEvent = text_interaction.applyTextInputEvent;
 pub const snapTextSelection = text_interaction.snapTextSelection;
+pub const snapTextCaretPosition = text_interaction.snapTextCaretPosition;
+pub const snapTextCaretSelection = text_interaction.snapTextCaretSelection;
 pub const snapTextRange = text_interaction.snapTextRange;
 pub const previousTextOffset = text_interaction.previousTextOffset;
 pub const nextTextOffset = text_interaction.nextTextOffset;
@@ -77,6 +91,8 @@ pub const previousTextWordOffset = text_interaction.previousTextWordOffset;
 pub const nextTextWordOffset = text_interaction.nextTextWordOffset;
 pub const textWordSelectionAtOffset = text_interaction.textWordSelectionAtOffset;
 pub const textLineSelectionAtOffset = text_interaction.textLineSelectionAtOffset;
+pub const textLineStartOffset = text_interaction.textLineStartOffset;
+pub const textLineEndOffset = text_interaction.textLineEndOffset;
 pub const snapTextOffset = text_interaction.snapTextOffset;
 pub const utf8SequenceLength = text_interaction.utf8SequenceLength;
 pub const isUtf8ContinuationByte = text_interaction.isUtf8ContinuationByte;

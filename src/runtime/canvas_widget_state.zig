@@ -25,7 +25,29 @@ const CanvasWidgetTextReconcileEntry = canvas_widget_runtime.CanvasWidgetTextRec
 const canvasWidgetLayoutTreeWithRuntimeReconcileState = canvas_widget_runtime.canvasWidgetLayoutTreeWithRuntimeReconcileState;
 const canvasWidgetEditableTextKind = canvas_widget_runtime.canvasWidgetEditableTextKind;
 const canvasWidgetAccessibilityActionSupported = widget_bridge.canvasWidgetAccessibilityActionSupported;
+const platformWidgetAccessibilityActionKindFromCanvas = widget_bridge.platformWidgetAccessibilityActionKindFromCanvas;
 const canvasWidgetBooleanSelected = canvas_widget_runtime.canvasWidgetBooleanSelected;
+
+fn canvasWidgetLayoutNeedsLargeTextStorage(layout: canvas.WidgetLayoutTree) bool {
+    var text_len: usize = 0;
+    for (layout.nodes) |node| {
+        const widget = node.widget;
+        if (widget.code_editor) return true;
+        text_len +|= widget.text.len +| widget.icon.len +| widget.command.len +| widget.semantics.label.len;
+        for (widget.spans) |span| text_len +|= span.text.len +| span.link.len;
+        for (widget.context_menu) |item| text_len +|= item.label.len;
+        for (widget.chart.series) |series| text_len +|= series.label.len;
+        for (widget.chart.x_labels) |label| text_len +|= label.len;
+        if (text_len > canvas_limits.max_canvas_widget_inline_text_bytes_per_view) return true;
+    }
+    return false;
+}
+
+fn ensureCanvasWidgetLargeTextStorageThrough(runtime: anytype, index: usize) !void {
+    for (runtime.views[0 .. index + 1]) |*view| {
+        try view.ensureLargeCanvasWidgetTextStorage(runtime.owned_allocator);
+    }
+}
 
 pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
     return struct {
@@ -84,6 +106,9 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 armed_tween_ids[0..armed_tween_count],
                 canvasWidgetPressedSplitId(self, index),
             );
+            if (canvasWidgetLayoutNeedsLargeTextStorage(reconciled_layout)) {
+                try ensureCanvasWidgetLargeTextStorageThrough(self, index);
+            }
             // Native scroll drivers: mark natively driven scroll
             // regions before the copy so rebuild-time clamping and display
             // emission both see the flag (engine scrollbar + engine clamp
@@ -95,6 +120,40 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // and force-pushing the clamp into the live bounce (visible
             // jitter). Non-driver platforms clamp exactly as before.
             canvas_widget_runtime.clampCanvasWidgetLayoutScrollOffsets(reconciled_nodes[0..reconciled_layout.nodes.len], null);
+            // Runtime-owned tooltip visibility normalizes BEFORE the
+            // diff: the retained tree carries the intent machine's
+            // hidden stamps on anchored tooltips while the source
+            // declares authored visibility, so diffing them as-is
+            // reported a spurious visibility invalidation (a dirty
+            // repaint region for chrome that never changed) on EVERY
+            // rebuild containing a hidden anchored tooltip. The stamp
+            // uses the prune VERDICT against the reconciled tree — the
+            // shown id adoption will actually keep — WITHOUT mutating
+            // the live intent registers yet: everything between here
+            // and a retained tree is fallible (`diffWithTokens` can
+            // overflow its invalidation scratch, and
+            // `copyWidgetLayoutTree` rejects node/anchored-surface
+            // limits and every retained-pool budget before it resets
+            // the pools), and a register prune applied ahead of a
+            // failure left the OLD tree stamped visible with cleared
+            // registers — a tooltip no transition could ever hide
+            // again. The register mutation lands inside
+            // `copyWidgetLayoutTree`'s own prune, after the fallible
+            // steps succeed, where it applies this same verdict; an
+            // unchanged rebuild still diffs clean, a SHOWN tooltip
+            // stays visibly shown across the rebuild (no hide-then-show
+            // frame pair), and a rebuild that breaks the shown binding
+            // still diffs the hide honestly.
+            const prospective_shown_tooltip_id = self.views[index].canvasTooltipShownIdSurvivingLayout(reconciled_layout);
+            // Pre-adoption tooltip bindings for the standing hover and
+            // keyboard focus-visible owners, captured while the OLD
+            // tree is still retained (the copy below replaces it): the
+            // adoption reconcile at the bottom compares them against
+            // the adopted tree to catch a tooltip mounted/replaced/
+            // rekeyed beneath a stable owner — a change neither the
+            // hover re-hit-test nor the register prune can see.
+            const adoption_tooltip_bindings = CanvasWidgetEventMethods(Runtime).captureCanvasTooltipAdoptionBindings(self, index);
+            self.views[index].applyCanvasTooltipVisibilityToNodesForShownId(reconciled_nodes[0..reconciled_layout.nodes.len], prospective_shown_tooltip_id);
             const invalidations = try canvas.WidgetLayoutTree.diffWithTokens(previous_layout, reconciled_layout, tokens, &self.canvas_widget_invalidations_scratch);
             const previous_render_state = self.views[index].canvasWidgetRenderState();
             const next_render_state = CanvasWidgetEventMethods(Runtime).canvasWidgetRenderStateAfterLayout(previous_render_state, reconciled_layout);
@@ -112,6 +171,12 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const disclosure_plan = planCanvasWidgetDisclosureTween(self, index, previous_layout, reconciled_layout);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const previous_widget_revision = self.views[index].widget_revision;
+            // The adoption witness (`canvas_widget_layout_adoptions`)
+            // moves INSIDE the copy, at its destructive boundary: a
+            // per-node failure mid-copy leaves a torn retained tree
+            // that hover currency must treat as adopted-and-stale,
+            // while the copy's up-front validation rejects with the
+            // witness unmoved.
             try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
             try self.views[index].copyCanvasWidgetSourceText(layout);
             self.views[index].copyCanvasWidgetSourceScroll(layout);
@@ -151,6 +216,16 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // the user was looking at, and the tween walks it to the
             // declared pose one presented frame at a time.
             try applyCanvasWidgetDisclosureTweenPlan(self, index, disclosure_plan);
+            // Re-hit-test the stationary pointer against the ADOPTED
+            // tree, after every pose restore above settles the frames
+            // the user actually sees and BEFORE the display refresh
+            // publishes them: the prune at the top validates only
+            // tooltip/owner identity and hover survives by ID, so a
+            // rebuild that MOVES a same-ID trigger away from (or
+            // under) the stationary pointer must step hover ownership
+            // and the tooltip intent machine exactly like the
+            // point-blind scroll paths do.
+            try CanvasWidgetEventMethods(Runtime).reconcileCanvasWidgetInteractionAfterLayoutAdoption(self, index, adoption_tooltip_bindings);
             const requested_frame = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
             if ((layout_dirty or widget_revision_changed) and !requested_frame) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, index);
             return self.views[index].info();
@@ -187,6 +262,38 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const actions = AutomationWidgetMethods(Runtime).canvasWidgetActionsForId(self, index, action.id) orelse return error.InvalidCommand;
             if (!canvasWidgetAccessibilityActionSupported(actions, action.action)) return error.InvalidCommand;
 
+            // Session recording, outer-wins on BOTH entry surfaces: the
+            // platform AX path arrives with its journaled tag-23 event
+            // already on the recorder's staging stack (flow.zig staged
+            // it), but the DIRECT verb surfaces (an embed host's
+            // `widgetAction`, automation `widget_action` commands) reach
+            // here with no platform event at all. Their verbs journal
+            // only UNTARGETED children routed by focus, while the focus
+            // write itself (`focusAutomationCanvasWidget`) is a direct
+            // unjournaled state change — so a fresh replay delivered the
+            // children against whatever focus the session happened to
+            // hold and a first-in-session composition landed nowhere.
+            // Stage the same synthetic `widget_accessibility_action`
+            // record the platform path carries: its suppression window
+            // keeps the children out of the journal and replay re-runs
+            // this whole dispatch — focus included — through the tag-23
+            // arm in flow.zig. When the platform event IS already staged,
+            // this nested stage lands inside its suppression window as a
+            // never-written placeholder, so no double record; the commit
+            // below pops it symmetrically. Effect results drained during
+            // the verb still write through ahead of the record, and
+            // event_count/checkpoint ordinals only ever see the one
+            // surviving record (checkpoints fire at staging depth 0).
+            if (self.options.session_recorder) |recorder| recorder.stageEvent(.{ .widget_accessibility_action = .{
+                .window_id = window_id,
+                .label = label,
+                .id = action.id,
+                .action = platformWidgetAccessibilityActionKindFromCanvas(action.action),
+                .text = action.text,
+                .selection = if (action.selection) |selection| .{ .start = selection.anchor, .end = selection.focus } else null,
+            } });
+            defer if (self.options.session_recorder) |recorder| recorder.commitEvent();
+
             // Every assistive action rides the SAME machinery the
             // automation widget verbs use — the key-driven activation for
             // press/toggle/increment/decrement (quiet-list-row ring
@@ -209,10 +316,10 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 .increment => try AutomationWidgetMethods(Runtime).dispatchAutomationWidgetKey(self, app, index, action.id, self.views[index].canvasWidgetStepKey(action.id, .increment)),
                 .decrement => try AutomationWidgetMethods(Runtime).dispatchAutomationWidgetKey(self, app, index, action.id, self.views[index].canvasWidgetStepKey(action.id, .decrement)),
                 .set_text => try AutomationWidgetMethods(Runtime).setAutomationCanvasWidgetText(self, app, index, action.id, action.text),
-                .set_selection => try AutomationWidgetMethods(Runtime).editAutomationCanvasWidgetText(self, index, action.id, .{ .set_selection = action.selection orelse return error.InvalidCommand }),
-                .set_composition => try AutomationWidgetMethods(Runtime).editAutomationCanvasWidgetText(self, index, action.id, .{ .set_composition = .{ .text = action.text } }),
-                .commit_composition => try AutomationWidgetMethods(Runtime).editAutomationCanvasWidgetText(self, index, action.id, .commit_composition),
-                .cancel_composition => try AutomationWidgetMethods(Runtime).editAutomationCanvasWidgetText(self, index, action.id, .cancel_composition),
+                .set_selection => try AutomationWidgetMethods(Runtime).editAutomationCanvasWidgetText(self, app, index, action.id, .{ .set_selection = action.selection orelse return error.InvalidCommand }),
+                .set_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_set_composition, action.text),
+                .commit_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_commit_composition, ""),
+                .cancel_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_cancel_composition, ""),
                 .select => try AutomationWidgetMethods(Runtime).selectAutomationCanvasWidget(self, index, action.id),
                 .drag => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetDrag(self, app, index, action.id, action.text),
                 .drop_files => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetFileDrop(self, app, index, action.id, action.text),
@@ -233,7 +340,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
             const dirty = try self.views[index].stepCanvasWidgetKineticScroll(dt_ms) orelse return self.views[index].info();
             const previous_cursor = self.views[index].canvas_widget_cursor;
-            self.views[index].reconcileCanvasWidgetRenderStateAfterScroll(null);
+            try CanvasWidgetEventMethods(Runtime).reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, null);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try CanvasWidgetEventMethods(Runtime).syncCanvasWidgetCursorForView(self, index);
             try CanvasWidgetEventMethods(Runtime).invalidateForCanvasWidgetDirty(self, index, dirty);
             _ = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
@@ -707,6 +814,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (std.meta.eql(self.views[index].widget_tokens, tokens)) return self.views[index].info();
+            self.views[index].clearCanvasWidgetTextVerticalGoal();
             self.views[index].widget_tokens = tokens;
             self.views[index].widget_revision += 1;
             if (self.views[index].canvas_display_list_widget_owned) {
@@ -742,7 +850,15 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (!self.views[index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
 
-            const dirty = try self.views[index].applyCanvasWidgetTextEdit(id, edit) orelse return self.views[index].info();
+            // Direct runtime edits sanitize like every other insertion
+            // source (the keyboard choke point's rule): a single-line
+            // field's editor never accepts a line break, whoever writes.
+            const node = self.views[index].widgetLayoutTree().findById(id) orelse return error.InvalidCommand;
+            const sanitized = canvas.sanitizedSingleLineTextInputEvent(node.widget.kind, edit) orelse return self.views[index].info();
+            if (self.views[index].canvasWidgetTextEditNeedsLargeStorage(id, sanitized)) {
+                try ensureCanvasWidgetLargeTextStorageThrough(self, index);
+            }
+            const dirty = try self.views[index].applyCanvasWidgetTextEdit(id, sanitized) orelse return self.views[index].info();
             try CanvasWidgetEventMethods(Runtime).invalidateForCanvasWidgetDirty(self, index, dirty);
             _ = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
             return self.views[index].info();

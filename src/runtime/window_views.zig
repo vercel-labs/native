@@ -47,6 +47,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         pub const findShellLayoutIndex = WindowStorageMethods.findShellLayoutIndex;
         pub const removeShellLayoutForWindow = WindowStorageMethods.removeShellLayoutForWindow;
         pub const setFocusedIndex = WindowStorageMethods.setFocusedIndex;
+        pub const setAppActive = WindowStorageMethods.setAppActive;
         pub const findWindowIndexById = WindowStorageMethods.findWindowIndexById;
         pub const findWindowIndexByLabel = WindowStorageMethods.findWindowIndexByLabel;
         pub const allocateWindowId = WindowStorageMethods.allocateWindowId;
@@ -105,13 +106,27 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             // open=false event, and the open->closed TRANSITION — which
             // dispatches the `window_closed` app event — must stay
             // reserved for closes the app did not initiate.
+            // The `focused` flip deliberately bypasses the
+            // `setWindowFocused` seam (see window_storage.zig): on
+            // success the window's views — and any tooltip state in
+            // them — are removed below, and the rollback on platform
+            // failure must not have fired a key-loss tooltip reset for
+            // a window that never lost key.
             const was_open = self.windows[index].info.open;
             const was_focused = self.windows[index].info.focused;
+            // `hidden` clears with `open`: an app-driven close of a
+            // policy-hidden window (a menu-bar app tearing down its
+            // hidden panel) must not leave {open=false, hidden=true}
+            // in the runtime table — the JS bridge exposes hidden, and
+            // a closed window is not "hidden", it is gone.
+            const was_hidden = self.windows[index].info.hidden;
             self.windows[index].info.open = false;
             self.windows[index].info.focused = false;
+            self.windows[index].info.hidden = false;
             self.options.platform.services.closeWindow(window_id) catch |err| {
                 self.windows[index].info.open = was_open;
                 self.windows[index].info.focused = was_focused;
+                self.windows[index].info.hidden = was_hidden;
                 return err;
             };
             Self.removeWindowRuntimeViews(self, window_id);
@@ -123,8 +138,56 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// bookkeeping moves: a minimized window stays open and keeps
         /// its views — it comes back from the Dock/taskbar.
         pub fn minimizeWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
-            if (Self.findWindowIndexById(self, window_id) == null) return error.WindowNotFound;
+            const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            // The same liveness gate as showWindow below: a retained
+            // closed slot must not reach the platform (the CEF host
+            // would genie the retained closed window into the Dock).
+            if (!self.windows[index].info.open) return error.WindowNotFound;
             try self.options.platform.services.minimizeWindow(window_id);
+        }
+
+        /// The real OS show verb: unhide and order front — the counterpart
+        /// to a `close_policy = .hide` hide, and what a tray "Open"
+        /// action resolves to. Like `closeWindow`, the runtime flag
+        /// flips BEFORE the platform call (hosts that emit the frame
+        /// event synchronously would echo the same state) and rolls
+        /// back on platform failure. A window that was never hidden
+        /// just comes to the front.
+        pub fn showWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            // A closed window keeps its table slot (the id and label
+            // release lazily, at the next create), so resolving the id
+            // is not liveness: a dead slot must answer WindowNotFound —
+            // the same answer every not-open gate in the runtime gives —
+            // BEFORE the platform call. The null platform would accept
+            // the show and report {open:false, focused:true}; the CEF
+            // host retains browser-bearing windows past their close and
+            // would visibly re-order one onto the glass.
+            if (!self.windows[index].info.open) return error.WindowNotFound;
+            const was_hidden = self.windows[index].info.hidden;
+            self.windows[index].info.hidden = false;
+            self.options.platform.services.showWindow(window_id) catch |err| {
+                self.windows[index].info.hidden = was_hidden;
+                return err;
+            };
+            // Active windows use the classic show+activate contract.
+            // Passive overlay windows order front without changing the
+            // user's current app or our focus table; an explicit
+            // focusWindow remains the deliberate activation path.
+            if (self.windows[index].activate_on_show) {
+                try Self.setFocusedIndex(self, index);
+            }
+            self.invalidated = true;
+        }
+
+        /// The graceful app quit: ask the platform to terminate through
+        /// the SAME shutdown path a last-window close takes — the host
+        /// emits `app_shutdown` (journaled like any platform event),
+        /// `app.stop` runs exactly once, and a recording session seals
+        /// its journal. No runtime bookkeeping here: the shutdown event
+        /// owns the teardown.
+        pub fn quitApp(self: *Runtime) anyerror!void {
+            try self.options.platform.services.quitApp();
         }
 
         pub fn updateWindowState(self: *Runtime, state: platform.WindowState) !void {
@@ -165,8 +228,13 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .restore_policy = shellRestorePolicy(shell_window.restore_policy),
                 .titlebar = shell_layout.shellTitlebarStyle(shell_window.titlebar),
                 .show = shell_layout.shellWindowShowMode(shell_window),
+                .transparent = shell_window.transparent,
+                .always_on_top = shell_window.always_on_top,
+                .click_through = shell_window.click_through,
+                .activate_on_show = shell_window.activate_on_show,
                 .min_width = shell_window.min_width,
                 .min_height = shell_window.min_height,
+                .close_policy = shell_layout.shellClosePolicy(shell_window.close_policy),
                 .source = source,
             }, source_reloads_from_app, source_policy);
             errdefer Self.closeWindow(self, info.id) catch {};

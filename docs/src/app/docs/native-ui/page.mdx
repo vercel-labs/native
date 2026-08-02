@@ -1,0 +1,707 @@
+import { CodeToggle } from "@/components/code-toggle";
+
+# Native UI
+
+The default Native SDK app is native-rendered: the view is a Native markup file (`.native`), the logic is an app core — TypeScript by default, or Zig — and rendering happens through Native SDK's own engine. Scaffold one with `native init my_app` and run it with `native dev`.
+
+An app is four things:
+
+- `src/app.native` — the entire UI: elements, layout, bindings, and message dispatch.
+- `Model` — a plain data structure holding your state.
+- `Msg` — a tagged union of everything that can happen.
+- `update(model, msg)` — the only place state changes.
+
+The runtime owns the rest: install, presentation, resize, typed event dispatch, timers, and hot reload. In dev builds, edit the `.native` file while the app runs and the window updates in place — model state, selection, and widget identity all survive. Compiled markup fragments embedded in a Zig view hot reload the same way — register each one with `View.fragment("src/header.native")` in `Options.fragment_watch`, and editing that file (or any file its imports reach) reloads it in place. In release builds the markup is compiled at comptime, so the binary carries no parser and a typo in a view is a compile error with a line and column.
+
+## A complete view
+
+```html:src/app.native
+<column gap="12" padding="16">
+  <row gap="8" cross="center">
+    <text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />
+    <button variant="primary" on-press="add">Add task</button>
+  </row>
+  <scroll grow="1">
+    <column gap="2">
+      <for each="visible" key="id" as="t">
+        <row gap="8" padding="6" cross="center">
+          <checkbox checked="{t.done}" on-toggle="toggle:{t.id}" />
+          <text grow="1">{t.title}</text>
+        </row>
+      </for>
+    </column>
+  </scroll>
+  <status-bar>{openCount} open</status-bar>
+</column>
+```
+
+## Elements
+
+| Markup | Renders as | Notes |
+| --- | --- | --- |
+| `row`, `column` | flex containers | horizontal / vertical main axis |
+| `stack`, `panel`, `card` | overlay containers | children layer on top of each other — `gap` can never space them and is a validation error (put a `column`/`row` inside for flow) |
+| `scroll` | scroll view | wrap multiple children in a `column` inside it |
+| `list`, `grid` | list, grid | vertical stack / cell grid |
+| `tabs`, `toggle-group`, `button-group`, `radio-group`, `breadcrumb`, `pagination` | row containers | children flow horizontally (tab buttons, toggle-buttons, radios, ...) |
+| `table` > `table-row` > `table-cell` | table | rows only inside a table, cells only inside a row (`for`/`if` wrappers are fine); cells are text leaves |
+| `dropdown-menu` | menu surface | vertical; children are `menu-item`s. `anchor="below\|above"` floats it against its parent's frame: a late z-pass above the whole tree, window-clipped (never cropped by a scroll pane), auto-flipping at the window edges, zero flow space — pair with `on-dismiss` so Escape/click-outside close model-side |
+| `accordion` | accordion | header via the `text` attribute; children show while `selected`, dispatch `on-toggle` |
+| `alert`, `bubble` | surfaces | `alert` title via the `text` attribute; children stack inside. `bubble` hugs its message up to 80% of the thread (`ghost` exempt; explicit `width` wins) and takes one `<reactions>` child — the reaction pill straddling its bottom edge, one text run, dock via `text-alignment` (default `end`); `text=` on bubble itself is a teaching error (that channel belongs to the pill) |
+| `dialog`, `drawer`, `sheet` | modal surfaces | rendered in place — title via `text`, wrap in `<if>` to show conditionally |
+| `resizable` | resizable panel | engine-managed drag handle; `width` sets the initial width |
+| `split` | two-pane splitter | exactly two element children (nest splits for more panes); the engine synthesizes the draggable divider between them. `value` binds the model-owned first-pane fraction, `on-resize` names an f32 Msg variant dispatched with each applied fraction (echo it back through `value`), `min-width` on the panes bounds the drag, `gap` sets the divider band thickness; the focused divider takes Left/Right (Shift for bigger steps) and Home/End. `resize-duration` (milliseconds, split only) animates model-driven value moves — the runtime eases the rendered fraction to the new value one presented frame at a time instead of snapping, and reduced-motion appearances snap automatically; `resize-easing` (`linear`/`standard`/`emphasized`/`spring`) shapes the ramp and needs a nonzero duration beside it |
+| `tree` | disclosure tree | vertical container whose descendant rows with `role="treeitem"` form one roving keyboard focus set: Up/Down walk visible rows (selection follows focus via `on-change` when bound, otherwise `on-press`), Left collapses or moves to the parent row, Right expands or moves to the first child row, Home/End jump to the edges, Enter/Space activate; nested rows derive hierarchy structurally, while flat `<for>` rows declare their one-based `tree-level`; expandable rows bind `expanded` and `on-toggle`, and the model owns both states |
+| `text`, `badge`, `tooltip` | text leaves | `{}` interpolation allowed in content; `text` takes a line policy via `wrap` (`"true"` word-wraps; `"false"`/unset paint one honest line) and an overflow policy via `overflow` (`ellipsis` — the default trailing elision — or `clip`) and the typography rungs via `size="heading"`/`size="display"` (themable token steps above title — section headings, hero stats). `tooltip` with `anchor="above\|below"` floats against its parent — the `stack` wrapping trigger + tooltip, the same shape as the anchored `dropdown-menu` — and the runtime owns its visibility through hover intent: it shows after the pointer rests on the trigger for `tooltip-delay` milliseconds (default 600; `"0"` shows instantly), skips the delay during the shared 400ms warm window after a pointer-hovered tooltip hides on leave, and shows immediately when the trigger gains keyboard focus; it hides on pointer leave (the only hide that warms), focus departure, Escape, or a press — the model never hears hover. Without `anchor` it stays a static leaf that paints whenever the view renders it — see [Tooltip](/docs/components/tooltip) |
+| `text` > `span` | inline styled runs | mixed-style text in one wrapped paragraph: span children style runs with `weight="regular\|medium\|bold"`, `mono`, `italic`, `scale` (a positive multiplier on the paragraph's base size — inline headings, hero stats), `underline`, `foreground` (a token name); `{bindings}` interpolate inside spans; whitespace between runs collapses to a single space (none = the runs abut); spans do not nest, take no events, and the paragraph announces as one text run — see [Rich text](#rich-text-inline-spans-and-markdown) |
+| `button`, `toggle-button`, `list-item`, `menu-item`, `toggle`, `switch`, `select`, `avatar` | text-bearing controls | the label is the element content; `button`, `toggle-button`, `list-item`, and `menu-item` also take `icon="..."` — a vector icon drawn inline (buttons and toggle-buttons before the label, icon-only when the content is empty; list and menu items as a leading slot), one hit target that follows the element's enabled/disabled tint; tab strips are `toggle-button` children, so tabs get icons this way; `select` shows its `placeholder` while empty and dispatches `on-press`; `avatar` renders initials, or a runtime image via `image="{binding}"`. `list-item` alone also accepts element children IN PLACE of the text run (the list-row composite): the children flow horizontally inside the row's flat chrome — transparent at rest, full-width hover/selected washes, one hit target — so composite rows (title + snippet, leading icon + trailing badge) stay honest list rows instead of bordered boxes; name the row with `label` and never mix a text run with children. Rows that really are cards (a kanban board's draggable cards) opt into the card treatment explicitly with `background`/`radius` |
+| `checkbox`, `radio`, `slider`, `progress` | value controls | `checked`, `value` |
+| `text-field`, `input`, `search-field`, `combobox`, `textarea` | text entry | `placeholder`; edits arrive via `on-input` |
+| `status-bar` | status bar | content only, no children |
+| `separator`, `spacer` | separator, flexible space | `separator` is axis-aware — a horizontal rule in a `column`, a thin vertical divider in a `row`; give `spacer` a `grow` |
+| `skeleton`, `spinner` | loading leaves | size `skeleton` with `width`/`height` |
+| `icon` | vector icon leaf | `name` picks the icon: a bare literal is one of the curated stroke-dialect built-ins (compile-checked; 49 names — transport, files/folders, arrows/chevrons, panes (panel-left, panel-right), tooling (terminal, wrench), theming, and the full GitHub vocabulary (git-pull-request, git-merge, git-branch, circle-dot, check-circle, x-circle)); `app:<name>` reaches an icon the app registered at boot (verified by `native check` against the model contract), and one `{binding}` defers the choice to model data (an unknown resolved name draws the missing-icon fallback with a Debug warning naming the value - never a silent gap); tint with `foreground`, size with `width`/`height`; never a press target — decoration inside pressable rows passes clicks through to the row (give the icon its own `on-press` to make it an icon hotspot) |
+| `markdown` | rendered markdown | leaf; `source` is one `{binding}` — see [Rich text](#rich-text-inline-spans-and-markdown) |
+| `media-surface` | media surface | composites a texture produced OUTSIDE the widget tree (video, camera, an external renderer) like any widget; `surface="{binding}"` (required) binds the model-owned `u64` surface id a Zig-tier producer targets — no intrinsic size, display-only, `label` it; goldens and replay see the deterministic id-derived placeholder, never producer frames — see [Media Surface](/docs/components/media-surface) and [Media Producers](/docs/media-producers) |
+| `video` | video playback | leaf; `src` declares the app's single platform-decoded playback (an assets path or `http(s)` URL, local-first like audio), `autoplay`/`loop`/`muted` shape it, and `controls` composes the house transport chrome — without it the element is the surface alone and your update code drives the video command vocabulary; no intrinsic size, `label` it; goldens and replay see the placeholder, transport is journaled truth — see [Video](/docs/components/video) |
+| `stepper` > `step` | stage stepper | `active="{index}"` derives each step's completed/active/pending state; steps are text leaves joined by connectors — see [Pipeline components](#pipeline-components-stepper-timeline-and-nav) |
+| `timeline` > `timeline-item` | ledger/timeline list | items are leaves whose `title`/`description`/`meta`/`indicator` attributes carry the content; `on-press` makes the whole item pressable |
+| `chart` > `series` | data chart | each series binds a model `[]const f32` iterable via `values="{binding}"` (`kind` is `line`/`area`/`bar`, `color` a token name); `y-min`/`y-max`/`grid-lines`/`baseline` shape the plot, `x-labels`/`y-labels` add muted axis ticks, `hover-details` adds the pointer detail card — see [Charts](#charts) |
+| `input-group` > `textarea` + `input-group-actions` | grouped input | the composer shape: ONE bordered field wrapping exactly one `textarea` (first) plus an optional `input-group-actions` row of controls inside the same border — the group wears the focus ring for its focused descendant and the textarea's own chrome dissolves; put a `<spacer grow="1"/>` between leading and trailing controls — see [Input Group](/docs/components/input-group) |
+
+A tab strip, a select trigger, and a table read the way you would guess:
+
+```html
+<tabs gap="4">
+  <button selected="{tab == overview_tab}" on-press="set_tab:{overview_tab}">Overview</button>
+  <button selected="{tab == data_tab}" on-press="set_tab:{data_tab}">Data</button>
+</tabs>
+<select placeholder="Pick a fruit" on-press="open_picker">{choice}</select>
+<!-- the options: an if-gated <dropdown-menu anchor="below" on-dismiss="close_picker"> beside the select in a stack -->
+<table gap="2">
+  <for each="rows" key="id" as="r">
+    <table-row gap="4">
+      <table-cell on-press="pick_row:{r.id}">{r.name}</table-cell>
+      <table-cell>{r.qty}</table-cell>
+    </table-row>
+  </for>
+</table>
+```
+
+A few widget kinds are deliberately **not** markup elements because their shape does not fit the closed grammar — write these as Zig view functions with `canvas.Ui`: `image` (it references image pixels by `ImageId` — registered at runtime, see [Images](#images) below — which attribute values cannot carry), `icon_button` (`<button icon="...">` with empty content covers the declarative case), `data_grid` (needs per-column cell templates — arbitrary render callbacks), `popover` and `menu_surface` (Zig-side floating surfaces; the ANCHORED `dropdown-menu` covers the declarative case), and `segmented_control` (a shell-chrome kind; `tabs` and `toggle-group` cover its use cases). (`icon` used to sit on this list; the built-in vector icon set made it expressible — the name vocabulary is closed and compile-checked.) The one image binding markup does carry is the avatar's: `image="{binding}"` names a `u64` `ImageId` model field or function — the id is just model data, never a markup literal, and `0` keeps the initials fallback.
+
+Apps with their own iconography can parse any stroke-dialect/Feather/Tabler-dialect SVG at comptime (`canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"))`) and register it at boot with `canvas.icons.registerAppIcons(&table)`: the draw paths (icon leaves via `ui.appIcon`, `ElementOptions.icon` on buttons, toggle buttons, icon buttons, and list/menu items) resolve registered names exactly like built-ins. Markup reaches them through the `app:` NAMESPACE (`<icon name="app:waveform"/>`, `icon="app:waveform"`): bare names keep the closed built-in vocabulary (the compiled engine proves them at comptime, where a runtime registration cannot exist), while `app:` names are structurally accepted by both engines and verified by `native check` against the model contract - declare the table as `pub const app_icons` on the app root so the contract emit reflects the same names `main` registers. Bound icon names (`icon="{binding}"`) make the choice model data - a per-row status icon, a play/pause toggle - and any name that fails to resolve at draw time renders the missing-icon fallback (a slashed circle) with a Debug warning naming the value, never a silent gap.
+
+Layout attributes: `gap`, `padding`, `grow`, `width`, `height`, `wrap`, `text-alignment`, `columns`, `main`, `cross`, `virtualized`, and the anchored-floating family on `dropdown-menu` and `tooltip`: `anchor` (`below`/`above` — floats the surface against its parent, flipping when the preferred side does not fit), `anchor-alignment` (`start`/`end`/`stretch`), `anchor-offset` (points, default 4), plus `tooltip-delay` on `tooltip` alone (the hover-intent show delay in milliseconds, default the 600ms token; `"0"` shows the instant the trigger is hovered; keyboard-focus reveals are always immediate — a teaching error without `anchor` beside it). An anchored tooltip's visibility is runtime-owned hover intent on its trigger, unlike the model-owned dropdown. `gap` belongs to flow containers: the stacking kinds (`stack`, `panel`, `card`, and the surface/modal elements) layer their children, so `gap` there is rejected with a teaching error — wrap the children in a `column` (or `row`) inside for flow (on `split` it sets the divider band thickness). `width` and `height` are definite sizes: the element is exactly that size, so intrinsic content neither shrinks nor silently overflows it (`resizable` treats `width` as its initial width), and debug builds log a `zero_canvas_layout` diagnostic whenever children's minimum sizes overflow their container. `min-width` is a floor without the definite max: the element may grow past it but never shrink below — on split panes it is what bounds the divider drag. `wrap` applies to `text` only: `wrap="true"` word-wraps the content at the width the element receives and reserves the wrapped height in columns; `wrap="false"` and unset are the honest single-line mode — the content measures and paints as one line, and content that does not fit follows `overflow`. `overflow` (`text` only) names the single-line policy for content that does not fit: `ellipsis` (the default) elides the tail behind a trailing … measured with the same metrics paint uses, the right choice for width-constrained list-row titles; `clip` hard-cuts at the frame for fixed-format content like a duration column, where "1…" would be worse than a partial glyph. There is deliberately no overflow-visible — painting past the frame is the bug class the layout audit exists to catch. `text-alignment` (`start`|`center`|`end`) aligns text content in text leaves, status bars, and surface titles. `columns` fixes a `grid`'s column count (grid-only — anywhere else it is a teaching error; omit it for the derived near-square grid). `tree-level` gives flat sibling rows with `role="treeitem"` a one-based logical depth so Left/Right can resolve parents and children; omit it for structurally nested rows. Appearance: `variant`, `size` (the control scale `default`|`sm`|`lg`|`icon` on every sized element; on `text` also the typography rungs `heading`|`display` — named typography token steps for section headings and hero stats, themable like every token, and text-only: on a control they are a teaching error naming text as their home; numeric sizes are refused by design — retheme the typography tokens to move the whole scale), `disabled`, `checked`, `selected`, `expanded` (tree rows: model-owned disclosure state; omit on leaves). Focus: `autofocus` (focusable controls only) moves keyboard focus to the element when it mounts or when the bound value turns on — edge-triggered, so holding it true never re-steals focus; it is the model-driven way to focus an editor on create or give a keyboard-first app its first focus. Semantics: `role` (`treeitem` also makes a row part of its tree's roving focus set), `label` (an explicit accessible name — it replaces the element's text; see [Accessibility](#accessibility)). Identity: `key` (sibling-scoped) and `global-key` (survives moving between containers — board cards, tab pages). Window chrome: `window-drag="true"` marks the element as a window-drag surface for hidden-titlebar windows (see [Hidden titlebar](#hidden-titlebar-drag-regions-and-chrome-insets)).
+
+## Styling with design tokens
+
+Color and radius attributes reference design tokens by name — literals only, validated against the token lists (a typo is a check/compile error, never a silent default):
+
+```html
+<row background="surface" radius="md" padding="8">
+  <text foreground="text_muted">Muted caption</text>
+</row>
+```
+
+The color attributes are `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, and `focus-ring`; values are `ColorTokens` field names: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `syntax_plain`, `syntax_comment`, `syntax_keyword`, `syntax_literal`, `syntax_function`, `syntax_property`, `syntax_constant`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `success`, `success_text`, `warning`, `warning_text`, `info`, `info_text`, `focus_ring`, `shadow`, `scrim`, `disabled`. The `syntax_*` roles are the Geist Code Block palette shared by both built-in packs; `ui.code` and Markdown fences use them automatically. `info` is the violet identity hue beside the status trio — merged PR badges, "new" chips, informational callouts. `radius` takes a `RadiusTokens` name: `sm`, `md`, `lg`, `xl`.
+
+References resolve against the app's live tokens on every rebuild, so themed apps re-resolve them when the theme changes — dark mode flips `surface` for free. Anything dynamic beyond that (raw colors, per-state styling) stays in Zig via `ElementOptions.style`, which always wins over a token reference.
+
+By default the stock tokens follow the system appearance: an app that sets neither `tokens` nor `tokens_fn` derives its theme from the OS light/dark setting (plus high-contrast and reduce-motion) and re-themes live when the user flips it — no restart, no wiring. Apps that own their look opt out by passing explicit `tokens` (a fixed theme) or `tokens_fn` (model-owned theming — the pattern for a custom palette that still follows the system scheme through `on_appearance`).
+
+## Structure tags
+
+`<for each="..." as="...">` repeats its body per item and `<if test="{...}">` renders its children conditionally. A `for` body takes one or more children — elements, `<use>`, `<if>`/`<else>` arms, or nested `<for>`s — so polymorphic rows need no wrapper node. `key` names an item field: every node an item emits shares the item's identity across reorders (same-kind siblings within one item are disambiguated automatically), and a node's own `key`/`global-key` still wins. An `<else>` directly after an `</if>` renders when the test is false; directly after a `</for>` it renders the empty state when the iterable has no items:
+
+```html
+<for each="visible" key="id" as="t">
+  <if test="{t.done}"> <badge>done</badge> </if>
+  <else> <text>{t.title}</text> </else>
+</for>
+<else> <text>Nothing yet</text> </else>
+```
+
+There is no `else-if` chain tag — nest an `<if>`/`<else>` inside the `<else>` body instead.
+
+## Templates
+
+When the same subtree repeats with different data, define it once — templates go at the top of the file, before the single view root:
+
+```html
+<template name="board-column" args="title cards">
+  <column grow="1" gap="8" label="{title}">
+    <text foreground="text_muted">{title}</text>
+    <for each="cards" key="id" as="c">
+      <row global-key="{c.id}"><text>{c.title}</text></row>
+    </for>
+  </column>
+</template>
+<row grow="1" gap="12">
+  <use template="board-column" title="Todo"  cards="{todoCards}" />
+  <use template="board-column" title="Doing" cards="{doingCards}" />
+  <use template="board-column" title="Done"  cards="{doneCards}" />
+</row>
+```
+
+A `<use>` is allowed anywhere an element is, and its attributes must match the template's declared `args` exactly. Args bind like `for` variables: a `{binding}` naming an iterable (the same set `for each` accepts) is iterable inside the template; anything else — a literal or a scalar binding — is a value for bindings and interpolation. The body is built in place of the `<use>`, so widget ids are identical to writing it out by hand: converting copy-pasted markup to a template changes no ids. Templates may only reference templates defined earlier in the file, which keeps expansion finite; bindings stay zero-argument, so per-case queries (`todoCards`, `doingCards`) remain named model functions.
+
+An arg can declare a literal default with `name=value`, and a use site may then omit it — `args="title trend=flat"` makes `trend` optional. Defaults are literals only: they evaluate in no scope, so a `{binding}` default is rejected with a teaching error, and a missing arg without a default keeps its error too. `args="name="` declares an empty-string default, and defaults are unquoted — quotes in a default would be literal characters, so a quoted default (`name='x'`) is rejected with a teaching error.
+
+## Components
+
+Templates become shared components through `<import>`, which goes at the very top of a file, before its own templates:
+
+```html
+<import src="components/board-column.native"/>
+<column gap="12">
+  <use template="board-column" title="Todo" cards="{todoCards}" />
+</column>
+```
+
+Paths resolve relative to the importing file, subdirectories and transitive imports included, and everything must stay under the markup root (the root view file's directory) — absolute paths and escapes are rejected. An imported file defines templates only: it is a component file, valid on its own for `native markup check`, and a view root inside one is an error. Importing splices the file's templates (and transitively its imports') before yours, in import order — exactly as if pasted at the import site — so the define-before-use rule is the only ordering rule to learn. Cycles are reported with the cycle path spelled out, and a template name defined twice is an error naming both definition sites: imports never shadow silently.
+
+Each engine resolves imports through its own source access. The runtime interpreter re-resolves from disk on hot reload, so `native dev` picks up edits to imported files too. The compiled engine takes an embedded source set — one `@embedFile` entry per file — which also feeds the app's markup options, so both engines see the same document:
+
+```zig
+pub const board_markup_files = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "board.native", .source = @embedFile("board.native") },
+    .{ .path = "components/board-column.native", .source = @embedFile("components/board-column.native") },
+};
+pub const CompiledBoardView = canvas.CompiledMarkupImports(Model, Msg, "board.native", &board_markup_files);
+```
+
+A template can also take markup children. The body marks the insertion point with a single `<slot/>`, and the use site's children build in the consumer's scope — they see the model paths and loop variables where the `<use>` is written — then land at the slot's position:
+
+```html
+<template name="section" args="title">
+  <column gap="4">
+    <text foreground="text_muted">{title}</text>
+    <slot/>
+  </column>
+</template>
+<use template="section" title="Cards">
+  <for each="cards" as="c"> <text>{c.title}</text> </for>
+</use>
+```
+
+A use with no children renders the slot empty; children passed to a template without a slot are an error; a template body takes at most one `<slot/>` (named slots are not supported yet). Structural widget ids hash exactly as if the slot content were written inline, in both engines.
+
+## Expressions
+
+Attribute values take a literal or exactly one `{expression}`; text content interpolates any number of them (`{openCount} open`). An expression is a binding path (`{c.title}`) or a pure, total combination of paths, literals (numbers, `'strings'` in single quotes, `true`/`false`), operators, and the built-in function library — spreadsheet power, never a programming language: no user-defined functions, no effects, no computed message names, and every expression terminates by construction.
+
+Operators: arithmetic `+ - * /` (division always produces a float — wrap in `round()`/`floor()`/`ceil()` for whole-number attributes; dividing by zero is a loud error, never a silent zero or NaN), comparison `== != < <= > >=` (ordering takes numbers only; equality compares any two values, and different types are simply not equal), boolean `and`/`or`/`not` (booleans only — write `count > 0`, not `count`), and `++` (joins anything as display text, formatted exactly like interpolation). Comparisons do not chain, and `and`/`or` evaluate both sides (expressions are pure, so only errors are observable).
+
+Type discipline is teaching errors over silent coercion: a string minus a number is an error at check/compile time when the types are known, and a loud build failure when they are not — never a NaN. Both engines evaluate through one shared evaluator, so results (float formatting included) are identical bit for bit.
+
+The function library is closed — seventeen functions, and growing the set is a toolkit change: `fixed(x, digits)` (exact decimals), `thousands(n)` (`1,234,567`), `percent(fraction, digits?)` (`0.42` → `42%`), `date(ts)`/`time(ts)`/`datetime(ts)` (a model unix timestamp in seconds, formatted in UTC — formatting model time is pure; *reading the clock* is an effect, so `now()` is a teaching error pointing at the model/fx loop), `upper`/`lower`/`trim` (ASCII case mapping; other characters pass through), `min`/`max`/`abs`, `round`/`floor`/`ceil` (number → whole number), `plural(count, singular, plural)` (`{plural(n, 'item', 'items')}`), and `pad(x, width)` (zero-pads the integer value of x to `width` digits — `pad(7, 2)` → `07`, a negative sign precedes the zeros without counting toward the width, and numbers wider than `width` print in full; the mm:ss counter function: `{pad(minutes, 2)}:{pad(seconds, 2)}`).
+
+Complexity is bounded and taught one past the bound: at most 256 bytes, 64 terms, and 16 nesting levels per expression — anything larger is a named model function by design.
+
+The same line separates inline arithmetic from model functions. Inline expression arithmetic is sanctioned for one-off presentation-level derivation — `{percent(done / total)}` on the single readout that shows it is exactly what expressions are for. The moment a derivation is reused in a second binding, deserves a name, or carries meaning the model owns (a threshold, a rule, a policy), it belongs in a named model function: `{completionRate}` reads at the binding site, tests in Zig, and changes in one place.
+
+Bindings resolve against your model: struct fields, zero-argument public methods, and — for `for each` — slices, public array declarations, or functions taking `(*const Model)` or `(*const Model, std.mem.Allocator)` (the allocator variant is how filtered lists work). Enums resolve to their tag names. Expressions are allowed in text interpolation, attribute values, `if` tests, and template args at use sites; message tags and payloads, `for each` iterables, and import paths stay path-only.
+
+Scalar bindings take the allocator form too: `{summary}` binds `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8` directly, formatting a derived display string into the build arena — it works in text interpolation, attribute values, message payloads, and as function arguments (`{upper(summary)}`). The one exclusion is comparison operands (`==`, `<`, ...), which reject arena-computed values with a teaching error: compare the source fields, or bind a `bool`-returning method. For `<if test>`, write the predicate out (`test="{count > 0}"`) or bind one (`test="{hasItems}"`) instead of leaning on numeric truthiness.
+
+## Messages
+
+`on-press`, `on-toggle`, `on-change`, and `on-submit` name a variant of your `Msg` union, optionally with one binding payload (`toggle:{t.id}`). `on-input` names a variant carrying the runtime's text-input event, and each core tier declares that in its own vocabulary. In a TypeScript core the event union mirrors the runtime's event vocabulary structurally, and `on-input` matches the shape and translates each runtime event into your union at dispatch — import it from `@native-sdk/core/text` (or `@native-sdk/core/events`), or declare the same shape in-file; your `update` reduces the events over the draft bytes. In a Zig core the payload is `canvas.TextInputEvent`; pair it with `canvas.TextBuffer` in the model for editor state that survives rebuilds — the markup binds a `pub fn` returning the text (`text="{draft}"`), and binding the `TextBuffer` field itself directly is a teaching error pointing at this pattern:
+
+<CodeToggle>
+
+```ts
+import { type TextInputEvent } from "@native-sdk/core/text";
+// insert_text / delete_* / clear / move_caret / set_selection /
+// set_composition / commit_composition / cancel_composition — the full
+// union is the SDK's; the same shape declared in-file matches identically.
+
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "draft_edit"; readonly edit: TextInputEvent };
+```
+
+```zig
+draft_buffer: canvas.TextBuffer(64) = .{},
+pub fn draft(model: *const Model) []const u8 {
+    return model.draft_buffer.text();
+}
+// in update:
+.draft_edit => |edit| model.draft_buffer.apply(edit),
+.add => { model.addTask(model.draft_buffer.text()); model.draft_buffer.clear(); },
+```
+
+</CodeToggle>
+
+`on-scroll` (on the `scroll` element; `Ui.scrollMsg(.tag)` on `on_scroll` in Zig views) names a variant whose payload is `canvas.ScrollState` (in a TypeScript core, the `ScrollState` record from `@native-sdk/core/events`, or the same four-numeric-field shape declared in-file): after every user scroll — wheel, kinetic momentum, keyboard, accessibility — the runtime delivers the post-scroll `offset`, `viewport_extent`, and `content_extent`, so long content can page or lazy-load a bounded window that follows the scrollbar. The payload carries the offset the runtime already applied: store it in the model and echo it back through the scroll's `value`, and rebuilds never fight live scrolling.
+
+`on-resize` (on the `split` element; `Ui.valueMsg(.tag)` on `on_resize` in Zig views) names a variant whose payload is the new first-pane fraction (`f32`): after every divider drag, keyboard adjustment, or assistive increment/decrement the runtime delivers the fraction it already applied and clamped — store it in the model and echo it back through the split's `value`, and rebuilds never fight live resizing.
+
+`on-dismiss` (on the dismissible surfaces: `dialog`, `drawer`, `sheet`, `dropdown-menu`; `ElementOptions.on_dismiss` in Zig views) dispatches when Escape or a click outside dismisses the surface, so the model owns the close — clear the open flag in `update`. The engine hides the surface immediately as an optimistic echo; the next rebuild's source tree is truth. Escape works regardless of focus: it dismisses the nearest surface up the focused widget's chain, and when nothing relevant is focused — a menu opened from a plain-text trigger takes no focus — it falls back to the topmost mounted anchored surface. `on-hold` (any element; `ElementOptions.on_hold`) is press-and-hold: a pointer held ~350 ms dispatches the hold Msg and the release presses nothing, a quick click dispatches `on-press` as usual, and a right/ctrl-click with no context menu on its route dispatches the hold Msg immediately (a declared `<context-menu>` always wins the right-click) — the crumb-switcher shape (`on-press` selects, `on-hold` opens an anchored menu). Both legs are live-drivable through automation: `native automate widget-hold <view> <id>` runs the pointer+timer gesture, `widget-context-press <view> <id>` the secondary click.
+
+`on-hover-enter` and `on-hover-leave` (any element; `ElementOptions.on_hover_enter` / `on_hover_leave`) are the pointer-hover pair — Elm's `onMouseEnter`/`onMouseLeave`: enter dispatches once when the pointer enters the element's hit region, leave once when it exits — discrete containment edges, never per-move, so hover previews, prefetch, and hover cards are ordinary Msgs. Binding either makes the element hover-hittable the way a bound press makes it pressable (so both are legal everywhere, and a pointer over plain text or icons inside counts as inside), but never pressable: clicks keep falling through, no accessibility action is announced, and no hover wash appears — the wash stays the visual channel of acting controls ([state washes](/docs/building-components#theming-your-component)), so a `quiet-hover` content tile that binds hover stays visually quiet while the model hears it. Nested bound elements track containment independently (moving onto a bound row inside a bound card never leaves the card); enters fire outermost-first and leaves innermost-first. Every enter is answered by exactly one eventual leave while the app runs: the leave Msg is captured while the element stands — kept fresh as rebuilds change the binding, retained from the last build that bound one — so it still arrives when the exit is the element unmounting. Exits follow the same resolution the hover wash already uses: moving off and the pointer leaving the window are direct edges; content scrolling or reflowing out from under a stationary pointer re-hit-tests the last pointer position (a scrolled list fires the same leave and enter a real move would); and a dismissal removing the surface under the pointer delivers that surface's leaves immediately, with whatever it reveals entered when the model's close rebuild re-hit-tests — pair dismissible surfaces with `on-dismiss`, as always. Overlays occlude hover exactly as they occlude clicks (the topmost surface under the pointer wins). Hover comes from mouse and trackpad pointers only: containment advances on hover-phase motion — a pointer floating without contact, which touch physically cannot produce — so touch input never synthesizes hover, and anything reachable only by hover must stay reachable another way.
+
+`on-double-press` in markup (`ElementOptions.on_double_press` in Zig views) names the Msg for a double click. The runtime derives the click count itself, identically on every platform: a primary press within 500 ms and 4 points of the previous one raises the count (clamped at 3 — a fourth rapid click repeats the triple behavior), anything else restarts at 1, and the count rides the gesture to its release. The firing order is additive, never a delay: the first click of a double dispatches `on-press` on its own release as usual, and the second release — click count 2 — dispatches `on-double-press` in place of a second press (a triple click's third release resolves the double handler again). That makes select-on-press + act-on-double-press the natural pairing — a track list where a click selects the row and a double click plays it, with no press timer and no swallowed first click; `examples/code-editor` uses the pair to preview files on click and pin their tabs on double click. A double click on a widget that binds no double handler behaves exactly like two single clicks, and like `on-press`, binding it makes the element a hit target.
+
+On a `list-item`, `on-submit` grows a second home beyond text entry: with a submit handler bound, plain Enter on a ring-focused row dispatches it as the row's PRIMARY action (open the record, play the track — the desktop list convention), while Space keeps the row's select activation (`on-press`). Rows without a submit handler resolve Enter exactly as before — both activation keys select. It is the keyboard mirror of `on-double-press`: bind both to the same Msg and pointer and keyboard users share one primary action (the soundboard's Zig track rows bind `on_press` select, `on_double_press` play, `on_submit` play). How Enter reaches the row at all — and why arrows may not — is [keyboard routing](#keyboard-routing-focus-registers-quiet-list-rows-and-the-app-level-fallback).
+
+Presses follow one rule: a click lands on the nearest pressable widget under the pointer — plain text, icons, images, badges, and layout containers let it fall through to their closest pressable ancestor, and dragging still selects text. Any element with a bound `on-press`, `on-double-press`, or `on-toggle` is pressable (the handler makes it a hit target), so a pressable row is just `<panel on-press="open:{id}">` — or `<row on-press=...>` — with plain text children: no overlays, no duplicated handlers. Nested pressables resolve to the deepest one (a button inside a pressable row wins); editable text fields, scroll containers, and modal surfaces always claim their own presses. Value/text handlers (`on-change`, `on-submit`, `on-input`) still belong on controls only — the validator, both engines, and the LSP reject them on layout/decoration elements with a teaching error.
+
+## Keyboard routing: focus registers, quiet list rows, and the app-level fallback
+
+Keyboard focus has two registers, and the split is what makes desktop keyboard conventions expressible without per-widget wiring:
+
+- **Ring focus** is the keyboard contract: Tab (and Shift+Tab) walk the focusable widgets and draw the visible focus ring. A ring-focused widget owns its keys in full — Enter/Space activate it, arrows walk its group (list rows, menu items, radios, segments) or step its value (sliders, split dividers), Home/End jump to the group edges.
+- **Quiet focus** is the bookkeeping register: a pointer press (or programmatic focus — `autofocus`, the automation `focus` action) records which widget the user last touched, with no ring drawn. It exists so activation can find "the thing the user last touched", not to promise a keyboard cursor. Editable text kinds are the exception and show their ring and caret however focus arrives — a caret is a visible promise.
+
+A key event then resolves top to bottom — the focused widget always outranks the app:
+
+1. **Runtime focus motion.** Tab moves ring focus; group arrows and Home/End walk the focused widget's focus group (menu items, radios, segments under either register — list rows only under the ring, the quiet-list-row rule below), and where selection follows focus (tree rows), the landing row's select dispatches. These keys are consumed by the move.
+2. **The focused widget's bound handler.** Activation keys resolve to the widget's `on-press`/`on-toggle` handler, Enter to a bound submit handler on text entry and list rows, arrow steps to a slider's `on-change` — Space on a ring-focused track row selects THAT row.
+3. **Structural consume.** A focused widget that answers the key structurally consumes it silently even with nothing bound: any key on an editable text widget (typing must stay typing — checked by widget kind, so a search field blocks app shortcuts without knowing they exist), and any key the widget's kind maps as a control intent.
+4. **The app-level fallback.** Only an unclaimed key-down reaches `Options.on_key` (a target-less event — nothing focused — skips straight here). The fallback is a plain function from the key event to an optional Msg:
+
+```zig
+// options: .on_key = onKey,
+pub fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
+    if (keyboard.modifiers.hasNavigationModifier() or keyboard.modifiers.shift) return null;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "space")) return .toggle_play;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return .select_next;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return .select_previous;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "enter")) return .play_selected;
+    return null;
+}
+```
+
+One rule bridges the registers: **quiet focus on a plain list row routes no keys.** A quietly focused `list-item` (what clicking a row leaves behind) is transparent to the keyboard — arrows neither walk the row group nor escalate to the ring, Enter and Space fire nothing on the row, and the key reaches the app target-less, exactly as if nothing were focused. The why is selection-follows-intent apps: in a music library the selection is MODEL state — a click selects a row, and the arrows should keep moving that app-owned selection through the fallback (`select_next`/`select_previous` above), not silently start walking engine focus from whichever row was clicked last; without the rule, the first click anywhere in a list re-aimed every arrow and swallowed the spacebar. Tab restores the full contract — a ring-focused row walks on arrows, selects on Space, submits on Enter — and rows carrying `role="treeitem"` are exempt entirely: a [tree](/docs/components/tree)'s roving keymap is the feature, under either register. Every other widget kind keeps its keys under quiet focus too (a quietly focused button still presses on Space); the rule is scoped to plain list rows because only there quiet focus is bookkeeping rather than a keyboard cursor.
+
+`examples/soundboard` is the worked example, pinned end-to-end in its tests: Space toggles the transport from anywhere — after clicking a track row (quiet, transparent), from a focused slider or scroll region (space is not one of their keys, so it falls through) — while a tabbed-to row takes Space for select and Enter for play, and the search field takes every key as typing. Automation note: `native automate widget-action <view> <id> press` escalates a plain list row to the ring register before dispatching its synthesized activation key, so a scripted activation reaches the row the way Tab-then-Enter would.
+
+## Trackpad pinch
+
+Pinch-to-zoom reaches the app as a view-global gesture channel — the `on_key` shape, deliberately outside the widget pipeline (timeline and canvas zoom are app-level concerns, not widget presses). The channel is phase-explicit: `begin`, then a stream of `change` events, then `end` (a host-cancelled gesture folds into `end` — pinch delivers incremental deltas the app applies as they arrive, so there is nothing to roll back; a terminal host event that still measured a nonzero delta arrives as one last `change` before the `end`, so the cumulative product always matches what the OS reported). Each `change` carries `scale`, the magnification **delta** for that event, and the delta is multiplicative: the cumulative gesture scale is the running product of `1 + scale`, never the sum — apply it memorylessly (`zoom *= 1 + scale`), no gesture-start bookkeeping. On macOS that delta is AppKit's raw per-event `NSEvent.magnification`, forwarded untransformed — raw magnification is the multiplicative per-event delta in every browser engine (Safari and Chrome both compound `1 + magnification` per event), so the product is the zoom users already know from the same gesture in a browser. The pointer anchor rides `x`/`y` in view-local canvas points — the pointer location during the gesture (hosts report gesture events at the pointer, not at a midpoint between the fingers), so a zoom can anchor under the cursor. Every event also names its source — `window_id` and the view `label` in Zig, `windowId`/`label` in TypeScript — because view-local coordinates mean nothing without their view: multi-window apps tell pinches apart by them.
+
+```zig
+// options: .on_pinch = onPinch,
+pub fn onPinch(pinch: platform.PinchEvent) ?Msg {
+    return switch (pinch.phase) {
+        .change => .{ .zoom = .{ .factor = 1 + pinch.scale, .cx = pinch.x, .cy = pinch.y } },
+        .begin, .end => null,
+    };
+}
+```
+
+TypeScript cores export the same channel as `pinchMsg` (the `keyMsg` shape), with the record types importable from `@native-sdk/core/events`:
+
+```ts
+import { type PinchEvent } from "@native-sdk/core/events";
+
+export function pinchMsg(pinch: PinchEvent): Msg | null {
+  if (pinch.phase !== "change") return null;
+  return { kind: "zoomed", factor: 1 + pinch.scale, cx: pinch.x, cy: pinch.y };
+}
+```
+
+macOS emits pinch today (trackpad `magnifyWithEvent:`); Windows precision-touchpad and GTK gesture sources are staged follow-ups — on those platforms the channel simply never fires. Everything flows from the journaled input events, so recorded sessions replay the identical zoom, and tests (or agents without a trackpad) drive the real event stream with `native automate widget-pinch <view-label> <scale> [x y]` — `<scale>` is the final multiplicative zoom for the gesture (one change event whose product lands exactly on it), anchor point defaulting to the view center.
+
+## Native scrolling and context menus
+
+On macOS, every non-virtualized `scroll` region is driven by an invisible `NSScrollView`: momentum and the system overlay scrollbar are OS-computed while the engine renders the content. This needs no app code — scroll offsets stay on the widget (`sync`, snapshot offsets, and programmatic scrolls work unchanged), and the engine's drawn scrollbar stands down for natively driven regions. Other platforms keep the engine's wheel physics.
+
+Scroll regions pin at their content edges by default on every path — no rubber-band bounce; kinetic motion stops cleanly at the boundary. Bouncing is a per-region opt-in: `overscroll="rubber_band"` in markup or `ElementOptions.overscroll = .rubber_band` in Zig views (the native macOS scroller gets elastic edges, the engine physics overscroll under resistance and spring back). The `ScrollPhysics.overscroll` design token flips the app-wide default; per-region values override it, and `overscroll="none"` pins a region regardless of the token.
+
+Right/ctrl-click presents a real OS context menu at the pointer: `NSMenu` on macOS, `TrackPopupMenu` on Windows, `GtkPopoverMenu` on Linux. Authors declare ONE menu and the platform decides presentation: hosts without a native menu presenter (the mobile toolkit hosts and embed hosts today) mount the same declared items as an anchored canvas surface at the click point automatically — never two authored menus, never a canvas imitation where the OS menu exists. In markup, the menu is a `<context-menu>` child of the pressable element it answers, holding `menu-item`s (`on-press` required, `disabled` optional) and `separator`s, with `if`/`else`/`for` to swap or repeat items:
+
+```html
+<list-item on-press="open:{entry.id}" label="{entry.title}">
+  <text grow="1">{entry.title}</text>
+  <context-menu>
+    <menu-item on-press="open:{entry.id}">Open</menu-item>
+    <separator />
+    <menu-item on-press="delete:{entry.id}">Delete</menu-item>
+  </context-menu>
+</list-item>
+```
+
+The Zig builder's mirror is `ElementOptions.context_menu`:
+
+```zig
+ui.listItem(.{
+    .on_press = Msg{ .select = entry.index },
+    .context_menu = &.{
+        .{ .label = "Open", .msg = Msg{ .select = entry.index } },
+        .{ .separator = true },
+        .{ .label = "Delete", .msg = Msg{ .delete = entry.index } },
+    },
+}, entry.title)
+```
+
+Editable text fields present the standard Cut / Copy / Paste / Select All menu with no declaration, wired to the same clipboard actions as the keyboard shortcuts; a selected static text presents Copy. Tests drive the native path without pixels: snapshots list each widget's declared items (`context_menu=["Open","Delete"]`), and `native automate widget-context-menu <view> <id> <item-index>` invokes an item through the same dispatch a real pick takes.
+
+## Effects
+
+For anything asynchronous — running `gh`, streaming an agent's stdout — `update` never performs the work; it describes it, and results come back as ordinary Msgs. In a TypeScript core the description is `Cmd` data returned beside the next model ([TypeScript Cores: Effects](/docs/typescript#effects-are-cmd-data) has the whole vocabulary); in a Zig core, `update` takes a third parameter, the effects channel — declare `.update_fx` instead of `.update` (two-argument apps are unchanged). The subprocess stream in both:
+
+<CodeToggle>
+
+```ts
+case "start":
+  return [model, Cmd.spawn(
+    [asciiBytes("gh"), asciiBytes("issue"), asciiBytes("list")],
+    {
+      key: "issues",
+      line: "line",   // each stdout line dispatches { kind: "line", text: Uint8Array }
+      exit: "exited", // a clean exit dispatches { kind: "exited", code: number }
+      err: "stream_failed",
+    },
+  )];
+case "cancel":
+  return [model, Cmd.cancel("issues")]; // the stream's err arm gets `cancelled`
+case "line":
+  return { ...model, lines: [...model.lines, { text: msg.text }] };
+```
+
+```zig
+const Effects = native_sdk.UiApp(Model, Msg).Effects;
+
+pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
+    switch (msg) {
+        .start => fx.spawn(.{
+            .key = stream_key,                    // caller-chosen u64, kept in the model
+            .argv = &.{ "gh", "issue", "list" },
+            .on_line = Effects.lineMsg(.line),    // each stdout line becomes Msg{ .line = ... }
+            .on_exit = Effects.exitMsg(.exited),  // the exit becomes Msg{ .exited = ... }
+        }),
+        .cancel => fx.cancel(stream_key),
+        .line => |line| model.recordLine(line),   // copy the bytes — the slice dies with this call
+        .exited => |exit| model.finish(exit),
+    }
+}
+```
+
+</CodeToggle>
+
+The process runs on a worker thread the runtime owns; results post to a bounded queue, the platform loop is nudged, and Msgs dispatch on the loop thread — the model is never touched off-thread. Views never spawn: a button dispatches a Msg, and that Msg's update arm spawns.
+
+Boot-time effects go in `.init_fx`, the app's init command: it runs exactly once on the installing frame, before the first view build, so a loading flag set there is in the very first paint and the boot fetch is already in flight when the window appears. Results arrive as ordinary Msgs; it works with either update form.
+
+Line streaming truncates single-line JSON at the 4 KiB line cap, so tools like `gh --json` use collect mode instead: spawn with `.output = .collect` and whole stdout (up to 512 KiB) arrives once on the exit Msg as `exit.output`, together with the child's stderr tail (last 4 KiB) in `exit.stderr_tail` — check it when `exit.code != 0`. No line Msgs fire for a collect spawn, overflow arrives cut with `output_truncated`/`stderr_truncated` set (never silently), and both slices die with the update call — copy what the model keeps.
+
+HTTP requests ride the same channel: one buffered request on a worker thread, delivering its terminal outcome as exactly one Msg — a real response (any status, non-2xx included), a classified failure (`rejected`, `connect_failed`, `tls_failed`, `protocol_failed`, `timed_out`), or `cancelled`:
+
+<CodeToggle>
+
+```ts
+case "load":
+  return [model, Cmd.fetch(
+    { url: asciiBytes("https://api.example.com/search?q=zig") },
+    { key: "search", ok: "fetched", err: "fetch_failed" },
+  )];
+case "stop":
+  return [model, Cmd.cancel("search")];
+case "fetched":
+  // the ok arm carries { status: number, body: Uint8Array } — a 404 is
+  // still ok: an HTTP-level error is a delivered response
+  return { ...model, status: msg.status, body: msg.body };
+```
+
+```zig
+.load => fx.fetch(.{
+    .key = search_key,                                 // fetches share the spawn slots and key space
+    .url = "https://api.example.com/search?q=zig",
+    .on_response = Effects.responseMsg(.fetched),      // Msg{ .fetched = native_sdk.EffectResponse }
+}),
+.stop => fx.cancel(search_key),
+.fetched => |response| model.recordResults(response),  // copy response.body — the slice dies with this call
+```
+
+</CodeToggle>
+
+Response bodies are binary-safe and bounded (256 KiB; longer arrives cut with `truncated = true`), the whole exchange honors a per-fetch timeout (default 30 s), and cancelling a fetch delivers exactly one `cancelled` Msg with nothing after it.
+
+Files ride the same channel: `fx.writeFile` / `fx.readFile` persist app state — session snapshots, transcripts — without smuggling an `Io` handle from `main` into `update`. Bounded (1 KiB paths, 1 MiB files), key-based, one terminal Msg per operation with an explicit outcome (`ok`, `not_found`, `io_failed`, `truncated` — an over-bound read's own outcome, so a cut JSON snapshot cannot parse as whole — `rejected`, `cancelled`); writes create missing parent directories and replace the file whole:
+
+```zig
+.save => fx.writeFile(.{
+    .key = save_key,
+    .path = model.sessionPath(),
+    .bytes = model.snapshotJson(),                 // copied at call time
+    .on_result = Effects.fileMsg(.saved),          // Msg{ .saved = native_sdk.EffectFileResult }
+}),
+.saved => |result| model.noteSaved(result.outcome),
+```
+
+Failure and overflow are always visible: a spawn that cannot run delivers an exit Msg with reason `rejected`, a fetch that cannot run delivers a response Msg with outcome `rejected`, and a file effect that cannot run delivers a result Msg with outcome `rejected`; dropped or truncated lines carry counts and flags; `cancel` kills and reaps the process and always ends in exactly one `cancelled` exit Msg, with no further line Msgs after it. Tests use the fake executor (`effects.executor = .fake`) to assert on spawn, fetch, and file requests and feed synthetic lines, stderr (`feedStderr`, collect spawns), exits, responses, and file results back deterministically — set it before the first frame and `init_fx` boot spawns are recorded too. See `examples/effects-probe`.
+
+For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std.Io`, which `update` never sees): `native_sdk.nowMs()` / `nowNanoseconds()` read the wall clock and `monotonicMs()` / `monotonicNanoseconds()` the duration clock. Time-dependent logic stores the `native_sdk.Clock` seam in the model (`.system` by default) so tests substitute a deterministic `native_sdk.TestClock` and advance it by hand.
+
+## Secondary windows
+
+Windows are model-declared, exactly like the tray: `Options.windows_fn` returns the window descriptors that should exist right now (presence IS visibility — there is no `visible` flag because the platform window channel is create/focus/close with no hide), and `Options.window_view` builds each declared window's whole canvas tree, keyed by the descriptor's window label. After every dispatched Msg the runtime reconciles: windows the model started declaring are created (a source-less native window wearing one `gpu_surface` view with the descriptor's `canvas_label`, inheriting the main canvas's gpu options), windows it stopped declaring close, and every open window's view rebuilds from the same model — a theme picked in the settings window restyles the main window on the same dispatch.
+
+```zig
+fn windows(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
+    var count: usize = 0;
+    if (model.settings_open) {
+        scratch.windows[count] = .{
+            .label = "settings",
+            .canvas_label = "settings-canvas",
+            .title = "Settings",
+            .width = 360,
+            .height = 320,
+            .min_width = 320,               // the WINDOW enforces the floor (macOS contentMinSize)
+            .min_height = 280,              // — resizes stop instead of clamping panes
+            .on_close = .settings_closed,   // the user's close button, as a Msg
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+fn windowView(ui: *App.Ui, model: *const Model, window_label: []const u8) App.Ui.Node {
+    _ = window_label; // one declared window; multi-window apps switch on it
+    return settingsPane(ui, model);
+}
+
+// options: .windows_fn = windows, .window_view = windowView,
+```
+
+Input from any window dispatches Msgs through that window's own tree with its window identity, and a USER close (the titlebar close button) dispatches the descriptor's `on_close` Msg — the dismissal precedent applied to windows: the window is already gone as an optimistic echo, the model clears its open flag in `update` (or keeps declaring the window and the next rebuild brings it back — source wins). A close the model itself initiated (it stopped declaring the window) never echoes a Msg. At most `UiApp.max_ui_windows` (4) secondary windows may be declared; the excess warns and is ignored. `min_width`/`min_height` declare a content min-size floor the window itself enforces (macOS `contentMinSize`): the user's resize stops at the floor instead of the layout clamping and clipping panes below their declared minimums — the same fields exist on app.zon windows and `ShellWindow`, and the startup window applies its declaration at the host create like `titlebar`. 0 (the default) leaves the axis at the platform's own minimum.
+
+Markup deliberately binds ONE window's content: there is no `window` element in the closed grammar, because windows are app-shell concerns, not view-tree concerns. A markup-authored secondary window is a `canvas.CompiledMarkupView` whose `build` the `window_view` fn calls for the matching label.
+
+Automation reaches every window with the same verbs: snapshots enumerate all windows and their widgets, and `widget-click`/`widget-hold`/`widget-key`/`screenshot` address a canvas by its view label across all open windows — a settings window's canvas is as drivable as the main one. See `examples/system-monitor` (the gear chip opens a model-declared settings window).
+
+## Hidden titlebar: drag regions and chrome insets
+
+`titlebar = "hidden_inset"` on a window (app.zon `windows`/`shell.windows`, `ShellWindow.titlebar`, or a `WindowDescriptor`'s `titlebar`) is the VS Code/Linear shape: content extends under a transparent titlebar with the title hidden — on macOS the traffic lights stay. The declaration threads through the startup window create, so the MAIN window hides its titlebar from the first frame. Three channels make the app's own header an honest replacement for the chrome it removed:
+
+1. **`window-drag="true"`** (builder: `.window_drag = true`) marks an element as a window-drag surface. A press on its background — or on plain text/icons inside it — moves the window (the drag starts only on actual movement; a plain click moves nothing), and a double-click applies the OS titlebar convention (macOS: zoom, honoring the user's titlebar double-click preference). Press fall-through keeps working: a button inside the drag header stays a button, because the press walk claims interactive children before the drag surface.
+2. **`on_chrome`** delivers the window's chrome as a Msg — the overlay insets (macOS: titlebar height on top, traffic lights on the leading edge; all-zero in fullscreen, on standard-chrome windows, and on platforms without the concept) plus the traffic-light cluster's frame, so a header can pad its leading edge and vertically center content against the buttons instead of hardcoding pixel counts. It fires before the first view build and again when the chrome changes. Main canvas window only (the same scope note as `sync`).
+3. The header itself is ordinary markup:
+
+```html
+<row padding="10" cross="center" background="surface" window-drag="true" label="Toolbar">
+  <spacer width="{chrome_leading}" />   <!-- clears the traffic lights; 0 in fullscreen -->
+  <text>My Document</text>
+  <spacer grow="1" />
+  <button size="sm" on-press="save">Save</button>  <!-- stays clickable -->
+</row>
+```
+
+`titlebar = "hidden_inset_tall"` is the same shape with the taller unified band: macOS centers the traffic lights in a 52pt band (the Notes/Linear look) instead of the compact one — pick it when the header row is toolbar-height so the lights sit on its centerline. Fullscreen falls back cleanly in both variants.
+
+macOS-first, like `resizable = false`: GTK and Win32 hosts keep standard chrome (both `hidden_inset` variants are harmless there), report zero insets, and treat drag-region presses as dead space. See `examples/markdown-viewer` for the full retrofit.
+
+`titlebar = "chromeless"` removes ALL OS chrome — the titleband AND the system buttons, on every desktop (macOS borderless, Windows caption-less popup, Linux undecorated). It is an EXPLICIT opt-in for fully-skinned apps whose chassis draws its own working close/minimize controls wired to the real window-action effects (`fx.closeWindow(label)` / `fx.minimizeWindow(label)`); ordinary apps should keep the hidden styles above, which keep the real OS buttons. Drag regions keep working; chrome insets are honestly zero. See `examples/deck` for the full shape.
+
+## Images
+
+Image pixels are runtime-registered resources: the app registers decoded straight-alpha RGBA8 under a caller-chosen `ImageId` (a `u64` kept in the model, effect-key style; 0 is the "no image" sentinel), and `image`, `icon_button`, and `avatar` widgets reference the id. Native SDK bundles no image codecs — encoded bytes (PNG, JPEG, whatever the OS decodes) go through the platform decoder: CGImageSource on macOS and the iOS toolkit host, gdk-pixbuf on GTK, WIC on Windows, BitmapFactory on the Android toolkit host (both mobile hosts register the codec over the embed image service; an embed host without one reports `error.UnsupportedService`).
+
+The first-class load path is `fx.loadImage` (`Cmd.imageLoad` on the TS tier): one effect resolving a local-then-URL source cascade with a content-addressed cache, decoding, registering, and delivering exactly one result Msg — see [Dynamic Images](/docs/dynamic-images) for the whole story, including the byte-identical offline replay guarantee. The registration seam underneath is also callable directly — the hand-rolled fetch-avatar path is one update arm: fetch bytes, decode + register in one call, and write the id into the model only on success — so the avatar renders its initials while the image is loading and keeps them when the fetch or decode failed:
+
+```zig
+.load => fx.fetch(.{ .key = avatar_key, .url = avatar_url, .on_response = Effects.responseMsg(.fetched) }),
+.fetched => |response| {
+    if (response.outcome == .ok and response.status == 200) {
+        _ = fx.registerImageBytes(avatar_image_id, response.body) catch return;
+        model.avatar_image = avatar_image_id;   // only a registered id reaches the view
+    }
+},
+```
+
+```zig
+// in a Zig view:
+ui.avatar(.{ .image = model.avatar_image, .semantics = .{ .label = "Octocat" } }, "OC"),
+ui.image(.{ .image = model.chart_image, .width = 120, .height = 80, .semantics = .{ .label = "Chart" } }),
+```
+
+```html
+<!-- in markup, image leaves and avatars bind the same model id;
+     0 draws nothing / renders the initials -->
+<image image="{chart_image}" width="120" height="80" label="Chart" />
+<avatar image="{avatar_image}" label="Octocat">OC</avatar>
+```
+
+`fx.registerImage(id, width, height, rgba8)` registers already-decoded pixels (the runtime copies them; your buffer is free on return), `fx.registerImageBytes(id, bytes)` decodes through the platform codec first, and `fx.unregisterImage(id)` frees the slot. Re-registering an id replaces its pixels and every view repaints — GPU caches re-upload off the changed content fingerprint, no invalidation calls. For caches, mint fresh ids (effect-key style, monotonically increasing) and unregister the evictee — never re-key different content onto a live id. Outside `UiApp`, the same registry is `Runtime.registerCanvasImage`/`registerCanvasImageBytes`/`unregisterCanvasImage`.
+
+Capacities are fixed and loud (`canvas_limits`): `max_registered_canvas_images` slots (16) of `max_registered_canvas_image_pixel_bytes` each (1 MiB — 512×512 RGBA8, avatar/icon scale), with `error.ImageRegistryFull`, `error.ImageTooLarge`, `error.ImageDecodeFailed`, and `error.UnsupportedService` (a platform without a codec) never silent. Registered images render everywhere the canvas does: live presentation (GPU packet and software paths), `renderCanvasScreenshot`, and automation screenshots. A draw referencing an id that is not (or no longer) registered skips — a pure view cannot fail presentation with a transient loading state. In tests, the null platform's `image_decode` flag enables a deterministic decoder for the strict PNG subset `canvas.png.writeRgba8` emits, so raw RGBA fixtures exercise the full decode→register→draw path without bundling a codec.
+
+## Rich text: inline spans and markdown
+
+Mixed-style text inside one wrapped paragraph is markup's `<span>`: inline children of a `<text>` element, each styling one run with `weight` (`regular`, `medium` — the semibold rung — or `bold`), `mono`, `italic`, `scale` (a positive multiplier on the paragraph's base size), `underline`, and `foreground` (a color token name). `{bindings}` interpolate inside spans like any text, and the whole paragraph word-wraps as one block:
+
+```html
+<text>
+  Disk <span weight="bold">{diskUsed}</span> of
+  <span foreground="text_muted">{diskTotal}</span> — run
+  <span mono="true">native doctor</span> if this looks wrong.
+</text>
+```
+
+Whitespace between runs collapses to a single space; runs written with no whitespace between them abut, which is how a mono run takes trailing punctuation (`<span mono="true">init.zig</span>.`). Spans do not nest and take no events or keys — layout, identity, and the accessible name stay on the enclosing `<text>` — and the paragraph announces to assistive tech as **one** text run: spans are visual, not structural. Because a span paragraph always word-wraps (reserving its real wrapped height), the single-line `wrap`/`overflow` policies are rejected on it. Both engines lower spans through the same paragraph builder, so a markup span paragraph renders identically to a Zig-built one.
+
+`scale` composes with the paragraph's typography: the run draws (and measures — line breaking is size-aware) at the base size times the multiplier, so `<text size="heading">` with a `scale="1.5"` span gives heading × 1.5, and the multiplier tracks the themable token steps instead of hard-coding a pixel size. One honest limit: a paragraph reserves ONE uniform line height sized by its largest scale, and every run sits on that line's shared baseline — mixed-scale paragraphs are for inline headings and hero stats next to their captions, not for stacking independent text sizes (stack separate `<text>` elements for that). Only positive finite multipliers are accepted; zero, negative, and non-numeric scales are teaching errors instead of runs silently drawn at the base size. `underline` is a pure decoration — it does not make the run a link.
+
+The full span model — including `strikethrough`, `background` highlights, and link spans — is available from the Zig builder as *spans*:
+
+```zig
+const spans = [_]canvas.TextSpan{
+    .{ .text = "Run " },
+    .{ .text = "zig build test", .monospace = true },
+    .{ .text = " then read " },
+    .{ .text = "the guide", .link = "https://example.com/guide" },
+};
+ui.paragraph(.{ .on_link = Ui.linkMsg(.open_url) }, &spans)
+```
+
+Wrapping and measurement are span-aware (the platform text provider measures every run with the font it draws with), stacked paragraphs reserve their real wrapped height, and link spans are first-class: they carry `role=link` semantics in automation snapshots, show the pointing-hand cursor (the only place the engine uses it — controls keep the platform arrow, following native convention rather than the web's), and clicking one dispatches your `Msg` with the link payload.
+
+Source presentation is the reusable `ui.code` / `<code>` component. It is deliberately bare: no background, border, radius, shadow, or padding. Wrap it in a `panel`, `card`, or another container when the design needs surface chrome. It wraps by default; `wrap="false"` preserves logical lines inside one horizontal scroll region, and `line-numbers` opts into a muted logical-line gutter. A definite `height` keeps overflow reachable with vertical scrolling (or both axes when wrapping is off):
+
+```html
+<code source="{component_source}" language="tsx" line-numbers wrap="false" width="480" label="Accordion example" />
+```
+
+```zig
+ui.code(.{
+    .language = .html,
+    .line_numbers = true,
+    .wrap = false,
+    .width = 480,
+}, model.component_source)
+```
+
+For example, an inset code well is ordinary composition:
+
+```html
+<panel padding="12">
+  <code source="{component_source}" language="tsx" />
+</panel>
+```
+
+Recognized languages receive theme-aware syntax color for keywords, types/numbers, strings, and comments: Zig; JavaScript/TypeScript; JSX/TSX; JSON; YAML; shell; Python; Rust; C, C++, C#, Java, Kotlin, and Swift; Go; HTML/XML/SVG; CSS/SCSS/Less; and SQL. HTML-family highlighting distinguishes element and component tags, attributes, strings, comments, and JavaScript/TypeScript expressions. Unknown or omitted tags stay plain monospace, and the bounded highlighting fallback never drops code. See [Code](/docs/components/code).
+
+Markdown builds on the same model. `native_sdk.markdown` maps a GitHub-flavored subset — headings, inline styles, links (including bare `http(s)://` URLs, which autolink with trailing punctuation trimmed), bullet/ordered/task lists, fenced code blocks, blockquotes, rules, pipe tables, and `<details>` collapsibles — onto ordinary widgets:
+
+```zig
+const Md = native_sdk.markdown.Markdown(Msg);
+Md.view(ui, issue.body, .{
+    .on_link = Ui.linkMsg(.open_url),
+    .on_details = Md.detailsMsg(.toggle_details),
+    .details_expanded = &model.details_expanded, // caller-owned flags, elm-style
+    .issue_link_base = "ghissue://", // opt-in: "#123" links to ghissue://123
+})
+```
+
+Malformed input degrades to plain text — the build fn never fails. Task-list checkboxes render as disabled (display-only) checkboxes, and `<details>` expansion is state the caller's model owns.
+
+Fenced code preserves every source indentation level and lowers through the same `ui.code` component, including JSX/TSX-aware HTML-family highlighting. Markdown keeps the component defaults: wrapping on, line numbers off.
+
+GFM pipe tables map onto the real `table`/`table-row`/`table-cell` widgets: the header row renders bold, the delimiter row's `:---`/`:--:`/`---:` cells set per-column start/center/end alignment, every cell runs the full inline grammar (code, bold, links — links in cells are clickable), `\|` puts a literal pipe in a cell, and cells wrap at their column width (columns share the width equally in v1). A pipe block whose delimiter row is missing or mismatched is not a table and renders as plain paragraphs.
+
+In markup, the `<markdown>` element wires all of this declaratively:
+
+```html
+<markdown source="{issue_body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="ghissue://" />
+```
+
+`source` (required) is one `{binding}` producing the markdown text — a string field, zero-arg method, or arena-taking method. `on-link` and `on-details` are bare `Msg` tags (the runtime supplies their payloads: the URL as `[]const u8`, the details index as `usize`), `details-expanded` names a `[]const bool` iterable through the same sources `for each` accepts, and `issue-link-base` (a literal prefix or one `{binding}`) turns `#123` references into links to base ++ number. Everything but `source` is optional — without the details wiring, `<details>` blocks render collapsed and inert. Both the interpreter and the comptime compiler implement the element identically.
+
+## Pipeline components: stepper, timeline, and nav
+
+Pipeline UIs (agent runs, wizards, activity feeds) get three composites. All three are ordinary compositions of existing widgets — same layout, theming, semantics, and hit-testing as hand-written trees.
+
+A **stepper** is a horizontal stage track (the house stepper conventions: indicator + title per step, separators as connectors). The model owns the active index; earlier steps render completed (a check badge), later ones pending:
+
+```html
+<stepper active="{stage_index}">
+  <step>Work</step>
+  <step>Triage</step>
+  <step>Review · {review_round}</step>
+  <step>Fix</step>
+  <step>Ready</step>
+</stepper>
+```
+
+From Zig: `ui.stepper(.{ .active = model.stage_index }, &.{ .{ .label = "Work" }, ... })`. Semantics: a `list` of `listitem`s, the active step `selected`, each label carrying its state (`"Review (active)"`) plus its position, so automation can read the pipeline at a glance.
+
+A **timeline** is a ledger list (the house timeline conventions: indicator + separator rail + title/description/meta per item). Items are leaves; the attributes carry the content:
+
+```html
+<timeline gap="4">
+  <for each="ledger" key="slot" as="entry">
+    <timeline-item title="{entry.title}" description="{entry.summary}" meta="{entry.meta}"
+                   variant="{entry.tone}" on-press="open_step:{entry.slot}" />
+  </for>
+  <timeline-item title="Ready for review" indicator="✓" variant="secondary" connector="false" />
+</timeline>
+```
+
+The leading badge is a small dot colored by `variant` (map run outcomes: `primary` for done, `destructive` for errors, `outline` for stopped, ...) or carries `indicator` text ("✓"); `connector="false"` ends the rail on the last item. With `on-press`, the item grows a trailing chevron and the press binds to the item's root, focusable with role `listitem` — clicks on the title/description/meta fall through to it, so a click anywhere on the item dispatches the message (dragging still selects the text). There is no built-in hover fill or line-clamping on the description in v1.
+
+A **nav** container is the within-pane navigation stack (ledger item → step transcript, back button pops). Zig-only for now — markup swaps views with `<if>`:
+
+```zig
+ui.nav(.{ .active = model.nav_depth, .retain = true }, .{
+    ledgerPane(ui, model),
+    transcriptPane(ui, model),
+})
+```
+
+The model owns the stack (push = set `nav_depth = 1`, pop = back to 0; out-of-range clamps). Pages are index-keyed, so a page's widget ids — and with them engine-owned scroll offsets and text edits — are stable across swaps. `retain = true` keeps inactive pages mounted but hidden: they keep engine state and drop out of rendering, hit-testing, focus traversal, and semantics; the default unmounts them (cheapest, engine state dropped). v1 swaps instantly — there is no push/pop animation yet — and focus does not transfer automatically: move it from `update` when the focused widget lives on the outgoing page.
+
+## Charts
+
+The `<chart>` element is the data-visualization composite: `<series>` children bind model iterables of `f32` and draw through the vector path pipeline with token colors, so charts re-theme with the palette, repaint exactly when their data changes, and report their series in automation snapshots. Three series kinds cover time-series dashboards:
+
+```html
+<chart grow="1" height="220" y-min="0" grid-lines="3" label="Star history">
+  <series kind="area" values="{sdkStars}" color="accent" label="native-sdk" />
+  <series kind="line" values="{examplesStars}" color="info" label="examples" />
+</chart>
+```
+
+- **`line`** — a polyline through the values. A single sample renders as a dot.
+- **`area`** — a line with a translucent fill down to the baseline (the builder's `fill = true` spelling).
+- **`bar`** — one bar per value, always anchored at zero (the auto domain forces 0 in; negative values hang below the zero line). A zero value draws nothing — zero looks like zero.
+
+Series `values` take one `{binding}` naming a `[]const f32` iterable — a model field, public declaration, or function (arena functions work), the same resolution set as `for each`, slice-valued template args included. Values are y samples at uniform x steps, oldest first; `NaN` marks a missing sample and draws a gap, so pad a filling window with leading `NaN` in a model function and the trace enters from the right. Colors are design-token references (`accent`, `info`, `success`, `warning`, `destructive`, ...), never raw colors, so charts hold up in both themes. The y domain derives from the data per side unless `y-min`/`y-max` pin it (literals or scalar bindings); `grid-lines` draws that many horizontal token hairlines (opt-in — none by default) and `baseline="true"` marks the zero line.
+
+Axis tick labels are opt-in and draw in the muted text register inside reserved gutters. `x-labels="{binding}"` names a model iterable of strings — one category label per sample, oldest first — thinned deterministically to every Nth so labels never collide (and dropped entirely when a series downsamples: bucketed indices no longer name the labeled samples). `y-labels="true"` adds numeric ticks on a nice-step lattice (1/2/5 × 10^k, exact at their precision); with `grid-lines` set, the gridlines ride the same lattice, so the grid and its labels can never disagree.
+
+`hover-details="true"` adds pointer-hover point details: the pointer snaps to the nearest sample, a hairline cursor marks it (line series get a dot on the hovered point), and a floating card shows the sample's label with every series' name and value. Interaction-only chrome — static renders never show it.
+
+Long series are safe: charts downsample every series past 256 points with deterministic index-bucket min/max decimation (spikes survive, same input always produces the same pixels), so a 10k-point history renders within the path budget instead of erroring.
+
+Semantics: role `chart`, a generated series summary as the label (`"chart: stars 10000 pts last 9999.00; cpu 3 pts last 0.75"` — describing the source series, pre-decimation) unless you set one, and the first series' latest value as the accessibility value, so automation can assert on live data without pixel access. Charts never claim presses: clicks fall through to the nearest pressable ancestor, so a chart inside a pressable row keeps the row clickable (`hover-details` makes the chart a hover target only).
+
+The series set is static — the plot's shape is part of the design and the DATA varies through the bindings. `ui.chart` (the same code the markup lowers through) is the escape hatch for what the grammar deliberately excludes: `.band` envelopes (a min/max band pairs a second lower-edge slice per point) and series sets composed dynamically at view time. See [Chart](/docs/components/chart) for the full attribute tables.
+
+## Accessibility
+
+Every interactive element needs an accessible name — the text a screen reader announces and automation snapshots address widgets by. Name sources are the element's text content, the `text` attribute, or `label="..."`; text-entry controls take `label` or `placeholder` (the accessibility bridges announce the placeholder as the fallback name). The sources never combine: an explicit `label` REPLACES the element's text as the accessible name — while a label is set, the visible text is neither announced nor targetable, so never label an element whose visible text your automation greps for.
+
+This is a machine check, not a review item. An unnamed control, an icon-only control without a label (the icon name is a drawing instruction, not a label), or a misused role (`role="tree"` on an element that can never hold rows) is a validation error in `native markup check`, both view engines, and the LSP — the rubric is whether a screen reader user is fully blocked. Unnamed images and labels that duplicate the text they shadow degrade rather than block, so they report as warnings (`--strict` promotes them); the explicit `label=""` marks an image decorative on purpose.
+
+Zig-built views get the same discipline at tree level: `canvas.expectA11yAuditSweepClean` lays out the real tree and reports interactive widgets announced with no name (including dynamic labels that resolve empty at runtime), focusable widgets keyboard traversal can never reach, and identically labeled sibling controls — adopt it in your test suite next to `canvas.expectLayoutAuditSweepClean`. Contrast checking and focus-visible styling checks are not part of the audit yet.
+
+## Tooling
+
+- `native markup check src/app.native` — instant validation with `file:line:column` errors, including the font-coverage tofu guard: literal text with a codepoint outside the bundled face is a teaching error naming the character (it renders as a tofu box on the reference/screenshot and mobile paths — [register a font](/docs/fonts) that covers it and bind the text from the model, or use a vector icon or plain words; the static check knows only the bundled face's coverage). Dynamic strings get the same lesson as a Debug-build diagnostic when the view builds. Accessibility findings ride the same pass: unnamed interactive controls and role misuse are errors, unnamed images and redundant labels are warnings (see [Accessibility](#accessibility)).
+- `native markup lsp` — diagnostics, completion, and hover in your editor (see `editors/native-markup/` in the repo for VS Code, Helix, and Neovim setup).
+- The automation harness drives widgets and reads accessibility snapshots and screenshots headlessly — see [Automation](/docs/automation).
+
+### The model–view contract
+
+The model-contract artifact — `zig-out/model-contract.zon`, a reflection of your `Model`/`Msg` — is refreshed by `native test` in every app shape (apps that own their build can also run `zig build model-contract` directly). With that artifact fresh, `native check` verifies markup against your app's actual surface — no app compile in the loop:
+
+- View → model: every binding path, `for each` iterable, `key` field, message tag, and payload type must exist on the model with the right shape, and expressions type-check with the real binding types — `{count > 'a'}` is an error naming `count` and its Zig type. Unknown names get a did-you-mean over your model's actual fields.
+- Model → view: model fields, query fns, and `Msg` tags that no view binds or dispatches are reported as **warnings** — state only `update`/fx logic touches is legitimate, so declare it: `pub const view_unbound = .{ "next_id" };` on `Model` or `Msg` opts names out. `--strict` promotes the warnings to failures.
+- Template args are part of a template's interface: the kinds of use-site arguments flow into the template body (a string passed into a `width` arg fails at the use), slot content checks in the consumer's scope, and the check follows the whole `<import>` closure.
+
+A missing or stale artifact (the artifact carries a hash of your Zig sources) degrades to structural checking with one loud line ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks") — never a false pass; the compiled engine still enforces the same contract at build time, and a conformance suite holds the two checkers to identical accept/reject sets. Model state consumed only by a Zig-built view needs `view_unbound` too — the markup checker cannot see Zig view reads.
+
+For the component catalog and styling model, see [Built-in Components](/docs/built-in-components). For dropping down to the programmatic API, the `canvas.Ui(Msg)` builder produces exactly the same trees the markup compiles to.

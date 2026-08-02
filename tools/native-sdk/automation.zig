@@ -90,8 +90,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.E
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-drag", value);
     } else if (std.mem.eql(u8, command, "widget-wheel")) {
-        if (args.len != 4) return usage();
-        const value = try std.fmt.allocPrint(allocator, "{s} {s} {s}", .{ args[1], args[2], args[3] });
+        // The optional fourth token is the horizontal delta (per-axis
+        // routing applies, like a real trackpad gesture with both).
+        if (args.len != 4 and args.len != 5) return usage();
+        const value = try std.mem.join(allocator, " ", args[1..]);
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-wheel", value);
     } else if (std.mem.eql(u8, command, "widget-key")) {
@@ -99,6 +101,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.E
         const value = try std.mem.join(allocator, " ", args[1..]);
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-key", value);
+    } else if (std.mem.eql(u8, command, "widget-pinch")) {
+        if (args.len != 3 and args.len != 5) return usage();
+        const value = try std.mem.join(allocator, " ", args[1..]);
+        defer allocator.free(value);
+        try sendCommand(allocator, io, "widget-pinch", value);
     } else if (std.mem.eql(u8, command, "shortcut")) {
         if (args.len != 2) return usage();
         try sendCommand(allocator, io, "shortcut", args[1]);
@@ -445,8 +452,9 @@ fn printUsage() void {
         \\  widget-context-press <view-label> <widget-id>   (right-click: context menu, or on_hold when the route has none)
         \\  widget-context-menu <view-label> <widget-id> <item-index>   (invoke a declared context-menu item; snapshots list them as context_menu=[...])
         \\  widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]
-        \\  widget-wheel <view-label> <widget-id> <delta-y>
+        \\  widget-wheel <view-label> <widget-id> <delta-y> [delta-x]
         \\  widget-key <view-label> <key> [text]
+        \\  widget-pinch <view-label> <scale> [x y]   (trackpad pinch: <scale> is the gesture's final multiplicative zoom, e.g. 1.5 zooms in; anchor defaults to the view center)
         \\  shortcut <id>
         \\  tray-action <item-id>   (status-item dropdown row; snapshots print tray-item #id)
         \\  focus <view-label>
@@ -780,26 +788,45 @@ fn newestBinaryInZigOut(io: std.Io) ?struct { name: []const u8, mtime_ns: i128 }
 // command vocabulary — and every failure mode is SILENT (a days-old
 // snapshot reads as plausible state; a stale binary once cost a whole
 // misdiagnosis round).
-// Both binaries bake `protocol.version` at their own build time and the
-// app stamps its copy into every snapshot header; any read that would
-// interpret snapshot state first proves both sides speak the same
-// version, and refuses loudly — naming both versions — otherwise.
+// Both binaries bake `protocol.fingerprint` at their own build time and
+// the app stamps its copy into every snapshot header; any read that
+// would interpret snapshot state first proves both sides speak the same
+// protocol, and refuses loudly — naming both fingerprints — otherwise.
 
 const ProtocolSkew = union(enum) {
     ok,
     /// The publisher stamps no `protocol=` field: it predates the
     /// handshake (or this CLI is from the future relative to the app).
     missing,
-    /// The publisher's version, when it differs from this binary's.
-    mismatch: u32,
+    /// The publisher's fingerprint, when it differs from this binary's.
+    mismatch: u64,
 };
 
-/// `protocol=<n>` from the snapshot header, checked against this
-/// binary's own baked-in `protocol.version`.
+/// `protocol=<fingerprint>` from the snapshot header, checked against
+/// this binary's own baked-in `protocol.fingerprint`. Accepts the
+/// `0x`-hex form this build stamps and bare decimal, so a stale app
+/// still stamping the retired integer counter gets a NAMED mismatch
+/// instead of hiding in the `.missing` arm.
 fn protocolSkew(bytes: []const u8) ProtocolSkew {
-    const published = headerField(bytes, "protocol=") orelse return .missing;
-    if (published == protocol.version) return .ok;
+    const published = fingerprintField(bytes, "protocol=") orelse return .missing;
+    if (published == protocol.fingerprint) return .ok;
     return .{ .mismatch = published };
+}
+
+/// Like `headerField`, for the `0x`-hex-or-decimal u64 fingerprint form.
+fn fingerprintField(bytes: []const u8, marker: []const u8) ?u64 {
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, search, marker)) |index| {
+        search = index + marker.len;
+        if (index > 0 and bytes[index - 1] != ' ' and bytes[index - 1] != '\n') continue;
+        var digits = search;
+        if (digits + 2 <= bytes.len and bytes[digits] == '0' and bytes[digits + 1] == 'x') digits += 2;
+        var end = digits;
+        while (end < bytes.len and std.ascii.isHex(bytes[end])) end += 1;
+        if (end == digits) continue;
+        return std.fmt.parseUnsigned(u64, bytes[search..end], 0) catch continue;
+    }
+    return null;
 }
 
 fn describeProtocolSkew(skew: ProtocolSkew, io: std.Io) void {
@@ -809,19 +836,21 @@ fn describeProtocolSkew(skew: ProtocolSkew, io: std.Io) void {
         .ok => {},
         .mismatch => |published| std.debug.print(
             "error: automation protocol mismatch at {s}/snapshot.txt\n" ++
-                "       the running app publishes protocol v{d} but this native binary speaks v{d} -\n" ++
-                "       one of them is stale; rebuild the native CLI (zig build) and/or relaunch\n" ++
-                "       the freshly built app so both share one protocol (compare `native version`\n" ++
+                "       the running app publishes protocol fingerprint 0x{x:0>16} but this\n" ++
+                "       native binary speaks 0x{x:0>16} - one of them was built from a different\n" ++
+                "       framework state; rebuild the native CLI (zig build) and/or relaunch the\n" ++
+                "       freshly built app so both share one protocol (compare `native version`\n" ++
                 "       against your framework checkout, and delete stale zig-out binaries)\n",
-            .{ dir, published, protocol.version },
+            .{ dir, published, protocol.fingerprint },
         ),
         .missing => std.debug.print(
-            "error: the automation snapshot at {s}/snapshot.txt carries no protocol version\n" ++
+            "error: the automation snapshot at {s}/snapshot.txt carries no protocol fingerprint\n" ++
                 "       its publisher predates the protocol handshake, so this native binary\n" ++
-                "       (protocol v{d}) may misread it - rebuild and relaunch the app against the\n" ++
-                "       current framework; if the app IS current, this native binary is the stale\n" ++
-                "       side (an old zig-out copy?) - rebuild it and check `native version`\n",
-            .{ dir, protocol.version },
+                "       (protocol 0x{x:0>16}) may misread it - rebuild and relaunch the app\n" ++
+                "       against the current framework; if the app IS current, this native binary\n" ++
+                "       is the stale side (an old zig-out copy?) - rebuild it and check\n" ++
+                "       `native version`\n",
+            .{ dir, protocol.fingerprint },
         ),
     }
 }
@@ -1413,19 +1442,27 @@ test "publisherPid parses the header field only" {
     try testing.expectEqual(@as(?u32, null), publisherPid("publisher_pid=abc\n"));
 }
 
-test "protocolSkew matches this binary's version and names the skew" {
+test "protocolSkew matches this binary's fingerprint and names the skew" {
     var ok_buffer: [64]u8 = undefined;
-    const ok_snapshot = try std.fmt.bufPrint(&ok_buffer, "ready=true protocol={d} publisher_pid=4242\n", .{protocol.version});
+    const ok_snapshot = try std.fmt.bufPrint(&ok_buffer, "ready=true protocol=0x{x:0>16} publisher_pid=4242\n", .{protocol.fingerprint});
     try testing.expectEqual(ProtocolSkew.ok, protocolSkew(ok_snapshot));
 
+    // A publisher whose fingerprint is perturbed by one bit is any
+    // other build's: the mismatch names the published fingerprint.
     var skewed_buffer: [64]u8 = undefined;
-    const skewed_snapshot = try std.fmt.bufPrint(&skewed_buffer, "ready=true protocol={d} publisher_pid=4242\n", .{protocol.version + 1});
-    try testing.expectEqual(ProtocolSkew{ .mismatch = protocol.version + 1 }, protocolSkew(skewed_snapshot));
+    const skewed_snapshot = try std.fmt.bufPrint(&skewed_buffer, "ready=true protocol=0x{x:0>16} publisher_pid=4242\n", .{protocol.fingerprint +% 1});
+    try testing.expectEqual(ProtocolSkew{ .mismatch = protocol.fingerprint +% 1 }, protocolSkew(skewed_snapshot));
+
+    // A stale app still stamping the retired decimal counter is a named
+    // mismatch too, never `.missing`.
+    try testing.expectEqual(ProtocolSkew{ .mismatch = 8 }, protocolSkew("ready=true protocol=8 publisher_pid=4242\n"));
 
     // Pre-handshake publishers stamp no protocol field at all.
     try testing.expectEqual(ProtocolSkew.missing, protocolSkew("ready=true frame=3 publisher_pid=4242\n"));
     // Widget text echoing the token mid-word is not the header field.
     try testing.expectEqual(ProtocolSkew.missing, protocolSkew("name=\"xprotocol=9\"\n"));
+    // A bare `0x` with no digits is not a fingerprint.
+    try testing.expectEqual(ProtocolSkew.missing, protocolSkew("ready=true protocol=0x \n"));
 }
 
 test "snapshotLiveness classifies both directions" {

@@ -846,6 +846,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
         .{ .id = 4, .kind = .text_field, .frame = geometry.RectF.init(12, 96, 160, 28), .text = "Search", .placeholder = "Search deployments", .text_selection = canvas.TextSelection{ .anchor = 1, .focus = 4 }, .text_composition = canvas.TextRange.init(2, 5), .state = .{ .required = true, .read_only = true, .invalid = true } },
         .{ .id = 5, .kind = .select, .frame = geometry.RectF.init(184, 96, 120, 28), .text = "Production", .state = .{ .expanded = false }, .semantics = .{ .label = "Environment" } },
         .{ .id = 10, .kind = .data_grid, .frame = geometry.RectF.init(12, 132, 220, 64), .text = "Deployments", .layout = .{ .gap = 2 }, .children = &rows },
+        .{ .id = 6, .kind = .input, .frame = geometry.RectF.init(184, 58, 120, 28), .text = "Draft" },
     };
     var layout_nodes: [16]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{
@@ -860,7 +861,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expect(platform_state.update_count >= 1);
     try std.testing.expectEqual(@as(platform.WindowId, 1), platform_state.window_id);
     try std.testing.expectEqualStrings("canvas", platform_state.view_label[0..platform_state.view_label_len]);
-    try std.testing.expectEqual(@as(usize, 12), platform_state.node_count);
+    try std.testing.expectEqual(@as(usize, 13), platform_state.node_count);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.group, platform_state.nodes[0].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.button, platform_state.nodes[1].role);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.checkbox, platform_state.nodes[2].role);
@@ -870,12 +871,15 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     const cell_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 16).?;
     const text_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 4).?;
     const select_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 5).?;
+    const initial_editor_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 6).?;
     try std.testing.expectEqual(@as(?bool, false), select_node.expanded);
     try std.testing.expect(text_node.required);
     try std.testing.expect(text_node.read_only);
     try std.testing.expect(text_node.invalid);
     try std.testing.expect(!text_node.actions.set_text);
     try std.testing.expect(text_node.actions.set_selection);
+    try std.testing.expect(!initial_editor_node.can_undo);
+    try std.testing.expect(!initial_editor_node.can_redo);
     try std.testing.expectEqual(platform.WidgetAccessibilityRole.grid, grid_node.role);
     try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_row_count);
     try std.testing.expectEqual(@as(?usize, 2), grid_node.grid_column_count);
@@ -899,6 +903,28 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expect(platform_state.nodes[3].actions.set_selection);
     try std.testing.expectEqual(@as(f32, 12), platform_state.nodes[1].bounds.x);
     try std.testing.expectEqual(@as(f32, 14), platform_state.nodes[1].bounds.y);
+
+    runtime.views[0].focused = true;
+    runtime.views[0].keyboard_active = true;
+    runtime.views[0].canvas_widget_focused_id = 6;
+    _ = try runtime.views[0].applyCanvasWidgetTextEdit(6, .{ .insert_text = "!" });
+    _ = try runtime.refreshCanvasWidgetDisplayListIfOwned(0);
+    const edited_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 6).?;
+    try std.testing.expect(edited_node.can_undo);
+    try std.testing.expect(!edited_node.can_redo);
+
+    const editor_target = runtime.views[0].widgetLayoutTree().focusTargetById(6).?;
+    const undo = runtime.views[0].canvasWidgetTextHistoryShortcut(editor_target, .{
+        .phase = .key_down,
+        .key = "z",
+        .modifiers = .{ .super = true },
+    }).?;
+    _ = try runtime.views[0].applyCanvasWidgetTextEditWithoutHistory(6, undo.edit);
+    runtime.views[0].commitCanvasWidgetTextHistoryReplayIfComplete(editor_target, undo.serial, undo.redo);
+    _ = try runtime.refreshCanvasWidgetDisplayListIfOwned(0);
+    const undone_node = platformWidgetAccessibilityNodeById(platform_state.nodes[0..platform_state.node_count], 6).?;
+    try std.testing.expect(!undone_node.can_undo);
+    try std.testing.expect(undone_node.can_redo);
 
     const published_after_layout = platform_state.update_count;
     try runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_input = .{
@@ -940,7 +966,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     } });
     try std.testing.expect(runtime.dispatchErrors().len > errors_before_invalid);
     try std.testing.expectEqualStrings("InvalidCommand", runtime.dispatchErrors()[runtime.dispatchErrors().len - 1].error_name);
-    try std.testing.expectEqualStrings("widget_accessibility_action", runtime.dispatchErrors()[runtime.dispatchErrors().len - 1].event);
+    try std.testing.expectEqualStrings("widget_accessibility_action", runtime.dispatchErrors()[runtime.dispatchErrors().len - 1].event());
     try std.testing.expectEqualStrings("Search", platform_state.nodes[3].text_value);
 
     try runtime.dispatchPlatformEvent(app_state.app(), .{ .widget_accessibility_action = .{

@@ -15,18 +15,72 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The TypeScript core suites transpile at build/test time; without
+      # node they skip silently, so CI must provide it.
+      - run: npm ci --prefix packages/core
       - run: zig build test
       - run: zig build validate
+
+  compiled-core-parity:
+    name: Compiled-Core Parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The transpiled lane of every pairing runs the repo's own transpiler under node at build time; it needs its installed dependency.
+      - run: npm ci --prefix packages/core
+      # The external core compiler, at the release the profiles' determinism fence tables are pinned to. tests/compiled-core/core_compiler_pin is the ONE place the pin lives — build_core.sh refuses any other release, so a bump is a one-line change there and this step follows.
+      - name: Install the external core compiler
+        run: |
+          set -euo pipefail
+          pin="$(cat tests/compiled-core/core_compiler_pin)"
+          npm install --prefix .zig-cache/core-compiler "scriptc@${pin}"
+          compiler="$PWD/.zig-cache/core-compiler/node_modules/.bin/scriptc"
+          test "$("$compiler" -v)" = "$pin"
+          echo "NATIVE_SDK_CORE_COMPILER=$compiler" >> "$GITHUB_ENV"
+      # Per-fixture contract artifacts the external compile consumes: the effective sidecar plus its generated entry module and compiler profile, under zig-out/core-contracts.
+      - run: zig build stage-core-contracts
+      # Determinism-fence negative control: the pristine markup fixture compiles and its co-emitted sidecar attests deterministic: true, then one injected ambient read (Date.now() in update) must be refused by the profile's fences — proving the fences fire, not merely that clean cores pass under them.
+      - name: Determinism fences fire (negative control)
+        run: tests/compiled-core/fence_check.sh .zig-cache/fence-check
+      - name: Build the five fixture cores
+        run: |
+          set -euo pipefail
+          for fixture in host-fixture soundboard system-monitor ai-chat markup; do
+            tests/compiled-core/build_core.sh "$fixture" ".zig-cache/compiled-cores/$fixture"
+          done
+      # Each fixture app's OWN e2e battery over a paired core — the transpiled lane vs the compiled archive, byte-compared at every seam. Locally this step is env-gated (no external compiler on a stock checkout); this job is where it always runs. Serial (-j1): the soundboard battery measures wall-clock dispatch budgets, and five test binaries racing on a two-core runner turn scheduler contention into failures the budgets were never meant to catch.
+      - name: Run the compiled-core parity battery
+        run: zig build test-compiled-core-parity -j1
+        env:
+          NATIVE_SDK_EXTERNAL_CORE_ARCHIVE_HOST: ${{ github.workspace }}/.zig-cache/compiled-cores/host-fixture/libhost_fixture_core.a
+          NATIVE_SDK_EXTERNAL_CORE_SIDECAR_HOST: ${{ github.workspace }}/.zig-cache/compiled-cores/host-fixture/core.contract.json
+          NATIVE_SDK_EXTERNAL_CORE_ARCHIVE_SOUNDBOARD: ${{ github.workspace }}/.zig-cache/compiled-cores/soundboard/libsoundboard_core.a
+          NATIVE_SDK_EXTERNAL_CORE_SIDECAR_SOUNDBOARD: ${{ github.workspace }}/.zig-cache/compiled-cores/soundboard/core.contract.json
+          NATIVE_SDK_EXTERNAL_CORE_ARCHIVE_SYSTEM_MONITOR: ${{ github.workspace }}/.zig-cache/compiled-cores/system-monitor/libsystem_monitor_core.a
+          NATIVE_SDK_EXTERNAL_CORE_SIDECAR_SYSTEM_MONITOR: ${{ github.workspace }}/.zig-cache/compiled-cores/system-monitor/core.contract.json
+          NATIVE_SDK_EXTERNAL_CORE_ARCHIVE_AI_CHAT: ${{ github.workspace }}/.zig-cache/compiled-cores/ai-chat/libai_chat_core.a
+          NATIVE_SDK_EXTERNAL_CORE_SIDECAR_AI_CHAT: ${{ github.workspace }}/.zig-cache/compiled-cores/ai-chat/core.contract.json
+          NATIVE_SDK_EXTERNAL_CORE_ARCHIVE_MARKUP: ${{ github.workspace }}/.zig-cache/compiled-cores/markup/libmarkup_core.a
+          NATIVE_SDK_EXTERNAL_CORE_SIDECAR_MARKUP: ${{ github.workspace }}/.zig-cache/compiled-cores/markup/core.contract.json
 
   macos-webview:
     name: macOS WebView
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       - run: zig build test-webview-system-link
@@ -53,7 +107,7 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       # Percentile perf check: 5 cold launches asserting p90
@@ -75,19 +129,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       - name: Install WebKitGTK dependencies
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
       - run: zig build test-webview-system-link -Dplatform=linux
+      # Declare-to-use, proven on real Linux executables WITH the
+      # WebKitGTK dev package installed — the seam, not the environment:
+      # the native-only ui-inbox binary must carry no libwebkitgtk
+      # DT_NEEDED entry and no webkit_/jsc_ dynamic symbol even though
+      # the headers were right there, while the webview example must
+      # keep them. (The environment half — building native-only on a
+      # runner with no WebKitGTK dev package at all — is the
+      # linux-canvas-smoke job.)
+      - run: zig build test-linux-web-layer-audit
 
   windows-webview:
     name: Windows WebView
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       # Builds the WebView example with the system engine, compiling the
@@ -97,15 +160,35 @@ jobs:
       # include path, or a conformance error in the embedded layer — is a
       # compile failure here, not a silent WebViewNotFound at runtime.
       - run: zig build test-webview-system-link -Dplatform=windows
+      # Effects.spawn is a pipe-backed background transport. Run its
+      # Windows-only PowerShell probe natively so removing CREATE_NO_WINDOW
+      # cannot leave the platform-neutral and Wine lanes green.
+      - run: zig build test-windows-effects-no-console
+      # The registered-font receipt, natively on Windows: runs the
+      # font-registry suite — registration validation, the glyph-budget
+      # gate, present/reference pixel parity, and the Chinese-receipt
+      # test that registers the committed subsetted Noto Sans SC through
+      # the app-fonts seam and proves the rendered string is real glyphs,
+      # not tofu — on real Windows, not under emulation. The font
+      # pipeline is platform-neutral Zig, so this lane pins that neutral
+      # truth on a Windows host (the Linux run lives in the Zig Core
+      # lane's `zig build test`).
+      - run: zig build test-canvas-fonts
 
   cef-platform-tooling:
     name: CEF Platform Tooling
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The TypeScript core suites transpile at build/test time; without
+      # node they skip silently, so CI must provide it.
+      - run: npm ci --prefix packages/core
       - run: zig build test-tooling
 
   npm-package:
@@ -119,36 +202,179 @@ jobs:
       - run: npm --prefix packages/native-sdk run version:check
       - run: npm --prefix packages/native-sdk run scripts:check
 
-  native-examples:
-    name: Native Examples
+  native-example-shards:
+    name: Native Examples (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 1/4
+            step: test-examples-native-shard-1
+          - name: 2/4
+            step: test-examples-native-shard-2
+          - name: 3/4
+            step: test-examples-native-shard-3
+          - name: 4/4
+            step: test-examples-native-shard-4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The TypeScript examples transpile at build time; the transpiler
+      # needs its installed dependency.
+      - run: npm ci --prefix packages/core
+      # Every example test uses the null backend, so this lane needs no
+      # GTK/WebKitGTK packages. The root build owns the round-robin shard
+      # membership, keeping CI and the complete local group in one registry.
+      - run: zig build ${{ matrix.step }}
+
+  windows-web-layer-audit:
+    name: Windows Web Layer Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
-      - name: Install GTK dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
-      - run: zig build test-examples-native
+      # Declare-to-use, proven on real Windows executables: the
+      # canvas-only ui-inbox cross-compiles without the embedded WebView
+      # layer (no WebView2Loader.dll reference, no loader installed) and
+      # the webview example keeps it.
+      - run: zig build test-windows-web-layer-audit
+
+  # Preserve the established `CI / Native Examples` required-check name
+  # while making it an aggregate receipt for every shard and the audit.
+  native-examples:
+    name: Native Examples
+    if: ${{ always() }}
+    needs:
+      - native-example-shards
+      - windows-web-layer-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm every native example lane passed
+        env:
+          EXAMPLE_SHARDS_RESULT: ${{ needs.native-example-shards.result }}
+          WINDOWS_AUDIT_RESULT: ${{ needs.windows-web-layer-audit.result }}
+        run: |
+          test "$EXAMPLE_SHARDS_RESULT" = success
+          test "$WINDOWS_AUDIT_RESULT" = success
 
   linux-canvas-smoke:
     name: Linux Canvas Smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
-      - name: Install GTK and Xvfb
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
-      # Drives the gpu_surface software path against system WebKitGTK under
-      # Xvfb: snapshot ready, gpu_backend=software, gpu_nonblank=true,
-      # automation widget-click, and a rendered screenshot. Sandbox/a11y
-      # env, the widened cold-start readiness budget (shared runners stall
-      # ~27 s before the first runtime event), and failure forensics (dump
-      # snapshot + app log) all live in the script.
+      # Deliberately NO libwebkitgtk-6.0-dev: ui-inbox declares no web
+      # use, so its host compiles with the WebKitGTK stub seam and this
+      # job doubles as the native-only Linux LINK test — the build can
+      # only succeed if nothing in a native-only app needs the WebKitGTK
+      # headers or pkg-config entry. (The seam under webkit-PRESENT
+      # conditions is the linux-webkitgtk job's ELF cross-audit.)
+      # x11-utils provides xwininfo, which the smoke script uses to find
+      # the context-menu popover's override-redirect X window (and to
+      # dump the X window list in failure diagnostics).
+      - name: Install GTK, Xvfb, xdotool, and x11-utils
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xdotool x11-utils
+      # The stub is the expected, configured state of every native-only
+      # Linux app, so compiling the GTK host with the stub define must be
+      # diagnostic-FREE, not merely successful: zig renders every clang
+      # diagnostic of a failing translation unit as `error:` (serialized
+      # clang diagnostics carry no severity into its error bundle), so
+      # even an informational #pragma message in this path masquerades as
+      # the build-killing error the moment any unrelated real error
+      # appears in the file. `zig cc` runs clang in passthrough mode,
+      # where warnings actually reach stderr — `zig build` only surfaces
+      # C diagnostics on failure, which is exactly the escalation this
+      # step pins against. The throwaway cache dir keeps the compile
+      # cold: on a cache hit zig replays nothing, stderr included, so a
+      # warm compiler cache would hide the diagnostics
+      # this step exists to catch.
+      - name: WebKitGTK stub compile is diagnostic-free
+        run: |
+          export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d) ZIG_LOCAL_CACHE_DIR=$(mktemp -d)
+          status=0
+          out=$(zig cc -c src/platform/linux/gtk_host.c -DNATIVE_SDK_ALLOW_WEBKITGTK_STUB $(pkg-config --cflags gtk4) -o /tmp/gtk_host_stub.o 2>&1) || status=$?
+          if [ "$status" -ne 0 ] || [ -n "$out" ]; then
+            echo "the WebKitGTK stub compile must succeed with zero diagnostics (exit $status):"
+            echo "$out"
+            exit 1
+          fi
+      # Drives the gpu_surface software path under Xvfb: snapshot ready,
+      # gpu_backend=software, gpu_nonblank=true, automation widget-click,
+      # a real xdotool right-click driving a task row's native context
+      # menu end to end, a rendered screenshot, an ELF audit that the
+      # built binary carries no WebKitGTK reference, and ZERO WebKit
+      # helper processes (canvas apps never boot WebKit). A11y env, the widened cold-start
+      # readiness budget (shared runners stall ~27 s before the first
+      # runtime event), and failure forensics (dump snapshot, app log,
+      # and X window list) all live in the script.
       - name: Build and drive ui-inbox headless
         run: .github/scripts/linux-canvas-smoke.sh
+      # Durable receipt for the GLib 2.72 fallback (the pre-2.74
+      # G_APPLICATION_DEFAULT_FLAGS shim in gtk_host.c): no stock image
+      # pairs an old glib with GTK >= 4.10 (only backport distros do),
+      # and ubuntu 22.04 ships GTK 4.6 — so a clean compile is
+      # impossible here by design. This pins the error SET instead:
+      # every diagnostic must match a GTK-age shape (the allowlist
+      # script holds the shapes, why cascades are allowed, and the
+      # positive-evidence floor) — a 2.74+ glib symbol, type, or
+      # member used without a version-checked fallback surfaces as a
+      # rejected diagnostic and fails this step, and so does a compile
+      # that produced no classifiable error set at all. If this compile ever succeeds outright, the premise
+      # changed (newer GTK in the image) and the receipt must be
+      # re-verified rather than trusted.
+      - name: GTK host GLib 2.72 fallback holds (error-set receipt)
+        run: |
+          docker run --rm -v "$PWD:/src" -v "$(dirname "$(which zig)"):/zig" ubuntu:22.04 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -q >/dev/null && apt-get install -y -q libgtk-4-dev pkg-config >/dev/null
+            export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d) ZIG_LOCAL_CACHE_DIR=$(mktemp -d)
+            status=0
+            out=$(/zig/zig cc -c /src/src/platform/linux/gtk_host.c -DNATIVE_SDK_ALLOW_WEBKITGTK_STUB $(pkg-config --cflags gtk4) -ferror-limit=0 -o /tmp/gtk_host_2272.o 2>&1) || status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "unexpected clean compile on ubuntu 22.04 - this receipt assumes GTK-age errors; re-verify what it proves now"
+              exit 1
+            fi
+            echo "$out" | python3 /src/.github/scripts/glib272_error_allowlist.py
+          '
+
+  linux-dev-smoke:
+    name: Linux Dev Smoke (Debug scaffold)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The scaffold default is the TypeScript core; its transpiler runs
+      # under node at build time from this checkout's packages/core.
+      - run: npm ci --prefix packages/core
+      # No WebKitGTK dev package, same as linux-canvas-smoke: the scaffold
+      # declares no web use, so its host compiles with the stub seam.
+      - name: Install GTK and Xvfb
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb
+      # The Debug half of the Linux runtime story: linux-canvas-smoke runs
+      # at the graph's release default, and Release always uses the LLVM
+      # backend — a Debug-only x86_64 codegen fault (self-hosted backend,
+      # the mode every fresh `native init` + `native dev` builds) stays
+      # invisible to it. This job scaffolds the default template with the
+      # CLI, builds it -Doptimize=Debug with automation, runs it under
+      # Xvfb, and requires the startup scene to come up (ready=true,
+      # gpu_nonblank=true, template widgets in the snapshot).
+      - name: Scaffold and drive the Debug template headless
+        run: .github/scripts/linux-dev-smoke.sh
 
   windows-canvas-smoke:
     name: Windows Canvas Smoke (Wine)
@@ -156,14 +382,30 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       - name: Install Wine, Xvfb, and xdotool
         run: sudo apt-get update && sudo apt-get install -y wine xvfb xdotool
+      # The Windows twin of the linux-canvas-smoke stub receipt: the
+      # WebView2 stub is the expected, configured state of every
+      # native-only Windows app, so cross-compiling the host with the
+      # stub define must be diagnostic-free (see that job's step comment
+      # for why even an informational #pragma message is dangerous, and
+      # why the compile must run against a cold cache).
+      - name: WebView2 stub cross-compile is diagnostic-free
+        run: |
+          export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d) ZIG_LOCAL_CACHE_DIR=$(mktemp -d)
+          status=0
+          out=$(zig c++ -target x86_64-windows-gnu -std=c++17 -DNATIVE_SDK_ALLOW_WEBVIEW2_STUB -c src/platform/windows/webview2_host.cpp -o /tmp/webview2_host_stub.o 2>&1) || status=$?
+          if [ "$status" -ne 0 ] || [ -n "$out" ]; then
+            echo "the WebView2 stub cross-compile must succeed with zero diagnostics (exit $status):"
+            echo "$out"
+            exit 1
+          fi
       # Cross-compiles ui-inbox for x86_64-windows-gnu and drives the
-      # gpu_surface software path (child HWND + WM_TIMER + SetDIBitsToDevice)
-      # under Wine: snapshot ready, gpu_backend=software, gpu_nonblank=true,
+      # retained Direct2D packet path (child HWND + WM_TIMER) under Wine:
+      # snapshot ready, gpu_backend=direct2d, gpu_nonblank=true,
       # automation widget-click, and real XTEST pointer/keyboard input.
       # Wineprefix init happens inline in the script (measured 21s from
       # scratch in an ubuntu-24.04 container, so no cache step).
@@ -176,7 +418,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       - name: Install Wine and Xvfb
@@ -195,7 +437,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       - run: zig build test-examples-frontends
@@ -205,7 +447,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       - run: zig build test-examples-mobile
@@ -215,9 +457,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The default scaffold is a TypeScript core: its build runs the
+      # @native-sdk/core transpiler from this checkout's own install.
+      - run: npm ci --prefix packages/core
       - run: zig build
       - name: Scaffold and test the zero-config native app
         run: |
@@ -228,8 +476,17 @@ jobs:
           # Slim scaffold: no build files — the CLI's generated graph drives it.
           test ! -f "$app/build.zig"
           test ! -f "$app/build.zig.zon"
+          # The editor surface landed: package.json + tsconfig.json + the
+          # materialized @native-sdk/core copy stock tsc resolves.
+          test -f "$app/package.json"
+          test -f "$app/tsconfig.json"
+          test -f "$app/node_modules/@native-sdk/core/sdk/core.ts"
+          # ...and none of it is build truth: every verb works without it.
+          rm -rf "$app/node_modules"
           ./zig-out/bin/native test "$app" -Dplatform=null
           ./zig-out/bin/native check "$app"
+          # check self-healed the editor copy back into place.
+          test -f "$app/node_modules/@native-sdk/core/sdk/core.ts"
           ./zig-out/bin/native eject "$app"
           (cd "$app" && zig build test -Dplatform=null)
       - name: Scaffold and test frontend templates

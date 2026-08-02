@@ -1,0 +1,121 @@
+# Multiple WebViews
+
+Apps that [embed web content](/docs/frontend) can model a native window as a stack of named WebViews. A WebView can fill the window, cover a panel-sized region, or sit above another WebView by setting its `frame` and `layer`.
+
+This is the right model for browser chrome, dashboards, previews, auth flows, and any app that needs trusted web UI next to isolated page content. (Canvas-first apps that want one live web pane beside native-rendered widgets should use `web_panes` instead — see [Native Surfaces](/docs/native-surfaces#canvas-webview-in-one-window).)
+
+The startup app source is the default trusted WebView named `main`. Simple apps can ignore this and keep using one page. Advanced apps can resize `main` and place isolated child WebViews beneath or above it. `main` is reserved; child WebViews cannot be created with that label.
+
+## JavaScript API
+
+Enable the built-in WebView helpers from an allowed origin:
+
+```zig
+const app_permissions = [_][]const u8{native_sdk.security.permission_window};
+
+.security = .{
+    .permissions = &app_permissions,
+    .navigation = .{ .allowed_origins = &.{ "zero://app", "https://example.com" } },
+},
+.js_window_api = true,
+```
+
+Then create and manage WebViews from JavaScript:
+
+```javascript
+const preview = await window.zero.webviews.create({
+  label: "preview",
+  url: "https://example.com",
+  frame: { x: 24, y: 24, width: 480, height: 320 },
+  layer: 10,
+  transparent: false,
+  bridge: false,
+});
+
+await preview.setFrame({ x: 32, y: 32, width: 640, height: 420 });
+await preview.navigate("https://example.com/docs");
+await preview.setZoom(1.25);
+await preview.setLayer(20);
+await preview.close();
+```
+
+Coordinates are logical content coordinates relative to the parent window: `x: 0, y: 0` is the top-left corner of the window content area.
+
+`layer` controls native stacking. Higher layers appear above lower layers. DOM `z-index` only affects elements inside one WebView; it cannot place one WebView above another.
+
+`transparent: true` requests a transparent native WebView background for chrome and menu surfaces. Support is backend dependent and best effort.
+
+`bridge: true` injects `window.zero` into that WebView. Use it only for trusted app chrome. Leave it `false` for untrusted page content.
+
+`windowId` defaults to the window that calls the command. If you pass it explicitly, it must match the calling window; one window cannot manage another window's WebViews.
+
+`webviews.list()` includes `main` first, followed by open child WebViews in the calling window. `main` reports the current startup WebView frame, layer, bridge state, focus state, and source URL.
+
+You can also enable the helpers with an explicit `builtin_bridge` policy instead of `js_window_api`. In that mode, list every WebView command your app calls: `native-sdk.webview.create`, `native-sdk.webview.list`, `native-sdk.webview.setFrame`, `native-sdk.webview.navigate`, `native-sdk.webview.setZoom`, `native-sdk.webview.setLayer`, and `native-sdk.webview.close`.
+
+## Lifecycle
+
+WebView labels are unique per parent window. Creating a second WebView with the same label fails; close the existing WebView first if you want to replace it.
+
+The `main` WebView can be resized and zoomed through `setFrame({ label: "main", ... })` and `setZoom({ label: "main", ... })` on supported backends. It cannot be closed or replaced. Layering `main` is backend dependent; use child WebView layers for portable stacking.
+
+When a parent window closes, its child WebViews are closed with it. Child WebViews do not receive `window.zero` by default, so untrusted content cannot call native bridge commands through the app bridge.
+
+WebView slots are capped globally per runtime, not per window. The default cap is 16 child WebViews.
+
+## Commands
+
+The helper calls these built-in bridge commands internally:
+
+<table>
+  <thead>
+    <tr>
+      <th>Helper</th>
+      <th>Command</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>window.zero.webviews.create(options)</code> / <code>preview</code></td>
+      <td><code>native-sdk.webview.create</code></td>
+      <td>Create a named WebView in a parent window</td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.list()</code></td>
+      <td><code>native-sdk.webview.list</code></td>
+      <td>List WebViews in the calling window</td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.setFrame(options)</code> / <code>preview.setFrame(frame)</code></td>
+      <td><code>native-sdk.webview.setFrame</code></td>
+      <td>Move or resize a WebView</td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.navigate(options)</code> / <code>preview.navigate(url)</code></td>
+      <td><code>native-sdk.webview.navigate</code></td>
+      <td>Navigate a WebView to a new URL</td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.setZoom(options)</code> / <code>preview.setZoom(zoom)</code></td>
+      <td><code>native-sdk.webview.setZoom</code></td>
+      <td>Set page zoom from <code>0.25</code> to <code>5.0</code></td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.setLayer(options)</code> / <code>preview.setLayer(layer)</code></td>
+      <td><code>native-sdk.webview.setLayer</code></td>
+      <td>Change native stack order</td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.close(options)</code> / <code>preview.close()</code></td>
+      <td><code>native-sdk.webview.close</code></td>
+      <td>Close a WebView</td>
+    </tr>
+  </tbody>
+</table>
+
+WebView URLs are checked against the runtime navigation policy before native views are created or navigated. Add the target origin to `security.navigation.allowed_origins` before loading it.
+
+## Backend Support
+
+System WebView stacks are implemented on macOS and Linux with layers, best-effort transparency, bridge-enabled trusted child WebViews, targeted bridge responses, and page zoom. Windows WebView2 child WebViews are in progress: child layers, navigation, and bridge-enabled trusted child WebViews are available when WebView2 is installed, but `main` WebView frame/zoom/layer operations reject with explicit unsupported-backend errors. macOS CEF supports layered child WebViews, page zoom, and bridge-enabled trusted child WebViews. Linux CEF explicitly rejects child WebView creation until native CEF embedding is wired in.

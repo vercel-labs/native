@@ -34,6 +34,12 @@ const booleanControlSelected = widget_access.booleanControlSelected;
 const widgetButtonTextSize = widget_metrics.widgetButtonTextSize;
 const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
 const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
+const widgetTabTriggerTextSize = widget_metrics.widgetTabTriggerTextSize;
+const widgetTabTriggerHeight = widget_metrics.widgetTabTriggerHeight;
+const widgetTabTriggerInset = widget_metrics.widgetTabTriggerInset;
+const widgetTabTriggerIconExtent = widget_metrics.widgetTabTriggerIconExtent;
+const widgetTabTriggerIconGap = widget_metrics.widgetTabTriggerIconGap;
+const underlineTabsListInset = widget_metrics.underlineTabsListInset;
 const widgetTypographySize = widget_metrics.widgetTypographySize;
 const widgetLineHeight = widget_metrics.widgetLineHeight;
 const widgetDefaultRowHeight = widget_metrics.widgetDefaultRowHeight;
@@ -42,6 +48,7 @@ const widgetControlInset = widget_metrics.widgetControlInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
 const densityValue = widget_metrics.densityValue;
 const widgetControlHeight = widget_metrics.widgetControlHeight;
+const widgetCodeLineNumberGutterWidth = widget_metrics.widgetCodeLineNumberGutterWidth;
 const widgetStatusBarPadding = widget_render.widgetStatusBarPadding;
 const controlStrokeWidth = widget_render.controlStrokeWidth;
 const componentControlVisualTokens = widget_render.componentControlVisualTokens;
@@ -70,7 +77,8 @@ pub fn layoutWidgetDepth(
     };
     len.* += 1;
 
-    const content = frame.inset(widget.layout.padding);
+    const layout_padding = if (widget.kind == .tabs) tabsLayoutPadding(widget, tokens) else widget.layout.padding;
+    const content = windowControlsClearedContent(frame.inset(layout_padding), widget, tokens);
     switch (widget.kind) {
         .row, .breadcrumb, .pagination, .radio_group, .toggle_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         // Button groups flow like rows but at their register's effective
@@ -80,7 +88,7 @@ pub fn layoutWidgetDepth(
         // Tab strips flow the same way: the underline register supplies
         // its own inter-trigger gap when the author left the strip's gap
         // at 0 (the house pill container keeps its flush triggers).
-        .tabs => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, tabsLayoutStyle(widget, tokens), tokens),
+        .tabs => try layoutTabsChildren(widget, content, index, depth, output, len, tokens),
         .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
         // The grouped input flows vertically inside its own field chrome:
         // the text entry (grow-stretched by `Ui.inputGroup`) above the
@@ -103,7 +111,7 @@ pub fn layoutWidgetDepth(
         .scroll_view => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
-            try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.value, tokens),
+            try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.scroll_axes, scrollLayoutOffset(widget), tokens),
         .list => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
@@ -122,7 +130,7 @@ pub fn layoutWidgetDepth(
             const child_content = accordionContentFrame(widget, content, tokens, depth);
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child), index, depth + 1, output, len, tokens);
+                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, tokens), index, depth + 1, output, len, tokens);
             }
         },
         .alert => {
@@ -132,19 +140,19 @@ pub fn layoutWidgetDepth(
             const child_content = alertContentFrame(widget, content, tokens);
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child), index, depth + 1, output, len, tokens);
+                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, tokens), index, depth + 1, output, len, tokens);
             }
         },
         .stack, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
+                _ = try layoutWidgetDepth(child, stackChildFrame(content, child, tokens), index, depth + 1, output, len, tokens);
             }
         },
         // Span paragraphs and span-carrying table cells share the link
         // hotspot child convention (no spans or no children is a no-op).
         .text, .data_cell => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
-        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider => {},
+        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface, .terminal => {},
     }
 
     // Anchored floating children are excluded from every flow above (they
@@ -152,9 +160,149 @@ pub fn layoutWidgetDepth(
     // widget's resolved frame and the window (the layout root's frame).
     // Leaf trigger kinds (select, button, ...) never lay out flow
     // children, but their anchored children float all the same.
-    try layoutAnchoredChildren(widget.children, frame, index, depth, output, len, tokens);
+    // A drag header's anchor base is trimmed clear of the stamped
+    // window-control cluster exactly like its flow content box: the
+    // collision scan counts anchored descendants too, so the remedy must
+    // move them or the one retry is paid for nothing. Non-drag widgets
+    // pass through untouched (menus and popovers anchor everywhere).
+    try layoutAnchoredChildren(widget.children, windowControlsClearedContent(frame, widget, tokens), index, depth, output, len, tokens);
 
     return index;
+}
+
+/// Lay a drag header's content out clear of the OS window-control
+/// cluster. On hidden-titlebar windows the content extends under the
+/// system's control band, and the cluster sits ON the content at one
+/// end — macOS's traffic lights lead, Windows' min/max/close cluster
+/// trails. A `window_drag` widget declares "this row IS the titlebar",
+/// so when the runtime has stamped the cluster's frame into the tokens
+/// (`DesignTokens.window_controls` — only after a build proved content
+/// actually collided; see `windowDragContentUnderWindowControls`), the
+/// row's content box is trimmed on the cluster's side: trailing content
+/// (a right-aligned status line) stops at the cluster's leading edge
+/// instead of rendering under the buttons. Rows whose own padding (or
+/// an app-authored chrome spacer) already clears the cluster never
+/// reach the stamping step, so they lay out byte-identically.
+fn windowControlsClearedContent(content: geometry.RectF, widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (!widget.window_drag) return content;
+    const controls = (tokens.window_controls orelse return content).normalized();
+    if (controls.width <= 0 or controls.height <= 0) return content;
+    if (geometry.RectF.intersection(content, controls).isEmpty()) return content;
+    var cleared = content;
+    if (controls.x + controls.width / 2 >= content.x + content.width / 2) {
+        // Trailing cluster (Windows caption buttons): the content box
+        // ends where the cluster begins.
+        cleared.width = @max(0, @min(content.maxX(), controls.x) - content.x);
+    } else {
+        // Leading cluster (macOS traffic lights): the content box
+        // starts past the cluster.
+        const start = @min(content.maxX(), @max(content.x, controls.maxX()));
+        cleared.width = @max(0, content.maxX() - start);
+        cleared.x = start;
+    }
+    return cleared;
+}
+
+/// True when a laid-out tree left CONTENT of a drag header under the
+/// window-control cluster (`controls`, canvas-local): the trigger for
+/// the runtime's window-control reservation. Only nodes INSIDE a
+/// visible `window_drag` region count — the drag row is the declared
+/// titlebar, the one place the reservation can honestly re-flow — and
+/// only content-bearing leaves count: text you must read, controls you
+/// must see and press. Containers and full-bleed decoration (the row's
+/// own background, separators, skeletons, progress strips, cover
+/// images) are EXPECTED to run under the cluster, exactly like they do
+/// under macOS traffic lights, so they never trigger. Text leaves are
+/// judged by their PAINTED bounds, not their frame (`tokens` carries
+/// the measurement seam the layout ran with), so a grow/stretch title
+/// whose glyphs sit clear never pays a retry that would visibly shift
+/// it — see `windowControlContentBounds`.
+pub fn windowDragContentUnderWindowControls(nodes: []const WidgetLayoutNode, controls: geometry.RectF, tokens: DesignTokens) bool {
+    const cluster = controls.normalized();
+    if (cluster.width <= 0 or cluster.height <= 0) return false;
+    const layout = LayoutNodesView{ .nodes = nodes };
+    for (nodes, 0..) |node, index| {
+        if (!widget_access.isWindowDragRegion(node.widget)) continue;
+        if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
+        for (nodes, 0..) |candidate, candidate_index| {
+            if (candidate_index == index) continue;
+            if (!widgetIsWindowControlContent(candidate.widget)) continue;
+            const painted = windowControlContentBounds(candidate.widget, candidate.frame.normalized(), tokens);
+            if (geometry.RectF.intersection(painted, cluster).isEmpty()) continue;
+            if (widget_tree.isWidgetHiddenInAncestors(layout, candidate_index)) continue;
+            if (!layoutNodeHasAncestor(nodes, candidate_index, index)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The rect the cluster test judges for one content candidate. Controls
+/// (buttons, inputs, ...) are judged by their full frame — the hit
+/// surface is the control, glyphs or not. Single-line text leaves are
+/// judged by their ALIGNED PAINTED BOUNDS instead: the measured line
+/// width (capped at the frame — elision and clipping both keep painted
+/// glyphs inside it), placed per the widget's text alignment, at the
+/// frame's full height. A grow/stretch title spanning the header row
+/// (the centered-title pattern) has a FRAME under the cluster while its
+/// inked glyphs sit well clear; judging the frame would trigger the
+/// clearance retry, and the remedy's trimmed content box would then
+/// visibly shift the very title it exists to protect. Span paragraphs
+/// wrap and explicit newlines stack lines with per-line extents; drag
+/// headers are practically single-line, so anything that can break
+/// keeps the conservative frame test.
+fn windowControlContentBounds(widget: Widget, frame: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (widget.kind != .text) return frame;
+    if (widget.spans.len > 0) return frame;
+    if (std.mem.indexOfScalar(u8, widget.text, '\n') != null) return frame;
+    const measured = measuredTextWidth(tokens, widget.text, widgetBodyTextSize(widget, tokens));
+    const width = @min(measured, frame.width);
+    const dx: f32 = switch (widget.text_alignment) {
+        .start => 0,
+        .center => (frame.width - width) * 0.5,
+        .end => frame.width - width,
+    };
+    return geometry.RectF.init(frame.x + dx, frame.y, width, frame.height);
+}
+
+/// Adapter so the shared ancestor-hidden walk (which reads
+/// `layout.nodes`) runs over a bare node slice.
+const LayoutNodesView = struct {
+    nodes: []const WidgetLayoutNode,
+};
+
+fn layoutNodeHasAncestor(nodes: []const WidgetLayoutNode, node_index: usize, ancestor_index: usize) bool {
+    var current: ?usize = nodes[node_index].parent_index;
+    while (current) |index| {
+        if (index >= nodes.len) return false;
+        if (index == ancestor_index) return true;
+        current = nodes[index].parent_index;
+    }
+    return false;
+}
+
+/// Content the window-control cluster must never cover: readable leaves
+/// and interactive controls. Deliberately exhaustive so a new widget
+/// kind forces the honesty call here. Containers are transparent (their
+/// CHILDREN are judged, not their frames), and decorative full-bleed
+/// leaves — separators, skeletons, progress strips, images (header
+/// cover art composites under the OS controls on every platform) — are
+/// allowed under the cluster.
+fn widgetIsWindowControlContent(widget: Widget) bool {
+    return switch (widget.kind) {
+        // Layout and surface containers: judged through their children.
+        .stack, .row, .column, .grid, .data_grid, .table, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .dialog, .drawer, .sheet, .panel, .popover, .menu_surface, .dropdown_menu, .list_item, .data_row, .split, .tree, .input_group => false,
+        // Full-bleed decoration: expected under the cluster. Media
+        // surfaces join images here — full-bleed video/preview content
+        // composites under the OS controls exactly like header cover art.
+        .separator, .skeleton, .progress, .image, .split_divider, .media_surface => false,
+        // A text leaf with no bytes and no spans is a hit/semantics
+        // overlay, not readable content.
+        .text => widget.text.len > 0 or widget.spans.len > 0,
+        // The terminal's grid is readable content edge to edge — the
+        // cluster must never cover its rows.
+        .data_cell, .icon, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .spinner, .chart, .terminal => true,
+    };
 }
 
 fn layoutAnchoredChildren(
@@ -178,7 +326,11 @@ fn layoutAnchoredChildren(
 /// width), placed on the preferred side of the anchor rect — flipping to
 /// the other side when it does not fit and the other side has more room —
 /// with height clamped to the chosen side's space and both axes clamped
-/// into the window. Pure geometry, unit-testable on its own.
+/// into the window. A point anchor (`anchor.point`) replaces the anchor
+/// rect with a zero-size rect at that point (clamped into the window), so
+/// the same flip and clamp rules position a surface against an explicit
+/// coordinate — the context-menu-at-the-pointer shape. Pure geometry,
+/// unit-testable on its own.
 pub fn anchoredWidgetFrame(
     child: Widget,
     anchor: widget_model.WidgetAnchor,
@@ -187,7 +339,12 @@ pub fn anchoredWidgetFrame(
     tokens: DesignTokens,
 ) geometry.RectF {
     const window = window_rect.normalized();
-    const anchor_frame = anchor_rect.normalized();
+    const anchor_frame = if (anchor.point) |point| geometry.RectF.init(
+        std.math.clamp(point.x, window.x, window.maxX()),
+        std.math.clamp(point.y, window.y, window.maxY()),
+        0,
+        0,
+    ) else anchor_rect.normalized();
     const intrinsic = intrinsicWidgetSize(child, tokens);
 
     var width = if (child.frame.width > 0) child.frame.width else intrinsic.width;
@@ -264,7 +421,83 @@ pub fn tabsGap(widget: Widget, tokens: DesignTokens) f32 {
 fn tabsLayoutStyle(widget: Widget, tokens: DesignTokens) WidgetLayoutStyle {
     var style = widget.layout;
     style.gap = tabsGap(widget, tokens);
+    style.padding = tabsLayoutPadding(widget, tokens);
+    // Primary underline triggers fill the strip's row just like their
+    // web reference. This also honors an author-constrained strip height
+    // without letting the intrinsic trigger spill past its rail.
+    if (tokens.controls.tabs_indicator == .underline) style.cross_alignment = .stretch;
     return style;
+}
+
+/// Underline triggers are the strip's full-height hit targets. The
+/// ordinary stretch alignment only fills children without an explicit
+/// cross extent; theme-agnostic trees can still carry the house trigger's
+/// fixed 32px height, so this path translates those fixed frames onto the
+/// underline register's row as well.
+fn layoutTabsChildren(
+    widget: Widget,
+    content: geometry.RectF,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    tokens: DesignTokens,
+) Error!void {
+    const style = tabsLayoutStyle(widget, tokens);
+    if (tokens.controls.tabs_indicator == .underline) {
+        if (underlineTabsFillWidth(tokens)) {
+            return layoutAxisChildrenMode(widget.children, content, .horizontal, parent_index, depth, output, len, style, tokens, true, true);
+        }
+        return layoutAxisChildrenMode(widget.children, content, .horizontal, parent_index, depth, output, len, style, tokens, false, true);
+    }
+    return layoutAxisChildrenMode(widget.children, content, .horizontal, parent_index, depth, output, len, style, tokens, false, false);
+}
+
+/// Full-width underline tabs are an explicit pack layout policy, not a
+/// consequence of choosing underline paint. This keeps custom underline
+/// themes content-hugging unless they opt into the ruled-row geometry.
+fn underlineTabsFillWidth(tokens: DesignTokens) bool {
+    return tokens.controls.tabs_indicator == .underline and
+        tokens.metrics.tabs_list_full_width;
+}
+
+/// Geist's primary TabsList is a width:100% ruled row. The authored
+/// widget tree is theme-agnostic, though, and often carries the house
+/// pill's intrinsic/fixed width, so every parent layout mode uses this
+/// predicate to translate that same node without changing house layout.
+fn primaryUnderlineTabsFillWidth(widget: Widget, tokens: DesignTokens) bool {
+    return widget.kind == .tabs and
+        (widget.variant == .default or widget.variant == .primary) and
+        underlineTabsFillWidth(tokens);
+}
+
+/// A non-growing primary underline TabsList gets first claim on a row's
+/// flexible width. This is the flow-layout equivalent of
+/// `stackChildFrame`'s full-width translation. Author-provided grow still
+/// follows the normal flex allocation contract.
+fn axisChildImplicitlyFillsWidth(widget: Widget) bool {
+    return nonNegative(widget.layout.grow) == 0 and
+        widget.kind == .tabs and
+        (widget.variant == .default or widget.variant == .primary);
+}
+
+/// Width:100% is a floor for primary underline tabs, not a cap. Preserve
+/// an authored overflow while still growing a house-sized strip to its
+/// share of the row. Explicit max bounds remain the author escape hatch.
+fn axisChildImplicitFillExtent(widget: Widget, axis: LayoutAxis, fill_width_share: f32, tokens: DesignTokens) f32 {
+    return clampMainExtent(widget, axis, @max(preferredMainExtent(widget, axis, tokens), fill_width_share));
+}
+
+/// The builder stamps the house TabsList's canonical hug before it knows
+/// which runtime theme pack will paint the tree. When the resolved
+/// register is underline, translate only that recorded kind default to
+/// the underline register's own inset (0 for Geist). Numerically equal
+/// author padding remains author-owned. The pill arm returns the stored
+/// padding byte-for-byte, preserving the default theme's layout.
+fn tabsLayoutPadding(widget: Widget, tokens: DesignTokens) geometry.InsetsF {
+    if (tokens.controls.tabs_indicator != .underline) return widget.layout.padding;
+    if (!widget.layout.padding_is_kind_default) return widget.layout.padding;
+    return geometry.InsetsF.all(underlineTabsListInset(tokens));
 }
 
 fn layoutAxisChildren(
@@ -277,6 +510,28 @@ fn layoutAxisChildren(
     len: *usize,
     style: WidgetLayoutStyle,
     tokens: DesignTokens,
+) Error!void {
+    if (axis == .horizontal and underlineTabsFillWidth(tokens)) {
+        return layoutAxisChildrenMode(children, content, axis, parent_index, depth, output, len, style, tokens, true, false);
+    }
+    return layoutAxisChildrenMode(children, content, axis, parent_index, depth, output, len, style, tokens, false, false);
+}
+
+/// `fill_primary_tabs` is comptime so the overwhelmingly common house
+/// path compiles to the original flex loop with no per-child theme
+/// branches. Underline rows opt into the extra full-width allocation.
+fn layoutAxisChildrenMode(
+    children: []const Widget,
+    content: geometry.RectF,
+    axis: LayoutAxis,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    style: WidgetLayoutStyle,
+    tokens: DesignTokens,
+    comptime fill_primary_tabs: bool,
+    comptime stretch_tab_triggers: bool,
 ) Error!void {
     // Anchored floating children take no flow slot: they are skipped in
     // every pass here (measurement, gap counting, placement) and laid out
@@ -299,8 +554,14 @@ fn layoutAxisChildren(
     const total_gap = clamped_gap * @as(f32, @floatFromInt(flow_count - 1));
     var fixed_extent: f32 = 0;
     var grow_total: f32 = 0;
+    var fill_width_count: usize = 0;
     for (children) |child| {
         if (child.layout.anchor != null) continue;
+        const implicitly_fills = if (comptime fill_primary_tabs) axisChildImplicitlyFillsWidth(child) else false;
+        if (implicitly_fills) {
+            fill_width_count += 1;
+            continue;
+        }
         const grow = nonNegative(child.layout.grow);
         if (grow > 0) {
             grow_total += grow;
@@ -313,8 +574,23 @@ fn layoutAxisChildren(
         }
     }
 
-    const remaining = @max(0, available_extent - fixed_extent - total_gap);
-    const assigned_extent = assignedAxisChildrenExtent(children, axis, fixed_extent, grow_total, remaining);
+    const flexible_extent = @max(0, available_extent - fixed_extent - total_gap);
+    const fill_width_share = if (fill_width_count > 0)
+        flexible_extent / @as(f32, @floatFromInt(fill_width_count))
+    else
+        0;
+    var fill_width_extent: f32 = 0;
+    if (comptime fill_primary_tabs) {
+        if (fill_width_count > 0) {
+            for (children) |child| {
+                if (child.layout.anchor != null) continue;
+                if (!axisChildImplicitlyFillsWidth(child)) continue;
+                fill_width_extent += axisChildImplicitFillExtent(child, axis, fill_width_share, tokens);
+            }
+        }
+    }
+    const grow_extent = @max(0, flexible_extent - fill_width_extent);
+    const assigned_extent = assignedAxisChildrenExtent(children, axis, fixed_extent + fill_width_extent, grow_total, grow_extent);
     const used_extent = assigned_extent + total_gap;
     if (axisLayoutOverflow(available_extent, used_extent)) |overflow| {
         logAxisChildrenOverflow(output, parent_index, axis, available_extent, used_extent, overflow);
@@ -332,11 +608,20 @@ fn layoutAxisChildren(
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         const grow = nonNegative(child.layout.grow);
-        const main_extent = if (grow > 0 and grow_total > 0)
-            clampMainExtent(child, axis, remaining * grow / grow_total)
+        const implicitly_fills = if (comptime fill_primary_tabs) axisChildImplicitlyFillsWidth(child) else false;
+        const main_extent = if (implicitly_fills)
+            axisChildImplicitFillExtent(child, axis, fill_width_share, tokens)
+        else if (grow > 0 and grow_total > 0)
+            clampMainExtent(child, axis, grow_extent * grow / grow_total)
         else
             mainExtentWithBubbleCap(child, axis, available_extent, preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens));
-        const cross = preferredCrossExtent(child, axis, cross_extent, style.cross_alignment, tokens);
+        const cross = if (comptime stretch_tab_triggers)
+            if (child.kind == .segmented_control)
+                stretchedCrossExtent(child, axis, cross_extent)
+            else
+                preferredCrossExtent(child, axis, cross_extent, style.cross_alignment, tokens)
+        else
+            preferredCrossExtent(child, axis, cross_extent, style.cross_alignment, tokens);
         const cross_origin = alignedCrossAxisOrigin(content, axis, cross_extent, cross, child, style.cross_alignment);
         const child_frame = switch (axis) {
             .horizontal => geometry.RectF.init(cursor, cross_origin, main_extent, cross),
@@ -384,7 +669,22 @@ fn widgetInsideVerticalScrollScope(output: []const WidgetLayoutNode, parent_inde
     var current: ?usize = parent_index;
     while (current) |index| {
         const widget = output[index].widget;
-        if (widget.kind == .scroll_view or widget.layout.virtualized) return true;
+        if ((widget.kind == .scroll_view and widget.scroll_axes.scrollsVertically()) or widget.layout.virtualized) return true;
+        if (widget.layout.anchor != null) return false;
+        current = output[index].parent_index;
+    }
+    return false;
+}
+
+/// The horizontal twin of `widgetInsideVerticalScrollScope`: inside a
+/// HORIZONTALLY scrolling scope (a `.scroll_view` ancestor granting the
+/// horizontal axis), content wider than the viewport is the operating
+/// mode, so the horizontal overflow diagnostic stays quiet there.
+fn widgetInsideHorizontalScrollScope(output: []const WidgetLayoutNode, parent_index: usize) bool {
+    var current: ?usize = parent_index;
+    while (current) |index| {
+        const widget = output[index].widget;
+        if (widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized) return true;
         if (widget.layout.anchor != null) return false;
         current = output[index].parent_index;
     }
@@ -402,13 +702,15 @@ fn widgetInsideVerticalScrollScope(output: []const WidgetLayoutNode, parent_inde
 ///   virtualized scroll's content wrapper is sized to the viewport and
 ///   its children legitimately extend past it on every rebuild, which
 ///   used to repeat this line hundreds of times for a perfectly correct
-///   layout. Horizontal overflow still warns there — nothing scrolls
-///   sideways to reveal it.
+///   layout. Horizontal overflow warns there UNLESS a horizontally
+///   scrolling scope encloses it — a `horizontal`/`both` scroll view
+///   exists precisely to reveal sideways content.
 /// - The line names the concrete widget (root-first kind path, label
 ///   snippet, id — the same identity the layout audit prints), because
 ///   a bare kind like "column" is unactionable in any real tree.
 fn logAxisChildrenOverflow(output: []const WidgetLayoutNode, parent_index: usize, axis: LayoutAxis, available_extent: f32, used_extent: f32, overflow: f32) void {
     if (axis == .vertical and widgetInsideVerticalScrollScope(output, parent_index)) return;
+    if (axis == .horizontal and widgetInsideHorizontalScrollScope(output, parent_index)) return;
     if (builtin.is_test) test_axis_overflow_diagnostics += 1;
     if (builtin.mode != .Debug) return;
     var path_buffer: [256]u8 = undefined;
@@ -621,14 +923,27 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
 /// so wrapped heights inside rows (blockquotes, list items) are computed
 /// against real widths.
 fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: DesignTokens) f32 {
+    if (underlineTabsFillWidth(tokens)) {
+        return rowChildWidthMode(row, available_width, index, tokens, true);
+    }
+    return rowChildWidthMode(row, available_width, index, tokens, false);
+}
+
+fn rowChildWidthMode(row: Widget, available_width: f32, index: usize, tokens: DesignTokens, comptime fill_primary_tabs: bool) f32 {
     const children = row.children;
     if (children.len == 0) return available_width;
     var flow_count: usize = 0;
     var fixed_extent: f32 = 0;
     var grow_total: f32 = 0;
+    var fill_width_count: usize = 0;
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         flow_count += 1;
+        const implicitly_fills = if (comptime fill_primary_tabs) axisChildImplicitlyFillsWidth(child) else false;
+        if (implicitly_fills) {
+            fill_width_count += 1;
+            continue;
+        }
         const grow = nonNegative(child.layout.grow);
         if (grow > 0) {
             grow_total += grow;
@@ -646,10 +961,27 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
         else => nonNegative(row.layout.gap),
     };
     const total_gap = row_gap * @as(f32, @floatFromInt(flow_count - 1));
-    const remaining = @max(0, available_width - fixed_extent - total_gap);
+    const flexible_extent = @max(0, available_width - fixed_extent - total_gap);
+    const fill_width_share = if (fill_width_count > 0)
+        flexible_extent / @as(f32, @floatFromInt(fill_width_count))
+    else
+        0;
+    var fill_width_extent: f32 = 0;
+    if (comptime fill_primary_tabs) {
+        if (fill_width_count > 0) {
+            for (children) |candidate| {
+                if (candidate.layout.anchor != null) continue;
+                if (!axisChildImplicitlyFillsWidth(candidate)) continue;
+                fill_width_extent += axisChildImplicitFillExtent(candidate, .horizontal, fill_width_share, tokens);
+            }
+        }
+    }
+    const grow_extent = @max(0, flexible_extent - fill_width_extent);
     const child = children[index];
+    const implicitly_fills = if (comptime fill_primary_tabs) axisChildImplicitlyFillsWidth(child) else false;
+    if (implicitly_fills) return axisChildImplicitFillExtent(child, .horizontal, fill_width_share, tokens);
     const grow = nonNegative(child.layout.grow);
-    if (grow > 0 and grow_total > 0) return clampMainExtent(child, .horizontal, remaining * grow / grow_total);
+    if (grow > 0 and grow_total > 0) return clampMainExtent(child, .horizontal, grow_extent * grow / grow_total);
     // The same bubble thread cap `layoutAxisChildren` applies, replayed
     // here so wrapped heights measure at the width the bubble will
     // actually receive.
@@ -659,7 +991,11 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
 fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
     return text_spans_model.textSpansWrappedHeight(
         widget.spans,
-        widgetTextSpanLayoutOptions(widget, tokens, width),
+        widgetTextSpanLayoutOptions(
+            widget,
+            tokens,
+            @max(0, width - widgetCodeLineNumberGutterWidth(widget, tokens)),
+        ),
     );
 }
 
@@ -670,7 +1006,7 @@ fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
 /// an empty frame (never hit-testable).
 fn layoutTextSpanLinkChildren(
     widget: Widget,
-    content: geometry.RectF,
+    raw_content: geometry.RectF,
     parent_index: usize,
     depth: usize,
     output: []WidgetLayoutNode,
@@ -679,6 +1015,12 @@ fn layoutTextSpanLinkChildren(
 ) Error!void {
     if (widget.children.len == 0) return;
     if (widget.spans.len == 0) return;
+    var content = raw_content;
+    if (widget.kind == .text) {
+        const gutter = @min(content.width, widgetCodeLineNumberGutterWidth(widget, tokens));
+        content.x += gutter;
+        content.width -= gutter;
+    }
 
     var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
     const layout = text_spans_model.layoutTextSpans(
@@ -782,7 +1124,7 @@ fn layoutGridChildren(
         const row = child_index / columns;
         const x = content.x + @as(f32, @floatFromInt(column)) * (cell_width + clamped_gap);
         const y = content.y + @as(f32, @floatFromInt(row)) * (fallback_cell_height + clamped_gap);
-        const width = clampIntrinsicAxis(if (child.frame.width > 0) child.frame.width else cell_width, child.layout.min_size.width, child.layout.max_size.width);
+        const width = gridChildWidth(child, cell_width, tokens);
         const height = clampIntrinsicAxis(if (child.frame.height > 0) child.frame.height else fallback_cell_height, child.layout.min_size.height, child.layout.max_size.height);
         const child_frame = geometry.RectF.init(
             x + child.frame.x,
@@ -844,7 +1186,7 @@ fn layoutVirtualGridChildren(
             child.semantics.list_item_count = saturatingU32(children.len);
             const x = content.x + @as(f32, @floatFromInt(column)) * (cell_width + clamped_gap);
             const y = content.y + @as(f32, @floatFromInt(row)) * stride - range.layout_offset + child.frame.y;
-            const width = clampIntrinsicAxis(if (child.frame.width > 0) child.frame.width else cell_width, child.layout.min_size.width, child.layout.max_size.width);
+            const width = gridChildWidth(child, cell_width, tokens);
             const height = clampIntrinsicAxis(if (child.frame.height > 0) child.frame.height else range.item_extent, child.layout.min_size.height, child.layout.max_size.height);
             const child_frame = geometry.RectF.init(
                 x + child.frame.x,
@@ -857,6 +1199,17 @@ fn layoutVirtualGridChildren(
     }
 }
 
+/// A grid cell is the containing width for Geist's primary ruled row.
+/// Translate the theme-agnostic house width to the remaining cell width,
+/// while keeping deliberate overflow and explicit max bounds intact.
+fn gridChildWidth(child: Widget, cell_width: f32, tokens: DesignTokens) f32 {
+    var width = if (child.frame.width > 0) child.frame.width else cell_width;
+    if (primaryUnderlineTabsFillWidth(child, tokens)) {
+        width = @max(width, @max(0, cell_width - child.frame.x));
+    }
+    return clampIntrinsicAxis(width, child.layout.min_size.width, child.layout.max_size.width);
+}
+
 fn preferredGridRowExtent(children: []const Widget, columns: usize, tokens: DesignTokens) f32 {
     if (children.len == 0 or columns == 0) return 0;
     var max_height: f32 = 0;
@@ -867,6 +1220,17 @@ fn preferredGridRowExtent(children: []const Widget, columns: usize, tokens: Desi
     return max_height;
 }
 
+/// The layout-time scroll displacement of a non-virtualized scroll
+/// view: each offset applies only on an axis the region grants, so a
+/// stale `value_x` on a vertical-only region can never shear its
+/// content sideways — and a stale `value` on a horizontal-only one can
+/// never leave it displaced upward.
+fn scrollLayoutOffset(widget: Widget) geometry.OffsetF {
+    const scroll_x = if (widget.scroll_axes.scrollsHorizontally()) widget.value_x else 0;
+    const scroll_y = if (widget.scroll_axes.scrollsVertically()) widget.value else 0;
+    return geometry.OffsetF.init(scroll_x, scroll_y);
+}
+
 fn layoutScrollChildren(
     children: []const Widget,
     content: geometry.RectF,
@@ -874,13 +1238,22 @@ fn layoutScrollChildren(
     depth: usize,
     output: []WidgetLayoutNode,
     len: *usize,
-    scroll_y: f32,
+    axes: canvas.ScrollAxes,
+    scroll_offset: geometry.OffsetF,
     tokens: DesignTokens,
 ) Error!void {
-    const scrolled_content = content.translate(geometry.OffsetF.init(0, -scroll_y));
+    const scrolled_content = content.translate(geometry.OffsetF.init(-scroll_offset.dx, -scroll_offset.dy));
     for (children) |child| {
         if (child.layout.anchor != null) continue;
-        _ = try layoutWidgetDepth(child, stackChildFrame(scrolled_content, child), parent_index, depth + 1, output, len, tokens);
+        var child_frame = stackChildFrame(scrolled_content, child, tokens);
+        // A `both` region must retain the same intrinsic width as a
+        // horizontal-only shelf; otherwise its horizontal axis has no
+        // content range even when its child paints a long no-wrap line.
+        if (axes.scrollsHorizontally() and child.frame.width <= 0) {
+            const intrinsic = intrinsicChildSize(child, tokens, depth + 1);
+            child_frame.width = @max(child_frame.width, intrinsic.width);
+        }
+        _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
     }
 }
 
@@ -1286,15 +1659,37 @@ pub fn widgetKindStacksChildren(kind: widget_model.WidgetKind) bool {
     };
 }
 
-fn stackChildFrame(content: geometry.RectF, child: Widget) geometry.RectF {
+fn stackChildFrame(content: geometry.RectF, child: Widget, tokens: DesignTokens) geometry.RectF {
     const width = if (child.frame.width > 0) child.frame.width else content.width;
     const height = if (child.frame.height > 0) child.frame.height else content.height;
-    return geometry.RectF.init(
+    var frame = geometry.RectF.init(
         content.x + child.frame.x,
         content.y + child.frame.y,
         clampIntrinsicAxis(width, child.layout.min_size.width, child.layout.max_size.width),
         clampIntrinsicAxis(height, child.layout.min_size.height, child.layout.max_size.height),
     );
+    // A primary underline TabsList is a full-width rule with
+    // content-hugging triggers, equivalent to the reference's
+    // `width: 100%`. Fixed frames in theme-agnostic trees often describe
+    // the house pill's hug width (the GPU catalog's 148px Small/Large
+    // specimen is one); carrying that width into the underline register
+    // clips the closing rail immediately after the last trigger. Stretch
+    // only the underline register to the remaining containing width.
+    // House pills return byte-for-byte above, and an explicit max width
+    // remains the author escape hatch for a deliberately bounded strip.
+    if (primaryUnderlineTabsFillWidth(child, tokens)) {
+        frame.width = clampIntrinsicAxis(
+            // Full-width is a floor, not a replacement for authored
+            // overflow. A tab strip wider than a horizontal scroll
+            // viewport must keep that width so its rail and clipped
+            // trigger content remain reachable; only the narrow house
+            // hug grows to the containing width.
+            @max(frame.width, @max(0, content.maxX() - frame.x)),
+            child.layout.min_size.width,
+            child.layout.max_size.width,
+        );
+    }
+    return frame;
 }
 
 /// Whether the accordion's EXTENT includes its content: only while
@@ -1368,6 +1763,12 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
 }
 
 fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    // The composed-media contract (`WidgetLayoutStyle.zero_intrinsic`):
+    // the container measures like the media-surface leaf regardless of
+    // what chrome it composes. Declared width/height still apply — they
+    // ride the widget frame and the min/max bounds, which every caller
+    // maxes against this measure.
+    if (widget.layout.zero_intrinsic) return geometry.SizeF.zero();
     return switch (widget.kind) {
         .text => intrinsicTextWidgetSize(widget, tokens, widgetBodyTextSize(widget, tokens)),
         .icon => geometry.SizeF.init(intrinsicIconExtent(widget, tokens), intrinsicIconExtent(widget, tokens)),
@@ -1432,8 +1833,11 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         .dialog, .drawer, .sheet => intrinsicModalSurfaceWidgetSize(widget, tokens, depth),
         // Containers measure their children (matching the stacking axis the
         // layout pass uses), bounded by the widget depth cap. Scroll
-        // viewports and virtualized containers stay zero: their content is
-        // allowed to overflow the space they're given.
+        // viewports and virtualized containers stay zero on each axis they
+        // scroll: their content is allowed to overflow the space they're
+        // given. A horizontal-only viewport still reports its child's
+        // height, so an inline code scroller hugs its rows instead of
+        // collapsing to a zero-height clip.
         .row, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group => intrinsicAxisChildrenSize(widget, tokens, .horizontal, depth),
         .column, .menu_surface, .dropdown_menu, .input_group => intrinsicAxisChildrenSize(widget, tokens, .vertical, depth),
         .list, .data_grid, .table => if (widget.layout.virtualized)
@@ -1451,7 +1855,16 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         .split_divider => geometry.SizeF.init(splitDividerExtent(widget), 0),
         // A split fills the space it is given (panes partition it);
         // like scroll viewports it reports no intrinsic size of its own.
-        .scroll_view, .image, .split => geometry.SizeF.zero(),
+        // Media surfaces measure like images: the texture is external
+        // content with no natural layout size — definite width/height
+        // (or flex grow) size the surface, exactly like an image leaf.
+        // Terminals join them: the grid derives its cols/rows FROM the
+        // space it is given (the runtime resizes the pty to fit), so
+        // reporting an intrinsic size would invert the contract.
+        .scroll_view => if (!widget.layout.virtualized and widget.scroll_axes == .horizontal) blk: {
+            break :blk intrinsicHorizontalScrollSize(widget, tokens, depth);
+        } else geometry.SizeF.zero(),
+        .image, .split, .media_surface, .terminal => geometry.SizeF.zero(),
     };
 }
 
@@ -1515,10 +1928,12 @@ fn intrinsicAxisChildrenSize(widget: Widget, tokens: DesignTokens, axis: LayoutA
         else => nonNegative(widget.layout.gap),
     };
     const gap = child_gap * @as(f32, @floatFromInt(flow_count - 1));
-    return paddedIntrinsicSize(widget, switch (axis) {
+    const content_size = switch (axis) {
         .horizontal => geometry.SizeF.init(main_sum + gap, cross_max),
         .vertical => geometry.SizeF.init(cross_max, main_sum + gap),
-    });
+    };
+    if (widget.kind == .tabs) return paddedIntrinsicSizeWithPadding(widget, content_size, tabsLayoutPadding(widget, tokens));
+    return paddedIntrinsicSize(widget, content_size);
 }
 
 fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
@@ -1534,6 +1949,28 @@ fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usi
     return paddedIntrinsicSize(widget, geometry.SizeF.init(width_max, height_max));
 }
 
+/// A horizontal viewport stays width-neutral but hugs the full vertical
+/// extent of its unwrapped content. Span paragraphs report a one-line
+/// intrinsic height, so measure each child through the width-aware seam at
+/// its natural width; explicit newlines then contribute every painted row.
+fn intrinsicHorizontalScrollSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    if (depth >= max_widget_depth or widget.children.len == 0) {
+        return geometry.SizeF.init(0, intrinsicOwnMinSize(widget).height);
+    }
+    var height_max: f32 = 0;
+    for (widget.children) |child| {
+        if (child.layout.anchor != null) continue;
+        const intrinsic = intrinsicChildSize(child, tokens, depth + 1);
+        const child_width = if (child.frame.width > 0) child.frame.width else intrinsic.width;
+        height_max = @max(
+            height_max,
+            wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1),
+        );
+    }
+    const padded = paddedIntrinsicSize(widget, geometry.SizeF.init(0, height_max));
+    return geometry.SizeF.init(0, padded.height);
+}
+
 fn intrinsicGridChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
     if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
     var cell_width: f32 = 0;
@@ -1545,7 +1982,10 @@ fn intrinsicGridChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize)
         cell_height = @max(cell_height, size.height);
     }
     const columns = gridColumnCount(widget.children.len, widget.layout.columns);
-    const rows = (widget.children.len + columns - 1) / columns;
+    // `gridRowCount`, not the additive ceil-div: declared columns are
+    // engine input, and `children.len + columns` overflows in safe
+    // builds when a parent intrinsically measures a maxInt-columns grid.
+    const rows = gridRowCount(widget.children.len, columns);
     const gap = nonNegative(widget.layout.gap);
     return paddedIntrinsicSize(widget, geometry.SizeF.init(
         cell_width * @as(f32, @floatFromInt(columns)) + gap * @as(f32, @floatFromInt(columns - 1)),
@@ -1559,6 +1999,10 @@ fn intrinsicOwnMinSize(widget: Widget) geometry.SizeF {
 
 fn paddedIntrinsicSize(widget: Widget, content: geometry.SizeF) geometry.SizeF {
     const padding = widget.layout.padding;
+    return paddedIntrinsicSizeWithPadding(widget, content, padding);
+}
+
+fn paddedIntrinsicSizeWithPadding(widget: Widget, content: geometry.SizeF, padding: geometry.InsetsF) geometry.SizeF {
     return geometry.SizeF.init(
         @max(content.width + padding.left + padding.right, widget.layout.min_size.width),
         @max(content.height + padding.top + padding.bottom, widget.layout.min_size.height),
@@ -1569,7 +2013,8 @@ fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32)
     if (widgetIsSpanParagraph(widget)) {
         const options = widgetTextSpanLayoutOptions(widget, tokens, 0);
         return geometry.SizeF.init(
-            text_spans_model.textSpansIntrinsicWidth(widget.spans, options),
+            text_spans_model.textSpansIntrinsicWidth(widget.spans, options) +
+                widgetCodeLineNumberGutterWidth(widget, tokens),
             widgetLineHeight(text_size * text_spans_model.textSpansMaxScale(widget.spans)),
         );
     }
@@ -1800,12 +2245,22 @@ fn intrinsicSpinnerWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Siz
 }
 
 fn intrinsicSegmentedControlSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
-    const text_width = measuredTextWidth(tokens, widget.text, widgetLabelTextSize(widget, tokens));
+    const text_width = measuredTextWidth(tokens, widget.text, widgetTabTriggerTextSize(widget, tokens));
+    if (tokens.controls.tabs_indicator == .underline) {
+        const icon_width = if (widget.icon.len > 0)
+            widgetTabTriggerIconExtent(widget, tokens) + (if (widget.text.len > 0) widgetTabTriggerIconGap(tokens) else 0)
+        else
+            0;
+        return geometry.SizeF.init(
+            pixelSnapCeil(tokens, icon_width + text_width + widgetTabTriggerInset(widget, tokens) * 2),
+            widgetTabTriggerHeight(widget, tokens),
+        );
+    }
     // Ceil to the snap grid (`pixelSnapCeil`): a segment / tabs trigger
     // sized exactly to its measured label must survive render-time edge
     // snapping without eliding.
     const width = pixelSnapCeil(tokens, @max(widgetSizedDensityValue(widget, tokens, 44), text_width + widgetControlInset(widget, tokens, tokens.spacing.md) * 2));
-    return geometry.SizeF.init(width, widgetControlHeight(widget, tokens));
+    return geometry.SizeF.init(width, widgetTabTriggerHeight(widget, tokens));
 }
 
 fn intrinsicRowTextWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -1928,6 +2383,19 @@ fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32, alignm
         .horizontal => widget.layout.max_size.height,
         .vertical => widget.layout.max_size.width,
     };
+    // The cross axis of a vertical flow is width. Geist primary tabs
+    // therefore fill a column just as they fill stack and row parents,
+    // even when the theme-agnostic node still carries the house pill's
+    // fixed width. An explicit max width remains the bounding escape.
+    if (axis == .vertical and primaryUnderlineTabsFillWidth(widget, tokens)) {
+        // `alignedCrossAxisOrigin` applies the authored x offset after
+        // choosing this width. Fill only the space remaining after that
+        // offset so the closing rail still lands on the parent's trailing
+        // edge, matching `stackChildFrame`. A deliberately wider strip
+        // remains wider so horizontal scrolling keeps its full extent.
+        const remaining = @max(0, available - widget.frame.x);
+        return @max(min_value, boundedByMax(@max(value, remaining), max_value));
+    }
     if (value > 0) return @max(min_value, boundedByMax(value, max_value));
     // The cross axis of a vertical container is the child's WIDTH, so
     // the bubble thread contract applies here: a bubble directly in a
@@ -1956,6 +2424,18 @@ fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32, alignm
         return @max(min_value, boundedByMax(intrinsic, max_value));
     }
     return @max(min_value, boundedByMax(@min(available, intrinsic), max_value));
+}
+
+fn stretchedCrossExtent(widget: Widget, axis: LayoutAxis, available: f32) f32 {
+    const min_value = switch (axis) {
+        .horizontal => widget.layout.min_size.height,
+        .vertical => widget.layout.min_size.width,
+    };
+    const max_value = switch (axis) {
+        .horizontal => widget.layout.max_size.height,
+        .vertical => widget.layout.max_size.width,
+    };
+    return @max(min_value, boundedByMax(available, max_value));
 }
 
 fn minMainExtent(widget: Widget, axis: LayoutAxis) f32 {

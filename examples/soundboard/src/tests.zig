@@ -924,6 +924,42 @@ test "search filters albums and songs through typed dispatch" {
     try testing.expect(findByLabel(tree.root, "No albums match") != null);
 }
 
+test "live: Escape clears the search field and the model hears it" {
+    // The post-launch live-GUI smoke bug: Escape made the runtime's
+    // editor clear the field VISUALLY while the model kept the stale
+    // query — the grid stayed filtered against a term the screen no
+    // longer showed, and the next keystroke spliced into it. The
+    // keyboard derivation now stamps the clear it applies onto the
+    // dispatched event, so the model's on-input mirror hears Escape
+    // exactly like the clear affordance and every keystroke.
+    const live = try LiveApp.start(true);
+    defer live.stop();
+    const app_state = live.app_state;
+
+    // Focus the search field and type a one-album query through the
+    // real platform text channel.
+    try live.focusWidget(try live.widgetIdByLabel(.search_field, "Search library"));
+    try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_input = .{
+        .label = main.canvas_label,
+        .kind = .text_input,
+        .text = "channel",
+    } });
+    try testing.expectEqualStrings("channel", app_state.model.search());
+    try testing.expectEqual(@as(usize, 1), countListItems(app_state.tree.?.root));
+
+    // Escape through the same raw key path a physical press produces:
+    // the model clears WITH the field, and the grid unfilters.
+    try live.keyDown("escape", "");
+    try testing.expectEqualStrings("", app_state.model.search());
+    try testing.expectEqual(model_mod.albums.len, countListItems(app_state.tree.?.root));
+
+    // The retained editor agrees with the model — no visual/model split.
+    const layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .search_field) try testing.expectEqualStrings("", node.widget.text);
+    }
+}
+
 test "a full session: open an album, play it, and use the context menus" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -943,7 +979,27 @@ test "a full session: open an album, play it, and use the context menus" {
 
     tree = try buildTree(arena, &model);
     try testing.expect(findByLabel(tree.root, "Album detail") != null);
-    try testing.expectEqual(@as(usize, album.track_count), countListItems(tree.root));
+    // Track rows count inside the track LIST: the page also carries the
+    // "From the collection" shelf, whose album tiles are listitems too.
+    try testing.expectEqual(@as(usize, album.track_count), countListItems(findByLabel(tree.root, "Album tracks").?));
+
+    // The collection shelf: every OTHER album on a horizontal rail —
+    // wheel delta_x and Left/Right scroll it while the page keeps
+    // vertical scrolling (each axis routes to the nearest region that
+    // scrolls it).
+    const shelf = findByLabel(tree.root, "More albums").?;
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, shelf.kind);
+    try testing.expectEqual(canvas.ScrollAxes.horizontal, shelf.scroll_axes);
+    try testing.expectEqual(model.shelf_scroll_x, shelf.value_x);
+    try testing.expectEqual(@as(usize, model_mod.albums.len - 1), countListItems(shelf));
+
+    // The shelf echo is the controlled-scroll shape on the HORIZONTAL
+    // axis: the applied offset_x lands in the model and binds back as
+    // value_x, and opening an album resets the rail.
+    apply(&model, tree.msgForScroll(shelf.id, .{ .offset_x = 96, .viewport_extent_x = 480, .content_extent_x = 960 }).?);
+    try testing.expectEqual(@as(f32, 96), model.shelf_scroll_x);
+    tree = try buildTree(arena, &model);
+    try testing.expectEqual(@as(f32, 96), findByLabel(tree.root, "More albums").?.value_x);
 
     // Play album starts the record's first track. The button carries its
     // play icon inline (widget.icon) beside the label: one widget, one
@@ -1021,16 +1077,23 @@ test "the system appearance drives the custom tokens live" {
     // palettes, so these assertions follow the one source of truth).
     try testing.expectEqualDeep(theme.light_colors, main.tokensFromModel(&app_state.model).colors);
 
-    // The accent override actually landed: the filled-primary pair, the
-    // focus ring, and the slider's filled range all carry the same pink
-    // step in BOTH schemes — the scrubber is the one slot the pack
-    // states its own hue for, so it is pinned separately from `accent`.
+    // The accent override actually landed: the filled-primary pair and
+    // the slider's filled range carry the same pink step in BOTH
+    // schemes — the scrubber is the one slot the pack states its own
+    // hue for, so it is pinned separately from `accent`.
     const pink = canvas.Color.rgb8(223, 38, 112);
     for ([_]canvas.ColorTokens{ theme.light_colors, theme.dark_colors }) |colors| {
         try testing.expectEqualDeep(pink, colors.accent);
         try testing.expectEqualDeep(canvas.Color.rgb8(255, 255, 255), colors.accent_text);
-        try testing.expectEqualDeep(pink, colors.focus_ring);
     }
+    // The focus ring is stated per scheme: raw pink in light, the
+    // desaturated dark step in dark (canvas.accentFocusRing — the same
+    // derivation the manifest theme_accent channel applies, so the TS
+    // port's ring matches). Full-chroma pink would glare neon on the
+    // dark palette.
+    try testing.expectEqualDeep(pink, theme.light_colors.focus_ring);
+    try testing.expectEqualDeep(canvas.accentFocusRing(pink, .dark), theme.dark_colors.focus_ring);
+    try testing.expect(!std.meta.eql(pink, theme.dark_colors.focus_ring));
     for ([_]native_sdk.ColorScheme{ .light, .dark }) |scheme| {
         try testing.expectEqualDeep(pink, theme.tokens(scheme, false, false).controls.slider.active_background.?);
     }
@@ -1912,6 +1975,39 @@ fn expectChunking(rows: usize, counts: []const usize, first_x: []const f32, colu
     }
 }
 
+test "a search narrowed below the column count keeps natural tile size" {
+    const live = try LiveApp.start(true);
+    defer live.stop();
+
+    // Establish the four-column desktop fit, then search down to ONE
+    // matching album (the last album's title matches "channel" and
+    // nothing else does — see the typed-dispatch search test).
+    try resizeTo(live, main.window_width, main.window_height, 2);
+    const fit = view_mod.gridFit(main.window_width);
+    try testing.expect(fit.columns > 1);
+    try live.dispatch(.{ .search_edit = .{ .insert_text = "channel" } });
+
+    // The lone tile keeps the fit's natural tile width — image-forward
+    // covers never balloon across the freed row — and stays pinned to
+    // the leading content edge, leaving the trailing space empty.
+    var layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    var tiles: usize = 0;
+    for (layout.nodes) |node| {
+        if (node.widget.kind != .list_item or node.widget.semantics.role != .listitem) continue;
+        tiles += 1;
+        try testing.expectApproxEqAbs(fit.tile_width, node.frame.width, 0.5);
+    }
+    try testing.expectEqual(@as(usize, 1), tiles);
+
+    // Clearing the search restores the full four-wide chunking.
+    try live.dispatch(.{ .search_edit = .clear });
+    var counts: [8]usize = undefined;
+    var first_x: [8]f32 = undefined;
+    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    const rows = gridRowCounts(layout, &counts, &first_x);
+    try expectChunking(rows, counts[0..rows], first_x[0..rows], fit.columns);
+}
+
 test "chrome geometry pads the header and matches its height to the tall band" {
     var fx = model_mod.Effects.init(testing.allocator);
     defer fx.deinit();
@@ -2155,7 +2251,7 @@ test "the navigation projection follows the visible page stack" {
     // identical depth readouts at every step — the projection is a pure
     // derivation, so a journal replayed without a host is identical.
     const journal = [_]Msg{
-        .{ .open_album = 2 }, .show_songs, .show_albums, .close_album,
+        .{ .open_album = 2 }, .show_songs,  .show_albums, .close_album,
         .{ .open_album = 5 }, .close_album,
     };
     var first = Model{};
@@ -2430,7 +2526,7 @@ test "one Msg journal drives both shells deterministically" {
     const expected_form = [journal.len]model_mod.FormFactor{
         .compact, .compact, .compact, .compact,
         .regular, .regular, .regular, .compact,
-        .regular, .compact,  .compact,
+        .regular, .compact, .compact,
     };
 
     var first = Model{};

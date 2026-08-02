@@ -1,0 +1,1 @@
+fix: **Canonical documentation routes**: documentation now lives under `/docs/`, with permanent redirects from every previous URL, explicit canonical metadata, `.md` siblings, and a generated `llms.txt` that stays aligned with each page's canonical MDX source.

@@ -336,7 +336,7 @@ const TranscriptModel = struct {
 
 fn transcriptUpdate(model: *TranscriptModel, msg: TranscriptMsg) void {
     switch (msg) {
-        .scrolled => |scroll| model.offset = scroll.offset,
+        .scrolled => |scroll| model.offset = scroll.offset_y,
     }
 }
 
@@ -484,7 +484,7 @@ fn measuredChatUpdate(model: *MeasuredChatModel, msg: MeasuredChatMsg) void {
             model.draft[model.draft_len % measured_chat_draft_capacity] = 'a' + @as(u8, @intCast(model.typed % 26));
             model.draft_len = (model.draft_len % measured_chat_draft_capacity) + 1;
         },
-        .scrolled => |scroll| model.offset = scroll.offset,
+        .scrolled => |scroll| model.offset = scroll.offset_y,
     }
 }
 

@@ -1,0 +1,112 @@
+# Theming
+
+Every visual decision a built-in component makes — colors, radii, control heights, state washes, focus geometry, type sizes — reads from one `DesignTokens` value. There are no per-component style props and no emitter-level special cases: retheme the tokens and the whole widget register moves together. This page covers the three ways to own that value, from picking a built-in pack to authoring a design system from scratch.
+
+## Theme packs
+
+A theme pack is a complete built-in register selectable by name. Two ship today:
+
+- `house` (the default) — the monochrome neutral register documented throughout these pages.
+- `geist` — the design register of the bundled Geist typeface family: a cool neutral scale over pure white/black pages, monochrome primaries, blue focus rings, 6px control corners, and a taller 32/40/48 control ladder.
+
+Select a pack in `app.zon`:
+
+```zig
+.{
+    .id = "com.example.app",
+    .name = "example",
+    .version = "0.1.0",
+    .theme = "geist",
+}
+```
+
+An unknown name is a build error listing the valid packs — never a silent fallback. The scaffold passes the manifest's choice into the app through `app_runner.manifestThemePack()`; wire it to your `UiApp` options and the pack composes with the live system appearance, so a packed app still re-themes on the OS light/dark flip (plus high contrast and reduced motion), no restart:
+
+```zig
+const MyApp = native_sdk.UiApp(Model, Msg);
+// In your options:
+.theme = app_runner.manifestThemePack(),
+```
+
+Apps that derive their own tokens select the pack directly — `ThemeOptions.pack` is just another theme axis, exactly as switchable at runtime as the scheme:
+
+```zig
+pub fn myTokens(model: *const Model) canvas.DesignTokens {
+    return canvas.DesignTokens.theme(.{
+        .color_scheme = model.system_scheme,
+        .pack = if (model.brand_preview) .geist else .house,
+    });
+}
+```
+
+Pack selection is deliberately manifest/API vocabulary, not markup: a document describes structure, the app owns its look.
+
+## Pin your design system in CI
+
+A pack (or your own token set) is machine-verifiable: render a reference surface under it once, pin the pixel signature, and CI fails the moment any change moves a pixel of your design system. The SDK does exactly this for both built-in packs — the component catalog is rendered under `house` and under `geist`, each with its own pinned signature, so a token promotion or emitter change that would silently restyle either register cannot land. The same pattern works for an app: render your key screen through the reference renderer in a test, pin the signature, and re-bless it only after reviewing captures by eye.
+
+## The overrides layer
+
+Between "pick a pack" and "author everything" sits `DesignTokenOverrides`: a sparse struct of optional fields applied over any base. Every field you leave null keeps the base value, so an override survives SDK default changes and pack updates without going stale:
+
+```zig
+var tokens = canvas.DesignTokens.themeWithOverrides(.{
+    .color_scheme = scheme,
+    .pack = .geist,
+}, .{
+    // Brand accent over the pack's monochrome primary.
+    .colors = .{ .accent = canvas.Color.rgb8(0, 120, 111), .accent_text = canvas.Color.rgb8(240, 253, 250) },
+    // Sharper corners across the register.
+    .radius = .{ .sm = 4, .md = 4, .lg = 4 },
+});
+```
+
+The layering order is always: pack register → your overrides → runtime-stamped values (the surface scale in `pixel_snap.scale`, platform text measurement). Overrides exist for every token group, including the control tables (`controls.button_primary.background = …`), the interaction-state formulas (`states`), and the metric ladder (`metrics`).
+
+## The token groups
+
+The register is small enough to read in one sitting; these are the groups and what lives in each:
+
+- `colors` — the semantic palette: page/surface/washes, text inks, border hairline, the accent pair, the four semantic hues (destructive/success/warning/info) with their knockout inks, focus ring, shadow ink, scrim, disabled fill.
+- `controls` — per-control visual tables (`button_primary`, `input`, `card`, …). Each entry states background/hover/active/pressed/disabled colors, foreground, border, radius, and stroke width; null fields fall through to the semantic palette and the state formulas. This is where a design system's per-control exceptions live — a filled error button, a 12px card corner — without touching any renderer.
+- `states` — the interaction formulas applied when a control table is silent: the filled hover/pressed alpha cuts, the disabled wash strength, the destructive chip's wash ladder, the static-text selection wash.
+- `metrics` — the control size register: the sm/default/lg height ladder, per-rung button insets, button label steps, icon extents and gaps, row extent.
+- `typography` — faces and the type rungs (body/label/title/button/heading/display). The face slots (`font_id`/`mono_font_id`) take app-registered faces too — see [Fonts](/docs/fonts).
+- `radius`, `stroke`, `spacing` — the corner scale, hairline/focus stroke widths plus the focus ring's offset gap, and the spacing scale.
+- `shadow`, `blur`, `motion`, `scroll`, `layer`, `pixel_snap` — elevation, backdrop blur, motion durations/easing, scroll physics, z-bands, and snapping.
+
+## Authoring a full design system
+
+A pack is nothing more than a function returning `DesignTokens` per scheme and contrast — your app can own one the same way the built-ins do. The honest recipe:
+
+1. Start from your system's published values, not from screenshots: the neutral scale, the accent, the semantic hues, the type rungs, the radii, the control heights.
+2. Fill `colors` for all four scheme/contrast pairs (light, dark, and both high-contrast variants — high contrast is not optional; push inks to their extremes and borders toward opaque).
+3. State per-control exceptions in `controls` only where your system genuinely diverges from its own semantic palette. Most controls should need no entry — if you are filling every table, your `colors` are wrong.
+4. Restate `states` and `metrics` only if your system's interaction feedback or size ladder differs from the defaults.
+5. Pin a reference signature (see above) and review light and dark captures by eye before blessing it.
+
+```zig
+pub fn brandTokens(scheme: canvas.ColorScheme, contrast: canvas.ColorContrast) canvas.DesignTokens {
+    return .{
+        .colors = brandColors(scheme, contrast),
+        .controls = brandControls(scheme, contrast),
+        .typography = .{ .body_size = 14, .title_size = 20 },
+        .radius = .{ .sm = 4, .md = 6, .lg = 8, .xl = 12 },
+        .metrics = .{ .control_height = 36 },
+    };
+}
+```
+
+Hand it to your app via `tokens_fn` (model-owned, follows the system scheme through your model) or `tokens` (fixed). The runtime stamps `pixel_snap.scale` and text measurement after your function runs, so never cache those.
+
+## What themes cannot do
+
+Tokens restyle the register; they do not restructure it. A pack cannot change what a control is — its states, its semantics, its layout contract. That line is what makes a pinned signature meaningful: two packs render the same tree, differently inked.
+
+## Theme, eject, or build
+
+When a built-in is not what you need, there are exactly three moves, and they go in this order:
+
+- **Theme it.** Engine controls — buttons, text fields, tabs, every widget whose behavior lives in the runtime — are themed, never forked. The depth above ([packs](#theme-packs), [overrides](#the-overrides-layer), [full design systems](#authoring-a-full-design-system)) reaches every visual decision they make, including per-control exceptions through the `controls` tables.
+- **Eject it.** Library composites — views the SDK itself builds out of primitives — can become your code when you need to own their shape: `native eject component <name>` writes the canonical source into `src/components/`, building the identical widget tree at the moment of ejection. See [Building Components](/docs/building-components#use-eject-or-build) for the ejectable set and the mechanics.
+- **Build it.** When neither fits, compose a new component from the same primitives the library uses — [Building Components](/docs/building-components) walks through it. Because it is made of the same parts, it reads the same tokens, and your theme reaches it for free.

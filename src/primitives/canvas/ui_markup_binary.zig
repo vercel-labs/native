@@ -419,7 +419,10 @@ pub fn decode(arena: std.mem.Allocator, bytes: []const u8, diagnostic: *CodecDia
     for (templates) |*template_node| {
         template_node.* = try decoder.node(0);
     }
-    var document = markup.MarkupDocument{ .templates = templates };
+    // `source_bytes` sizes the tree for quota scaling; the artifact
+    // carries every node's text/names/attrs, so its length is the honest
+    // stand-in for the source this document no longer has.
+    var document = markup.MarkupDocument{ .templates = templates, .source_bytes = bytes.len };
     if (try decoder.byte() != 0) {
         document.root = try decoder.node(0);
     }

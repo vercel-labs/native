@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const canvas_limits = @import("canvas_limits.zig");
@@ -28,8 +29,8 @@ const max_canvas_visual_effects_per_view = canvas_limits.max_canvas_visual_effec
 const max_canvas_text_layouts_per_view = canvas_limits.max_canvas_text_layouts_per_view;
 const max_canvas_widget_nodes_per_view = canvas_limits.max_canvas_widget_nodes_per_view;
 const max_canvas_widget_semantics_per_view = canvas_limits.max_canvas_widget_semantics_per_view;
-const max_canvas_widget_text_bytes_per_view = canvas_limits.max_canvas_widget_text_bytes_per_view;
 const max_canvas_widget_source_text_entries_per_view = canvas_limits.max_canvas_widget_source_text_entries_per_view;
+const max_canvas_widget_text_history_entries_per_view = canvas_limits.max_canvas_widget_text_history_entries_per_view;
 
 const CanvasWidgetSourceTextEntry = canvas_widget_runtime.CanvasWidgetSourceTextEntry;
 const CanvasWidgetSourceScrollEntry = canvas_widget_runtime.CanvasWidgetSourceScrollEntry;
@@ -107,6 +108,81 @@ pub fn canvasRenderAnimationStartNsForView(view: *const RuntimeView) u64 {
     return @max(view.gpu_input_timestamp_ns, view.gpu_timestamp_ns);
 }
 
+/// The cancel-to-commit routing grace (see
+/// `RuntimeView.canvas_widget_ime_commit_grace`).
+pub const ImeCommitGrace = enum { none, route_to_owner, swallow };
+
+/// The split-event claim carry's key (see
+/// `RuntimeView.canvas_widget_claimed_key_grace`): which claimed
+/// activation key is waiting for its own committed literal. Only the
+/// text-producing activation keys arm one — every other claimed key's
+/// commit is nothing, so there is no split to carry.
+pub const CanvasWidgetClaimedKeyGrace = enum {
+    none,
+    space,
+    enter,
+
+    /// Whether `text` is the committed literal the armed key itself
+    /// produces — the keying that stops the carry from eating a
+    /// DIFFERENT key's text.
+    pub fn coversText(self: CanvasWidgetClaimedKeyGrace, text: []const u8) bool {
+        return switch (self) {
+            .none => false,
+            .space => std.mem.eql(u8, text, " "),
+            .enter => std.mem.eql(u8, text, "\r") or std.mem.eql(u8, text, "\n"),
+        };
+    }
+};
+
+/// Blur-side IME hygiene, shared by EVERY focus-mutation entry point —
+/// the pointer-driven focus move, the programmatic `focusView`, and the
+/// window-level `clearFocusedView` blur all route here so the class is
+/// closed, not chased per path. Hosts emit a standalone cancel when a
+/// composing view blurs, and after refocus an IM-consumed keystroke's
+/// text_input arrives BEFORE its key_down echo — a stale grace would
+/// route that fresh commit to the old editor (or swallow it) instead of
+/// the one focused now, so the grace and its owner pin die at blur (the
+/// target-less twin too, when the blurred view owns it).
+pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
+    // The owner pin clears UNCONDITIONALLY, not only when a grace is
+    // armed: an active (never-cancelled) composition's owner surviving
+    // a view blur would redirect post-refocus input to the stale editor
+    // (the text_input-prefers-owner routing). A composition does not
+    // outlive its view's focus — hosts cancel on blur, and where one
+    // does not, the pin must die here.
+    view.canvas_widget_ime_commit_grace = .none;
+    view.canvas_widget_ime_owner_id = 0;
+    // The split-event claim carry dies too: it marks "the text_input
+    // arriving NEXT on this view belongs to the claimed key_down just
+    // routed", and a focus move breaks that adjacency — a claimed
+    // Enter/Space activation that moves focus before its key-up would
+    // otherwise leave the carry armed to swallow the refocused view's
+    // first unrelated commit.
+    view.canvas_widget_claimed_key_grace = .none;
+    // A Tab that entered a Tab-owning editor (live terminal or editable
+    // code) suppresses its repeats and release until the physical key
+    // comes up. If the view blurs first, retire the latch here.
+    view.canvas_widget_tab_input_focus_entry_held = false;
+    // Same physical-lifetime rule for terminal Paste: a native menu can
+    // synthesize only the key-down, and a real Cmd/Ctrl+V may release its
+    // modifier before V. Blur retires either incomplete gesture so no
+    // later plain V release can inherit it.
+    view.canvas_widget_terminal_paste_v_held = false;
+    if ((runtime.targetless_ime_preedit_len > 0 or
+        runtime.targetless_ime_commit_grace) and
+        runtime.targetless_ime_preedit_window == view.window_id and
+        std.mem.eql(u8, runtime.targetless_ime_preedit_label[0..runtime.targetless_ime_preedit_label_len], view.label))
+    {
+        // The buffered preedit dies with the grace — a live target-less
+        // composition surviving its surface's blur would hijack the
+        // next composition as a continuation
+        // (`ime_continuation_owned_targetless`) even after an editor
+        // takes focus, routing that editor's commit target-less.
+        runtime.targetless_ime_preedit_len = 0;
+        runtime.targetless_ime_commit_grace = false;
+    }
+}
+
 pub const RuntimeView = struct {
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
@@ -143,6 +219,11 @@ pub const RuntimeView = struct {
     gpu_first_frame_latency_recorded: bool = false,
     gpu_frame_nonblank: bool = false,
     gpu_sample_color: u32 = 0,
+    /// Immutable creation-time backend request. `gpu_backend` below is
+    /// completion state and changes to the concrete presenter reported by
+    /// the host, so it cannot answer whether packet work was explicitly
+    /// opted out before a present.
+    gpu_requested_backend: platform.GpuSurfaceBackend = .none,
     gpu_backend: platform.GpuSurfaceBackend = .none,
     gpu_pixel_format: platform.GpuSurfacePixelFormat = .none,
     gpu_present_mode: platform.GpuSurfacePresentMode = .none,
@@ -421,12 +502,184 @@ pub const RuntimeView = struct {
     /// the last offset it reported (or was pushed), so the sync only
     /// forces `set_offset` when a non-driver source moved the offset.
     scroll_driver_ids: [platform.max_gpu_surface_scroll_drivers]u64 = undefined,
-    scroll_driver_offsets: [platform.max_gpu_surface_scroll_drivers]f32 = undefined,
+    scroll_driver_offsets: [platform.max_gpu_surface_scroll_drivers]geometry.OffsetF = undefined,
     scroll_driver_count: usize = 0,
     canvas_widget_focused_id: canvas.ObjectId = 0,
+    /// The text-entry widget whose editor OWNS the in-flight IME
+    /// composition — set when a `set_composition` routes to it, cleared
+    /// when its commit/cancel (or a direct text insertion) resolves the
+    /// sequence. A composition belongs to the editor it STARTED in:
+    /// commit and cancel route here even when focus has since moved, so
+    /// the starting editor resolves its own marked text instead of the
+    /// sequence leaking to the newly focused widget or the target-less
+    /// fallback (`canvas_widget_focused_id` is where NEW input goes;
+    /// this is where the open sequence finishes).
+    canvas_widget_ime_owner_id: canvas.ObjectId = 0,
+    /// One-shot routing grace armed by a composition CANCEL: every host
+    /// encodes a CONVERTED commit (the composed result differs from the
+    /// marked text) as cancel-then-text_input, so the text_input
+    /// immediately following a cancel still belongs to the sequence —
+    /// routed to the owner that composed it (`route_to_owner`, the
+    /// owner pin held through the cancel), or swallowed alongside an
+    /// orphaned sequence (`swallow`). Any OTHER event disarms it: a
+    /// plain Escape cancel is followed by its own key_down, which
+    /// disarms the grace before the user's next typing could misroute.
+    canvas_widget_ime_commit_grace: ImeCommitGrace = .none,
+    /// One-shot claim carry for hosts that deliver a claimed key_down
+    /// and its committed text as SEPARATE events (AppKit, Windows —
+    /// unlike GTK's key-with-text): armed when a textless key_down was
+    /// structurally claimed by the focused widget, consumed by the very
+    /// next event. The trailing text_input then counts as claimed even
+    /// though the activation may have rebuilt the tree in between —
+    /// one physical keystroke never doubles into a command and a
+    /// literal character across the event split. KEYED by which
+    /// activation key armed it: the carry swallows only that key's own
+    /// committed literal (space's " ", enter's CR/LF) — an unrelated
+    /// key's text arriving next (a second key pressed while the claimed
+    /// one is still held, on hosts that emit input-method text before
+    /// its key_down) flows instead of being eaten by a stale latch.
+    canvas_widget_claimed_key_grace: CanvasWidgetClaimedKeyGrace = .none,
+    /// A physical Tab whose first key-down moved focus INTO a Tab-owning
+    /// editor (live terminal or editable code). Its auto-repeats and
+    /// eventual release still belong to focus traversal, not input for
+    /// the newly focused target.
+    canvas_widget_tab_input_focus_entry_held: bool = false,
+    /// A Cmd/Ctrl+V key-down the clipboard pass converted into terminal
+    /// paste input. Its physical V release belongs to that paste even if
+    /// the modifier came up first; the raw gpu-input pass consumes it
+    /// and clears this latch. A fresh V key-down clears a stale native-
+    /// menu latch before the clipboard pass may arm it again.
+    canvas_widget_terminal_paste_v_held: bool = false,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
+    /// True when `canvas_widget_focus_visible_id` was written by the
+    /// KEYBOARD focus contract (`setCanvasWidgetFocusFromKeyboard`) —
+    /// the one focus path that reveals tooltips. Every other
+    /// focus-visible writer stamps false: pointer focus on editables
+    /// (the caret contract), programmatic/automation focus, the
+    /// automation key escalation on plain list rows, and the rebuild
+    /// and dismissal focus-return seams — all of which deliberately
+    /// skip the reveal (Base UI's focus-visible guard against
+    /// click-focus opens, and the reveals-are-transition-edges rule).
+    /// The layout-adoption reconcile reads this to decide whether a
+    /// tooltip newly bound beneath the standing focus-visible owner
+    /// inherits the keyboard's immediate reveal or must wait for the
+    /// next real focus arrival.
+    canvas_widget_focus_visible_keyboard: bool = false,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
+    /// The STANDING hover-Msg containment chain: every widget on the
+    /// last resolved raw hover hit's ancestor path that listens for
+    /// hover Msgs (`Widget.hover_msgs`), outermost first
+    /// (`WidgetLayoutTree.hoverMsgChainForHit`). Recomputed at exactly
+    /// the seams the hover WASH resolves through — pointer phases,
+    /// scroll re-hit-tests (wheel, kinetic, drivers, keyboard), layout
+    /// adoption, and the rebuild/dismissal prunes — so hover-Msg
+    /// containment and the wash can never disagree about where the
+    /// pointer stands. Derived from journaled input only, so replay
+    /// reproduces identical chains. The ui-app layer diffs this
+    /// against the chain it last DELIVERED (its own mirror) and
+    /// dispatches enter/leave Msgs; apps that bind no hover handlers
+    /// keep the chain empty and pay nothing.
+    canvas_widget_hover_msg_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined,
+    canvas_widget_hover_msg_chain_len: usize = 0,
+    /// A hover-CAPABLE pointer is present over this view: set by
+    /// hover-phase moves (a pointer floating without contact — which
+    /// touch physically cannot produce; taps and drags arrive as
+    /// down/drag/up), cleared when that pointer leaves the view. This
+    /// is the mechanical touch-honesty gate for hover-Msg containment:
+    /// down/drag/up phases and the scroll/adoption re-hit-tests advance
+    /// the chain only while it holds, so a tap can never enter and a
+    /// fling can never hover what slides under a lifted finger, while a
+    /// mouse keeps full fidelity through clicks and drags. The proof is
+    /// scoped to the pointer IDENTITY that earned it
+    /// (`canvas_widget_hover_pointer_id`): on hosts that distinguish
+    /// pointers, a touch contact's down/drag/up can never ride a
+    /// mouse's hover proof (single-pointer desktop hosts leave every id
+    /// 0, where the scope is a no-op). Derived from journaled input
+    /// only, so replay reproduces it.
+    canvas_widget_hover_pointer_live: bool = false,
+    canvas_widget_hover_pointer_id: u64 = 0,
+    /// The PROVEN pointer's last position — the anchor every point-blind
+    /// chain re-hit-test (scroll, adoption) resolves against, instead of
+    /// `canvas_last_pointer_position`, which any device updates: on a
+    /// host with a mouse and a touchscreen, a touch drag must not move
+    /// the re-hit anchor of the mouse's standing containment. Updated
+    /// only by the proven pointer's own events; meaningful while
+    /// `canvas_widget_hover_pointer_live` holds.
+    canvas_widget_hover_pointer_position: geometry.PointF = .{},
+    /// Count of widget-layout ADOPTIONS: incremented the moment
+    /// `copyWidgetLayoutTree` replaces the retained tree inside
+    /// `setCanvasWidgetLayout`, BEFORE the pipeline's later fallible
+    /// steps (source-text copies, host scroll/drag syncs, display
+    /// refresh). The ui-app layer samples it around publication so its
+    /// hover-currency stamp tracks the true adoption boundary: a
+    /// pre-adoption rejection (validated-then-atomic) leaves the old
+    /// pair current, while a post-adoption failure inside the pipeline
+    /// still marks the pair stale.
+    canvas_widget_layout_adoptions: u64 = 0,
+    /// Hover-intent state for ANCHORED tooltips — runtime-owned
+    /// presentation chrome; the model never hears hover. `armed` is
+    /// the tooltip whose trigger is hovered while its show delay runs;
+    /// `shown` is the tooltip currently painted; `warm_until` is the
+    /// shared warm window after a pointer-hovered tooltip hides on
+    /// pointer leave (reaching another
+    /// trigger before it passes shows that tooltip immediately, the
+    /// dense-toolbar polish). Every timestamp lives on the RECORDED
+    /// input/frame clock (`canvasRenderAnimationStartNsForView` at
+    /// pointer dispatch, `GpuSurfaceFrameEvent.timestamp_ns` at frame
+    /// advance — never a wall clock), so a recorded hover-dwell
+    /// session replays its tooltip show/hide frames byte-identically.
+    canvas_tooltip_armed_id: canvas.ObjectId = 0,
+    canvas_tooltip_deadline_ns: u64 = 0,
+    canvas_tooltip_shown_id: canvas.ObjectId = 0,
+    canvas_tooltip_warm_until_ns: u64 = 0,
+    /// The TRIGGER each intent slot was earned through (the hover
+    /// target that armed the delay / the widget whose hover or
+    /// focus-visible showed the tooltip). Ownership is a live claim,
+    /// not a memento: a rebuild that removes, rekeys, disables, or
+    /// re-parents the owner invalidates the slot in
+    /// `pruneCanvasTooltipIntent` — the tooltip node alone surviving
+    /// is not enough to keep explaining a control that no longer
+    /// exists.
+    canvas_tooltip_armed_owner_id: canvas.ObjectId = 0,
+    canvas_tooltip_shown_owner_id: canvas.ObjectId = 0,
+    /// The pointer's last position while it held the shown tooltip —
+    /// on the owning trigger (seeded at arm/show) or inside the shown
+    /// tooltip's own frame. It is the apex of the transit corridor
+    /// (`canvasTooltipTravelRegionContains`) a leave-move is judged
+    /// against, so the corridor always fans out from where the pointer
+    /// actually left. Meaningful only while a pointer-shown tooltip is
+    /// up; every value it is compared against comes from journaled
+    /// pointer events, so replay sees identical corridors.
+    canvas_tooltip_pointer_from: geometry.PointF = geometry.PointF.zero(),
+    /// Nonzero while the pointer has left both the trigger and the
+    /// shown tooltip's frame but is still inside the transit corridor
+    /// between them: the deadline (recorded clock) by which it must
+    /// arrive. Each in-corridor move re-arms it, so slow deliberate
+    /// transits stay open (WCAG 1.4.13 hoverable content) while a
+    /// pointer that parks in the gap resolves deterministically on the
+    /// frame clock. 0 means no transit is in flight.
+    canvas_tooltip_transit_deadline_ns: u64 = 0,
+    /// True when the shown tooltip was revealed by keyboard
+    /// focus-visible rather than pointer hover. Focus-shown tooltips
+    /// follow shadcn's Base UI-backed defaults: they open instantly on
+    /// focus-visible, hide on blur, ignore pointer hover leaving OTHER
+    /// triggers, and never open the pointer's warm window when they
+    /// hide (deliberate keyboard motion is not a pointer sweep).
+    canvas_tooltip_shown_from_focus: bool = false,
+    /// The pointer's last JOURNALED position over this view — every
+    /// phase that carries a trustworthy point (hover, move, down, up,
+    /// wheel) updates it; null before the first pointer event and after
+    /// a `.cancel` (the pointer-exit AppKit/GTK/Win32 hosts emit, and
+    /// gesture cancels). Point-blind scroll reconciliation (kinetic
+    /// steps, native drivers, keyboard scrolling) re-hit-tests this
+    /// position against the post-scroll tree — the pointer did not
+    /// move, so where it last stood is where it still is — and a null
+    /// here means those paths must CLOSE pointer tooltip intent rather
+    /// than guess (see
+    /// reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent).
+    /// Journaled input only, so replay sees identical positions.
+    canvas_last_pointer_position: ?geometry.PointF = null,
     /// Pointer position while the hovered widget draws hover-detail
     /// chrome (a `.chart` with hover details opted in); null everywhere
     /// else. Feeds `WidgetRenderState.hover_point`, so the display list
@@ -435,10 +688,14 @@ pub const RuntimeView = struct {
     /// updateCanvasWidgetInteractionFromPointer), so a pointer gliding
     /// within one sample repaints nothing.
     canvas_widget_hover_point: ?geometry.PointF = null,
-    /// The static `.text` widget owning the view's active click-drag
-    /// selection (0 = none). One static selection per view; starting a
-    /// selection elsewhere (or pressing anywhere else) clears it.
+    /// The static `.text` widget where the view's active click-drag
+    /// selection began (0 = none). Ordinary paragraphs keep their range
+    /// on that widget. Bounded code paragraphs additionally share the
+    /// global group range below so one gesture can cross internal chunks.
     canvas_widget_selected_text_id: canvas.ObjectId = 0,
+    canvas_widget_selected_text_group_id: canvas.ObjectId = 0,
+    canvas_widget_selected_text_group_anchor: usize = 0,
+    canvas_widget_selected_text_group_focus: usize = 0,
     /// Multi-click chain state for the double/triple-click text
     /// gestures. The runtime derives a click count from consecutive
     /// primary pointer-downs (recorded timestamps within the interval,
@@ -449,6 +706,11 @@ pub const RuntimeView = struct {
     canvas_widget_click_count: u8 = 0,
     canvas_widget_click_timestamp_ns: u64 = 0,
     canvas_widget_click_point: geometry.PointF = .{},
+    /// A chain belongs to one physical pointer and one resolved press/text
+    /// target. Nearby controls must never donate the first click of another
+    /// control's double-click gesture.
+    canvas_widget_click_pointer_id: u64 = 0,
+    canvas_widget_click_target_id: canvas.ObjectId = 0,
     /// The anchor RUN of an in-flight multi-click drag: the word (or
     /// line) selected by the initiating double (triple) click. Drag
     /// extension unions the run under the pointer with this range, so
@@ -467,7 +729,11 @@ pub const RuntimeView = struct {
     canvas_widget_drag_regions: [canvas_limits.max_canvas_widget_window_drag_regions_per_view]platform.WindowDragRegion = undefined,
     canvas_widget_drag_region_count: usize = 0,
     canvas_widget_drag_regions_pushed: bool = false,
-    widget_text_bytes: [max_canvas_widget_text_bytes_per_view]u8 = undefined,
+    widget_text_inline_bytes: [canvas_limits.max_canvas_widget_inline_text_bytes_per_view]u8 = undefined,
+    /// Points at `widget_text_inline_bytes` for ordinary views and upgrades to
+    /// heap-owned large-file capacity only when a retained layout needs it.
+    widget_text_bytes: []u8 = &.{},
+    widget_text_bytes_heap_owned: bool = false,
     widget_text_len: usize = 0,
     widget_span_entries: [canvas_limits.max_canvas_widget_spans_per_view]canvas.TextSpan = undefined,
     widget_span_len: usize = 0,
@@ -482,7 +748,16 @@ pub const RuntimeView = struct {
     widget_chart_points_len: usize = 0,
     widget_chart_x_labels: [canvas_limits.max_canvas_widget_chart_x_labels_per_view][]const u8 = undefined,
     widget_chart_x_labels_len: usize = 0,
+    /// Whether this view is the focused child INSIDE its window. This
+    /// memory deliberately survives app deactivation and window key
+    /// loss so focus returns to the same child when keyboard ownership
+    /// comes back.
     focused: bool = false,
+    /// Whether the app is active AND this view's owning window is key.
+    /// Kept separate from `focused`: retained widget focus remains
+    /// remembered while inactive, but it must not paint or report as
+    /// keyboard focus until this gate reopens.
+    keyboard_active: bool = false,
     open: bool = false,
     label_storage: [platform.max_view_label_bytes]u8 = undefined,
     parent_storage: [platform.max_view_label_bytes]u8 = undefined,
@@ -490,10 +765,41 @@ pub const RuntimeView = struct {
     accessibility_label_storage: [platform.max_view_accessibility_label_bytes]u8 = undefined,
     text_storage: [platform.max_view_text_bytes]u8 = undefined,
     command_storage: [platform.max_view_command_bytes]u8 = undefined,
+    /// Per-view, per-widget undo/redo deltas. Kept at the tail so adding
+    /// editor history does not move the established hot render/layout
+    /// fields inside RuntimeView. Text bytes are shared across entries, so
+    /// ordinary typing costs one byte per step rather than a full document
+    /// snapshot.
+    canvas_widget_text_history_entries: [max_canvas_widget_text_history_entries_per_view]view_widget_text.CanvasWidgetTextHistoryEntry = undefined,
+    canvas_widget_text_history_entry_count: usize = 0,
+    canvas_widget_text_history_inline_bytes: [canvas_limits.max_canvas_widget_inline_text_history_bytes_per_view]u8 = undefined,
+    canvas_widget_text_history_bytes: []u8 = &.{},
+    canvas_widget_text_history_bytes_heap_owned: bool = false,
+    canvas_widget_text_history_byte_count: usize = 0,
+    canvas_widget_text_history_next_serial: u64 = 1,
+    /// Native textarea Up/Down retains its painted x coordinate while a
+    /// consecutive vertical-navigation run crosses shorter visual lines.
+    canvas_widget_text_vertical_goal_id: canvas.ObjectId = 0,
+    /// Preferred x in widget-local coordinates, so moving a textarea does
+    /// not move the logical column with respect to its text container.
+    canvas_widget_text_vertical_goal_x: f32 = 0,
+    canvas_widget_text_vertical_goal_text_len: usize = 0,
+    canvas_widget_text_vertical_goal_text_hash: u64 = 0,
+    canvas_widget_text_vertical_goal_focus: usize = 0,
+    canvas_widget_text_vertical_goal_affinity: canvas.TextCaretAffinity = .upstream,
+    canvas_widget_text_vertical_goal_frame: geometry.RectF = .{},
 
     const CanvasWidgetTextMethods = view_widget_text.RuntimeViewCanvasWidgetText(RuntimeView);
     pub const applyCanvasWidgetTextEdit = CanvasWidgetTextMethods.applyCanvasWidgetTextEdit;
+    pub const applyCanvasWidgetTextEditWithoutHistory = CanvasWidgetTextMethods.applyCanvasWidgetTextEditWithoutHistory;
+    pub const canvasWidgetTextEditNeedsLargeStorage = CanvasWidgetTextMethods.canvasWidgetTextEditNeedsLargeStorage;
     pub const canvasWidgetKeyboardTextEdit = CanvasWidgetTextMethods.canvasWidgetKeyboardTextEdit;
+    pub const canvasWidgetTextHistoryShortcut = CanvasWidgetTextMethods.canvasWidgetTextHistoryShortcut;
+    pub const canvasWidgetTextHistoryAvailability = CanvasWidgetTextMethods.canvasWidgetTextHistoryAvailability;
+    pub const canvasWidgetTextHistoryReplayNext = CanvasWidgetTextMethods.canvasWidgetTextHistoryReplayNext;
+    pub const commitCanvasWidgetTextHistoryReplayIfComplete = CanvasWidgetTextMethods.commitCanvasWidgetTextHistoryReplayIfComplete;
+    pub const pruneCanvasWidgetTextHistory = CanvasWidgetTextMethods.pruneCanvasWidgetTextHistory;
+    pub const clearCanvasWidgetTextVerticalGoal = CanvasWidgetTextMethods.clearCanvasWidgetTextVerticalGoal;
     pub const canEditCanvasWidgetText = CanvasWidgetTextMethods.canEditCanvasWidgetText;
     pub const applyCanvasWidgetTextPointer = CanvasWidgetTextMethods.applyCanvasWidgetTextPointer;
     pub const clearCanvasWidgetStaticTextSelection = CanvasWidgetTextMethods.clearCanvasWidgetStaticTextSelection;
@@ -505,18 +811,21 @@ pub const RuntimeView = struct {
     pub const canvasWidgetKineticScrollActive = CanvasWidgetScrollMethods.canvasWidgetKineticScrollActive;
     pub const applyCanvasWidgetScrollRoute = CanvasWidgetScrollMethods.applyCanvasWidgetScrollRoute;
     pub const deepestCanvasWidgetScrollIndex = CanvasWidgetScrollMethods.deepestCanvasWidgetScrollIndex;
+    pub const deepestCanvasWidgetScrollIndexForAxis = CanvasWidgetScrollMethods.deepestCanvasWidgetScrollIndexForAxis;
     pub const canvasWidgetScrollState = CanvasWidgetScrollMethods.canvasWidgetScrollState;
     pub const canvasWidgetScrollStateById = CanvasWidgetScrollMethods.canvasWidgetScrollStateById;
     pub const noteCanvasWidgetScrollEvent = CanvasWidgetScrollMethods.noteCanvasWidgetScrollEvent;
-    pub const canvasWidgetScrollCanConsume = CanvasWidgetScrollMethods.canvasWidgetScrollCanConsume;
+    pub const canvasWidgetScrollCanConsumeAxis = CanvasWidgetScrollMethods.canvasWidgetScrollCanConsumeAxis;
     pub const applyCanvasWidgetScroll = CanvasWidgetScrollMethods.applyCanvasWidgetScroll;
+    pub const applyCanvasWidgetScrollAxis = CanvasWidgetScrollMethods.applyCanvasWidgetScrollAxis;
     pub const applyCanvasWidgetTextareaScroll = CanvasWidgetScrollMethods.applyCanvasWidgetTextareaScroll;
     pub const applyCanvasWidgetScrollDriverOffset = CanvasWidgetScrollMethods.applyCanvasWidgetScrollDriverOffset;
     pub const applyCanvasWidgetScrollKeyboardTarget = CanvasWidgetScrollMethods.applyCanvasWidgetScrollKeyboardTarget;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
+    pub const canvasWidgetScrollContentExtentX = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtentX;
     pub const translateCanvasWidgetScrollDescendants = CanvasWidgetScrollMethods.translateCanvasWidgetScrollDescendants;
-    pub const scrollCanvasTextareaCaretIntoView = CanvasWidgetScrollMethods.scrollCanvasTextareaCaretIntoView;
+    pub const scrollCanvasTextInputCaretIntoView = CanvasWidgetScrollMethods.scrollCanvasTextInputCaretIntoView;
 
     const CanvasWidgetControlMethods = view_widget_control.RuntimeViewCanvasWidgetControl(RuntimeView);
     pub const canvasWidgetToggleAnimation = CanvasWidgetControlMethods.canvasWidgetToggleAnimation;
@@ -556,6 +865,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasFrameResourceCache = CanvasFrameMethods.copyCanvasFrameResourceCache;
     pub const copyCanvasFramePathGeometryCache = CanvasFrameMethods.copyCanvasFramePathGeometryCache;
     pub const copyCanvasFrameImageCache = CanvasFrameMethods.copyCanvasFrameImageCache;
+    pub const removeCanvasFrameImageCacheId = CanvasFrameMethods.removeCanvasFrameImageCacheId;
     pub const copyCanvasFrameLayerCache = CanvasFrameMethods.copyCanvasFrameLayerCache;
     pub const copyCanvasFrameVisualEffectCache = CanvasFrameMethods.copyCanvasFrameVisualEffectCache;
     pub const copyCanvasRenderAnimations = CanvasFrameMethods.copyCanvasRenderAnimations;
@@ -603,6 +913,8 @@ pub const RuntimeView = struct {
     pub const canvasWidgetCursorForId = CanvasWidgetTreeMethods.canvasWidgetCursorForId;
     pub const canvasWidgetRenderState = CanvasWidgetTreeMethods.canvasWidgetRenderState;
     pub const reconcileCanvasWidgetRenderStateAfterScroll = CanvasWidgetTreeMethods.reconcileCanvasWidgetRenderStateAfterScroll;
+    pub const setCanvasWidgetHoverMsgChainForHit = CanvasWidgetTreeMethods.setCanvasWidgetHoverMsgChainForHit;
+    pub const pruneCanvasWidgetHoverMsgChain = CanvasWidgetTreeMethods.pruneCanvasWidgetHoverMsgChain;
     pub const dismissCanvasWidgetSurfaceFromEscape = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceFromEscape;
     pub const dismissCanvasWidgetMenuSurfaceForFocusDeparture = CanvasWidgetTreeMethods.dismissCanvasWidgetMenuSurfaceForFocusDeparture;
     pub const dismissCanvasWidgetSurfaceForTarget = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceForTarget;
@@ -612,6 +924,15 @@ pub const RuntimeView = struct {
     pub const canvasWidgetDismissibleSurfaceIndexForTarget = CanvasWidgetTreeMethods.canvasWidgetDismissibleSurfaceIndexForTarget;
     pub const canvasWidgetAnchoredDismissibleChildIndex = CanvasWidgetTreeMethods.canvasWidgetAnchoredDismissibleChildIndex;
     pub const canvasWidgetOwnedMenuSurfaceIndex = CanvasWidgetTreeMethods.canvasWidgetOwnedMenuSurfaceIndex;
+    pub const canvasWidgetOwnedTooltipIndex = CanvasWidgetTreeMethods.canvasWidgetOwnedTooltipIndex;
+    pub const canvasWidgetOwnedTooltipIdForOwner = CanvasWidgetTreeMethods.canvasWidgetOwnedTooltipIdForOwner;
+    pub const applyCanvasTooltipVisibility = CanvasWidgetTreeMethods.applyCanvasTooltipVisibility;
+    pub const applyCanvasTooltipVisibilityToNodes = CanvasWidgetTreeMethods.applyCanvasTooltipVisibilityToNodes;
+    pub const applyCanvasTooltipVisibilityToNodesForShownId = CanvasWidgetTreeMethods.applyCanvasTooltipVisibilityToNodesForShownId;
+    pub const pruneCanvasTooltipIntent = CanvasWidgetTreeMethods.pruneCanvasTooltipIntent;
+    pub const pruneCanvasTooltipIntentForLayout = CanvasWidgetTreeMethods.pruneCanvasTooltipIntentForLayout;
+    pub const canvasTooltipShownIdSurvivingLayout = CanvasWidgetTreeMethods.canvasTooltipShownIdSurvivingLayout;
+    pub const canvasTooltipIntentArmed = CanvasWidgetTreeMethods.canvasTooltipIntentArmed;
     pub const canvasWidgetMenuSurfaceEntryId = CanvasWidgetTreeMethods.canvasWidgetMenuSurfaceEntryId;
     pub const canvasWidgetAnchorTriggerFocusId = CanvasWidgetTreeMethods.canvasWidgetAnchorTriggerFocusId;
     pub const canvasWidgetTopmostAnchoredDismissibleIndex = CanvasWidgetTreeMethods.canvasWidgetTopmostAnchoredDismissibleIndex;
@@ -891,7 +1212,21 @@ pub const RuntimeView = struct {
     }
 
     pub fn copyRuntimeStateFrom(self: *RuntimeView, source: *const RuntimeView, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch) void {
+        const widget_text_bytes = self.widget_text_bytes;
+        const widget_text_bytes_heap_owned = self.widget_text_bytes_heap_owned;
+        const text_history_bytes = self.canvas_widget_text_history_bytes;
+        const text_history_bytes_heap_owned = self.canvas_widget_text_history_bytes_heap_owned;
         self.* = source.*;
+        self.widget_text_bytes = widget_text_bytes;
+        self.widget_text_bytes_heap_owned = widget_text_bytes_heap_owned;
+        self.canvas_widget_text_history_bytes = text_history_bytes;
+        self.canvas_widget_text_history_bytes_heap_owned = text_history_bytes_heap_owned;
+        if (self.canvas_widget_text_history_bytes.ptr != source.canvas_widget_text_history_bytes.ptr) {
+            @memcpy(
+                self.canvas_widget_text_history_bytes[0..source.canvas_widget_text_history_byte_count],
+                source.canvas_widget_text_history_bytes[0..source.canvas_widget_text_history_byte_count],
+            );
+        }
         self.label = copyInto(&self.label_storage, source.label) catch unreachable;
         self.parent = if (source.parent) |parent| copyInto(&self.parent_storage, parent) catch unreachable else null;
         self.role = copyInto(&self.role_storage, source.role) catch unreachable;
@@ -904,5 +1239,22 @@ pub const RuntimeView = struct {
         self.copyWidgetLayoutTree(source.widgetLayoutTree(), scratch) catch unreachable;
         self.widget_revision = source.widget_revision;
         @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
+    }
+
+    pub fn ensureLargeCanvasWidgetTextStorage(self: *RuntimeView, allocator: std.mem.Allocator) !void {
+        if (self.widget_text_bytes_heap_owned) return;
+        const text_bytes = try allocator.alloc(u8, canvas_limits.max_canvas_widget_text_bytes_per_view);
+        errdefer allocator.free(text_bytes);
+        const history_bytes = try allocator.alloc(u8, canvas_limits.max_canvas_widget_text_history_bytes_per_view);
+        errdefer allocator.free(history_bytes);
+        @memcpy(text_bytes[0..self.widget_text_len], self.widget_text_bytes[0..self.widget_text_len]);
+        @memcpy(
+            history_bytes[0..self.canvas_widget_text_history_byte_count],
+            self.canvas_widget_text_history_bytes[0..self.canvas_widget_text_history_byte_count],
+        );
+        self.widget_text_bytes = text_bytes;
+        self.widget_text_bytes_heap_owned = true;
+        self.canvas_widget_text_history_bytes = history_bytes;
+        self.canvas_widget_text_history_bytes_heap_owned = true;
     }
 };

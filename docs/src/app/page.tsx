@@ -271,8 +271,8 @@ export default function HomePage() {
             native desktop apps
           </h1>
           <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
-            Write your interface in native markup and Zig. The toolkit&apos;s own engine renders
-            it into real OS windows — no browser, no WebView.
+            Write your app in native markup and TypeScript — or Zig. The toolkit&apos;s own
+            engine renders it into real OS windows — no browser, no WebView, no JS runtime.
           </p>
           <div className="mx-auto mt-8 w-full max-w-xs sm:max-w-sm">
             <InstallToggle />
@@ -449,7 +449,7 @@ export default function HomePage() {
                 real menus, and the tray is the real tray.
               </p>
               <Link
-                href="/native-ui"
+                href="/docs/native-ui"
                 className="mt-6 inline-block button-14 text-gray-1000 hover:underline"
               >
                 Native UI Guide →
@@ -497,7 +497,7 @@ export default function HomePage() {
                 and an LLM judge.
               </p>
               <Link
-                href="/automation"
+                href="/docs/automation"
                 className="mt-6 inline-block button-14 text-gray-1000 hover:underline"
               >
                 Automation →
@@ -527,7 +527,7 @@ export default function HomePage() {
                 with the canvas in the same window.
               </p>
               <Link
-                href="/packaging"
+                href="/docs/packaging"
                 className="mt-6 inline-block button-14 text-gray-1000 hover:underline"
               >
                 Packaging →
@@ -574,7 +574,7 @@ export default function HomePage() {
           </div>
           <p className="mt-8 text-center">
             <Link
-              href="/platform-support"
+              href="/docs/platform-support"
               className="button-14 text-gray-1000 hover:underline"
             >
               Full Support Matrix →
@@ -603,13 +603,13 @@ export default function HomePage() {
           </div>
           <div className="mt-8 flex items-center justify-center gap-3">
             <Link
-              href="/quick-start"
+              href="/docs/quick-start"
               className="inline-flex h-10 items-center justify-center rounded-md bg-gray-1000 px-4 button-14 text-background-100 transition-colors hover:bg-gray-1000/85"
             >
               Quick Start
             </Link>
             <Link
-              href="/native-ui"
+              href="/docs/native-ui"
               className="inline-flex h-10 items-center justify-center rounded-md border border-gray-alpha-400 bg-background-100 px-4 button-14 text-gray-1000 transition-colors hover:bg-gray-100"
             >
               Native UI Guide
@@ -623,16 +623,16 @@ export default function HomePage() {
         <div className="mx-auto flex max-w-[1200px] flex-col items-center justify-between gap-4 px-6 py-10 label-14 text-gray-900 sm:flex-row">
           <p>{siteName}</p>
           <nav className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
-            <Link href="/quick-start" className="transition-colors hover:text-gray-1000">
+            <Link href="/docs/quick-start" className="transition-colors hover:text-gray-1000">
               Quick Start
             </Link>
-            <Link href="/native-ui" className="transition-colors hover:text-gray-1000">
+            <Link href="/docs/native-ui" className="transition-colors hover:text-gray-1000">
               Native UI
             </Link>
-            <Link href="/automation" className="transition-colors hover:text-gray-1000">
+            <Link href="/docs/automation" className="transition-colors hover:text-gray-1000">
               Automation
             </Link>
-            <Link href="/platform-support" className="transition-colors hover:text-gray-1000">
+            <Link href="/docs/platform-support" className="transition-colors hover:text-gray-1000">
               Platforms
             </Link>
             <a

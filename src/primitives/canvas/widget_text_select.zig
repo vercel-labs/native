@@ -57,7 +57,7 @@ pub fn staticTextSelectionForWidgetPoint(
 pub fn staticTextOffsetForWidgetPoint(widget: Widget, point: geometry.PointF, tokens: DesignTokens) ?usize {
     if (!widgetStaticTextSelectable(widget)) return null;
     if (widget.spans.len > 0) {
-        const content = widget.frame.inset(widget.layout.padding);
+        const content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
         const options = widget_metrics.widgetTextSpanLayoutOptions(widget, tokens, content.width);
         return text_spans_model.textSpanOffsetForPoint(
             widget.text,
@@ -82,7 +82,7 @@ pub fn staticTextSelectionRects(
 ) []const TextSelectionRect {
     if (widget.kind != .text or widget.text.len == 0) return output[0..0];
     if (widget.spans.len > 0) {
-        const content = widget.frame.inset(widget.layout.padding);
+        const content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
         const options = widget_metrics.widgetTextSpanLayoutOptions(widget, tokens, content.width);
         const rects = text_spans_model.textSpanSelectionRects(widget.text, widget.spans, options, range, output);
         for (output[0..rects.len]) |*rect| {

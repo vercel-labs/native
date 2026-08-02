@@ -57,6 +57,8 @@ const environment_select_text_id = model.environment_select_text_id;
 const environment_menu_id = model.environment_menu_id;
 const environment_option_base_id = model.environment_option_base_id;
 const content_scroll_id = model.content_scroll_id;
+const component_tree_scroll_id = model.component_tree_scroll_id;
+const component_tree_id = model.component_tree_id;
 const canvas_sidebar_id = model.canvas_sidebar_id;
 const section_nav_base_id = model.section_nav_base_id;
 const canvas_background_id = model.canvas_background_id;
@@ -99,6 +101,7 @@ const componentSectionLabel = model.componentSectionLabel;
 const componentSectionCommand = model.componentSectionCommand;
 const componentSectionFromCommand = model.componentSectionFromCommand;
 const componentSectionNavId = model.componentSectionNavId;
+const componentTreeItemId = model.componentTreeItemId;
 const surfaceOverlayLabel = model.surfaceOverlayLabel;
 const surfaceOverlayBody = model.surfaceOverlayBody;
 const color = model.color;
@@ -265,8 +268,8 @@ test "gpu components layout keeps finished controls visually separated" {
 
     try std.testing.expect(layout.findById(canvas_toolbar_id) == null);
     try std.testing.expect(layout.findById(canvas_toolbar_title_id) == null);
-    try expectComponentWidgetFrame(layout, canvas_toolbar_theme_id, rect(292, 11, 174, 30));
-    try expectComponentWidgetFrame(layout, canvas_toolbar_refresh_id, rect(482, 11, 86, 30));
+    try expectComponentWidgetFrame(layout, canvas_toolbar_theme_id, rect(292, 11, 148, 30));
+    try expectComponentWidgetFrame(layout, canvas_toolbar_refresh_id, rect(456, 11, 86, 30));
     try std.testing.expect(layout.findById(canvas_toolbar_separator_id) == null);
     try expectComponentWidgetFrame(layout, canvas_sidebar_id, rect(0, canvas_content_y, canvas_sidebar_width, canvas_content_height));
     try std.testing.expectEqual(@as(?f32, 0), layout.findById(canvas_sidebar_id).?.widget.style.radius);
@@ -287,7 +290,8 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(layout, canvas_status_text_id, rect(0, canvas_content_y + canvas_content_height, canvas_width, statusbar_height));
     try std.testing.expectEqual(canvas.WidgetKind.status_bar, layout.findById(canvas_status_text_id).?.widget.kind);
     try std.testing.expectEqualStrings(initial_component_status_text, layout.findById(canvas_status_text_id).?.widget.text);
-    try expectComponentWidgetFrame(layout, componentSectionNavId(.controls), rect(14, canvas_content_y + 78, 180, 34));
+    try expectComponentWidgetFrame(layout, component_tree_scroll_id, rect(14, canvas_content_y + 60, 180, canvas_content_height - 76));
+    try expectComponentWidgetFrame(layout, componentSectionNavId(.controls), rect(14, canvas_content_y + 60, 180, 32));
     try std.testing.expect(layout.findById(componentSectionNavId(.controls)).?.widget.state.selected);
     try expectComponentWidgetFrame(layout, 111, contentRect(64, 124, 148, 34));
     try expectComponentWidgetFrame(layout, 112, contentRect(230, 124, 172, 34));
@@ -348,10 +352,19 @@ test "gpu components layout keeps finished controls visually separated" {
     var catalog_nodes: [max_component_widgets]canvas.WidgetLayoutNode = undefined;
     const catalog_layout = try buildComponentsWidgetLayoutWithStateAndSize(&catalog_nodes, .{}, .{ .section = .components }, default_canvas_size);
     try std.testing.expect(!catalog_layout.findById(componentSectionNavId(.controls)).?.widget.state.selected);
-    try std.testing.expect(catalog_layout.findById(componentSectionNavId(.components)).?.widget.state.selected);
-    try expectComponentWidgetFrame(catalog_layout, 181, contentRect(64, 124, catalog_card_width, catalog_card_height));
-    try expectComponentWidgetFrame(catalog_layout, 182, contentRect(342, 124, catalog_card_width, catalog_card_height));
-    try expectComponentWidgetFrame(catalog_layout, 184, contentRect(64, 274, catalog_card_width, catalog_card_height));
+    try std.testing.expectEqual(@as(?bool, true), catalog_layout.findById(componentSectionNavId(.components)).?.widget.state.expanded);
+    try std.testing.expect(catalog_layout.findById(componentTreeItemId(0)).?.widget.state.selected);
+    const first_component_tree_item_index = try expectComponentWidgetIndex(catalog_layout, componentTreeItemId(0));
+    const first_component_tree_item = catalog_layout.nodes[first_component_tree_item_index];
+    const first_component_tree_spacer = catalog_layout.nodes[first_component_tree_item_index + 1];
+    const first_component_tree_label = catalog_layout.nodes[first_component_tree_item_index + 2];
+    try std.testing.expectEqual(first_component_tree_item_index, first_component_tree_spacer.parent_index.?);
+    try std.testing.expectEqual(first_component_tree_item_index, first_component_tree_label.parent_index.?);
+    try std.testing.expect(first_component_tree_label.frame.x > first_component_tree_item.frame.x);
+    try std.testing.expectEqualStrings(canvas.builtin_component_names[0], first_component_tree_label.widget.text);
+    try expectComponentWidgetFrame(catalog_layout, 181, contentRect(64, 124, 720, 300));
+    try std.testing.expect(catalog_layout.findById(182) == null);
+    try std.testing.expect(catalog_layout.findById(184) == null);
     try std.testing.expect(catalog_layout.findById(180) == null);
     try std.testing.expect(catalog_layout.findById(212) == null);
     try std.testing.expect(catalog_layout.findById(18101) != null);
@@ -455,7 +468,7 @@ test "gpu components layout supports resized sidebar width" {
     try expectComponentWidgetFrame(layout, canvas_sidebar_id, rect(0, canvas_content_y, resized_sidebar_width, canvas_content_height));
     try expectComponentWidgetFrame(layout, content_scroll_id, rect(resized_sidebar_width, canvas_content_y, canvas_width - resized_sidebar_width, canvas_content_height));
     try expectComponentWidgetFrame(layout, canvas_sidebar_resize_handle_id, sidebarResizeHandleFrame(resized_sidebar_width, canvas_content_height));
-    try expectComponentWidgetFrame(layout, componentSectionNavId(.controls), rect(14, canvas_content_y + 78, resized_sidebar_width - 28, 34));
+    try expectComponentWidgetFrame(layout, componentSectionNavId(.controls), rect(14, canvas_content_y + 60, resized_sidebar_width - 28, 32));
     try expectComponentWidgetFrame(layout, 111, contentRectForSidebar(resized_sidebar_width, 64, 124, 148, 34));
     try std.testing.expectEqual(canvas.WidgetCursor.resize_horizontal, layout.cursorForHit(layout.hitTest(sidebarResizeHandleFrame(resized_sidebar_width, canvas_content_height).center())));
 
@@ -612,11 +625,12 @@ test "gpu components display list renders stable reference snapshot" {
     // select/combobox triggers, and menu rows with full-row wash plus a
     // trailing checkmark on the comfortable 32px band; 20px chip badges
     // and hairline-row-separator tables; ghost-chevron pagination; the
-    // anchored environment picker; and the near-black monochrome primary
-    // on checked/filled states. Update deliberately when component
+    // anchored environment picker; the compact theme picker and indented
+    // component-explorer tree; and the near-black monochrome primary on
+    // checked/filled states. Update deliberately when component
     // rendering changes, reviewing the rendered pixels (reference render
     // dump or docs previews — same emitters) first.
-    try std.testing.expectEqual(@as(u64, 4649016855701722499), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 4655492936421299551), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -684,16 +698,19 @@ test "gpu components display list renders stable geist reference snapshot" {
     // pure-black #000000 light-mode primary FILL on every accent-fed
     // fill (primary button, checked checkbox, toggle-on track, tooltip
     // chip) while gray-1000 #171717 stays the primary INK for text.
-    // Update deliberately when the pack or component rendering changes,
-    // reviewing light and dark captures of the catalog under the pack
-    // first.
+    // The toolbar rail reaches across its remaining row, and the
+    // catalog's Small/Large strip carries the full 352px input-column
+    // rail under Geist while the same authored 148px tree stays a
+    // hugging pill under house. Update deliberately when the pack or
+    // component rendering changes, reviewing light and dark captures of
+    // the catalog under the pack first.
     const pixel_count = @as(usize, @intFromFloat(canvas_width)) * @as(usize, @intFromFloat(canvas_height)) * 4;
     const pixels = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(pixels);
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     const surface = try renderComponentsReferenceSurface(componentTokensForPack(.geist, .light), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 937194073311940051), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 14968870102127994886), referenceSurfaceSignature(pixels));
     try expectVisiblePixel(surface.pixelRgba8(36, 36));
     try expectVisiblePixel(surface.pixelRgba8(92, 88));
     try expectVisiblePixel(surface.pixelRgba8(330, 160));
@@ -807,26 +824,10 @@ test "house button group keeps the attached segmented bar through the shared spe
     try std.testing.expectEqual(@as(u64, 2150490712731232712), referenceSurfaceSignature(pixels));
 }
 
-/// Render a two-trigger tab strip (one active) on a small reference
-/// surface under `tokens`, laid out WITH those same tokens — the pinned
-/// specimen for the per-pack tab register below. The catalog pins above
-/// lay out at house metrics by construction (the scene's fixed tile
-/// geometry is built before the per-theme paint), so the underline
-/// register's inter-trigger gap — a LAYOUT effect, not a paint one —
-/// needs its own tokens-laid-out surface to be machine-verified.
-fn renderTabsReferenceSurface(tokens: canvas.DesignTokens, pixels: []u8, scratch: []u8) !canvas.ReferenceRenderSurface {
-    // Fixed trigger frames, like the button-group specimen's members:
-    // widths sized for the real bundled face so the labels never elide
-    // under the estimator's narrower guess.
-    const triggers = [_]canvas.Widget{
-        .{ .id = 2, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 88, 30), .text = "Albums", .state = .{ .selected = true } },
-        .{ .id = 3, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 76, 30), .text = "Songs" },
-    };
-    const strip = canvas.builtinComponentWidget(.tabs, .{
-        .id = 1,
-        .frame = geometry.RectF.init(16, 16, tabs_surface_width - 32, 36),
-        .children = &triggers,
-    });
+/// Render a caller-stated tab strip on a small reference surface under
+/// `tokens`, laid out WITH those same tokens — the pinned specimens for
+/// the two per-pack tab registers below.
+fn renderTabsReferenceSurface(tokens: canvas.DesignTokens, strip: canvas.Widget, pixels: []u8, scratch: []u8) !canvas.ReferenceRenderSurface {
     var nodes: [4]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTreeWithTokens(strip, strip.frame, tokens, &nodes);
 
@@ -875,39 +876,62 @@ const tabs_surface_width: usize = 260;
 const tabs_surface_height: usize = 72;
 const tabs_surface_pixels: usize = tabs_surface_width * tabs_surface_height * 4;
 
-test "geist tabs separate underline triggers by the measured 24px gap in both schemes" {
-    // The pack's tab register laid out with the pack's own tokens: bare
-    // text triggers 24px apart (the `tabs_gap` metric, measured as the
-    // reference strip's flex gap), the strip's closing hairline, and the
-    // 2px active bar under the selected label. Update deliberately when
-    // the register changes, reviewing light and dark captures of this
-    // exact specimen first.
+test "geist primary tabs match the measured full-width underline register in both schemes" {
+    // The pack's primary tab register laid out with its own tokens: a
+    // full-width 50px strip, zero list inset, content-hugging 14px text
+    // triggers with 2px shoulders, 24px gaps, the 1px closing rail, and
+    // a 2px active bar covering that rail. Update deliberately only
+    // after reviewing light and dark captures of this exact specimen.
     const pixels = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
     defer std.testing.allocator.free(pixels);
     const scratch = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
     defer std.testing.allocator.free(scratch);
 
     const geist_light = componentTokensForPack(.geist, .light);
-    // The layout itself is asserted before pinning pixels: the second
-    // trigger starts exactly 24px after the first one ends.
     const trigger_specimens = [_]canvas.Widget{
-        .{ .id = 2, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 88, 30), .text = "Albums", .state = .{ .selected = true } },
-        .{ .id = 3, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 76, 30), .text = "Songs" },
+        .{ .id = 2, .kind = .segmented_control, .text = "Albums", .state = .{ .selected = true } },
+        .{ .id = 3, .kind = .segmented_control, .text = "Songs" },
+        .{ .id = 4, .kind = .segmented_control, .text = "Files", .icon = "folder" },
     };
     const strip = canvas.builtinComponentWidget(.tabs, .{
         .id = 1,
-        .frame = geometry.RectF.init(16, 16, tabs_surface_width - 32, 36),
+        .frame = geometry.RectF.init(16, 11, tabs_surface_width - 32, 50),
         .children = &trigger_specimens,
     });
     var nodes: [4]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTreeWithTokens(strip, strip.frame, geist_light, &nodes);
+    try std.testing.expectEqual(@as(f32, 16), layout.nodes[1].frame.x);
+    try std.testing.expectEqual(@as(f32, 11), layout.nodes[1].frame.y);
+    try std.testing.expectEqual(@as(f32, 50), layout.nodes[1].frame.height);
     try std.testing.expectApproxEqAbs(@as(f32, 24), layout.nodes[2].frame.x - layout.nodes[1].frame.maxX(), 0.001);
 
-    _ = try renderTabsReferenceSurface(geist_light, pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 9163360927786161748), referenceSurfaceSignature(pixels));
+    var commands: [16]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try layout.emitDisplayList(&builder, geist_light);
+    const display_list = builder.displayList();
+    switch (display_list.findCommandById(canvas.widgetPartId(1, 2)).?.command) {
+        .fill_rect => |rail| try std.testing.expectEqualDeep(geometry.RectF.init(16, 60, tabs_surface_width - 32, 1), rail.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(canvas.widgetPartId(2, 2)).?.command) {
+        .fill_rect => |indicator| {
+            try std.testing.expectEqual(@as(f32, 59), indicator.rect.y);
+            try std.testing.expectEqual(@as(f32, 2), indicator.rect.height);
+            try std.testing.expectEqual(layout.nodes[1].frame.width, indicator.rect.width);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(canvas.widgetPartId(2, 3)).?.command) {
+        .draw_text => |label| try std.testing.expectEqual(@as(f32, 14), label.size),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(display_list.findCommandById(canvas.widgetPartId(4, 5)) != null or display_list.findCommandById(canvas.widgetPartId(4, 6)) != null);
 
-    _ = try renderTabsReferenceSurface(componentTokensForPack(.geist, .dark), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 13274207636910902760), referenceSurfaceSignature(pixels));
+    _ = try renderTabsReferenceSurface(geist_light, strip, pixels, scratch);
+    try std.testing.expectEqual(@as(u64, 14130423953025879969), referenceSurfaceSignature(pixels));
+
+    _ = try renderTabsReferenceSurface(componentTokensForPack(.geist, .dark), strip, pixels, scratch);
+    try std.testing.expectEqual(@as(u64, 10163518893834772006), referenceSurfaceSignature(pixels));
 }
 
 test "house tabs keep the flush pill strip through the shared specimen" {
@@ -921,7 +945,16 @@ test "house tabs keep the flush pill strip through the shared specimen" {
     defer std.testing.allocator.free(pixels);
     const scratch = try std.testing.allocator.alloc(u8, tabs_surface_pixels);
     defer std.testing.allocator.free(scratch);
-    _ = try renderTabsReferenceSurface(componentTokens(), pixels, scratch);
+    const triggers = [_]canvas.Widget{
+        .{ .id = 2, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 88, 30), .text = "Albums", .state = .{ .selected = true } },
+        .{ .id = 3, .kind = .segmented_control, .frame = geometry.RectF.init(0, 0, 76, 30), .text = "Songs" },
+    };
+    const strip = canvas.builtinComponentWidget(.tabs, .{
+        .id = 1,
+        .frame = geometry.RectF.init(16, 16, tabs_surface_width - 32, 36),
+        .children = &triggers,
+    });
+    _ = try renderTabsReferenceSurface(componentTokens(), strip, pixels, scratch);
     try std.testing.expectEqual(@as(u64, 16693469301949121985), referenceSurfaceSignature(pixels));
 }
 
@@ -935,7 +968,7 @@ test "gpu components house reference snapshot is reproducible through the shared
     const scratch = try std.testing.allocator.alloc(u8, pixel_count);
     defer std.testing.allocator.free(scratch);
     _ = try renderComponentsReferenceSurface(componentTokens(), pixels, scratch);
-    try std.testing.expectEqual(@as(u64, 4649016855701722499), referenceSurfaceSignature(pixels));
+    try std.testing.expectEqual(@as(u64, 4655492936421299551), referenceSurfaceSignature(pixels));
 }
 
 test "gpu components catalog previews use canonical built-in foundations" {
@@ -1007,8 +1040,11 @@ test "gpu components semantics cover retained widget families" {
     try expectSemanticRole(semantics, themeModeTriggerId(.high), .tab);
     try expectSemanticRole(semantics, canvas_toolbar_refresh_id, .button);
     try expectSemanticRole(semantics, canvas_sidebar_id, .group);
-    try expectSemanticRole(semantics, componentSectionNavId(.controls), .listitem);
-    try expectSemanticRole(semantics, componentSectionNavId(.components), .listitem);
+    try expectSemanticRole(semantics, component_tree_scroll_id, .group);
+    try expectSemanticRole(semantics, component_tree_id, .tree);
+    try expectSemanticRole(semantics, componentSectionNavId(.controls), .treeitem);
+    try expectSemanticRole(semantics, componentSectionNavId(.components), .treeitem);
+    try expectSemanticRole(semantics, componentTreeItemId(0), .treeitem);
     try expectSemanticRole(semantics, 104, .button);
     try expectSemanticRole(semantics, 105, .button);
     try expectSemanticRole(semantics, 106, .group);
@@ -1076,7 +1112,10 @@ test "gpu components semantics cover retained widget families" {
     const first_catalog_item = expectSemantic(catalog_semantics, 181);
     try std.testing.expect(first_catalog_item.state.selected);
     try std.testing.expectEqualStrings(canvas.builtin_component_names[0], first_catalog_item.label);
-    try expectSemanticRole(catalog_semantics, 189, .group);
+    const selected_tree_item = expectSemantic(catalog_semantics, componentTreeItemId(0));
+    try std.testing.expect(selected_tree_item.state.selected);
+    try std.testing.expectEqualStrings(canvas.builtin_component_names[0], selected_tree_item.label);
+    try std.testing.expect(catalog_layout.findById(189) == null);
 }
 
 test "gpu components image widget exposes image semantics and display command" {
@@ -1491,6 +1530,22 @@ test "gpu components app registers component lab on first gpu frame" {
     // only picker groups with a declared committed row move it.
     try std.testing.expectApproxEqAbs(@as(f32, 0), selected_menu_item.value.?, 0.001);
 
+    // A real pointer click can enter the focused component view directly
+    // from another section; the route and the tree's selected row must
+    // land in the same retained update.
+    resetComponentDirty(&harness.runtime);
+    var component_click_buffer: [80]u8 = undefined;
+    const component_click = try std.fmt.bufPrint(&component_click_buffer, "widget-click components-canvas {d}", .{componentTreeItemId(8)});
+    try harness.runtime.dispatchAutomationCommand(app.app(), component_click);
+    snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expectEqual(ComponentSection.components, app.section);
+    try std.testing.expect(componentSnapshotWidget(snapshot, 189) != null);
+    try std.testing.expect(componentSnapshotWidget(snapshot, componentTreeItemId(8)).?.value.? > 0.5);
+
+    var controls_action_buffer: [80]u8 = undefined;
+    const controls_action = try std.fmt.bufPrint(&controls_action_buffer, "widget-action components-canvas {d} press", .{componentSectionNavId(.controls)});
+    try harness.runtime.dispatchAutomationCommand(app.app(), controls_action);
+
     resetComponentDirty(&harness.runtime);
     var section_action_buffer: [80]u8 = undefined;
     const section_action = try std.fmt.bufPrint(&section_action_buffer, "widget-action components-canvas {d} press", .{componentSectionNavId(.components)});
@@ -1498,8 +1553,20 @@ test "gpu components app registers component lab on first gpu frame" {
     snapshot = harness.runtime.automationSnapshot("Components");
     try std.testing.expectEqual(ComponentSection.components, app.section);
     try std.testing.expect(componentSnapshotWidget(snapshot, 111) == null);
-    try std.testing.expect(componentSnapshotWidget(snapshot, 181) != null);
+    try std.testing.expect(componentSnapshotWidget(snapshot, 181) == null);
     try std.testing.expect(componentSnapshotWidget(snapshot, 189) != null);
+
+    resetComponentDirty(&harness.runtime);
+    var component_action_buffer: [80]u8 = undefined;
+    const component_action = try std.fmt.bufPrint(&component_action_buffer, "widget-action components-canvas {d} press", .{componentTreeItemId(6)});
+    try harness.runtime.dispatchAutomationCommand(app.app(), component_action);
+    try std.testing.expectEqualStrings("Showing Button component.", try componentStatusText(&harness.runtime));
+    snapshot = harness.runtime.automationSnapshot("Components");
+    try std.testing.expectEqual(@as(usize, 6), app.selected_component);
+    try std.testing.expect(componentSnapshotWidget(snapshot, 181) == null);
+    try std.testing.expect(componentSnapshotWidget(snapshot, 187) != null);
+    try std.testing.expect(componentSnapshotWidget(snapshot, 189) == null);
+    try std.testing.expect(componentSnapshotWidget(snapshot, componentTreeItemId(6)).?.value.? > 0.5);
 }
 
 test "gpu components keeps textarea text when opening inputs dropdown" {
@@ -1829,6 +1896,17 @@ test "gpu components pointer clicks update retained controls" {
     try std.testing.expect(std.mem.indexOf(u8, try componentStatusText(&harness.runtime), "Scrolled") == null);
 
     resetComponentDirty(&harness.runtime);
+    before_scroll_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const before_tree_scroll = before_scroll_layout.findById(component_tree_scroll_id).?.widget.value;
+    try dispatchComponentPointerWheel(&harness.runtime, app_handle, component_tree_scroll_id, 20);
+    scrolled_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const tree_scroll = scrolled_layout.findById(component_tree_scroll_id).?.widget.value;
+    try std.testing.expectApproxEqAbs(before_tree_scroll + 22, tree_scroll, 0.001);
+    // The runtime-owned plain scroll view is echoed into app state and
+    // rebuilt once, making a later source reset distinguishable.
+    try std.testing.expectApproxEqAbs(tree_scroll, app.virtual_scroll.tree, 0.001);
+
+    resetComponentDirty(&harness.runtime);
     try dispatchComponentPointerClick(&harness.runtime, app_handle, 158);
     snapshot = harness.runtime.automationSnapshot("Components");
     try std.testing.expect(componentSnapshotWidget(snapshot, 158).?.selected);
@@ -1851,6 +1929,8 @@ test "gpu components pointer clicks update retained controls" {
     try std.testing.expectEqual(@as(f32, 0), refreshed_layout.findById(120).?.widget.value);
     try std.testing.expectEqual(@as(f32, 28), refreshed_layout.findById(130).?.widget.value);
     try std.testing.expectEqual(@as(f32, 28), refreshed_layout.findById(150).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 0), refreshed_layout.findById(component_tree_scroll_id).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 0), app.virtual_scroll.tree);
 }
 
 test "gpu components pointer opens and selects environment dropdown options" {

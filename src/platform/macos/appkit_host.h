@@ -32,6 +32,8 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER = 18,
     NATIVE_SDK_APPKIT_EVENT_CONTEXT_MENU_ACTION = 19,
     NATIVE_SDK_APPKIT_EVENT_AUDIO = 20,
+    NATIVE_SDK_APPKIT_EVENT_VIDEO = 21,
+    NATIVE_SDK_APPKIT_EVENT_VIEW_FOCUSED = 22,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -52,6 +54,23 @@ typedef enum {
     NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED = 3,
     NATIVE_SDK_APPKIT_AUDIO_EVENT_SPECTRUM = 4,
 } native_sdk_appkit_audio_event_kind_t;
+
+/* Video player reports (EVENT_VIDEO payloads). LOADED acknowledges a
+ * successful native_sdk_appkit_video_load (or a ready URL stream) with
+ * the stream's true pixel dimensions and the decoded duration; POSITION
+ * ticks at a coarse honest cadence (~500ms) only while playing;
+ * COMPLETED fires exactly once at a non-looping video's natural end (a
+ * looping playback wraps and never completes); FAILED reports an
+ * asynchronous decode/device failure — or a network failure that killed
+ * a stream mid-flight. Pixels never ride events: decoded frames flow
+ * through the sink push handed to the load entries. Ordinals are
+ * mirrored by the Zig side (videoEventKindFromInt). */
+typedef enum {
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED = 0,
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_POSITION = 1,
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_COMPLETED = 2,
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_FAILED = 3,
+} native_sdk_appkit_video_event_kind_t;
 
 /* How many band magnitudes every SPECTRUM report carries: 32 buckets
  * with log-spaced center frequencies covering roughly 50 Hz..16 kHz.
@@ -76,6 +95,17 @@ typedef enum {
     NATIVE_SDK_APPKIT_GPU_INPUT_IME_COMMIT_COMPOSITION = 9,
     NATIVE_SDK_APPKIT_GPU_INPUT_IME_CANCEL_COMPOSITION = 10,
     NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_CANCEL = 11,
+    /* Trackpad pinch phases (magnifyWithEvent:). The event's `scale`
+     * field carries the per-event magnification DELTA on PINCH_CHANGE —
+     * raw NSEvent.magnification, which IS the multiplicative per-event
+     * delta per the browser-engine convention (see the doctrine note at
+     * magnifyWithEvent: in appkit_host.m); cumulative gesture scale is
+     * the product of (1 + delta); 0 on begin/end. The pointer anchor rides
+     * x/y (the event's locationInWindow — gesture events report the
+     * pointer location, not a midpoint between the fingers). */
+    NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_BEGIN = 12,
+    NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_CHANGE = 13,
+    NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_END = 14,
 } native_sdk_appkit_gpu_input_kind_t;
 
 typedef enum {
@@ -141,6 +171,8 @@ enum {
     NATIVE_SDK_APPKIT_WIDGET_STATE_REQUIRED = 1u << 6,
     NATIVE_SDK_APPKIT_WIDGET_STATE_READ_ONLY = 1u << 7,
     NATIVE_SDK_APPKIT_WIDGET_STATE_INVALID = 1u << 8,
+    NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_UNDO = 1u << 9,
+    NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_REDO = 1u << 10,
 };
 
 enum {
@@ -224,6 +256,10 @@ typedef struct {
     double y;
     int open;
     int focused;
+    /* WINDOW_FRAME: nonzero while the window is alive but hidden by
+     * its close_policy (.hide intercepted a user close). open stays 1
+     * for the window's whole hidden stretch. */
+    int hidden;
     const char *label;
     size_t label_len;
     const char *shortcut_id;
@@ -264,9 +300,11 @@ typedef struct {
     int high_contrast;
     uint64_t timer_id;
     /* GPU_SURFACE_SCROLL_DRIVER / CONTEXT_MENU_ACTION payloads: widget_id
-     * carries the driver id / menu token; scroll_driver_offset_y the new
-     * content offset (canvas points, y-down, overscroll passes through);
-     * menu_item_id the selected context-menu item (0 = dismissed). */
+     * carries the driver id / menu token; scroll_driver_offset_x/_y the
+     * new content offsets (canvas points, x-rightward, y-down,
+     * overscroll passes through); menu_item_id the selected
+     * context-menu item (0 = dismissed). */
+    double scroll_driver_offset_x;
     double scroll_driver_offset_y;
     uint32_t menu_item_id;
     /* GPU_SURFACE_FRAME payloads: host-stamped durations of the most
@@ -298,6 +336,26 @@ typedef struct {
      * the -60 dBFS analysis floor at 0 to full scale at 255). Zeros on
      * every other event kind. */
     uint8_t audio_bands[NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS];
+    /* EVENT_VIDEO payloads: the report kind
+     * (native_sdk_appkit_video_event_kind_t) plus the player's
+     * position/duration readout in milliseconds at emit time.
+     * video_playing/video_buffering carry the audio event's exact
+     * semantics (transport intent vs a stalled stream). */
+    int video_kind;
+    /* The engine-minted load token this playback echoes in every event
+     * (see the Zig seam's VideoEvent.token): how a replaced playback's
+     * queued straggler is told apart from the replacement's stream. */
+    uint64_t video_token;
+    uint64_t video_position_ms;
+    uint64_t video_duration_ms;
+    int video_playing;
+    int video_buffering;
+    /* LOADED payloads: the STREAM's decoded pixel dimensions — the
+     * honest source geometry, even when the host downscales frames to
+     * fit the sink's per-frame pixel budget. Zeros on every other
+     * event kind. */
+    uint64_t video_width;
+    uint64_t video_height;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
@@ -316,7 +374,7 @@ typedef void (*native_sdk_appkit_bridge_callback_t)(void *context, uint64_t wind
 // non-empty. has_web_content declares whether the app hosts a webview;
 // web-only default menu items (Reload, Toggle Web Inspector, Undo/Redo)
 // exist only when it is set.
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy);
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
 void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host);
 // Adopt pre-rendered straight-alpha RGBA8 pixels as the Dock icon (and
 // the About panel copy). The pixels are copied before return, so the
@@ -331,7 +389,20 @@ void native_sdk_appkit_set_dock_icon_rgba(native_sdk_appkit_host_t *host, const 
 // keeping the pre-masking behavior (icon shown unshaped) as the floor.
 void native_sdk_appkit_set_dock_icon_file(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
 void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_event_callback_t callback, void *context);
+// The host-side shutdown request: a failed event emit asks the host to
+// deliver SHUTDOWN and stop. While the run loop is live the delivery is
+// queued to the next turn; before [NSApp run] it happens inline (the
+// failed-START precedent — runWithCallback's didShutdown check honors
+// it before the loop would start).
 void native_sdk_appkit_stop(native_sdk_appkit_host_t *host);
+// The quit VERB's landing point (fx.quitApp): always deferred, never
+// inline — the verb arrives mid dispatch, and the shutdown must emit
+// only after the requesting dispatch has committed to the session
+// recorder. While the run loop is live the deferral is a main-queue
+// hop; before [NSApp run] the request parks as a pending flag that
+// runWithCallback drains at top level after the pre-run dispatch that
+// carried it returns.
+void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host);
 void native_sdk_appkit_load_webview(native_sdk_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void native_sdk_appkit_load_window_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void native_sdk_appkit_set_bridge_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_bridge_callback_t callback, void *context);
@@ -342,7 +413,7 @@ void native_sdk_appkit_emit_window_event(native_sdk_appkit_host_t *host, uint64_
 void native_sdk_appkit_set_security_policy(native_sdk_appkit_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action);
 void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *const *menu_titles, const size_t *menu_title_lens, size_t menu_count, const uint32_t *item_menu_indices, const char *const *item_labels, const size_t *item_label_lens, const char *const *item_commands, const size_t *item_command_lens, const char *const *item_keys, const size_t *item_key_lens, const uint32_t *item_modifiers, const int *item_separators, const int *item_enabled, const int *item_checked, size_t item_count);
 void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy);
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
 // Content min-size floor for a created window (NSWindow contentMinSize):
 // the user's resize stops at the floor. Values <= 0 leave that axis at
 // AppKit's default minimum. Returns 0 when the window id is unknown.
@@ -353,6 +424,17 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
 // window controls on chromeless windows. Returns 0 when the window id
 // is unknown.
 int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// The show verb: bring the window back to the glass and activate the
+// app (deminiaturize + makeKeyAndOrderFront) — the counterpart to a
+// close_policy .hide hide, and the tray-menu "Open" consequence.
+// Returns 0 when the window id is unknown.
+int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// What the user's close affordance does to this window: 0 = quit (the
+// default: really close; last close follows app exit semantics),
+// 1 = hide (order out and keep running — the menu-bar-app shape).
+// Applied right after create, like the content min-size floor.
+// Returns 0 when the window id is unknown.
+int native_sdk_appkit_set_window_close_policy(native_sdk_appkit_host_t *host, uint64_t window_id, int close_policy);
 // Window-drag region channel: called during dispatch of the pointer-down
 // that starts the gesture. Single click hands the event to
 // -[NSWindow performWindowDragWithEvent:] (moves only on actual
@@ -448,6 +530,41 @@ int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume);
+
+/* Where the video player delivers decoded frames: one tightly packed,
+ * row-major, straight-alpha RGBA8 frame per call (len = width * height
+ * * 4), copied before return. Returns 0 when the frame was accepted, 1
+ * when the receiving claim has been released (the host must stop
+ * pushing — its frame timer has nothing left to feed), anything else a
+ * dropped frame (latest-wins; the host keeps decoding). Always invoked
+ * on the main run loop. */
+typedef int (*native_sdk_appkit_video_sink_push_t)(void *context, size_t width, size_t height, const uint8_t *pixels, size_t len);
+
+/* The app's single video player (AVPlayer + AVPlayerItemVideoOutput).
+ * Load replaces whatever was loaded before, paused at position zero;
+ * returns 0 on success, 1 when the file is missing/unreadable, 2 when
+ * it cannot be decoded. A successful load is followed by one
+ * EVENT_VIDEO/LOADED on the run loop carrying the stream's dimensions
+ * and the decoded duration; decoded frames flow through push_fn.
+ * Play/pause/stop/seek/set_volume/set_muted/set_loop return 1 when
+ * applied, 0 when there is no loaded player to apply to (stop, pause,
+ * and the setters treat that as a harmless no-op on the Zig side).
+ * All entries are loop-thread only. */
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
+/* URL sources on the same single player: progressive AVPlayer streaming
+ * (playable as soon as enough bytes arrive, never download-then-play;
+ * no cache layer). Returns 2 when the URL cannot even be parsed, 0 for
+ * a started stream. Async failures (unreachable host, mid-stream
+ * network loss, undecodable payload) arrive as one EVENT_VIDEO/FAILED
+ * on the run loop. Loop-thread only. */
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
+int native_sdk_appkit_video_play(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_video_pause(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_video_stop(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_video_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
+int native_sdk_appkit_video_set_volume(native_sdk_appkit_host_t *host, double volume);
+int native_sdk_appkit_video_set_muted(native_sdk_appkit_host_t *host, int muted);
+int native_sdk_appkit_video_set_loop(native_sdk_appkit_host_t *host, int loop);
 /* Thread-safe: nudges the main run loop to emit a WAKE event. May be
  * called from any thread (worker threads streaming effect results). */
 void native_sdk_appkit_wake(native_sdk_appkit_host_t *host);
@@ -475,8 +592,26 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
 
 // Register engine-validated TrueType bytes under a canvas font id so
 // measurement and packet text drawing resolve the id to this exact face.
-// Returns 1 on success, 0 when CoreText rejects the data.
-int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size_t bytes_len);
+// Returns 1 on success, 0 when CoreText rejects the data. On success
+// `*out_token` is the registration's ownership token — the handle the
+// caller must present to native_sdk_appkit_unregister_font, so teardown
+// removes exactly this registration (font ids are per-runtime while
+// host font state is per-process: a later runtime may re-register the
+// id, and its live face must survive the older owner's teardown). Hosts
+// that retain no font state (the Chromium engine's stateless accept)
+// write 0: nothing installed, nothing a token could own.
+int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size_t bytes_len, uint64_t *out_token);
+// Drop the per-id state a registration installed (the descriptor and its
+// caches) — the teardown twin Runtime.deinit calls, because font ids are
+// per-runtime while this host's font state is per-process. `token` must
+// be the value the matching register call reported: state is removed
+// only while the id's current registration still carries it, so an
+// older runtime's deinit never tears down a newer runtime's live face
+// under a shared id. A stale token — like an id with no installed
+// descriptor — is a no-op accept: the registration the token owned is
+// already gone, which is the state the caller asked for. Returns 1 on
+// accept, 0 only for the invalid id 0.
+int native_sdk_appkit_unregister_font(uint64_t font_id, uint64_t token);
 /* Decode encoded image bytes (PNG, JPEG, ... — whatever ImageIO supports)
  * through CGImageSource into tightly packed, row-major, straight-alpha
  * (non-premultiplied) RGBA8 written into `pixels`. Returns 1 on success
@@ -546,19 +681,41 @@ typedef void (*native_sdk_appkit_tray_callback_t)(void *context, uint32_t item_i
  * set_gpu_surface_scroll_drivers_fn). Frame coordinates are view-local
  * canvas points (top-left origin, y-down); the host flips to AppKit
  * coordinates itself. */
+/* A surface that hit-blocks scroll regions beneath it (view-local
+ * canvas points, top-left origin): wheel routing declines a driver
+ * whose occluder mask includes an occluder containing the point. */
+typedef struct {
+    double x;
+    double y;
+    double width;
+    double height;
+} native_sdk_appkit_scroll_occluder_t;
+
 typedef struct {
     uint64_t driver_id;
+    /* The nearest ancestor driver's id (0 = none): wheel-owner
+     * resolution is restricted to the hit region and its ancestors. */
+    uint64_t parent_driver_id;
+    /* Bit i set = occluder i (of the sync call's occluder array) blocks
+     * this region at points it contains. */
+    uint32_t occluder_mask;
     double x;
     double y;
     double width;
     double height;
     double content_width;
     double content_height;
+    double offset_x;
     double offset_y;
-    int set_offset;
+    int set_offset_x;
+    int set_offset_y;
     /* Edge behavior: 0 pins scrolling at the content edges, nonzero lets
-     * the scroller bounce past them (vertical elasticity). */
+     * the scroller bounce past them (armed per axis via the grants). */
     int rubber_band;
+    /* Which axes the region grants: elasticity and scroller chrome arm
+     * only on granted axes; an ungranted axis never moves or bounces. */
+    int scrolls_x;
+    int scrolls_y;
 } native_sdk_appkit_scroll_driver_t;
 
 /* One native context-menu entry. */
@@ -575,7 +732,7 @@ typedef struct {
  * extents / (when set_offset) offsets, remove drivers absent from the
  * list. Idempotent; called every layout install and every presented
  * frame. Returns 1 on success, 0 when the view does not exist. */
-int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count);
+int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count, const native_sdk_appkit_scroll_occluder_t *occluders, size_t occluder_count);
 
 /* Present a native context menu (NSMenu popUpMenuPositioningItem) at the
  * view-local point on the next main-loop turn. The selection (or

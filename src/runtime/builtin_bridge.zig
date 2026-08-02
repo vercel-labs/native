@@ -22,6 +22,7 @@ const jsonBoolField = bridge_payload.jsonBoolField;
 const webViewWindowIdFromJson = bridge_payload.webViewWindowIdFromJson;
 const viewWindowIdFromJson = bridge_payload.viewWindowIdFromJson;
 const viewKindFromString = bridge_payload.viewKindFromString;
+const windowTitlebarStyleFromString = bridge_payload.windowTitlebarStyleFromString;
 const gpuSurfaceOptionsFromJson = bridge_payload.gpuSurfaceOptionsFromJson;
 const viewFrameFromJson = bridge_payload.viewFrameFromJson;
 const viewLayerFromJson = bridge_payload.viewLayerFromJson;
@@ -148,6 +149,12 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchWebViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            // A native-only build has no webviews to command (and no page
+            // to command them from); every webview verb answers with the
+            // teaching error instead of a misleading not-found.
+            if (!self.options.web_layer) {
+                return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(error.WebViewLayerNotBuilt), builtinBridgeErrorMessage(error.WebViewLayerNotBuilt));
+            }
             const result = if (std.mem.eql(u8, request.command, "native-sdk.webview.create"))
                 Self.createWebViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.webview.list"))
@@ -230,11 +237,20 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             const x = jsonNumberField(payload, "x") orelse 0;
             const y = jsonNumberField(payload, "y") orelse 0;
             const source = if (jsonStringField(payload, "url", &storage)) |url| platform.WebViewSource.url(url) else null;
+            const titlebar = if (jsonStringField(payload, "titlebar", &storage)) |value|
+                windowTitlebarStyleFromString(value) orelse return error.InvalidWindowOptions
+            else
+                .standard;
             const info = try self.createWindow(.{
                 .label = label,
                 .title = title,
                 .default_frame = geometry.RectF.init(x, y, width, height),
                 .restore_state = jsonBoolField(payload, "restoreState") orelse true,
+                .titlebar = titlebar,
+                .transparent = jsonBoolField(payload, "transparent") orelse false,
+                .always_on_top = jsonBoolField(payload, "alwaysOnTop") orelse false,
+                .click_through = jsonBoolField(payload, "clickThrough") orelse false,
+                .activate_on_show = jsonBoolField(payload, "activateOnShow") orelse true,
                 .source = source,
             });
             return writeWindowJson(info, output);
@@ -524,11 +540,16 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var storage = json.StringStorage.init(output);
             const window_id = try Self.resolveWindowSelector(self, payload, &storage);
             const index = WindowViewMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
-            var info = self.windows[index].info;
-            info.open = false;
-            info.focused = false;
             try self.closeWindow(window_id);
-            return writeWindowJson(info, output);
+            // The response serializes the TABLE state after the close,
+            // never a hand-cleared copy: closeWindow owns which flags a
+            // close clears (open, focused, AND hidden — a closed
+            // policy-hidden window is gone, not "hidden"), and a copy
+            // maintained here field-by-field silently drifts every time
+            // that set grows. The index stays valid: a closed window
+            // keeps its table slot — slots only compact inside window
+            // create, when a dead slot's id or label is re-used.
+            return writeWindowJson(self.windows[index].info, output);
         }
 
         pub fn resolveWindowSelector(self: *Runtime, payload: []const u8, storage: *json.StringStorage) !platform.WindowId {

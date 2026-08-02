@@ -7,6 +7,7 @@ const bridge_responses = @import("bridge_responses.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_clock = @import("clock.zig");
 const runtime_state = @import("state.zig");
+const runtime_view = @import("view.zig");
 const runtime_window_storage = @import("window_storage.zig");
 const platform = @import("../platform/root.zig");
 const security = @import("../security/root.zig");
@@ -321,6 +322,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn createWebViewView(self: *Runtime, options: platform.ViewOptions) !platform.ViewInfo {
+            if (!self.options.web_layer) return error.WebViewLayerNotBuilt;
             try validateChildWebViewLabel(options.label);
             try Self.validateWebViewUrl(self, options.url);
             if (!isValidWebViewFrame(options.frame)) return error.InvalidWebViewOptions;
@@ -482,6 +484,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .transparent = options.transparent,
                 .bridge_enabled = options.bridge_enabled,
                 .gpu_size = if (options.kind == .gpu_surface) options.frame.size() else geometry.SizeF.init(0, 0),
+                .gpu_requested_backend = if (options.kind == .gpu_surface) options.gpu_surface.backend else .none,
                 .gpu_backend = if (options.kind == .gpu_surface) options.gpu_surface.backend else .none,
                 .gpu_pixel_format = if (options.kind == .gpu_surface) options.gpu_surface.pixel_format else .none,
                 .gpu_present_mode = if (options.kind == .gpu_surface) options.gpu_surface.present_mode else .none,
@@ -491,8 +494,11 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .gpu_status = if (options.kind == .gpu_surface) .ready else .unavailable,
                 .gpu_surface_created_timestamp_ns = if (options.kind == .gpu_surface) timestampToU64(nowNanoseconds()) else 0,
                 .focused = false,
+                .keyboard_active = windowKeyboardActive(self, options.window_id),
                 .open = true,
             };
+            self.views[index].widget_text_bytes = &self.views[index].widget_text_inline_bytes;
+            self.views[index].canvas_widget_text_history_bytes = &self.views[index].canvas_widget_text_history_inline_bytes;
             self.views[index].label = try copyInto(&self.views[index].label_storage, options.label);
             self.views[index].parent = if (options.parent) |parent| try copyInto(&self.views[index].parent_storage, parent) else null;
             self.views[index].role = try copyInto(&self.views[index].role_storage, options.role);
@@ -500,6 +506,12 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             self.views[index].text = try copyInto(&self.views[index].text_storage, options.text);
             self.views[index].command = try copyInto(&self.views[index].command_storage, options.command);
             self.view_count += 1;
+        }
+
+        fn windowKeyboardActive(self: *const Runtime, window_id: platform.WindowId) bool {
+            if (!self.app_active) return false;
+            const window_index = WindowStorageMethods.findWindowIndexById(self, window_id) orelse return false;
+            return self.windows[window_index].info.focused;
         }
 
         pub fn findViewIndex(self: *const Runtime, window_id: platform.WindowId, label: []const u8) ?usize {
@@ -533,10 +545,20 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             for (self.views[0..self.view_count], 0..) |*view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
+                const was_focused = view.focused;
                 view.focused = std.mem.eql(u8, view.label, label);
                 const next_state = view.canvasWidgetRenderState();
                 if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
                     try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+                }
+                // A view losing focus drops its tooltip state and
+                // re-stamps hidden — no stale tooltip may keep floating
+                // in a view the keyboard just left — and its IME grace
+                // dies with the blur (the shared hygiene every
+                // focus-mutation path applies).
+                if (was_focused and !view.focused) {
+                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForViewBlur(self, view_index);
+                    runtime_view.clearImeGraceOnViewBlur(self, view);
                 }
             }
             for (self.webviews[0..self.webview_count]) |*webview| {
@@ -551,10 +573,17 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             for (self.views[0..self.view_count], 0..) |*view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
+                const was_focused = view.focused;
                 view.focused = false;
                 const next_state = view.canvasWidgetRenderState();
                 if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
                     try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+                }
+                // Window-level focus loss blurs every view: same tooltip
+                // reset and IME-grace hygiene as a per-view focus move.
+                if (was_focused) {
+                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForViewBlur(self, view_index);
+                    runtime_view.clearImeGraceOnViewBlur(self, view);
                 }
             }
             for (self.webviews[0..self.webview_count]) |*webview| {
@@ -615,12 +644,39 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn removeViewAt(self: *Runtime, index: usize) void {
             if (index >= self.view_count) return;
+            // A target-less IME composition owned by this view dies with
+            // it: a later view REUSING the same window+label must not
+            // inherit the stale sequence (its first composition update
+            // would be mistaken for a continuation and bypass its own
+            // focused editor) NOR the cancel-to-commit grace (whose
+            // trailing text would leak target-less into the new
+            // surface — cancellation zeroes the preedit length before
+            // arming the grace, so both states gate the clear). The
+            // buffer stays allocated; only the ownership state clears.
+            if ((self.targetless_ime_preedit_len > 0 or self.targetless_ime_commit_grace) and
+                self.targetless_ime_preedit_window == self.views[index].window_id and
+                std.mem.eql(
+                    u8,
+                    self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                    self.views[index].label,
+                ))
+            {
+                self.targetless_ime_preedit_len = 0;
+                self.targetless_ime_commit_grace = false;
+            }
             var cursor = index;
             while (cursor + 1 < self.view_count) : (cursor += 1) {
                 const next = &self.views[cursor + 1];
                 self.views[cursor].copyRuntimeStateFrom(next, &self.canvas_widget_copy_scratch);
             }
             self.view_count -= 1;
+            const released = &self.views[self.view_count];
+            if (released.widget_text_bytes_heap_owned) self.owned_allocator.free(released.widget_text_bytes);
+            if (released.canvas_widget_text_history_bytes_heap_owned) self.owned_allocator.free(released.canvas_widget_text_history_bytes);
+            released.widget_text_bytes = &.{};
+            released.widget_text_bytes_heap_owned = false;
+            released.canvas_widget_text_history_bytes = &.{};
+            released.canvas_widget_text_history_bytes_heap_owned = false;
         }
 
         pub fn removeViewsForWindow(self: *Runtime, window_id: platform.WindowId) void {

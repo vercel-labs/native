@@ -1,0 +1,54 @@
+# Agent Skills
+
+Native SDK ships its agent guidance as skills: curated, versioned `SKILL.md` documents that the CLI delivers to coding agents.
+
+An agent should not assume it knows the Native SDK from general model knowledge. A skill closes that gap: it travels with the CLI, so the guidance an agent reads always matches the toolkit version it is building against — not whatever the model remembers.
+
+## Install for your agent
+
+One command sets an agent up:
+
+```sh
+npx skills add vercel-labs/native
+```
+
+It installs the Native SDK discovery skill into your agent's skills directory: a compact entry point that orients the agent and teaches it to load the full, version-matched skill content from the installed CLI with the `native skills` commands below. Install once — because the deep guidance is always read from the CLI, the agent stays current with whatever toolkit version each project uses.
+
+## Getting skills from the CLI
+
+The CLI itself serves the full skill content. This is the layer the installed discovery skill reads from, and the direct path when you want to print a skill or deliver one by hand — it needs nothing beyond the installed CLI, so it also works offline:
+
+```sh
+native skills list                    # list built-in skills
+native skills get core                # print a skill
+native skills get core --full         # include its reference files
+native skills get --all [--full]      # print every skill
+```
+
+`skills get` prints the skill to stdout, so delivering one to an agent is a single redirect into wherever your agent loads skills from:
+
+```sh
+mkdir -p .claude/skills/native-ui
+native skills get native-ui > .claude/skills/native-ui/SKILL.md
+```
+
+`native init` does not copy skills into the workspace — delivery is always explicit, so the skill in the workspace is exactly what the installed CLI serves. The repository's own eval harness gives fresh agents the `native-ui` skill this same way before grading what they build.
+
+## What ships
+
+<dl>
+  <dt><code>core</code></dt>
+  <dd>The shared foundation: the mental model, project structure, <code>app.zon</code>, App and Runtime patterns, frontend integration, web engines, the JavaScript bridge, permissions, windows, WebViews, dialogs, packaging, debugging, and testing. <code>--full</code> appends its five reference files (project anatomy, App/Runtime patterns, frontend assets, web engines/packaging/debugging, bridge/security/native capabilities).</dd>
+  <dt><code>native-ui</code></dt>
+  <dd>Authoring native-rendered apps: <code>.native</code> markup views, bindings and message dispatch, <code>Model</code>/<code>Msg</code>/<code>update</code> on the <code>UiApp</code> loop, testing markup views, hot reload, and verifying the result through the automation harness.</dd>
+  <dt><code>ts-core</code></dt>
+  <dd>Authoring <a href="/docs/typescript">TypeScript app cores</a>: the app-core subset, every checker rule by ID with its idiomatic fix, text-is-bytes, the full <code>Cmd</code>/<code>Sub</code> effect vocabulary, and the node dev loop.</dd>
+  <dt><code>automation</code></dt>
+  <dd>Driving and verifying a running app through <code>native automate</code>: snapshots, readiness waits, assertions, bridge round-trips, and smoke tests.</dd>
+  <dt><code>zig</code></dt>
+  <dd>Zig 0.16 idioms indexed by compile error, for fixing code written against older Zig: <code>std.Io</code> file IO and writers, <code>ArrayList</code>, spawning, clocks, formatting, and <code>build.zig</code> shapes, each as the SDK writes them. The human version is <a href="/docs/zig">Zig 0.16 Notes</a>.</dd>
+</dl>
+
+## Skills in the agent workflow
+
+[AI is part of the workflow](/docs/introduction#ai-is-part-of-the-workflow): the same declarative views and single typed `update` function that keep apps easy for people to reason about make them reliable for agents to generate. Skills supply the knowledge half of that loop, and the [automation server](/docs/automation) supplies the verification half — an agent reads the skill, builds with the [CLI verbs](/docs/cli), and then sees and drives the running window to check its own work.

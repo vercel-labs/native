@@ -25,7 +25,7 @@
 //! Format (the wire-packet precedent: length-prefixed little-endian
 //! binary, explicit budgets, hostile input fails loudly):
 //!
-//!   magic "NSDKSJNL" | u32 format version | records...
+//!   magic "NSDKSJNL" | u64 format fingerprint | records...
 //!
 //! Every record is `u8 kind | u32 payload_len | payload`. The first
 //! record must be the header; the last must be the end record, whose
@@ -40,25 +40,38 @@
 //! that consumes it. Nested dispatches (automation-driven events inside
 //! `frame_requested`) commit innermost-first for the same reason.
 //!
-//! Enum payloads ride as their declaration-order integer values, so
-//! reordering any journaled enum is a format break: bump
-//! `format_version` when one moves.
+//! That feed-then-dispatch premise only holds if event boundaries are
+//! CAUSAL: every result journaled ahead of an event must answer a
+//! request issued by some EARLIER dispatch — otherwise the file-order
+//! feed reaches a result whose request does not exist yet and replay
+//! reports a false divergence. The live drain guarantees it: one drain
+//! pass consumes only completions that existed when the pass began
+//! (`Effects.DrainBoundary`), so a load spawned by an update handler
+//! inside the pass — even one fast enough to finish before the pass
+//! ends — delivers, and journals, under the NEXT wake's event record.
 //!
-//! Coverage note: automation driving that synthesizes PLATFORM events is
-//! fully journaled (widget-click/hold/context-press/drag/wheel/key,
-//! widget-action press/toggle/increment/decrement/set_text, resize,
-//! menu-command, shortcut, tray-action). The few automation verbs that
-//! mutate runtime widget state directly (widget-action
-//! focus/select/set_selection and the composition edits) bypass the
-//! platform boundary and do not journal in v1 — a recorded session using
-//! them replays without those mutations, and the next fingerprint
-//! checkpoint says so loudly. Drive text through `widget-key` and
-//! selection through pointer/key input when recording.
+//! Enum payloads ride as their declaration-order integer values, so
+//! reordering any journaled enum is a format break — one
+//! `format_fingerprint` sees on its own (the layout description
+//! renders every journaled enum's names AND values).
+//!
+//! Coverage note: automation driving is fully journaled. Verbs that
+//! synthesize PLATFORM events (widget-click/hold/context-press/drag/
+//! wheel/key/pinch, resize, menu-command, shortcut, tray-action) journal
+//! those events; every widget-action verb — including the direct-
+//! surface ones (focus, select, set_selection, set_text, and the
+//! composition edits) — journals as the outer-wins
+//! `widget_accessibility_action` record its dispatch stages, with the
+//! events it synthesizes inside suppressed as that record's children.
+//! Replaying the action record re-runs the verb through the same
+//! dispatch, so recorded sessions may drive text and selection through
+//! any verb.
 
 const std = @import("std");
 const geometry = @import("geometry");
 const platform = @import("../platform/root.zig");
 const automation_protocol = @import("../automation/protocol.zig");
+const layout_fingerprint = @import("../automation/layout_fingerprint.zig");
 const runtime_effects = @import("effects.zig");
 
 pub const EffectResultRecord = runtime_effects.EffectResultRecord;
@@ -66,12 +79,128 @@ pub const EffectResultRecord = runtime_effects.EffectResultRecord;
 /// File magic: first eight bytes of every session journal.
 pub const magic = "NSDKSJNL";
 
-/// Journal format version. Any change to record layouts or journaled
-/// enum orders bumps this; readers refuse other versions loudly rather
-/// than misreading yesterday's shape. v2 added the stream `buffering`
-/// flag to audio event and audio effect records; v3 added the spectrum
-/// band bytes to both (and the `.spectrum` audio kind).
-pub const format_version: u32 = 3;
+/// Journal format identity. Any change to record layouts or journaled
+/// enum orders moves this fingerprint ON ITS OWN — the layout
+/// description below reflects over the actual record and event types —
+/// and readers refuse a journal whose fingerprint differs from their
+/// own, loudly, rather than misreading yesterday's shape.
+///
+/// This replaces the manually-bumped integer counter the preamble
+/// carried through v8. No journal is ever migrated (replay refuses
+/// every skew with the re-record teaching), so an ORDERED version
+/// carried no information — "same or different" is the entire question
+/// — while costing two recurring failures: parallel branches contending
+/// for the next integer, and forgettable bumps.
+///
+/// History of the retired counter, kept because it documents real
+/// breaks: v2 added the stream `buffering` flag to audio event and
+/// audio effect records; v3 added the spectrum band bytes to both (and
+/// the `.spectrum` audio kind); v4 added the composition verbs
+/// (`set_composition`/`commit_composition`/`cancel_composition`, codes
+/// 11-13) to the accessibility-action record's verb enum — a v3 reader
+/// hitting one of those codes would have reported the file corrupt
+/// instead of refusing the skew; v5 added the pinch magnification
+/// `scale` field to gpu-surface input records plus the
+/// `pinch_begin`/`pinch_change`/`pinch_end` input kinds (codes 12-14);
+/// v6 added the `hidden` flag to window-frame records; v7 added the
+/// `.image` effect-result kind (code 11) with its outcome/dimension
+/// fields and the blob-store content address appended to every effect
+/// record; v8 added the `.channel` effect-result kind (code 12) with
+/// its event kind and cumulative drop total appended to every effect
+/// record. Every one of those changes would now move the fingerprint
+/// with no manual step.
+pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescription(format_semantic_epoch));
+
+/// The escape hatch for a change in MEANING that leaves the journal
+/// bytes identical, which no layout description can see (the
+/// automation-protocol side had exactly one: context-menu action tokens
+/// becoming per-request generations — same bytes, values a stale build
+/// could never match). Bump this ONLY for such semantics-only changes;
+/// layout changes need NO action here — the fingerprint moves on its
+/// own. Epoch 2: `.video_load` records became one-per-load (refused
+/// cascades journal one too) and replay verifies the bijection — an
+/// earlier journal's failed loads would replay as false divergence, so
+/// the identical bytes must refuse. Epoch 3: the `video_kind` field on
+/// `.video_load` records became the load's OUTCOME (`.loaded` or
+/// `.failed`, steering the replayed fake's synchronous reset) where it
+/// previously rode its default — same bytes, new meaning. Epoch 4:
+/// `pointer_id` on gpu-surface input records reserved bit 63 as the
+/// touch-source stamp (`platform.touch_pointer_id_bit`) — same bytes,
+/// and an older recording whose host happened to emit ids with that
+/// bit set would replay with hover-proof semantics it never had.
+/// Epoch 5: audio positions and durations clamp into the exact-integer
+/// window (below 2^53) at every delivery entry, and replay refuses an
+/// out-of-window audio record as journal damage — an older recording
+/// could journal a wider value the old feed paths accepted, which
+/// would now be misreported as damage instead of refusing as a
+/// different generation.
+pub const format_semantic_epoch: u32 = 5;
+
+/// The canonical description `format_fingerprint` hashes: everything
+/// that defines the on-disk record layout. Reflection covers the record
+/// kinds, the event-tag set, every record struct's field names/types/
+/// order, the full effect record (including every journaled effect
+/// enum's names and values), and each event variant's payload type.
+/// Deliberate constants state what the hand-written codecs alone decide
+/// — framing, string/optional/enum encodings, the modifier bit
+/// assignments, the accessibility verb's i32 width, the
+/// `gpu_surface_frame` journaled subset — each commented at its codec.
+fn formatLayoutDescription(comptime epoch: u32) []const u8 {
+    comptime {
+        @setEvalBranchQuota(2_000_000);
+        return "native-sdk session journal layout\n" ++
+            std.fmt.comptimePrint("semantic_epoch={d}\n", .{epoch}) ++
+            "magic=" ++ magic ++ "\n" ++
+            "preamble=magic|u64 format fingerprint le\n" ++
+            "framing=u8 kind|u32 payload_len le|payload\n" ++
+            // Hand-written codec facts reflection cannot see; the
+            // couplings are commented at WriteCursor, writeModifiers,
+            // and the widget_accessibility_action arm.
+            "codec=ints le;str=u32 len|bytes;bool=u8;enum=u8 of declaration value;optional=u8 presence|payload;" ++
+            "modifiers=u8 bits primary=1 command=2 control=4 option=8 shift=16;" ++
+            "accessibility action verb=i32;insets=top,right,bottom,left f32;rect=x,y,w,h f32\n" ++
+            std.fmt.comptimePrint("max_drop_paths={d} (u16 count)\n", .{max_session_drop_paths}) ++
+            "record_kinds=" ++ layout_fingerprint.describe(RecordKind) ++ "\n" ++
+            "header=" ++ layout_fingerprint.describe(Header) ++ "\n" ++
+            "checkpoint=" ++ layout_fingerprint.describe(Checkpoint) ++ "\n" ++
+            "screenshot=" ++ layout_fingerprint.describe(ScreenshotMark) ++ "\n" ++
+            "end=" ++ layout_fingerprint.describe(End) ++ "\n" ++
+            "effect=" ++ layout_fingerprint.describe(EffectResultRecord) ++ "\n" ++
+            "event_tags=" ++ layout_fingerprint.describe(EventTag) ++ "\n" ++
+            // Per-variant payload types, reflected. Payload-free tags
+            // (app_start, wake, ...) are covered by the tag set above; a
+            // NEW tag moves the fingerprint through the tag set even
+            // before its payload line lands here. `native_handle` never
+            // rides the wire but its type is fixed; describing the full
+            // Surface is the conservative direction (a false re-record
+            // is cheap, a silent misread is not).
+            "appearance_changed=" ++ layout_fingerprint.describe(platform.Appearance) ++ "\n" ++
+            "surface_resized=" ++ layout_fingerprint.describe(platform.Surface) ++ "\n" ++
+            "window_frame_changed=" ++ layout_fingerprint.describe(platform.WindowState) ++ "\n" ++
+            "window_focused=" ++ layout_fingerprint.describe(platform.WindowId) ++ "\n" ++
+            "view_focused=" ++ layout_fingerprint.describe(platform.ViewFocusEvent) ++ "\n" ++
+            "bridge_message=" ++ layout_fingerprint.describe(platform.BridgeMessage) ++ "\n" ++
+            "tray_action=" ++ layout_fingerprint.describe(platform.TrayItemId) ++ "\n" ++
+            "shortcut=" ++ layout_fingerprint.describe(platform.ShortcutEvent) ++ "\n" ++
+            "native_command=" ++ layout_fingerprint.describe(platform.NativeCommandEvent) ++ "\n" ++
+            "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
+            "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
+            "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
+            "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
+            "files_dropped=" ++ layout_fingerprint.describe(platform.FileDropEvent) ++ "\n" ++
+            // gpu_surface_frame journals a deliberate SUBSET of a
+            // telemetry-heavy struct (the rest is host render telemetry,
+            // meaningless under replay), so its wire layout is stated by
+            // hand — the coupling is commented at the encodeEvent arm.
+            "gpu_surface_frame=window_id:u64,label:str,width:f32,height:f32,scale_factor:f32," ++
+            "frame_index:u64,timestamp_ns:u64,frame_interval_ns:u64,input_timestamp_ns:u64,canvas_frame_full_repaint:bool\n" ++
+            "gpu_surface_resized=" ++ layout_fingerprint.describe(platform.GpuSurfaceResizeEvent) ++ "\n" ++
+            "gpu_surface_input=" ++ layout_fingerprint.describe(platform.GpuSurfaceInputEvent) ++ "\n" ++
+            "gpu_surface_scroll_driver=" ++ layout_fingerprint.describe(platform.GpuSurfaceScrollDriverEvent) ++ "\n" ++
+            "context_menu_action=" ++ layout_fingerprint.describe(platform.ContextMenuActionEvent) ++ "\n" ++
+            "widget_accessibility_action=" ++ layout_fingerprint.describe(platform.WidgetAccessibilityActionEvent) ++ "\n";
+    }
+}
 
 // ------------------------------------------------------------- budgets
 //
@@ -108,9 +237,10 @@ pub const JournalError = error{
     /// The file does not start with the session-journal magic — it is
     /// not a journal (or the first bytes were destroyed).
     JournalBadMagic,
-    /// The journal was written by a different format version; replaying
-    /// it here would misread payloads. Re-record with this build.
-    JournalUnsupportedVersion,
+    /// The journal was written by a build whose journal format
+    /// fingerprint differs from this one; replaying it here would
+    /// misread payloads. Re-record with this build.
+    JournalFormatMismatch,
     /// The byte stream ends mid-record (or the end record is missing):
     /// the recording was cut off — replay would silently stop early, so
     /// it refuses instead.
@@ -137,10 +267,11 @@ pub const RecordKind = enum(u8) {
 
 /// Session identity, written once as the first record.
 pub const Header = struct {
-    /// The automation protocol version baked into the recording build —
-    /// the existing CLI/app handshake, reused so a journal from a stale
-    /// build is refused with the same teaching shape.
-    protocol_version: u32 = automation_protocol.version,
+    /// The automation protocol fingerprint baked into the recording
+    /// build — the existing CLI/app handshake identity, reused so a
+    /// journal from a stale build is refused with the same teaching
+    /// shape.
+    protocol_fingerprint: u64 = automation_protocol.fingerprint,
     /// Recording platform ("macos", "linux", ...). Replay is
     /// same-platform in v1; a cross-platform journal is refused loudly.
     platform_name: []const u8,
@@ -201,6 +332,13 @@ pub const EventDecodeStorage = struct {
 };
 
 // ------------------------------------------------------------ cursors
+//
+// The primitive encodings these cursors hand-write (little-endian ints,
+// u32-length-prefixed strings, u8 bools, enums as their u8 declaration
+// value, bool-prefixed optionals) are stated as deliberate constants in
+// `formatLayoutDescription` — reflection cannot see them, so changing
+// one here means updating that description's `codec=` line in the same
+// change.
 
 const WriteCursor = struct {
     buffer: []u8,
@@ -324,8 +462,13 @@ const EventTag = enum(u8) {
     context_menu_action = 22,
     widget_accessibility_action = 23,
     audio = 24,
+    video = 25,
+    view_focused = 26,
 };
 
+// The bit assignments below are hand-written wire layout: they are
+// stated in `formatLayoutDescription` (reflection sees the bool fields,
+// not the bits), so changing a bit here means updating that line too.
 fn writeModifiers(cursor: *WriteCursor, modifiers: platform.ShortcutModifiers) JournalError!void {
     var bits: u8 = 0;
     if (modifiers.primary) bits |= 1;
@@ -421,10 +564,17 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(state.focused);
             try cursor.writeBool(state.maximized);
             try cursor.writeBool(state.fullscreen);
+            // v6: alive-but-policy-hidden (`close_policy = .hide`).
+            try cursor.writeBool(state.hidden);
         },
         .window_focused => |window_id| {
             try cursor.writeEnum(EventTag.window_focused);
             try cursor.writeInt(u64, window_id);
+        },
+        .view_focused => |focus| {
+            try cursor.writeEnum(EventTag.view_focused);
+            try cursor.writeInt(u64, focus.window_id);
+            try cursor.writeStr(focus.label);
         },
         .bridge_message => |message| {
             try cursor.writeEnum(EventTag.bridge_message);
@@ -472,6 +622,22 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(audio.buffering);
             try cursor.writeBytes(&audio.bands);
         },
+        // Recorded for stream fidelity like `.audio`. On replay the
+        // journaled video EFFECT records are the Msg source; the
+        // platform events steer only the channel MIRRORS (the house
+        // chrome's render state for handler-less playbacks), gated by
+        // the load token exactly as live (`Effects.takeVideoMsg`).
+        .video => |video| {
+            try cursor.writeEnum(EventTag.video);
+            try cursor.writeEnum(video.kind);
+            try cursor.writeInt(u64, video.token);
+            try cursor.writeInt(u64, video.position_ms);
+            try cursor.writeInt(u64, video.duration_ms);
+            try cursor.writeBool(video.playing);
+            try cursor.writeBool(video.buffering);
+            try cursor.writeInt(u64, video.width);
+            try cursor.writeInt(u64, video.height);
+        },
         .files_dropped => |drop| {
             try cursor.writeEnum(EventTag.files_dropped);
             try cursor.writeInt(u64, drop.window_id);
@@ -485,6 +651,11 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u16, @intCast(drop.paths.len));
             for (drop.paths) |path| try cursor.writeStr(path);
         },
+        // This arm journals a deliberate SUBSET of the frame event (the
+        // fields dispatch semantics depend on — see the fn doc). The
+        // subset is stated by hand in `formatLayoutDescription`, so
+        // journaling another field here means adding it to that line in
+        // the same change.
         .gpu_surface_frame => |frame| {
             try cursor.writeEnum(EventTag.gpu_surface_frame);
             try cursor.writeInt(u64, frame.window_id);
@@ -525,12 +696,15 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
                 try cursor.writeInt(u64, @intCast(composition_cursor));
             }
             try writeModifiers(&cursor, input.modifiers);
+            // v5: the pinch magnification delta (0 on non-pinch kinds).
+            try cursor.writeF32(input.scale);
         },
         .gpu_surface_scroll_driver => |driver| {
             try cursor.writeEnum(EventTag.gpu_surface_scroll_driver);
             try cursor.writeInt(u64, driver.window_id);
             try cursor.writeStr(driver.label);
             try cursor.writeInt(u64, driver.driver_id);
+            try cursor.writeF32(driver.offset_x);
             try cursor.writeF32(driver.offset_y);
             try cursor.writeInt(u64, driver.timestamp_ns);
         },
@@ -546,6 +720,8 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u64, action.window_id);
             try cursor.writeStr(action.label);
             try cursor.writeInt(u64, action.id);
+            // The verb rides i32, not the u8 every other enum takes — a
+            // hand-written width stated in `formatLayoutDescription`.
             try cursor.writeInt(i32, @intFromEnum(action.action));
             try cursor.writeStr(action.text);
             try cursor.writeBool(action.selection != null);
@@ -606,9 +782,14 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
                 .focused = try cursor.readBool(),
                 .maximized = try cursor.readBool(),
                 .fullscreen = try cursor.readBool(),
+                .hidden = try cursor.readBool(),
             } };
         },
         .window_focused => .{ .window_focused = try cursor.readInt(u64) },
+        .view_focused => .{ .view_focused = .{
+            .window_id = try cursor.readInt(u64),
+            .label = try cursor.readStr(),
+        } },
         .bridge_message => blk: {
             const message_bytes = try cursor.readStr();
             const origin = try cursor.readStr();
@@ -667,6 +848,19 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             };
             @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
             break :blk .{ .audio = decoded };
+        },
+        .video => blk: {
+            const kind = try cursor.readEnum(platform.VideoEventKind);
+            break :blk .{ .video = .{
+                .kind = kind,
+                .token = try cursor.readInt(u64),
+                .position_ms = try cursor.readInt(u64),
+                .duration_ms = try cursor.readInt(u64),
+                .playing = try cursor.readBool(),
+                .buffering = try cursor.readBool(),
+                .width = try cursor.readInt(u64),
+                .height = try cursor.readInt(u64),
+            } };
         },
         .files_dropped => blk: {
             const window_id = try cursor.readInt(u64);
@@ -735,33 +929,39 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             if (try cursor.readBool()) {
                 composition_cursor = std.math.cast(usize, try cursor.readInt(u64)) orelse return error.JournalCorrupt;
             }
-            break :blk .{ .gpu_surface_input = .{
-                .window_id = window_id,
-                .label = label,
-                .kind = kind,
-                .timestamp_ns = timestamp_ns,
-                .pointer_id = pointer_id,
-                .x = x,
-                .y = y,
-                .button = button,
-                .pressure = pressure,
-                .delta_x = delta_x,
-                .delta_y = delta_y,
-                .key = key,
-                .text = text,
-                .composition_cursor = composition_cursor,
-                .modifiers = try readModifiers(&cursor),
-            } };
+            break :blk .{
+                .gpu_surface_input = .{
+                    .window_id = window_id,
+                    .label = label,
+                    .kind = kind,
+                    .timestamp_ns = timestamp_ns,
+                    .pointer_id = pointer_id,
+                    .x = x,
+                    .y = y,
+                    .button = button,
+                    .pressure = pressure,
+                    .delta_x = delta_x,
+                    .delta_y = delta_y,
+                    .key = key,
+                    .text = text,
+                    .composition_cursor = composition_cursor,
+                    .modifiers = try readModifiers(&cursor),
+                    // v5: the pinch magnification delta (0 on non-pinch kinds).
+                    .scale = try cursor.readF32(),
+                },
+            };
         },
         .gpu_surface_scroll_driver => blk: {
             const window_id = try cursor.readInt(u64);
             const label = try cursor.readStr();
             const driver_id = try cursor.readInt(u64);
+            const offset_x = try cursor.readF32();
             const offset_y = try cursor.readF32();
             break :blk .{ .gpu_surface_scroll_driver = .{
                 .window_id = window_id,
                 .label = label,
                 .driver_id = driver_id,
+                .offset_x = offset_x,
                 .offset_y = offset_y,
                 .timestamp_ns = try cursor.readInt(u64),
             } };
@@ -832,6 +1032,42 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
     try cursor.writeBytes(&record.audio_bands);
+    // v7: image terminals — outcome, decoded dimensions, and the blob
+    // store content address of the journaled source bytes.
+    try cursor.writeEnum(record.image_outcome);
+    try cursor.writeInt(u64, record.image_width);
+    try cursor.writeInt(u64, record.image_height);
+    try cursor.writeBytes(&record.image_blob_hash);
+    try cursor.writeInt(u64, record.image_blob_len);
+    // v8: channel events — the event kind and the occupancy's
+    // cumulative drop total (post bytes ride `payload` inline;
+    // dropped_pending rides the shared `dropped` field).
+    try cursor.writeEnum(record.channel_kind);
+    try cursor.writeInt(u32, record.channel_dropped_total);
+    // Video terminals — the delivered event, verbatim (fingerprint
+    // era: these fields move the format identity through reflection).
+    try cursor.writeEnum(record.video_kind);
+    try cursor.writeInt(u64, record.video_position_ms);
+    try cursor.writeInt(u64, record.video_duration_ms);
+    try cursor.writeBool(record.video_playing);
+    try cursor.writeBool(record.video_buffering);
+    try cursor.writeInt(u64, record.video_width);
+    try cursor.writeInt(u64, record.video_height);
+    // The producing load's identity, how replay routes the record
+    // (`EffectResultRecord.video_token`).
+    try cursor.writeInt(u64, record.video_token);
+    // `.video_load` records: the recording host's cascade resolution.
+    try cursor.writeEnum(record.video_source);
+    // `.video` records: whether the delivery dispatched a Msg.
+    try cursor.writeBool(record.video_handled);
+    // Pty events — the event kind, the terminating signal and refused
+    // writes, and the blob store content address of a journaled output
+    // batch (exit code and reason ride the shared fields).
+    try cursor.writeEnum(record.pty_kind);
+    try cursor.writeInt(i32, record.pty_signal);
+    try cursor.writeInt(u32, record.pty_dropped_writes);
+    try cursor.writeBytes(&record.pty_blob_hash);
+    try cursor.writeInt(u64, record.pty_blob_len);
     return buffer[0..cursor.len];
 }
 
@@ -864,6 +1100,32 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_buffering = try cursor.readBool(),
     };
     @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
+    // v7: image terminals.
+    record.image_outcome = try cursor.readEnum(runtime_effects.EffectImageOutcome);
+    record.image_width = try cursor.readInt(u64);
+    record.image_height = try cursor.readInt(u64);
+    @memcpy(&record.image_blob_hash, try cursor.readBytes(record.image_blob_hash.len));
+    record.image_blob_len = try cursor.readInt(u64);
+    // v8: channel events.
+    record.channel_kind = try cursor.readEnum(runtime_effects.EffectChannelEventKind);
+    record.channel_dropped_total = try cursor.readInt(u32);
+    // Video terminals.
+    record.video_kind = try cursor.readEnum(runtime_effects.EffectVideoEventKind);
+    record.video_position_ms = try cursor.readInt(u64);
+    record.video_duration_ms = try cursor.readInt(u64);
+    record.video_playing = try cursor.readBool();
+    record.video_buffering = try cursor.readBool();
+    record.video_width = try cursor.readInt(u64);
+    record.video_height = try cursor.readInt(u64);
+    record.video_token = try cursor.readInt(u64);
+    record.video_source = try cursor.readEnum(runtime_effects.EffectVideoSource);
+    record.video_handled = try cursor.readBool();
+    // Pty events.
+    record.pty_kind = try cursor.readEnum(runtime_effects.EffectPtyEventKind);
+    record.pty_signal = try cursor.readInt(i32);
+    record.pty_dropped_writes = try cursor.readInt(u32);
+    @memcpy(&record.pty_blob_hash, try cursor.readBytes(record.pty_blob_hash.len));
+    record.pty_blob_len = try cursor.readInt(u64);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -872,7 +1134,7 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
 
 pub fn encodeHeader(header: Header, buffer: []u8) JournalError![]const u8 {
     var cursor = WriteCursor{ .buffer = buffer };
-    try cursor.writeInt(u32, header.protocol_version);
+    try cursor.writeInt(u64, header.protocol_fingerprint);
     try cursor.writeStr(header.platform_name);
     try cursor.writeStr(header.app_name);
     try cursor.writeInt(i64, header.recorded_at_wall_ms);
@@ -884,7 +1146,7 @@ pub fn encodeHeader(header: Header, buffer: []u8) JournalError![]const u8 {
 pub fn decodeHeader(bytes: []const u8) JournalError!Header {
     var cursor = ReadCursor{ .bytes = bytes };
     const header: Header = .{
-        .protocol_version = try cursor.readInt(u32),
+        .protocol_fingerprint = try cursor.readInt(u64),
         .platform_name = try cursor.readStr(),
         .app_name = try cursor.readStr(),
         .recorded_at_wall_ms = try cursor.readInt(i64),
@@ -972,14 +1234,18 @@ pub fn frameRecord(kind: RecordKind, payload: []const u8, buffer: []u8) JournalE
     return buffer[0 .. 5 + payload.len];
 }
 
-/// The journal preamble (magic + format version).
+/// The journal preamble (magic + format fingerprint). The fingerprint
+/// field widened from the retired u32 counter to the full u64 hash when
+/// identity replaced ordering — this change refuses every older journal
+/// anyway, and the full width keeps the refuse-on-mismatch tripwire's
+/// collision odds at 2^-64 instead of 2^-32 for free.
 pub fn writePreamble(buffer: []u8) []const u8 {
     @memcpy(buffer[0..magic.len], magic);
-    std.mem.writeInt(u32, buffer[magic.len..][0..4], format_version, .little);
-    return buffer[0 .. magic.len + 4];
+    std.mem.writeInt(u64, buffer[magic.len..][0..8], format_fingerprint, .little);
+    return buffer[0 .. magic.len + 8];
 }
 
-pub const preamble_len: usize = magic.len + 4;
+pub const preamble_len: usize = magic.len + 8;
 
 /// Sequential journal reader over a whole in-memory journal. Validates
 /// the preamble at init, enforces record budgets, and requires header
@@ -1000,8 +1266,8 @@ pub const Reader = struct {
     pub fn init(bytes: []const u8) JournalError!Reader {
         if (bytes.len < preamble_len) return error.JournalBadMagic;
         if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.JournalBadMagic;
-        const version = std.mem.readInt(u32, bytes[magic.len..][0..4], .little);
-        if (version != format_version) return error.JournalUnsupportedVersion;
+        const recorded = std.mem.readInt(u64, bytes[magic.len..][0..8], .little);
+        if (recorded != format_fingerprint) return error.JournalFormatMismatch;
         return .{ .bytes = bytes, .pos = preamble_len };
     }
 
@@ -1067,7 +1333,7 @@ pub const Reader = struct {
 pub fn describeError(err: JournalError) []const u8 {
     return switch (err) {
         error.JournalBadMagic => "not a session journal (bad magic) - record one with NATIVE_SDK_SESSION_RECORD=<path>",
-        error.JournalUnsupportedVersion => "journal format version differs from this build - re-record the session with the same build that replays it",
+        error.JournalFormatMismatch => "journal was recorded by a build whose journal format differs from this build's - re-record the session with the same build that replays it",
         error.JournalTruncated => "journal ends mid-record (the recording was cut off) - re-record, and keep the app running until it exits cleanly",
         error.JournalCorrupt => "journal payload does not decode (damaged or hand-edited bytes)",
         error.JournalRecordOverBudget => "journal claims a record beyond max_session_record_bytes - the file is damaged or hostile",
@@ -1125,6 +1391,22 @@ test "event codec round-trips every payload variant" {
         } });
         try testing.expectEqualStrings("settings", decoded.window_frame_changed.label);
         try testing.expect(!decoded.window_frame_changed.open);
+        try testing.expect(!decoded.window_frame_changed.hidden);
+    }
+    {
+        // v6: a policy-hide keeps the window alive (`open` true) and
+        // rides the `hidden` flag — both must survive the round trip.
+        const decoded = try roundTripEvent(.{ .window_frame_changed = .{
+            .id = 1,
+            .label = "main",
+            .title = "Player",
+            .frame = geometry.RectF.init(0, 0, 480, 360),
+            .open = true,
+            .focused = false,
+            .hidden = true,
+        } });
+        try testing.expect(decoded.window_frame_changed.open);
+        try testing.expect(decoded.window_frame_changed.hidden);
     }
     {
         const decoded = try roundTripEvent(.{ .bridge_message = .{
@@ -1183,6 +1465,25 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqualSlices(u8, &bands, &decoded.audio.bands);
     }
     {
+        // Video events journal the whole shape including the stream
+        // dimensions the `.loaded` acknowledgment carries.
+        const decoded = try roundTripEvent(.{ .video = .{
+            .kind = .loaded,
+            .position_ms = 0,
+            .duration_ms = 92_500,
+            .playing = true,
+            .buffering = true,
+            .width = 1280,
+            .height = 720,
+        } });
+        try testing.expectEqual(platform.VideoEventKind.loaded, decoded.video.kind);
+        try testing.expectEqual(@as(u64, 92_500), decoded.video.duration_ms);
+        try testing.expect(decoded.video.playing);
+        try testing.expect(decoded.video.buffering);
+        try testing.expectEqual(@as(u64, 1280), decoded.video.width);
+        try testing.expectEqual(@as(u64, 720), decoded.video.height);
+    }
+    {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };
         const decoded = try roundTripEvent(.{ .files_dropped = .{
             .window_id = 1,
@@ -1225,6 +1526,26 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqualStrings("7", decoded.gpu_surface_input.text);
         try testing.expectEqual(@as(?usize, 3), decoded.gpu_surface_input.composition_cursor);
         try testing.expect(decoded.gpu_surface_input.modifiers.control);
+        try testing.expectEqual(@as(f32, 0), decoded.gpu_surface_input.scale);
+    }
+    {
+        // v5: pinch records carry the magnification delta and the
+        // gesture kinds appended at codes 12-14.
+        const decoded = try roundTripEvent(.{ .gpu_surface_input = .{
+            .label = "timeline-canvas",
+            .kind = .pinch_change,
+            .timestamp_ns = 6,
+            .x = 160,
+            .y = 120,
+            .scale = 0.25,
+        } });
+        try testing.expectEqual(platform.GpuSurfaceInputKind.pinch_change, decoded.gpu_surface_input.kind);
+        try testing.expectEqual(@as(f32, 0.25), decoded.gpu_surface_input.scale);
+        try testing.expectEqual(@as(f32, 160), decoded.gpu_surface_input.x);
+        const begin = try roundTripEvent(.{ .gpu_surface_input = .{ .label = "timeline-canvas", .kind = .pinch_begin } });
+        try testing.expectEqual(platform.GpuSurfaceInputKind.pinch_begin, begin.gpu_surface_input.kind);
+        const end = try roundTripEvent(.{ .gpu_surface_input = .{ .label = "timeline-canvas", .kind = .pinch_end } });
+        try testing.expectEqual(platform.GpuSurfaceInputKind.pinch_end, end.gpu_surface_input.kind);
     }
     {
         const decoded = try roundTripEvent(.{ .widget_accessibility_action = .{
@@ -1241,10 +1562,12 @@ test "event codec round-trips every payload variant" {
         const decoded = try roundTripEvent(.{ .gpu_surface_scroll_driver = .{
             .label = "canvas",
             .driver_id = 88,
+            .offset_x = 7.25,
             .offset_y = -12.5,
             .timestamp_ns = 4,
         } });
         try testing.expectEqual(@as(f32, -12.5), decoded.gpu_surface_scroll_driver.offset_y);
+        try testing.expectEqual(@as(f32, 7.25), decoded.gpu_surface_scroll_driver.offset_x);
     }
     {
         const decoded = try roundTripEvent(.{ .context_menu_action = .{ .view_label = "canvas", .token = 5, .item_id = 2 } });
@@ -1265,6 +1588,11 @@ test "event codec round-trips every payload variant" {
     {
         const decoded = try roundTripEvent(.{ .window_focused = 4 });
         try testing.expectEqual(@as(u64, 4), decoded.window_focused);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .view_focused = .{ .window_id = 4, .label = "preview" } });
+        try testing.expectEqual(@as(u64, 4), decoded.view_focused.window_id);
+        try testing.expectEqualStrings("preview", decoded.view_focused.label);
     }
     {
         const decoded = try roundTripEvent(.{ .gpu_surface_resized = .{
@@ -1343,6 +1671,59 @@ test "effect codec round-trips payloads and outcomes" {
     const spectrum_decoded = try decodeEffect(spectrum_encoded);
     try testing.expectEqual(runtime_effects.EffectAudioEventKind.spectrum, spectrum_decoded.audio_kind);
     try testing.expectEqualSlices(u8, &spectrum_bands, &spectrum_decoded.audio_bands);
+
+    // v8: channel records carry their event kind and the cumulative
+    // drop total; the post bytes ride the shared payload field INLINE
+    // (never the blob store).
+    const channel_encoded = try encodeEffect(.{
+        .kind = .channel,
+        .key = 88,
+        .payload = "cpu 12.5",
+        .dropped = 2,
+        .channel_kind = .data,
+        .channel_dropped_total = 7,
+    }, &buffer);
+    const channel_decoded = try decodeEffect(channel_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.channel, channel_decoded.kind);
+    try testing.expectEqual(@as(u64, 88), channel_decoded.key);
+    try testing.expectEqualStrings("cpu 12.5", channel_decoded.payload);
+    try testing.expectEqual(runtime_effects.EffectChannelEventKind.data, channel_decoded.channel_kind);
+    try testing.expectEqual(@as(u32, 2), channel_decoded.dropped);
+    try testing.expectEqual(@as(u32, 7), channel_decoded.channel_dropped_total);
+
+    const closed_encoded = try encodeEffect(.{
+        .kind = .channel,
+        .key = 88,
+        .channel_kind = .closed,
+        .channel_dropped_total = 7,
+    }, &buffer);
+    const closed_decoded = try decodeEffect(closed_encoded);
+    try testing.expectEqual(runtime_effects.EffectChannelEventKind.closed, closed_decoded.channel_kind);
+    try testing.expectEqual(@as(usize, 0), closed_decoded.payload.len);
+
+    // Video effect records round-trip the whole delivered event —
+    // including the dimensions the `.loaded` acknowledgment carries —
+    // because the journaled record is replay's only Msg source.
+    const video_encoded = try encodeEffect(.{
+        .kind = .video,
+        .key = 61,
+        .video_kind = .loaded,
+        .video_position_ms = 0,
+        .video_duration_ms = 92_500,
+        .video_playing = true,
+        .video_buffering = true,
+        .video_width = 1280,
+        .video_height = 720,
+    }, &buffer);
+    const video_decoded = try decodeEffect(video_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.video, video_decoded.kind);
+    try testing.expectEqual(@as(u64, 61), video_decoded.key);
+    try testing.expectEqual(runtime_effects.EffectVideoEventKind.loaded, video_decoded.video_kind);
+    try testing.expectEqual(@as(u64, 92_500), video_decoded.video_duration_ms);
+    try testing.expect(video_decoded.video_playing);
+    try testing.expect(video_decoded.video_buffering);
+    try testing.expectEqual(@as(u64, 1280), video_decoded.video_width);
+    try testing.expectEqual(@as(u64, 720), video_decoded.video_height);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {
@@ -1356,7 +1737,7 @@ test "header, checkpoint, screenshot, and end codecs round-trip" {
     }, &buffer));
     try testing.expectEqualStrings("macos", header.platform_name);
     try testing.expectEqualStrings("calculator", header.app_name);
-    try testing.expectEqual(automation_protocol.version, header.protocol_version);
+    try testing.expectEqual(automation_protocol.fingerprint, header.protocol_fingerprint);
 
     const checkpoint = try decodeCheckpoint(try encodeCheckpoint(.{ .event_ordinal = 10, .frame_index = 4, .fingerprint = 0xdead }, &buffer));
     try testing.expectEqual(@as(u64, 0xdead), checkpoint.fingerprint);
@@ -1426,15 +1807,43 @@ test "reader walks a whole journal and stops at the end record" {
     try testing.expectEqual(@as(?Record, null), try reader.next());
 }
 
-test "reader refuses bad magic and version skew" {
+test "reader refuses bad magic and format skew" {
     var buffer: [16384]u8 = undefined;
     const len = try buildTestJournal(&buffer);
     try testing.expectError(error.JournalBadMagic, Reader.init("not a journal at all"));
     try testing.expectError(error.JournalBadMagic, Reader.init(""));
+    // A journal whose recorded fingerprint differs from this build's —
+    // any other build's journal, in either direction — is refused at
+    // the preamble, before any record layout is consulted, instead of
+    // reporting an unknown payload code as corruption.
     var skewed: [16384]u8 = undefined;
     @memcpy(skewed[0..len], buffer[0..len]);
-    std.mem.writeInt(u32, skewed[magic.len..][0..4], format_version + 1, .little);
-    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(skewed[0..len]));
+    std.mem.writeInt(u64, skewed[magic.len..][0..8], format_fingerprint +% 1, .little);
+    try testing.expectError(error.JournalFormatMismatch, Reader.init(skewed[0..len]));
+    std.mem.writeInt(u64, skewed[magic.len..][0..8], format_fingerprint -% 1, .little);
+    try testing.expectError(error.JournalFormatMismatch, Reader.init(skewed[0..len]));
+    // A journal from the retired integer-counter era (u32 version after
+    // the magic, so this reader's u64 read spans the counter plus the
+    // first record's framing bytes) is the same honest mismatch.
+    var legacy: [preamble_len]u8 = undefined;
+    @memcpy(legacy[0..magic.len], magic);
+    std.mem.writeInt(u32, legacy[magic.len..][0..4], 8, .little);
+    legacy[magic.len + 4] = @intFromEnum(RecordKind.header);
+    std.mem.writeInt(u24, legacy[magic.len + 5 ..][0..3], 42, .little);
+    try testing.expectError(error.JournalFormatMismatch, Reader.init(&legacy));
+    // The teaching says whose build differs and what to do about it,
+    // so the reader of the error never suspects file damage.
+    const teaching = describeError(error.JournalFormatMismatch);
+    try testing.expect(std.mem.indexOf(u8, teaching, "journal format") != null);
+    try testing.expect(std.mem.indexOf(u8, teaching, "re-record") != null);
+}
+
+test "layout description moves with the semantic epoch" {
+    // Same layout, bumped epoch: the combined fingerprint must move, so
+    // a meaning-only change (identical bytes) still refuses replay of
+    // journals recorded before it.
+    const bumped = layout_fingerprint.hash(comptime formatLayoutDescription(format_semantic_epoch + 1));
+    try testing.expect(bumped != format_fingerprint);
 }
 
 test "reader fails loudly on truncation at every boundary" {

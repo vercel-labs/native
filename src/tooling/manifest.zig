@@ -24,11 +24,21 @@ pub const Metadata = struct {
     capabilities: []const []const u8 = &.{},
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
+    /// Whether the app ships the embedded web layer: "auto" (default,
+    /// inferred from the manifest's web declarations), "include", or
+    /// "exclude". See `webLayer` for the inference.
+    webview_layer: []const u8 = "auto",
     /// The built-in theme pack the app selects (`theme = "geist"`).
     /// Optional — absent keeps the house register. Validated against
     /// the known pack names so a typo is a check error, never a silent
     /// default-theme fallback.
     theme: ?[]const u8 = null,
+    /// The manifest's one-accent brand override (`theme_accent =
+    /// "#df2670"`), layered over the resolved pack by the runtime
+    /// (`canvas.accentOverrides`; high contrast skips it). Optional —
+    /// absent keeps the pack's own accent. Validated as a #rrggbb hex
+    /// color so a typo is a check error, never a silent stock accent.
+    theme_accent: ?[]const u8 = null,
     cef: web_engine_tool.CefConfig = .{},
     frontend: ?FrontendMetadata = null,
     security: SecurityMetadata = .{},
@@ -50,8 +60,10 @@ pub const Metadata = struct {
         if (self.display_name) |value| allocator.free(value);
         if (self.description) |value| allocator.free(value);
         if (self.theme) |value| allocator.free(value);
+        if (self.theme_accent) |value| allocator.free(value);
         allocator.free(self.version);
         allocator.free(self.web_engine);
+        allocator.free(self.webview_layer);
         allocator.free(self.cef.dir);
         for (self.icons) |value| allocator.free(value);
         if (self.icons.len > 0) allocator.free(self.icons);
@@ -90,6 +102,7 @@ pub const Metadata = struct {
             allocator.free(window.label);
             if (window.title) |title| allocator.free(title);
             allocator.free(window.titlebar);
+            allocator.free(window.close_policy);
         }
         if (self.windows.len > 0) allocator.free(self.windows);
         for (self.shell.windows) |window| {
@@ -97,6 +110,7 @@ pub const Metadata = struct {
             if (window.title) |title| allocator.free(title);
             allocator.free(window.restore_policy);
             allocator.free(window.titlebar);
+            allocator.free(window.close_policy);
             for (window.views) |view| {
                 allocator.free(view.label);
                 allocator.free(view.kind);
@@ -186,8 +200,13 @@ pub const WindowMetadata = struct {
     resizable: bool = true,
     restore_state: bool = true,
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
 };
 
 pub const ShellMetadata = struct {
@@ -223,8 +242,13 @@ pub const ShellWindowMetadata = struct {
     restore_state: bool = true,
     restore_policy: []const u8 = "clamp_to_visible_screen",
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
     views: []const ShellViewMetadata = &.{},
 };
 
@@ -369,6 +393,12 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
             .message = "app.zon theme is invalid - expected one of: house, geist",
         };
     }
+    if (metadata.theme_accent) |accent| {
+        if (!isHexColor(accent)) return .{
+            .ok = false,
+            .message = "app.zon theme_accent is invalid - expected a #rrggbb hex color (e.g. \"#df2670\")",
+        };
+    }
     validateIconPaths(metadata.icons) catch return .{ .ok = false, .message = "app.zon icons are invalid" };
     if (try checkIconSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.icons)) |icon_message| {
         return .{ .ok = false, .message = icon_message };
@@ -399,6 +429,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app.zon URL schemes are invalid" };
     defer allocator.free(url_schemes);
     const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app.zon web engine is invalid" };
+    const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app.zon webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
     const platform_settings = parsePlatformSettings(allocator, metadata.platforms) catch return .{ .ok = false, .message = "app.zon platforms are invalid" };
     defer allocator.free(platform_settings);
 
@@ -419,9 +450,16 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .file_associations = file_associations,
         .url_schemes = url_schemes,
         .cef = .{ .dir = metadata.cef.dir, .auto_install = metadata.cef.auto_install },
+        .webview_layer = manifest_webview_layer,
         .package = .{ .web_engine = manifest_web_engine },
     };
-    app_manifest.validateManifest(manifest) catch return .{ .ok = false, .message = "manifest fields failed semantic validation" };
+    app_manifest.validateManifest(manifest) catch |err| return .{
+        .ok = false,
+        .message = switch (err) {
+            error.WebViewLayerConflict => web_layer_conflict_message,
+            else => "manifest fields failed semantic validation",
+        },
+    };
     return .{ .ok = true, .message = "app.zon is valid" };
 }
 
@@ -467,6 +505,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .display_name = if (raw.display_name) |value| try allocator.dupe(u8, value) else null,
         .description = if (raw.description) |value| try allocator.dupe(u8, value) else null,
         .theme = if (raw.theme) |value| try allocator.dupe(u8, value) else null,
+        .theme_accent = if (raw.theme_accent) |value| try allocator.dupe(u8, value) else null,
         .version = try allocator.dupe(u8, raw.version),
         .icons = try duplicateStringList(allocator, raw.icons),
         .platforms = try duplicateStringList(allocator, raw.platforms),
@@ -474,6 +513,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
+        .webview_layer = try allocator.dupe(u8, raw.webview_layer),
         .cef = .{
             .dir = try allocator.dupe(u8, raw.cef.dir),
             .auto_install = raw.cef.auto_install,
@@ -562,8 +602,13 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .resizable = window.resizable,
             .restore_state = window.restore_state,
             .titlebar = try allocator.dupe(u8, window.titlebar),
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
             .min_width = window.min_width,
             .min_height = window.min_height,
+            .close_policy = try allocator.dupe(u8, window.close_policy),
         };
     }
     return converted;
@@ -614,8 +659,13 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .restore_state = window.restore_state,
             .restore_policy = try allocator.dupe(u8, window.restore_policy),
             .titlebar = try allocator.dupe(u8, window.titlebar),
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
             .min_width = window.min_width,
             .min_height = window.min_height,
+            .close_policy = try allocator.dupe(u8, window.close_policy),
             .views = try convertRawShellViews(allocator, window.views),
         };
     }
@@ -813,8 +863,13 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .resizable = window.resizable,
             .restore_state = window.restore_state,
             .titlebar = try parseTitlebarStyle(window.titlebar),
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
             .min_width = try parseWindowMinSize(window.min_width),
             .min_height = try parseWindowMinSize(window.min_height),
+            .close_policy = try parseClosePolicy(window.close_policy),
         };
     }
     return converted;
@@ -839,6 +894,7 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
         const titlebar = try parseTitlebarStyle(window.titlebar);
         const min_width = try parseWindowMinSize(window.min_width);
         const min_height = try parseWindowMinSize(window.min_height);
+        const close_policy = try parseClosePolicy(window.close_policy);
         const views = try parseShellViews(allocator, window.views);
         windows[index] = .{
             .label = window.label,
@@ -851,8 +907,13 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .restore_state = window.restore_state,
             .restore_policy = restore_policy,
             .titlebar = titlebar,
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
             .min_width = min_width,
             .min_height = min_height,
+            .close_policy = close_policy,
             .views = views,
         };
         initialized += 1;
@@ -944,6 +1005,17 @@ fn isKnownThemePack(name: []const u8) bool {
         if (std.mem.eql(u8, name, candidate)) return true;
     }
     return false;
+}
+
+/// One #rrggbb hex color — the `theme_accent` shape the runner's
+/// comptime parse accepts (kept in step the same way as the pack names:
+/// a drift is a build error in the app, never a shipped typo).
+fn isHexColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |byte| {
+        _ = std.fmt.charToDigit(byte, 16) catch return false;
+    }
+    return true;
 }
 
 fn validateIconPaths(icons: []const []const u8) !void {
@@ -1234,6 +1306,12 @@ fn parseTitlebarStyle(value: []const u8) !app_manifest.WindowTitlebarStyle {
     return error.InvalidWindowTitlebarStyle;
 }
 
+fn parseClosePolicy(value: []const u8) !app_manifest.WindowClosePolicy {
+    if (std.mem.eql(u8, value, "quit")) return .quit;
+    if (std.mem.eql(u8, value, "hide")) return .hide;
+    return error.InvalidWindowClosePolicy;
+}
+
 /// Same validation posture as the titlebar style: a min-size floor the
 /// host cannot honor (negative or non-finite) is a manifest error, not
 /// a silent clamp. 0 is the "no floor" sentinel.
@@ -1316,6 +1394,113 @@ fn parseWebEngine(value: []const u8) !app_manifest.WebEngine {
     if (std.mem.eql(u8, value, "system")) return .system;
     if (std.mem.eql(u8, value, "chromium")) return .chromium;
     return error.InvalidWebEngine;
+}
+
+fn parseWebViewLayer(value: []const u8) !app_manifest.WebViewLayer {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "include")) return .include;
+    if (std.mem.eql(u8, value, "exclude")) return .exclude;
+    return error.InvalidWebViewLayer;
+}
+
+/// The teaching message every boundary prints for the same
+/// contradiction: a manifest that excludes the web layer while declaring
+/// web content.
+pub const web_layer_conflict_message = "app.zon sets .webview_layer = \"exclude\" but the app declares web content (a .frontend block, the \"webview\" capability, a .shell webview view, or the Chromium web engine - from .web_engine or --web-engine) - remove the web declarations or drop the exclude";
+
+/// The same contradiction arriving through the CLI flag instead of the
+/// manifest field: `--web-layer exclude` against an app that declares
+/// web content.
+pub const web_layer_flag_conflict_message = "--web-layer exclude contradicts the app's web declarations (a .frontend block, the \"webview\" capability, a .shell webview view, or the Chromium web engine - from .web_engine or --web-engine) - remove the web declarations or drop the flag";
+
+/// Why the web layer is (or is not) in the build, for verdict lines —
+/// the shared contract's reason set.
+pub const WebLayerReason = app_manifest.web_layer.Reason;
+
+/// The layer setting a boundary resolves before deciding: "auto",
+/// "include", or "exclude" — the shared contract's input enum, exported
+/// for the CLI's `--web-layer` flag.
+pub const WebViewLayerSetting = app_manifest.WebViewLayer;
+
+/// Parse a `--web-layer` flag value (auto|include|exclude), via the
+/// shared contract so the flag and the app.zon field accept exactly the
+/// same vocabulary.
+pub const parseWebViewLayerSetting = app_manifest.web_layer.parseWebViewLayer;
+
+pub const WebLayer = struct {
+    enabled: bool,
+    reason: WebLayerReason,
+    /// Whether the deciding include/exclude came from the CLI's
+    /// `--web-layer` flag rather than app.zon's `.webview_layer`; only
+    /// meaningful for the declared_include/declared_exclude reasons.
+    from_flag: bool = false,
+
+    /// The parenthesized half of a verdict line: `web layer: none
+    /// (inferred)` / `web layer: webview2 (declared: capabilities)`.
+    pub fn sourceText(self: WebLayer) []const u8 {
+        return switch (self.reason) {
+            .inferred_native_only => "inferred: nothing in app.zon declares web use",
+            .declared_exclude => if (self.from_flag) "declared: --web-layer exclude" else "declared: .webview_layer = \"exclude\"",
+            .capability => "declared: capabilities",
+            .frontend => "declared: .frontend",
+            .shell_webview => "declared: .shell webview view",
+            .chromium_engine => "declared: the Chromium web engine (.web_engine or --web-engine)",
+            .declared_include => if (self.from_flag) "declared: --web-layer include" else "declared: .webview_layer = \"include\"",
+            // Only the build graph's lenient parse can produce this
+            // reason; parsed metadata always reaches this fn readable.
+            .unreadable_manifest => "kept: app.zon could not be parsed",
+        };
+    }
+};
+
+pub const WebLayerError = error{ InvalidWebViewLayer, WebViewLayerConflict };
+
+/// The CLI-side adapter over the shared web-layer contract
+/// (app_manifest.web_layer): the same declare-to-use rule the build
+/// graph and the runner apply, fed the engine this boundary RESOLVED —
+/// `--web-engine` orelse app.zon, already resolved by the CLI's verb
+/// handlers. `.webview_layer = "include"|"exclude"` overrides, and an
+/// exclude that contradicts a web declaration (including a resolved
+/// Chromium engine) is refused.
+pub fn webLayer(metadata: Metadata, resolved_engine: web_engine_tool.Engine) WebLayerError!WebLayer {
+    return webLayerResolved(metadata, resolved_engine, null);
+}
+
+/// `webLayer` with the CLI's `--web-layer` flag in play: the flag beats
+/// app.zon's `.webview_layer` exactly as `-Dweb-layer` beats it in the
+/// build graph (effective setting = flag orelse manifest), so the build
+/// graphs can forward their resolved decision and hand-run packages can
+/// override the field without editing app.zon. An exclude flag against
+/// a web declaration is the same refused conflict as a manifest exclude.
+pub fn webLayerResolved(metadata: Metadata, resolved_engine: web_engine_tool.Engine, layer_flag: ?WebViewLayerSetting) WebLayerError!WebLayer {
+    const manifest_setting = parseWebViewLayer(metadata.webview_layer) catch return error.InvalidWebViewLayer;
+    const engine: app_manifest.WebEngine = switch (resolved_engine) {
+        .system => .system,
+        .chromium => .chromium,
+    };
+    const decision = app_manifest.web_layer.infer(metadata, engine, layer_flag orelse manifest_setting) catch return error.WebViewLayerConflict;
+    if (layer_flag != null) {
+        // The flag decides, but the verdict line keeps app.zon's own
+        // richer reason whenever the flag merely confirms what the
+        // manifest already decides: the build graphs forward their
+        // resolved decision on every `zig build package`, and the common
+        // case must keep reporting "declared: capabilities", not the
+        // forwarded flag. Only a flag that CHANGES the outcome names
+        // itself as the cause.
+        if (app_manifest.web_layer.infer(metadata, engine, manifest_setting)) |manifest_decision| {
+            if (manifest_decision.enabled == decision.enabled) {
+                return .{ .enabled = manifest_decision.enabled, .reason = manifest_decision.reason };
+            }
+        } else |_| {}
+        return .{ .enabled = decision.enabled, .reason = decision.reason, .from_flag = true };
+    }
+    return .{ .enabled = decision.enabled, .reason = decision.reason };
+}
+
+/// The web-layer verdict for callers with no engine flag in play
+/// (`native check`): the manifest's own engine is the resolved engine.
+pub fn webLayerFromManifest(metadata: Metadata) WebLayerError!WebLayer {
+    return webLayer(metadata, web_engine_tool.Engine.parse(metadata.web_engine) orelse .system);
 }
 
 fn validateRelativePath(path: []const u8) !void {
@@ -1628,13 +1813,13 @@ test "manifest parser reads window titlebar styles" {
         \\  .name = "example",
         \\  .version = "1.2.3",
         \\  .windows = .{
-        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset" },
+        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false },
         \\    .{ .label = "tall", .titlebar = "hidden_inset_tall" },
         \\    .{ .label = "skinned", .titlebar = "chromeless" },
         \\  },
         \\  .shell = .{
         \\    .windows = .{
-        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
         \\    },
         \\  },
         \\}
@@ -1643,6 +1828,10 @@ test "manifest parser reads window titlebar styles" {
 
     try std.testing.expectEqualStrings("hidden_inset", metadata.windows[0].titlebar);
     try std.testing.expect(!metadata.windows[0].resizable);
+    try std.testing.expect(metadata.windows[0].transparent);
+    try std.testing.expect(metadata.windows[0].always_on_top);
+    try std.testing.expect(metadata.windows[0].click_through);
+    try std.testing.expect(!metadata.windows[0].activate_on_show);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.windows[1].titlebar);
     try std.testing.expectEqualStrings("chromeless", metadata.windows[2].titlebar);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.shell.windows[0].titlebar);
@@ -1651,12 +1840,20 @@ test "manifest parser reads window titlebar styles" {
     defer std.testing.allocator.free(windows);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset, windows[0].titlebar);
     try std.testing.expect(!windows[0].resizable);
+    try std.testing.expect(windows[0].transparent);
+    try std.testing.expect(windows[0].always_on_top);
+    try std.testing.expect(windows[0].click_through);
+    try std.testing.expect(!windows[0].activate_on_show);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, windows[1].titlebar);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.chromeless, windows[2].titlebar);
 
     const shell = try parseShell(std.testing.allocator, metadata.shell);
     defer deinitParsedShell(std.testing.allocator, shell);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, shell.windows[0].titlebar);
+    try std.testing.expect(shell.windows[0].transparent);
+    try std.testing.expect(shell.windows[0].always_on_top);
+    try std.testing.expect(shell.windows[0].click_through);
+    try std.testing.expect(!shell.windows[0].activate_on_show);
 }
 
 test "manifest parser reads window min sizes" {
@@ -1712,6 +1909,66 @@ test "manifest parser rejects negative window min sizes" {
 
     try std.testing.expectError(error.InvalidWindowMinSize, convertWindows(std.testing.allocator, metadata.windows));
     try std.testing.expectError(error.InvalidWindowMinSize, parseShell(std.testing.allocator, metadata.shell));
+}
+
+test "manifest parser reads window close policies" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .windows = .{
+        \\    .{ .label = "main", .close_policy = "hide" },
+        \\    .{ .label = "doc" },
+        \\  },
+        \\  .shell = .{
+        \\    .windows = .{
+        \\      .{ .label = "scene", .close_policy = "hide", .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("hide", metadata.windows[0].close_policy);
+    try std.testing.expectEqualStrings("quit", metadata.windows[1].close_policy);
+    try std.testing.expectEqualStrings("hide", metadata.shell.windows[0].close_policy);
+
+    const windows = try convertWindows(std.testing.allocator, metadata.windows);
+    defer std.testing.allocator.free(windows);
+    try std.testing.expectEqual(app_manifest.WindowClosePolicy.hide, windows[0].close_policy);
+    // Undeclared stays the .quit default — behavior unchanged for
+    // every existing app.
+    try std.testing.expectEqual(app_manifest.WindowClosePolicy.quit, windows[1].close_policy);
+
+    const shell = try parseShell(std.testing.allocator, metadata.shell);
+    defer deinitParsedShell(std.testing.allocator, shell);
+    try std.testing.expectEqual(app_manifest.WindowClosePolicy.hide, shell.windows[0].close_policy);
+}
+
+test "manifest parser rejects unknown window close policy" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .windows = .{
+        \\    .{ .label = "main", .close_policy = "minimize" },
+        \\  },
+        \\  .shell = .{
+        \\    .windows = .{
+        \\      .{ .label = "scene", .close_policy = "event", .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    // "event" is the deliberately reserved future tier (model-decides
+    // close); it parses as unknown until it ships — staged honestly,
+    // never accepted early.
+    try std.testing.expectError(error.InvalidWindowClosePolicy, convertWindows(std.testing.allocator, metadata.windows));
+    try std.testing.expectError(error.InvalidWindowClosePolicy, parseShell(std.testing.allocator, metadata.shell));
 }
 
 test "manifest parser rejects unknown window titlebar style" {
@@ -1920,6 +2177,151 @@ test "validate accepts a square icon source and prebuilt containers" {
     try std.testing.expect(result.ok);
 }
 
+test "web layer inference is declare-to-use over parsed metadata" {
+    // Nothing declared: native-only.
+    const canvas_capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const canvas: Metadata = .{ .id = "dev.example.canvas", .name = "canvas", .version = "1.0.0", .capabilities = &canvas_capabilities };
+    const canvas_layer = try webLayerFromManifest(canvas);
+    try std.testing.expect(!canvas_layer.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, canvas_layer.reason);
+
+    // Each web declaration flips the inference.
+    const webview_capabilities = [_][]const u8{"webview"};
+    const by_capability = try webLayerFromManifest(.{ .id = "dev.example.a", .name = "a", .version = "1.0.0", .capabilities = &webview_capabilities });
+    try std.testing.expect(by_capability.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, by_capability.reason);
+
+    const by_frontend = try webLayerFromManifest(.{ .id = "dev.example.b", .name = "b", .version = "1.0.0", .frontend = .{} });
+    try std.testing.expect(by_frontend.enabled);
+    try std.testing.expectEqual(WebLayerReason.frontend, by_frontend.reason);
+
+    const shell_views = [_]ShellViewMetadata{.{ .label = "content", .kind = "webview", .url = "zero://app/index.html" }};
+    const shell_windows = [_]ShellWindowMetadata{.{ .label = "main", .views = &shell_views }};
+    const by_shell = try webLayerFromManifest(.{ .id = "dev.example.c", .name = "c", .version = "1.0.0", .shell = .{ .windows = &shell_windows } });
+    try std.testing.expect(by_shell.enabled);
+    try std.testing.expectEqual(WebLayerReason.shell_webview, by_shell.reason);
+
+    // The Chromium engine is web intent; the system default alone is not.
+    const by_chromium = try webLayerFromManifest(.{ .id = "dev.example.d", .name = "d", .version = "1.0.0", .web_engine = "chromium" });
+    try std.testing.expect(by_chromium.enabled);
+    try std.testing.expectEqual(WebLayerReason.chromium_engine, by_chromium.reason);
+
+    // The RESOLVED engine decides, not the raw manifest value: a system
+    // manifest packaged with `--web-engine chromium` ships the layer.
+    const by_resolved_chromium = try webLayer(.{ .id = "dev.example.i", .name = "i", .version = "1.0.0" }, .chromium);
+    try std.testing.expect(by_resolved_chromium.enabled);
+    try std.testing.expectEqual(WebLayerReason.chromium_engine, by_resolved_chromium.reason);
+
+    // Explicit overrides.
+    const included = try webLayerFromManifest(.{ .id = "dev.example.e", .name = "e", .version = "1.0.0", .webview_layer = "include" });
+    try std.testing.expect(included.enabled);
+    const excluded = try webLayerFromManifest(.{ .id = "dev.example.f", .name = "f", .version = "1.0.0", .webview_layer = "exclude" });
+    try std.testing.expect(!excluded.enabled);
+    try std.testing.expectEqual(WebLayerReason.declared_exclude, excluded.reason);
+
+    // Contradictions and typos are refused, never resolved silently —
+    // including an exclude against a flag-resolved Chromium engine.
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerFromManifest(.{ .id = "dev.example.g", .name = "g", .version = "1.0.0", .capabilities = &webview_capabilities, .webview_layer = "exclude" }));
+    try std.testing.expectError(error.WebViewLayerConflict, webLayer(.{ .id = "dev.example.j", .name = "j", .version = "1.0.0", .webview_layer = "exclude" }, .chromium));
+    try std.testing.expectError(error.InvalidWebViewLayer, webLayerFromManifest(.{ .id = "dev.example.h", .name = "h", .version = "1.0.0", .webview_layer = "never" }));
+}
+
+test "web layer --web-layer flag beats the manifest field like -Dweb-layer does" {
+    const canvas_capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const canvas: Metadata = .{ .id = "dev.example.canvas", .name = "canvas", .version = "1.0.0", .capabilities = &canvas_capabilities };
+    const webview_capabilities = [_][]const u8{"webview"};
+    const web: Metadata = .{ .id = "dev.example.web", .name = "web", .version = "1.0.0", .capabilities = &webview_capabilities };
+
+    // An include flag that changes the outcome names itself as the cause.
+    const forced_in = try webLayerResolved(canvas, .system, .include);
+    try std.testing.expect(forced_in.enabled);
+    try std.testing.expectEqual(WebLayerReason.declared_include, forced_in.reason);
+    try std.testing.expectEqualStrings("declared: --web-layer include", forced_in.sourceText());
+
+    // A flag that merely confirms the inference keeps the manifest's own
+    // richer reason, so graph-forwarded packages report like hand-run ones.
+    const confirmed = try webLayerResolved(web, .system, .include);
+    try std.testing.expect(confirmed.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, confirmed.reason);
+    try std.testing.expectEqualStrings("declared: capabilities", confirmed.sourceText());
+    const confirmed_off = try webLayerResolved(canvas, .system, .exclude);
+    try std.testing.expect(!confirmed_off.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, confirmed_off.reason);
+
+    // An exclude flag against a web declaration is the same refused
+    // conflict as a manifest exclude — including a resolved Chromium engine.
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerResolved(web, .system, .exclude));
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerResolved(canvas, .chromium, .exclude));
+
+    // `--web-layer auto` overrides a manifest exclude back to inference,
+    // exactly as `-Dweb-layer=auto` does in the build graph.
+    const reopened = try webLayerResolved(.{ .id = "dev.example.k", .name = "k", .version = "1.0.0", .capabilities = &webview_capabilities, .webview_layer = "exclude" }, .system, .auto);
+    try std.testing.expect(reopened.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, reopened.reason);
+
+    // No flag: identical to `webLayer` (the manifest field decides).
+    const plain = try webLayerResolved(canvas, .system, null);
+    try std.testing.expect(!plain.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, plain.reason);
+
+    // The flag parser shares the contract's vocabulary.
+    try std.testing.expectEqual(WebViewLayerSetting.include, parseWebViewLayerSetting("include").?);
+    try std.testing.expectEqual(WebViewLayerSetting.exclude, parseWebViewLayerSetting("exclude").?);
+    try std.testing.expectEqual(WebViewLayerSetting.auto, parseWebViewLayerSetting("auto").?);
+    try std.testing.expectEqual(null, parseWebViewLayerSetting("never"));
+}
+
+test "validate rejects a web-declaring manifest that excludes the web layer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-web-layer-conflict";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"webview"},
+        \\  .webview_layer = "exclude",
+        \\}
+    });
+
+    const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, ".webview_layer = \"exclude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "declares web content") != null);
+
+    // A native-only manifest with the same exclude is valid.
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"gpu_surfaces"},
+        \\  .webview_layer = "exclude",
+        \\}
+    });
+    const native_only = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(native_only.ok);
+
+    // A typo in the setting is its own teaching error.
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .webview_layer = "never",
+        \\}
+    });
+    const invalid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!invalid.ok);
+    try std.testing.expect(std.mem.indexOf(u8, invalid.message, "webview_layer is invalid") != null);
+}
+
 test "manifest validates the theme pack name" {
     const metadata = try parseText(std.testing.allocator,
         \\.{
@@ -1936,4 +2338,26 @@ test "manifest validates the theme pack name" {
     try std.testing.expect(isKnownThemePack("house"));
     try std.testing.expect(isKnownThemePack("geist"));
     try std.testing.expect(!isKnownThemePack("neon"));
+}
+
+test "manifest validates the theme accent hex color" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .theme = "geist",
+        \\  .theme_accent = "#df2670",
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("#df2670", metadata.theme_accent.?);
+    // The hex-shape check is the tooling half of the contract; the
+    // runner re-parses the same shape at comptime in the app build.
+    try std.testing.expect(isHexColor("#df2670"));
+    try std.testing.expect(isHexColor("#000000"));
+    try std.testing.expect(!isHexColor("df2670"));
+    try std.testing.expect(!isHexColor("#df267"));
+    try std.testing.expect(!isHexColor("#df26700"));
+    try std.testing.expect(!isHexColor("#df267g"));
 }

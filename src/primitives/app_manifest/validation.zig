@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const web_layer = @import("web_layer.zig");
 
 const ValidationError = types.ValidationError;
 const max_shortcuts = types.max_shortcuts;
@@ -85,8 +86,25 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateFileAssociations(manifest.file_associations);
     try validateUrlSchemes(manifest.url_schemes);
     try validateCefConfig(manifest.package.web_engine, manifest.cef);
+    try validateWebViewLayer(manifest);
     try validatePackageMetadata(manifest.package);
     try validateUpdates(manifest.updates);
+}
+
+/// Whether the manifest declares web content — the shared declare-to-use
+/// contract (web_layer.zig) over the typed manifest. Validation has no
+/// engine flag, so the manifest's own engine is the resolved engine here;
+/// flag-resolved engines are the build graph's and the CLI's inputs.
+pub fn manifestDeclaresWebContent(manifest: Manifest) bool {
+    return web_layer.webDeclaration(manifest, manifest.package.web_engine) != null;
+}
+
+/// `.webview_layer = "exclude"` promises a native-only app; a manifest
+/// that simultaneously declares web content contradicts itself, and the
+/// contradiction is refused here — never resolved silently in either
+/// direction.
+pub fn validateWebViewLayer(manifest: Manifest) ValidationError!void {
+    _ = web_layer.decide(manifest.webview_layer, web_layer.webDeclaration(manifest, manifest.package.web_engine)) catch return error.WebViewLayerConflict;
 }
 
 pub fn validateIdentity(identity: AppIdentity) ValidationError!void {
@@ -672,6 +690,24 @@ fn validateShortcutKey(key: []const u8) ValidationError!void {
         "arrowright",
         "arrowup",
         "arrowdown",
+        "delete",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "insert",
+        "f1",
+        "f2",
+        "f3",
+        "f4",
+        "f5",
+        "f6",
+        "f7",
+        "f8",
+        "f9",
+        "f10",
+        "f11",
+        "f12",
     };
     for (&specials) |special| {
         if (std.ascii.eqlIgnoreCase(key, special)) return;

@@ -1,0 +1,82 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Code
+
+Presents source text as bare monospace content with deterministic, theme-aware syntax highlighting. The component supplies no background, border, radius, shadow, or padding; wrap it in a `panel`, `card`, or another container when the surrounding design calls for chrome. Code is selectable and read-only by default. Add `editable` and `on-input` to opt into the multiline editor without losing syntax colors. Code wraps by default. Set `wrap="false"` to preserve logical lines inside one horizontal scroll region, and opt into logical line numbers with `line-numbers`.
+
+HTML-family highlighting understands HTML, XML, SVG, JSX, and TSX structure: element or component tags, attributes, strings, comments, numbers, and JavaScript/TypeScript expressions receive distinct theme-token colors.
+
+<ComponentPreview name="code" alt="A bare JSX code sample with syntax highlighting and line numbers" caption="Bare highlighted content with JSX tags, attributes, strings, expressions, and an unwrapped horizontal viewport" />
+
+## Markup
+
+```html
+<code
+  source="{component_source}"
+  language="tsx"
+  line-numbers
+  wrap="false"
+  width="480"
+  label="Accordion example"
+/>
+```
+
+`source` is required and must be one `{binding}` producing text. `language` is a literal lexer name; unknown names are validation errors. Line numbers are off by default and remain decorative, so selecting and copying a numbered block returns only the source text. Numbered presentation is limited to 128 logical lines; longer sources keep all code and omit the gutter.
+
+For editable code, apply each `TextInputEvent` to the same model-owned buffer that supplies `source`:
+
+```html
+<code
+  source="{document}"
+  language="tsx"
+  editable
+  on-input="edit_document"
+  line-numbers
+  wrap="false"
+  grow="1"
+  label="Document editor"
+/>
+```
+
+The editor path includes multiline selection, caret navigation, IME, clipboard, and undo/redo behavior. It does not add textarea background, border, focus ring, or padding.
+
+Surface styling belongs to a wrapper:
+
+```html
+<panel padding="12">
+  <code source="{component_source}" language="tsx" />
+</panel>
+```
+
+## Programmatic construction (Zig)
+
+```zig
+ui.code(.{
+    .language = .html,
+    .editable = true,
+    .on_input = Ui.inputMsg(.edit_document),
+    .line_numbers = true,
+    .wrap = false,
+    .width = 480,
+    .semantics = .{ .label = "Accordion example" },
+}, model.component_source)
+```
+
+The Zig builder composes the same way when chrome is wanted:
+
+```zig
+ui.panel(.{ .padding = 12 }, .{
+    ui.code(.{ .language = .html }, model.component_source),
+})
+```
+
+The public lexer model is `native_sdk.canvas.code`. `languageFromName` resolves markup spellings, `languageFromFence` reads a Markdown info string, and `highlight` produces the same bounded, theme-colored span runs both renderers use.
+
+## Languages
+
+Zig; JavaScript and TypeScript; JSX and TSX; JSON; YAML; shell; Python; Rust; C, C++, C#, Java, Kotlin, and Swift; Go; HTML, XML, and SVG; CSS, SCSS, and Less; SQL; and Markdown. An omitted language renders plain monospace.
+
+## Attributes
+
+<AttrTable element="code" attrs={["source", "language", "editable", "on-input", "line-numbers", "wrap", "width", "height", "min-width", "grow", "key", "global-key", "label"]} />

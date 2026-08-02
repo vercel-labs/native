@@ -436,6 +436,15 @@ pub fn deliverPresentedPixels(self: anytype, scale: f32, buffer: []u8, out: *typ
     return true;
 }
 
+/// A runtime embedded in a host that owns the main loop (the mobile
+/// shims, game engines, custom render loops, headless tests). Lifecycle:
+/// `init`/`initInPlace`, `defer embedded.deinit()`, `start`, host-pumped
+/// events and `frame`s, `stop` (dispatches app_shutdown), and finally
+/// that deferred `deinit` — `stop` only tells the app it is shutting
+/// down; `deinit` is what returns the embedded runtime's heap-owned
+/// registrations (registered canvas font bytes), so a direct embedder
+/// that creates and destroys apps in one process leaks a full font
+/// registry per cycle without it.
 pub const EmbeddedApp = struct {
     app: runtime.App,
     runtime: runtime.Runtime,
@@ -449,6 +458,17 @@ pub const EmbeddedApp = struct {
     pub fn initInPlace(self: *EmbeddedApp, app: runtime.App, platform_value: platform.Platform) void {
         self.app = app;
         runtime.Runtime.initAt(&self.runtime, .{ .platform = platform_value });
+    }
+
+    /// End of the embedded lifecycle, symmetric with `init`/`initInPlace`:
+    /// releases everything the embedded app owns on the heap — the
+    /// runtime's registered canvas font bytes (`Runtime.deinit`); `init`
+    /// itself allocates nothing else. Idempotent: a second call is a
+    /// no-op, so `defer embedded.deinit()` composes with early exits.
+    /// Everything borrowing the runtime (parsed faces, measure
+    /// providers, views) is invalid past this point.
+    pub fn deinit(self: *EmbeddedApp) void {
+        self.runtime.deinit();
     }
 
     pub fn start(self: *EmbeddedApp) anyerror!void {
@@ -705,6 +725,11 @@ pub const MobileHostApp = struct {
         // below so the runtime's service table starts without audio.
         self.null_platform.audio_playback = false;
         self.null_platform.audio_streaming = false;
+        // Video is declined the same way: no mobile shim registers a
+        // decoder yet, and the null platform's fake player belongs to
+        // hermetic tests — a load that "succeeds" but never decodes
+        // would be a lie. Apps hear one honest failed event instead.
+        self.null_platform.video_playback = false;
         self.last_error = null;
         self.activation_count = 0;
         self.deactivation_count = 0;
@@ -757,6 +782,13 @@ pub const MobileHostApp = struct {
 
     pub fn destroy(self: *MobileHostApp) void {
         disableAutomation(self);
+        // One lifecycle owner: the embedded app's own deinit returns
+        // the runtime's heap-owned storage (registered canvas font
+        // bytes, lazily allocated media-surface texture buffers) AND
+        // disarms the producer wake bindings, so a media producer the
+        // embedding app keeps past destroy can never wake the freed
+        // host storage (the embedded null platform included).
+        self.embedded.deinit();
         std.heap.page_allocator.destroy(self);
     }
 

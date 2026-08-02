@@ -1,0 +1,61 @@
+# Media Producers
+
+Drive a `media-surface` from your own renderer: a video decoder, a camera pipeline, a game engine, or an external player like **mpv**. This is a Zig-tier toolkit extension — the producer API lives on the runtime, below `Cmd`/`Sub`, and this page is its recipe. (The higher-level `<video>` widget with play/pause/seek commands builds on exactly this channel; until it ships, this API *is* the media story for external engines.)
+
+## The shape
+
+A [`media-surface`](/docs/components/media-surface) widget binds a model-owned `u64` surface id. Your producer acquires a handle for the same id and pushes frames; the compositor does the rest — layout, clipping, z-order, damage tracking, and pacing against the presented-frame clock.
+
+```zig
+// 1. The model owns the surface id — any nonzero id below the reserved
+// media-surface texture bit (if you hash into a u64, clear bit 63).
+const Model = struct {
+    player_surface: u64 = 1,
+};
+
+// 2. The view binds it (markup: <media-surface surface="{player_surface}">).
+ui.mediaSurface(.{ .image = model.player_surface, .grow = 1, .semantics = .{ .label = "Player" } })
+
+// 3. Your producer claims the channel once (loop thread)...
+const producer = try runtime.acquireMediaSurfaceProducer(model.player_surface);
+
+// 4. ...and pushes tightly-packed straight-alpha RGBA8 frames from ANY
+// thread — your decoder's, your engine's render loop, an mpv
+// render-callback. The pixels are copied before pushFrame returns.
+try producer.pushFrame(width, height, rgba8);
+
+// 5. Release when the producer shuts down.
+producer.release();
+```
+
+## The contract
+
+- **Latest-wins.** Pushes never queue: an unpresented staged frame is replaced by the next one, so a producer running faster than the display can never build a backlog. Push at your source's native rate and let the compositor sample.
+- **Paced by the presented-frame clock, woken by your pushes.** Staged frames are adopted when the compositor's frame ticks (the 60 Hz host timer, or a prompt requested frame) — and a push that stages new bytes while the app is idle requests one coalesced frame itself, so a 24 fps video in an app nobody touches never stalls and a producer that starts late is adopted promptly. There is no wake channel to manage; pushing is waking.
+- **Damage-tracked.** A frame whose bytes match the previous push costs one hash and nothing else — no copy, no repaint. Idle video is free.
+- **Any-thread pushes, teardown-safe.** `pushFrame` and `release` are callable from any thread and touch only process-lived channel memory. A producer that outlives its view — or the whole runtime — pushes into inert memory; it can never use-after-free. Pushes through a released handle report `error.MediaSurfaceReleased` loudly.
+- **RGBA8 today, the format axis is open.** Tightly-packed straight-alpha RGBA8 is the slice-0 format; BGRA, planar YUV, and zero-copy GPU handles are planned as additional entry points on the same channel.
+- **Bounded and loud.** Frames are bounded per channel (1080p RGBA8 fits; `error.FrameTooLarge` past it) and channels are bounded process-wide (`error.MediaSurfaceChannelsExhausted`); one live producer per surface id (`error.MediaSurfaceInUse`).
+- **GPU hosts composite; software hosts show the placeholder.** Textures reach the screen through the GPU packet pipeline. A host on the software pixel fallback renders through the deterministic reference path, which shows the placeholder by policy in this release.
+
+## Determinism, honestly
+
+Texture *contents* are presentation chrome. The deterministic reference renderer — goldens, reference screenshots, session-replay pixel marks — renders a placeholder derived from the surface id, never your frames, and session fingerprints hash the semantic tree, which carries the surface's existence, geometry, and label but no pixels. A session recorded while your producer runs replays fingerprint-identical with the producer absent. Test your *app* with the toolkit's replay machinery; test your *frames* in your own pipeline.
+
+## The mpv shape (sketch)
+
+mpv's `render` API hands you frames on its own thread; the media surface is built for exactly that hand-off:
+
+```zig
+// mpv render callback (mpv's thread): render into your RGBA buffer,
+// then push. Latest-wins absorbs any rate mismatch with the display.
+fn onMpvFrame(player: *Mpv, producer: media.MediaSurfaceProducer) void {
+    const frame = player.renderFrameRgba8(); // your mpv glue
+    producer.pushFrame(frame.width, frame.height, frame.pixels) catch |err| switch (err) {
+        error.MediaSurfaceReleased => player.stop(), // the app tore the surface down
+        else => {},
+    };
+}
+```
+
+A complete mpv example app is planned as a later slice of the media arc; this channel is its stable foundation.

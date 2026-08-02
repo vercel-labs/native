@@ -44,9 +44,37 @@ const render_fingerprints = @import("render_fingerprints.zig");
 const vector = @import("vector.zig");
 const font_ttf = @import("font_ttf.zig");
 
-/// Element budget for one glyph outline: the bundled face's densest
-/// glyphs stay well under this (maxp: 96 points per simple glyph).
-const reference_glyph_path_capacity: usize = 256;
+/// Element budget for one glyph outline, derived from the parser's
+/// glyph budgets so every glyph a parsed face maps fits: a contour
+/// emits at most one element per point plus a move, a closing quad, and
+/// a close (points + 3*contours), taken over BOTH glyph forms the gate
+/// admits — a simple glyph's maxima and a composite's flattened maxima
+/// (`maxp.maxCompositePoints`/`maxCompositeContours`, which is what
+/// this builder actually receives when a composite renders). The
+/// budgets are currently equal, so the max is 1408 either way; the
+/// derivation keeps capacity honest if they ever diverge. Stack shape:
+/// at 28 B per element this is ~39 KiB in `drawGlyphOutline`; the edge
+/// accumulator below it is the per-thread heap-resident
+/// `vector.GlyphRasterizer` (see `reference_glyph_raster_scratch`), so
+/// the builder is the only glyph raster state on the stack.
+const reference_glyph_path_capacity: usize = @max(
+    font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours,
+    font_ttf.max_composite_points + 3 * font_ttf.max_composite_contours,
+);
+
+/// Per-thread rasterizer for glyph fills: `vector.GlyphRasterizer`'s
+/// derived budgets guarantee every outline the font registration gate
+/// admits rasterizes (never a block fallback), which sizes it at
+/// ~508 KiB — a per-thread heap slot behind one TLS pointer (the
+/// lazy_tls pattern), not a stack temporary and not static TLS. Only
+/// threads that ink a glyph through the reference renderer allocate it.
+/// The array carries no default and stays uninitialized, exactly like
+/// the stack `Rasterizer` it replaces; `vector.fillGlyphPath` resets it
+/// per glyph.
+const ReferenceGlyphRasterScratch = struct {
+    raster: vector.GlyphRasterizer,
+};
+const reference_glyph_raster_scratch = @import("lazy_tls.zig").LazyTls(ReferenceGlyphRasterScratch);
 
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
 const referenceBlurSampleWithKernel = reference_blur.referenceBlurSampleWithKernel;
@@ -62,6 +90,19 @@ pub const ReferenceImage = struct {
     width: usize,
     height: usize,
     pixels: []const u8,
+    /// Precomputed content fingerprint for the GPU cache planner
+    /// (`renderImageFingerprintForResource` uses it when nonzero instead
+    /// of hashing `pixels` at plan time). Media-surface textures set it
+    /// at adoption so a 60 fps producer never pays a full-buffer hash
+    /// per planned frame; 0 — every registered canvas image — keeps the
+    /// classic hash-the-bytes keying byte-identically.
+    content_fingerprint: u64 = 0,
+    /// PRESENTATION-ONLY resource: composited by live GPU/packet hosts,
+    /// invisible to the deterministic reference renderer (see the
+    /// policy comment in `findReferenceImage`). Media-surface textures
+    /// ride the image pipeline with this set, so producer output can
+    /// never leak into goldens, screenshots, or replay pixel marks.
+    presentation_only: bool = false,
 };
 
 /// One runtime-registered font face the reference renderer resolves text
@@ -772,9 +813,12 @@ pub const ReferenceRenderSurface = struct {
 
     /// Paint one glyph: the real Geist outline through the vector core
     /// when the codepoint resolves, the historical block rect otherwise
-    /// (unmapped codepoints, glyphs beyond the outline budgets, or draws
-    /// carrying no text bytes). Layout is untouched — the pen position
-    /// and advance still come from the deterministic estimator.
+    /// (unmapped codepoints, glyphs of hostile faces whose `maxp`
+    /// under-declares — the per-glyph parse backstops — or draws
+    /// carrying no text bytes; never a gate-admitted glyph, whose raster
+    /// budgets are derived from the registration gate). Layout is
+    /// untouched — the pen position and advance still come from the
+    /// deterministic estimator.
     fn drawGlyphBox(
         self: ReferenceRenderSurface,
         command: RenderCommand,
@@ -839,8 +883,14 @@ pub const ReferenceRenderSurface = struct {
             .coverage_blend = .srgb,
         };
         // The outline is already in device space; TrueType interiorness
-        // is the nonzero rule.
-        vector.fillPath(
+        // is the nonzero rule. The glyph raster budgets are derived from
+        // the registration gate's outline budgets, so a gate-admitted
+        // face never trips `VectorPathTooComplex` here — the remaining
+        // fallback triggers are a clip band wider than
+        // `max_raster_width` (surface-shaped, not font-shaped) and
+        // nothing else.
+        vector.fillGlyphPath(
+            &reference_glyph_raster_scratch.get().raster,
             builder.slice(),
             Affine.identity(),
             .nonzero,
@@ -1255,6 +1305,15 @@ fn referenceImagePixelLen(width: usize, height: usize) ?usize {
 
 fn findReferenceImage(images: []const ReferenceImage, id: ImageId) ?ReferenceImage {
     for (images) |image| {
+        // THE REFERENCE-RENDERER MEDIA POLICY: presentation-only
+        // resources (media-surface textures pushed by external
+        // producers) do not exist for the deterministic CPU path. The
+        // draw referencing one skips — exactly like an unregistered id —
+        // so the surface's id-derived placeholder beneath it is what
+        // reference renders, screenshots, replay pixel marks, and
+        // GOLDENS show. Goldens can therefore never depend on producer
+        // output; only live GPU/packet hosts composite the real texture.
+        if (image.presentation_only) continue;
         if (image.id == id) return image;
     }
     return null;

@@ -194,6 +194,29 @@ const Harness = struct {
         return 0;
     }
 
+    /// The laid-out center of a widget, view-local — the aim point for
+    /// raw pointer events (hover has no automation verb; it is a real
+    /// pointer stream by design).
+    fn aimAt(self: *Harness, id: canvas.ObjectId) !geometry.PointF {
+        for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |*view| {
+            if (!std.mem.eql(u8, view.label, "notes-canvas")) continue;
+            const node = view.widgetLayoutTree().findById(id) orelse return error.WidgetNotFound;
+            return node.frame.normalized().center();
+        }
+        return error.ViewNotFound;
+    }
+
+    fn movePointer(self: *Harness, point: geometry.PointF) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = "notes-canvas",
+            .kind = .pointer_move,
+            .timestamp_ns = 3_000_000,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+
     /// A raw pointer click at a canvas point — for targets whose center
     /// is covered by something else (the dialog backdrop scrim).
     fn clickPoint(self: *Harness, x: f32, y: f32) !void {
@@ -944,6 +967,38 @@ test "folder and note rows dispatch selection through real clicks" {
     try testing.expect(std.mem.startsWith(u8, model.activeNote().?.body.text(), "Reading queue mechanics"));
 }
 
+test "hovering a note row previews it in the status bar without committing selection" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const model = &h.app_state.model;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Park the pointer on a row that is NOT the active note, through
+    // real pointer motion over the laid-out geometry.
+    const active_before = model.active_note;
+    const snapshot = h.snapshot();
+    const queue_row = snapshotWidgetNamed(snapshot, "listitem", "Reading queue mechanics").?;
+    try h.movePointer(try h.aimAt(queue_row.id));
+
+    // The status bar previews the hovered note's details — title, age,
+    // word count — and the selection (and editor) stay untouched: hover
+    // previews, clicking commits.
+    try testing.expectEqual(active_before, model.active_note);
+    const preview = model.statusLine(arena);
+    try testing.expect(std.mem.startsWith(u8, preview, "Reading queue mechanics"));
+    try testing.expect(std.mem.indexOf(u8, preview, "words") != null);
+    try testing.expect(subtreeHasText(h.app_state.tree.?.root, preview));
+
+    // Off the list: the paired leave retires the preview and the
+    // default counts line returns.
+    try h.movePointer(geometry.PointF.init(600, 400));
+    try testing.expectEqual(@as(u32, 0), model.hovered_note);
+    try testing.expect(std.mem.indexOf(u8, model.statusLine(arena), "notes ·") != null);
+}
+
 test "a note row's context menu copies, deletes, restores, and purges through real dispatch" {
     var clock = native_sdk.TestClock{};
     var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
@@ -964,7 +1019,9 @@ test "a note row's context menu copies, deletes, restores, and purges through re
     try testing.expectEqualStrings("Delete", groceries_row.context_menu[1].label);
     try h.contextPress(groceries_row.id);
     try testing.expectEqual(@as(usize, 1), h.harness.null_platform.context_menu_request_count);
-    try testing.expectEqual(groceries_row.id, h.harness.null_platform.context_menu_token);
+    // The correlation token is minted per request and opaque; the null
+    // platform records it, and the platform only ever echoes it back.
+    try testing.expect(h.harness.null_platform.context_menu_token != 0);
     const presented = h.harness.null_platform.contextMenuItems();
     try testing.expectEqual(@as(usize, 2), presented.len);
     try testing.expectEqualStrings("Copy", presented[0].label);
@@ -1053,7 +1110,8 @@ test "a folder row's context menu renames and deletes through real dispatch" {
     try testing.expectEqualStrings("Delete", ideas_row.context_menu[1].label);
     try h.contextPress(ideas_row.id);
     try testing.expectEqual(@as(usize, 1), h.harness.null_platform.context_menu_request_count);
-    try testing.expectEqual(ideas_row.id, h.harness.null_platform.context_menu_token);
+    // Per-request token: opaque to the test as it is to the platform.
+    try testing.expect(h.harness.null_platform.context_menu_token != 0);
     try testing.expectEqual(model_mod.all_folder_id, model.selected_folder);
 
     // Rename opens the same dialog flow the keyboard uses, prefilled,
@@ -1318,7 +1376,7 @@ test "the note list scroll offset round-trips through the model" {
     var model = model_mod.initialModel(testClock(&clock));
 
     // The runtime delivers the applied offset; the model stores it…
-    main.update(&model, .{ .note_list_scrolled = .{ .offset = 42, .viewport_extent = 500, .content_extent = 900 } }, &fx);
+    main.update(&model, .{ .note_list_scrolled = .{ .offset_y = 42, .viewport_extent_y = 500, .content_extent_y = 900 } }, &fx);
     try testing.expectEqual(@as(f32, 42), model.note_list_scroll);
 
     // …and the rebuilt tree echoes it back through the scroll's value,

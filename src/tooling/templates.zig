@@ -1,4 +1,6 @@
 const std = @import("std");
+const junction = @import("junction.zig");
+const ts_core = @import("ts_core.zig");
 
 /// The SDK's default app icon, rendered from vector source by
 /// `zig build generate-icon` (tools/generate_app_icon.zig). Embedded so
@@ -63,11 +65,32 @@ pub const Shape = enum {
     full,
 };
 
+/// Which core the native-frontend scaffold writes. No language flag and no
+/// persistent config anywhere: the choice leaves NOTHING behind but the
+/// tree itself (src/core.ts vs src/main.zig) - the build graph detects the
+/// core from the tree on every build.
+pub const CoreTemplate = enum {
+    /// TypeScript core (src/core.ts) + markup view - the default.
+    ts,
+    /// Zig core (src/main.zig) + markup view - the same starter app,
+    /// authored in Zig.
+    zig,
+
+    pub fn parse(value: []const u8) ?CoreTemplate {
+        if (std.mem.eql(u8, value, "ts-core")) return .ts;
+        if (std.mem.eql(u8, value, "zig-core")) return .zig;
+        return null;
+    }
+};
+
 pub const InitOptions = struct {
     app_name: []const u8,
     framework_path: []const u8 = ".",
     frontend: Frontend = .vite,
     shape: Shape = .slim,
+    /// Applies to the native frontend only (web frontends have no core
+    /// tier to scaffold).
+    core: CoreTemplate = .ts,
 };
 
 pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []const u8, options: InitOptions) !void {
@@ -85,6 +108,15 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     try app_dir.createDirPath(io, "assets");
 
     if (options.frontend == .native) {
+        if (options.core == .ts) {
+            if (options.shape == .slim) {
+                return writeTsAppSlim(allocator, io, app_dir, names, destination, options.framework_path);
+            }
+            // build.zig.zon path dependencies must be relative to the app root.
+            const dependency_path = try nativeDependencyPath(allocator, io, destination, framework_path);
+            defer allocator.free(dependency_path);
+            return writeTsApp(allocator, io, app_dir, names, dependency_path, destination, options.framework_path);
+        }
         if (options.shape == .slim) {
             return writeNativeAppSlim(allocator, io, app_dir, names);
         }
@@ -150,6 +182,330 @@ fn slimGitignore() []const u8 {
     ;
 }
 
+/// The TypeScript-core zero-config scaffold - the `native init` default:
+/// core.ts (logic), app.native (view), app.zon (manifest). ZERO Zig in the
+/// tree; the build graph detects src/core.ts, transpiles it, and stages the
+/// generated wiring outside the app on every build.
+///
+/// The tree also carries the EDITOR surface: package.json + tsconfig.json,
+/// so stock editor TypeScript resolves `@native-sdk/core` with full
+/// IntelliSense, plus a materialized node_modules copy of the SDK package
+/// (ts_core.zig owns that contract). None of it is build truth — the tree
+/// detection above keys on src/core.ts alone, and every `native` verb
+/// works with node_modules deleted.
+fn writeTsAppSlim(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, destination: []const u8, sdk_source: []const u8) !void {
+    const app_zon = try nativeAppZon(allocator, names);
+    defer allocator.free(app_zon);
+    const readme_md = try tsSlimReadme(allocator, names);
+    defer allocator.free(readme_md);
+
+    try writeFile(app_dir, io, "src/core.ts", tsCoreStarter());
+    try writeFile(app_dir, io, "src/app.native", tsAppMarkup());
+    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
+    try writeFile(app_dir, io, ".gitignore", tsGitignore());
+    try writeFile(app_dir, io, "README.md", readme_md);
+    try writeTsEditorSurface(allocator, io, app_dir, names, destination, sdk_source);
+}
+
+/// The `--full` twin: the same TS tree plus an owned build.zig/zon pair
+/// (the plain addApp call - the build graph's tree detection does the
+/// rest) and a CI workflow, for users who want to own the build from day
+/// one — the same full-shape contract as the Zig template.
+fn writeTsApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, framework_path: []const u8, destination: []const u8, sdk_source: []const u8) !void {
+    const build_zig = try nativeBuildZig(allocator, names);
+    defer allocator.free(build_zig);
+    const build_zon = try nativeBuildZon(allocator, names, framework_path);
+    defer allocator.free(build_zon);
+    const app_zon = try nativeAppZon(allocator, names);
+    defer allocator.free(app_zon);
+    const readme_md = try tsSlimReadme(allocator, names);
+    defer allocator.free(readme_md);
+    const ci_yaml = try nativeCiYaml(allocator, names, framework_path, .ts);
+    defer allocator.free(ci_yaml);
+
+    try app_dir.createDirPath(io, ".github/workflows");
+    try writeFile(app_dir, io, ".github/workflows/ci.yml", ci_yaml);
+    try writeFile(app_dir, io, "build.zig", build_zig);
+    try writeFile(app_dir, io, "build.zig.zon", build_zon);
+    try writeFile(app_dir, io, "src/core.ts", tsCoreStarter());
+    try writeFile(app_dir, io, "src/app.native", tsAppMarkup());
+    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
+    try writeFile(app_dir, io, ".gitignore", tsGitignore());
+    try writeFile(app_dir, io, "README.md", readme_md);
+    try writeTsEditorSurface(allocator, io, app_dir, names, destination, sdk_source);
+}
+
+/// The editor-and-versioning surface of a TS scaffold: package.json (the
+/// app's name and its `@native-sdk/core` dependency at the SDK's bundled
+/// version), tsconfig.json (the checker's own compiler options, so editor
+/// errors match `native check` reality), and a materialized
+/// node_modules/@native-sdk/core so resolution works BEFORE the package is
+/// published to npm. `sdk_source` is the framework checkout as reachable
+/// from the CLI's cwd (unlike the destination-relative build.zig.zon path).
+fn writeTsEditorSurface(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, destination: []const u8, sdk_source: []const u8) !void {
+    const sdk_version = ts_core.bundledSdkVersion(allocator, io, sdk_source) catch |err| {
+        std.debug.print("the Native SDK at {s} is missing packages/core/package.json - is the checkout (or npm install) complete?\n", .{sdk_source});
+        return err;
+    };
+    defer allocator.free(sdk_version);
+    const package_json = try tsPackageJson(allocator, names, sdk_version);
+    defer allocator.free(package_json);
+    try writeFile(app_dir, io, "package.json", package_json);
+    try writeFile(app_dir, io, "tsconfig.json", tsTsconfig());
+    _ = try ts_core.ensureEditorPackage(allocator, io, sdk_source, destination);
+}
+
+/// The app's package.json: name + the pinned `@native-sdk/core` dependency,
+/// nothing else. It exists for editors and versioning only — the `native`
+/// verbs never read it (tree detection keys on src/core.ts; the build
+/// transpiles against the SDK checkout) — and the pin is exact so the
+/// post-publish `npm install` resolves the same content the CLI
+/// materialized.
+fn tsPackageJson(allocator: std.mem.Allocator, names: TemplateNames, sdk_version: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\n  \"name\": ");
+    try appendJsonString(&out, allocator, names.package_name);
+    try out.appendSlice(allocator,
+        \\,
+        \\  "private": true,
+        \\  "description": "Editor and versioning surface only: stock TypeScript tooling resolves @native-sdk/core from here. The native CLI never reads it and builds with node_modules absent.",
+        \\  "dependencies": {
+        \\    "@native-sdk/core":
+    );
+    try out.appendSlice(allocator, " ");
+    try appendJsonString(&out, allocator, sdk_version);
+    try out.appendSlice(allocator,
+        \\
+        \\  }
+        \\}
+        \\
+    );
+    return out.toOwnedSlice(allocator);
+}
+
+/// The editor tsconfig: the same compiler options the @native-sdk/core
+/// checker builds its program with (typed_ast.ts subsetCompilerOptions), so
+/// what the editor flags is what `native check` flags — minus the SDK
+/// `paths` injection: editors resolve `@native-sdk/core` through
+/// node_modules like any package.
+fn tsTsconfig() []const u8 {
+    return
+    \\{
+    \\  // Mirrors the compiler options the @native-sdk/core checker enforces,
+    \\  // so editor diagnostics match `native check` reality. @native-sdk/core
+    \\  // resolves from node_modules: the native CLI materializes the SDK's
+    \\  // copy there (and keeps it fresh) until the package is on npm.
+    \\  "compilerOptions": {
+    \\    "strict": true,
+    \\    "target": "esnext",
+    \\    "module": "esnext",
+    \\    "moduleResolution": "bundler",
+    \\    "lib": ["esnext"],
+    \\    "types": [],
+    \\    "allowImportingTsExtensions": true,
+    \\    "verbatimModuleSyntax": true,
+    \\    "exactOptionalPropertyTypes": true,
+    \\    "noFallthroughCasesInSwitch": true,
+    \\    "isolatedModules": true,
+    \\    "noEmit": true,
+    \\    "skipLibCheck": true
+    \\  },
+    \\  "include": ["src/**/*.ts"]
+    \\}
+    \\
+    ;
+}
+
+/// TS scaffolds ignore node_modules on top of the slim set: the
+/// @native-sdk/core copy in there is CLI-managed (npm-managed after
+/// publish), never source. `.native/` stays: `native check` stages the
+/// emitted core there for --full trees too.
+fn tsGitignore() []const u8 {
+    return
+    \\.native/
+    \\zig-out/
+    \\.zig-cache/
+    \\node_modules/
+    \\
+    ;
+}
+
+/// The starter core: a counter with a repeating tick (Sub.timer) and a
+/// timestamp request (Cmd.now) - one of each effect surface, small enough
+/// to read whole.
+fn tsCoreStarter() []const u8 {
+    return
+    \\// The app core: Model, Msg, update, and the pure helpers they call -
+    \\// plain TypeScript in the app-core subset, compiled to native Zig at
+    \\// build time (no JS runtime ships in the binary). The view lives in
+    \\// app.native and binds this model by its own field names exactly as
+    \\// written here (`tickCount` binds as `{tickCount}`).
+    \\//
+    \\// The loop: edit here -> `native dev --core` for instant logic checks
+    \\// under node -> `native dev` to run the real app. `native check`
+    \\// verifies this file and the markup together.
+    \\
+    \\import { Cmd, Sub } from "@native-sdk/core";
+    \\
+    \\export interface Model {
+    \\  readonly count: number;
+    \\  readonly ticking: boolean;
+    \\  readonly tickCount: number;
+    \\  readonly stampedMs: number;
+    \\}
+    \\
+    \\export type Msg =
+    \\  | { readonly kind: "increment" }
+    \\  | { readonly kind: "decrement" }
+    \\  | { readonly kind: "reset" }
+    \\  | { readonly kind: "toggle_ticking" }
+    \\  | { readonly kind: "stamp" }
+    \\  | { readonly kind: "stamped"; readonly at: number }
+    \\  | { readonly kind: "tick"; readonly at: number };
+    \\
+    \\// `tick` and `stamped` are dispatched by the host (timer fires and the
+    \\// Cmd.now result), never from markup - this list keeps `native check`'s
+    \\// unbound-state lint honest about that.
+    \\export const viewUnbound = ["tick", "stamped"] as const;
+    \\
+    \\export function initialModel(): Model {
+    \\  return { count: 0, ticking: false, tickCount: 0, stampedMs: -1 };
+    \\}
+    \\
+    \\// Exported single-model helpers become bindings too: `{total}` in
+    \\// app.native reads this.
+    \\export function total(model: Model): number {
+    \\  return model.count + model.tickCount;
+    \\}
+    \\
+    \\export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+    \\  switch (msg.kind) {
+    \\    case "increment":
+    \\      return { ...model, count: model.count + 1 };
+    \\    case "decrement":
+    \\      return { ...model, count: model.count - 1 };
+    \\    case "reset":
+    \\      return { ...model, count: 0, tickCount: 0 };
+    \\    case "toggle_ticking":
+    \\      return { ...model, ticking: !model.ticking };
+    \\    case "stamp":
+    \\      // Effects are data: the host performs this after commit and
+    \\      // dispatches `stamped` with the time.
+    \\      return [model, Cmd.now("stamped")];
+    \\    case "stamped":
+    \\      return { ...model, stampedMs: msg.at };
+    \\    case "tick":
+    \\      return { ...model, tickCount: model.tickCount + 1 };
+    \\  }
+    \\}
+    \\
+    \\// Recurring effects are declared from the model: while `ticking` holds,
+    \\// the host fires `tick` every second; flip it off and the timer stops.
+    \\export function subscriptions(model: Model): Sub<Msg> {
+    \\  if (!model.ticking) return Sub.none;
+    \\  return Sub.timer("tick", 1000, "tick");
+    \\}
+    \\
+    ;
+}
+
+fn tsAppMarkup() []const u8 {
+    return
+    \\<!-- The whole view: markup over the core's emitted model. Embedded at
+    \\     build time and hot-reloaded while `native dev` runs. Fields bind
+    \\     by the names core.ts wrote ({tickCount}); exported single-model
+    \\     helpers bind too ({total}). Validate with: native check -->
+    \\<column gap="12" padding="16">
+    \\  <row gap="8" cross="center">
+    \\    <text grow="1">Counter</text>
+    \\    <button size="sm" variant="ghost" on-press="reset">Reset</button>
+    \\  </row>
+    \\  <row gap="8" main="center" cross="center" grow="1">
+    \\    <button variant="secondary" on-press="decrement">-</button>
+    \\    <text>{count}</text>
+    \\    <button variant="primary" on-press="increment">+</button>
+    \\  </row>
+    \\  <row gap="8" cross="center">
+    \\    <switch checked="{ticking}" on-toggle="toggle_ticking">Tick every second</switch>
+    \\    <text grow="1">ticks {tickCount}</text>
+    \\    <button size="sm" on-press="stamp">Stamp</button>
+    \\  </row>
+    \\  <!-- The empty state is markup, not model surgery: stampedMs starts
+    \\       at -1 (never stamped), and the view says what Stamp will do
+    \\       instead of printing "-1ms". -->
+    \\  <if test="{stampedMs < 0}">
+    \\    <status-bar>total: {total} | press Stamp for a timestamp</status-bar>
+    \\  </if>
+    \\  <else>
+    \\    <status-bar>total: {total} | stamped: {stampedMs}ms</status-bar>
+    \\  </else>
+    \\</column>
+    \\
+    ;
+}
+
+fn tsSlimReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "# ");
+    try out.appendSlice(allocator, names.display_name);
+    try out.appendSlice(allocator,
+        \\
+        \\
+        \\A native app authored in TypeScript and markup: the logic lives in
+        \\`src/core.ts` (Model, Msg, update - the app-core subset, compiled to
+        \\native code at build time; no JS runtime ships in the binary) and the
+        \\view in `src/app.native`. There is no Zig in this tree and nothing to
+        \\configure: the build detects `src/core.ts` and wires everything.
+        \\
+        \\## The loop
+        \\
+        \\```sh
+        \\native dev --core   # fastest: run the core's logic under node -
+        \\                    # dispatch messages as JSON lines, watch the model
+        \\                    # and effect transcript (not a renderer)
+        \\native dev          # build and run the real app (markup hot reload)
+        \\native check        # verify core.ts (subset checker) + markup + app.zon
+        \\native build        # ReleaseFast binary in zig-out/bin/
+        \\native test         # the app's test suite
+        \\```
+        \\
+        \\Edit `src/core.ts` for behavior, `src/app.native` for the view, and
+        \\`app.zon` for windows/identity/permissions. Markup binds the model's
+        \\field names exactly as core.ts wrote them (`tickCount` -> `{tickCount}`),
+        \\and exported single-model helpers bind as derived values (`{total}`).
+        \\
+        \\## Try the core loop
+        \\
+        \\```sh
+        \\printf '%s\n' '{"kind":"increment"}' '{"kind":"toggle_ticking"}' '{"advance":3000}' | native dev --core
+        \\```
+        \\
+        \\## Editor support
+        \\
+        \\Stock editor TypeScript just works: `package.json` and `tsconfig.json`
+        \\are the editor-and-versioning surface (the tsconfig mirrors the checker's
+        \\own options, so editor errors match `native check`), and
+        \\`node_modules/@native-sdk/core` is a CLI-managed copy of the SDK package
+        \\so `@native-sdk/core` resolves with full IntelliSense. Builds never read
+        \\any of it — delete node_modules and every `native` verb still works; the
+        \\next `native check`/`dev`/`build` puts it back. Running `npm install`
+        \\is optional for the same reason: the CLI materializes and refreshes the
+        \\package itself, and an install simply lands the identical content once
+        \\`@native-sdk/core` is on npm.
+        \\
+        \\## Requirements
+        \\
+        \\Node.js 22.15+ (on the 23 line: 23.5+) on PATH (the TypeScript-to-native
+        \\transpiler runs at build time; your shipped binary carries none of it).
+        \\
+    );
+    return out.toOwnedSlice(allocator);
+}
+
 fn slimNativeReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -204,7 +560,7 @@ fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir,
     defer allocator.free(app_zon);
     const readme_md = try nativeReadme(allocator, names, framework_path);
     defer allocator.free(readme_md);
-    const ci_yaml = try nativeCiYaml(allocator, names, framework_path);
+    const ci_yaml = try nativeCiYaml(allocator, names, framework_path, .zig);
     defer allocator.free(ci_yaml);
 
     try writeFile(app_dir, io, "build.zig", build_zig);
@@ -276,9 +632,11 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
-        \\//! A minimal native-rendered Native SDK app: the view lives in
-        \\//! `app.native` (embedded into the binary, and watched for hot reload in
-        \\//! dev); this file is the logic: `Model`, `Msg`, and `update`.
+        \\//! The app core in Zig: `Model`, `Msg`, and `update` - the same
+        \\//! counter-with-effects starter the TypeScript template builds. The view
+        \\//! lives in `app.native` (embedded into the binary, and watched for hot
+        \\//! reload in dev); recurring work and clock reads ride the effects
+        \\//! channel, so `update` stays a plain function of model + message.
         \\
         \\const std = @import("std");
         \\const runner = @import("runner");
@@ -318,17 +676,66 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
         \\    increment,
         \\    decrement,
         \\    reset,
+        \\    toggle_ticking,
+        \\    stamp,
+        \\    tick: native_sdk.EffectTimer,
+        \\
+        \\    // `tick` is dispatched by the host (the repeating timer fires),
+        \\    // never from markup - this keeps the unbound-state lint honest
+        \\    // about that.
+        \\    pub const view_unbound = .{"tick"};
         \\};
         \\
         \\pub const Model = struct {
         \\    count: i64 = 0,
+        \\    ticking: bool = false,
+        \\    tick_count: i64 = 0,
+        \\    stamped_ms: i64 = -1,
+        \\
+        \\    // Public single-model helpers become bindings too: `{total}` in
+        \\    // app.native reads this.
+        \\    pub fn total(model: *const Model) i64 {
+        \\        return model.count + model.tick_count;
+        \\    }
         \\};
         \\
-        \\pub fn update(model: *Model, msg: Msg) void {
+        \\pub const Effects = native_sdk.Effects(Msg);
+        \\
+        \\/// The repeating tick's effects-channel key: starting an active key
+        \\/// replaces the timer in place, so toggling never double-registers.
+        \\pub const tick_timer_key: u64 = 1;
+        \\
+        \\pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         \\    switch (msg) {
         \\        .increment => model.count += 1,
         \\        .decrement => model.count -= 1,
-        \\        .reset => model.count = 0,
+        \\        .reset => {
+        \\            model.count = 0;
+        \\            model.tick_count = 0;
+        \\        },
+        \\        .toggle_ticking => {
+        \\            model.ticking = !model.ticking;
+        \\            // Recurring effects are timers on the effects channel: while
+        \\            // `ticking` holds, the host fires `tick` every second; flip
+        \\            // it off and the timer stops.
+        \\            if (model.ticking) {
+        \\                fx.startTimer(.{
+        \\                    .key = tick_timer_key,
+        \\                    .interval_ms = 1000,
+        \\                    .mode = .repeating,
+        \\                    .on_fire = Effects.timerMsg(.tick),
+        \\                });
+        \\            } else {
+        \\                fx.cancelTimer(tick_timer_key);
+        \\            }
+        \\        },
+        \\        // The journaled clock read - deterministic under session replay,
+        \\        // the Zig equivalent of the TypeScript starter's `Cmd.now`.
+        \\        .stamp => model.stamped_ms = fx.wallMs(),
+        \\        .tick => |timer| {
+        \\            if (timer.outcome != .fired) return;
+        \\            model.tick_count += 1;
+        \\        },
         \\    }
         \\}
         \\
@@ -359,7 +766,7 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
         \\,
         \\        .scene = shell_scene,
         \\        .canvas_label = canvas_label,
-        \\        .update = update,
+        \\        .update_fx = update,
         \\        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
         \\    });
         \\    defer app_state.destroy();
@@ -405,9 +812,11 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
 
 fn nativeAppMarkup() []const u8 {
     return
-    \\<!-- The whole view. Embedded into the binary and hot-reloaded in dev:
-    \\     edit this file while the app runs and the window updates without
-    \\     losing the count. Validate with: native markup check src/app.native -->
+    \\<!-- The whole view: markup over the core's model. Embedded into the
+    \\     binary and hot-reloaded in dev: edit this file while the app runs
+    \\     and the window updates without losing the count. Fields bind by
+    \\     the names main.zig wrote ({tick_count}); public single-model
+    \\     helpers bind too ({total}). Validate with: native check -->
     \\<column gap="12" padding="16">
     \\  <row gap="8" cross="center">
     \\    <text grow="1">Counter</text>
@@ -418,7 +827,12 @@ fn nativeAppMarkup() []const u8 {
     \\    <text>{count}</text>
     \\    <button variant="primary" on-press="increment">+</button>
     \\  </row>
-    \\  <status-bar>count: {count}</status-bar>
+    \\  <row gap="8" cross="center">
+    \\    <switch checked="{ticking}" on-toggle="toggle_ticking">Tick every second</switch>
+    \\    <text grow="1">ticks {tick_count}</text>
+    \\    <button size="sm" on-press="stamp">Stamp</button>
+    \\  </row>
+    \\  <status-bar>total: {total} | stamped: {stamped_ms}ms</status-bar>
     \\</column>
     \\
     ;
@@ -439,6 +853,7 @@ fn nativeTestsZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u
         \\const AppUi = main.AppUi;
         \\const Model = main.Model;
         \\const Msg = main.Msg;
+        \\const Effects = main.Effects;
         \\
         \\const AppMarkup = canvas.MarkupView(Model, Msg);
         \\
@@ -480,37 +895,106 @@ fn nativeTestsZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u
         \\    defer arena_state.deinit();
         \\    const arena = arena_state.allocator();
         \\
+        \\    // A real effects channel in fake-executor mode: requests are
+        \\    // recorded for assertions instead of touching the OS.
+        \\    var fx = Effects.init(testing.allocator);
+        \\    defer fx.deinit();
+        \\    fx.executor = .fake;
+        \\
         \\    var model = main.initialModel();
         \\
         \\    var tree = try buildTree(arena, &model);
         \\    _ = try expectByText(tree.root, .text, "0");
-        \\    _ = try expectByText(tree.root, .status_bar, "count: 0");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 0 | stamped: -1ms");
         \\
         \\    // Click "+": the count increments and the view rebuilds with the
         \\    // new value, keeping widget ids stable.
         \\    const plus = try expectByText(tree.root, .button, "+");
-        \\    main.update(&model, tree.msgForPointer(plus.id, .up).?);
+        \\    main.update(&model, tree.msgForPointer(plus.id, .up).?, &fx);
         \\    try testing.expectEqual(@as(i64, 1), model.count);
         \\
         \\    tree = try buildTree(arena, &model);
         \\    _ = try expectByText(tree.root, .text, "1");
-        \\    _ = try expectByText(tree.root, .status_bar, "count: 1");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 1 | stamped: -1ms");
         \\    try testing.expectEqual(plus.id, (try expectByText(tree.root, .button, "+")).id);
         \\
         \\    // Click "-" twice: the count goes negative.
         \\    const minus = try expectByText(tree.root, .button, "-");
-        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?);
-        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?);
+        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?, &fx);
+        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?, &fx);
         \\    try testing.expectEqual(@as(i64, -1), model.count);
         \\
-        \\    // Click "Reset": back to zero.
+        \\    // Click "Reset": the count and the tick tally both go back to zero.
         \\    tree = try buildTree(arena, &model);
         \\    const reset = try expectByText(tree.root, .button, "Reset");
-        \\    main.update(&model, tree.msgForPointer(reset.id, .up).?);
+        \\    main.update(&model, tree.msgForPointer(reset.id, .up).?, &fx);
         \\    try testing.expectEqual(@as(i64, 0), model.count);
         \\
         \\    tree = try buildTree(arena, &model);
-        \\    _ = try expectByText(tree.root, .status_bar, "count: 0");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 0 | stamped: -1ms");
+        \\}
+        \\
+        \\test "the ticking switch drives the repeating timer through the effects channel" {
+        \\    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        \\    defer arena_state.deinit();
+        \\    const arena = arena_state.allocator();
+        \\
+        \\    var fx = Effects.init(testing.allocator);
+        \\    defer fx.deinit();
+        \\    fx.executor = .fake;
+        \\
+        \\    var model = main.initialModel();
+        \\    var tree = try buildTree(arena, &model);
+        \\
+        \\    // Flip the switch on: the model tracks it and one repeating 1s
+        \\    // timer is registered on the effects channel.
+        \\    const ticker = try expectByText(tree.root, .switch_control, "Tick every second");
+        \\    main.update(&model, tree.msgForPointer(ticker.id, .up).?, &fx);
+        \\    try testing.expect(model.ticking);
+        \\    try testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+        \\    const request = fx.pendingTimerAt(0).?;
+        \\    try testing.expectEqual(main.tick_timer_key, request.key);
+        \\    try testing.expectEqual(@as(u64, 1000), request.interval_ms);
+        \\
+        \\    // Each timer fire arrives as an ordinary `tick` Msg through the
+        \\    // same update path as a click.
+        \\    main.update(&model, .{ .tick = .{ .key = main.tick_timer_key } }, &fx);
+        \\    main.update(&model, .{ .tick = .{ .key = main.tick_timer_key } }, &fx);
+        \\    try testing.expectEqual(@as(i64, 2), model.tick_count);
+        \\
+        \\    tree = try buildTree(arena, &model);
+        \\    _ = try expectByText(tree.root, .text, "ticks 2");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 2 | stamped: -1ms");
+        \\
+        \\    // Flip it off: the timer is cancelled, nothing left armed.
+        \\    main.update(&model, tree.msgForPointer(ticker.id, .up).?, &fx);
+        \\    try testing.expect(!model.ticking);
+        \\    try testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+        \\}
+        \\
+        \\test "stamp reads the journaled wall clock" {
+        \\    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        \\    defer arena_state.deinit();
+        \\    const arena = arena_state.allocator();
+        \\
+        \\    var fx = Effects.init(testing.allocator);
+        \\    defer fx.deinit();
+        \\    fx.executor = .fake;
+        \\    // Swap the clock seam for a hand-cranked one: `fx.wallMs()`
+        \\    // becomes deterministic, exactly like session replay.
+        \\    var test_clock = native_sdk.TestClock{};
+        \\    test_clock.setWallMs(4200);
+        \\    fx.clock = test_clock.clock();
+        \\
+        \\    var model = main.initialModel();
+        \\    var tree = try buildTree(arena, &model);
+        \\
+        \\    const stamp = try expectByText(tree.root, .button, "Stamp");
+        \\    main.update(&model, tree.msgForPointer(stamp.id, .up).?, &fx);
+        \\    try testing.expectEqual(@as(i64, 4200), model.stamped_ms);
+        \\
+        \\    tree = try buildTree(arena, &model);
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 0 | stamped: 4200ms");
         \\}
         \\
         \\test "the view lays out through the canvas engine" {
@@ -664,8 +1148,26 @@ fn nativeReadme(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
 /// GitHub Actions workflow for a native-rendered app: a null-platform
 /// logic-test job plus a Linux Xvfb automation smoke job that launches the
 /// real binary and asserts on the accessibility snapshot. The generated
-/// file belongs to the user, like everything init writes.
-fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []const u8) ![]const u8 {
+/// file belongs to the user, like everything init writes. A TypeScript
+/// core adds the node tier to both jobs: setup-node plus one `npm ci` in
+/// the fetched SDK's packages/core, because the @native-sdk/core
+/// transpiler runs under node at build time and needs its own installed
+/// dependency there — the same install `native build`'s teaching names.
+fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []const u8, core: CoreTemplate) ![]const u8 {
+    const node_setup =
+        \\      - uses: actions/setup-node@v4
+        \\        with:
+        \\          node-version: 22
+        \\
+    ;
+    const transpiler_install =
+        \\      - name: Install the core transpiler dependency
+        \\        # src/core.ts compiles to native code at build time: the
+        \\        # @native-sdk/core transpiler runs under node from the SDK
+        \\        # dependency and needs its dependency installed there once.
+        \\        run: npm ci --prefix "$NATIVE_SDK_PATH/packages/core"
+        \\
+    ;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
@@ -697,14 +1199,22 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\    runs-on: ubuntu-latest
         \\    steps:
         \\      - uses: actions/checkout@v4
-        \\      - uses: mlugg/setup-zig@v2
+        \\      - uses: vercel-labs/setup-zig@v1
         \\        with:
         \\          version: 0.16.0
+        \\
+    );
+    if (core == .ts) try out.appendSlice(allocator, node_setup);
+    try out.appendSlice(allocator,
         \\      - name: Fetch native-sdk
         \\        run: |
         \\          if [ ! -f "$NATIVE_SDK_PATH/build.zig" ]; then
         \\            git clone --depth 1 https://github.com/vercel-labs/native.git "$NATIVE_SDK_PATH"
         \\          fi
+        \\
+    );
+    if (core == .ts) try out.appendSlice(allocator, transpiler_install);
+    try out.appendSlice(allocator,
         \\      - run: zig build test -Dplatform=null
         \\
         \\  smoke:
@@ -712,16 +1222,28 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\    runs-on: ubuntu-latest
         \\    steps:
         \\      - uses: actions/checkout@v4
-        \\      - uses: mlugg/setup-zig@v2
+        \\      - uses: vercel-labs/setup-zig@v1
         \\        with:
         \\          version: 0.16.0
+        \\
+    );
+    if (core == .ts) try out.appendSlice(allocator, node_setup);
+    try out.appendSlice(allocator,
         \\      - name: Install GTK and Xvfb
-        \\        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
+        \\        # No WebKitGTK dev package: this app declares no web use, so its
+        \\        # Linux host compiles without the embedded web layer and never
+        \\        # links WebKitGTK (install it alongside a .frontend block or
+        \\        # the "webview" capability if the app grows web content).
+        \\        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb
         \\      - name: Fetch native-sdk
         \\        run: |
         \\          if [ ! -f "$NATIVE_SDK_PATH/build.zig" ]; then
         \\            git clone --depth 1 https://github.com/vercel-labs/native.git "$NATIVE_SDK_PATH"
         \\          fi
+        \\
+    );
+    if (core == .ts) try out.appendSlice(allocator, transpiler_install);
+    try out.appendSlice(allocator,
         \\      - name: Build the Native SDK CLI
         \\        run: cd "$NATIVE_SDK_PATH" && zig build
         \\      - name: Build and drive the app headless
@@ -738,7 +1260,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\          pid=$!
         \\          trap 'kill "$pid" >/dev/null 2>&1 || true' EXIT
         \\          "$cli" automate wait
-        \\          "$cli" automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
+        \\          "$cli" automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'total: 0'
         \\          "$cli" automate screenshot main-canvas
         \\          test -s .zig-cache/native-sdk-automation/screenshot-main-canvas.png
         \\
@@ -776,7 +1298,7 @@ fn frontendCiYaml(allocator: std.mem.Allocator, names: TemplateNames) ![]const u
         \\    runs-on: ubuntu-latest
         \\    steps:
         \\      - uses: actions/checkout@v4
-        \\      - uses: mlugg/setup-zig@v2
+        \\      - uses: vercel-labs/setup-zig@v1
         \\        with:
         \\          version: 0.16.0
         \\      - name: Fetch native-sdk
@@ -852,6 +1374,12 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    chromium,
         \\};
         \\
+        \\const WebLayerOption = enum {
+        \\    auto,
+        \\    include,
+        \\    exclude,
+        \\};
+        \\
         \\const PackageTarget = enum {
         \\    macos,
         \\    windows,
@@ -868,18 +1396,26 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\
         \\pub fn build(b: *std.Build) void {
         \\    const target = nativeSdkTarget(b);
-        \\    const optimize = b.standardOptimizeOption(.{});
+        \\    // -Doptimize is registered by hand (not the std helper) so the
+        \\    // graph can tell "unset" from "explicit": run/dev default to
+        \\    // Debug for the edit loop, while `zig build package` wraps its own
+        \\    // release-shaped exe — the same split `native dev`/`native build`
+        \\    // apply. An explicit -Doptimize (or --release) pins both roles.
+        \\    const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
+        \\    const optimize = optimizeMode(b, optimize_request, .Debug);
+        \\    const package_optimize = optimizeMode(b, optimize_request, .ReleaseFast);
         \\    const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
         \\    const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
         \\    const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
         \\    const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
         \\    const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
         \\    const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
+        \\    const web_layer_override = b.option(WebLayerOption, "web-layer", "Override app.zon webview_layer: auto, include, exclude");
         \\    const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
         \\    const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
         \\    const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
         \\    const native_sdk_path = b.option([]const u8, "native-sdk-path", "Path to the Native SDK framework checkout") orelse default_native_sdk_path;
-        \\    const optimize_name = @tagName(optimize);
+        \\    const package_optimize_name = @tagName(package_optimize);
         \\    const selected_platform: PlatformOption = switch (platform_option) {
         \\        .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .@"null",
         \\        else => platform_option,
@@ -893,13 +1429,14 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    if (selected_platform == .windows and target.result.os.tag != .windows) {
         \\        @panic("-Dplatform=windows requires a Windows target");
         \\    }
-        \\    const app_web_engine = appWebEngineConfig();
-        \\    const web_engine = web_engine_override orelse app_web_engine.web_engine;
-        \\    const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_web_engine.cef_dir);
-        \\    const cef_auto_install = cef_auto_install_override orelse app_web_engine.cef_auto_install;
+        \\    const app_config = appManifestBuildConfig(b);
+        \\    const web_engine = web_engine_override orelse app_config.web_engine;
+        \\    const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_config.cef_dir);
+        \\    const cef_auto_install = cef_auto_install_override orelse app_config.cef_auto_install;
         \\    if (web_engine == .chromium and selected_platform != .macos) {
         \\        @panic("-Dweb-engine=chromium currently requires -Dplatform=macos");
         \\    }
+        \\    const web_layer = resolveWebLayer(app_config, web_engine, web_layer_override);
         \\
         \\    const native_sdk_mod = nativeSdkModule(b, target, optimize, native_sdk_path);
         \\    const options = b.addOptions();
@@ -915,6 +1452,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    options.addOption(bool, "debug_overlay", debug_overlay);
         \\    options.addOption(bool, "automation", automation_enabled);
         \\    options.addOption(bool, "js_bridge", js_bridge_enabled);
+        \\    options.addOption(bool, "web_layer", web_layer);
         \\    const options_mod = options.createModule();
         \\
         \\    const runner_mod = localModule(b, target, optimize, "src/runner.zig");
@@ -928,8 +1466,24 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const exe = b.addExecutable(.{
         \\        .name = app_exe_name,
         \\        .root_module = app_mod,
+        \\        // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
+        \\        // miscompiles the SysV C calling convention for the long
+        \\        // mixed-argument signatures the platform hosts use, shifting
+        \\        // stack-passed pointers by one slot (a Debug dev run on
+        \\        // x86_64 Linux crashes creating its first shell view). Force
+        \\        // LLVM there, mirroring the Native SDK build graph; Release
+        \\        // modes already use LLVM, so only Debug changes.
+        \\        .use_llvm = useLlvmWorkaround(target),
         \\    });
-        \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
+        \\    // Windows subsystem posture (mirrors the Native SDK build graph):
+        \\    // release-shaped exes are GUI-subsystem so the app never flashes a
+        \\    // console behind its window; Debug keeps the console for dev logs.
+        \\    // Redirected logging still works on GUI exes - only console
+        \\    // AUTO-allocation is subsystem-gated.
+        \\    if (target.result.os.tag == .windows and optimize != .Debug) {
+        \\        exe.subsystem = .windows;
+        \\    }
+        \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
         \\    b.installArtifact(exe);
         \\
         \\    const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
@@ -944,17 +1498,47 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const run = b.addRunArtifact(exe);
         \\    run.step.dependOn(&frontend_build.step);
         \\    addCefRuntimeRunFiles(b, target, run, exe, web_engine, cef_dir);
-        \\    addWebView2RuntimeRunFiles(b, target, run, web_engine, native_sdk_path);
+        \\    addWebView2RuntimeRunFiles(b, target, run, web_engine, web_layer, native_sdk_path);
         \\    const run_step = b.step("run", "Run the app");
         \\    run_step.dependOn(&run.step);
         \\
         \\    const dev = b.addSystemCommand(&.{ "native", "dev", "--manifest", "app.zon", "--binary" });
         \\    dev.addFileArg(exe.getEmittedBin());
-        \\    addWebView2RuntimeRunFiles(b, target, dev, web_engine, native_sdk_path);
+        \\    addWebView2RuntimeRunFiles(b, target, dev, web_engine, web_layer, native_sdk_path);
         \\    dev.step.dependOn(&exe.step);
         \\    dev.step.dependOn(&frontend_install.step);
         \\    const dev_step = b.step("dev", "Run the frontend dev server and native shell");
         \\    dev_step.dependOn(&dev.step);
+        \\
+        \\    // `zig build package` wraps its own exe: release-shaped by default
+        \\    // (ReleaseFast, GUI subsystem on Windows) so the packaged artifact
+        \\    // is never a Debug console binary just because the dev loop
+        \\    // defaults to Debug. When -Doptimize/--release pinned one mode for
+        \\    // everything, the roles agree and the dev exe is reused as-is.
+        \\    const package_exe = if (package_optimize == optimize) exe else pkg: {
+        \\        const package_sdk_mod = nativeSdkModule(b, target, package_optimize, native_sdk_path);
+        \\        const package_runner_mod = localModule(b, target, package_optimize, "src/runner.zig");
+        \\        package_runner_mod.addImport("native_sdk", package_sdk_mod);
+        \\        package_runner_mod.addImport("build_options", options_mod);
+        \\        package_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+        \\        const package_app_mod = localModule(b, target, package_optimize, "src/main.zig");
+        \\        package_app_mod.addImport("native_sdk", package_sdk_mod);
+        \\        package_app_mod.addImport("runner", package_runner_mod);
+        \\        const built = b.addExecutable(.{
+        \\            .name = app_exe_name,
+        \\            .root_module = package_app_mod,
+        \\            // Same self-hosted x86_64 workaround as the dev exe above
+        \\            // (only reachable when -Doptimize pins Debug for both roles).
+        \\            .use_llvm = useLlvmWorkaround(target),
+        \\        });
+        \\        // Same subsystem posture as the dev exe above, keyed on this
+        \\        // exe's own mode: release-shaped Windows exes are GUI-subsystem.
+        \\        if (target.result.os.tag == .windows and package_optimize != .Debug) {
+        \\            built.subsystem = .windows;
+        \\        }
+        \\        linkPlatform(b, target, package_app_mod, built, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
+        \\        break :pkg built;
+        \\    };
         \\
         \\    const package = b.addSystemCommand(&.{
         \\        "native",
@@ -969,9 +1553,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
     try out.appendSlice(allocator,
         \\,
         \\        "--optimize",
-        \\        optimize_name,
+        \\        package_optimize_name,
         \\        "--output",
-        \\        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
+        \\        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), package_optimize_name, packageSuffix(package_target) }),
         \\        "--binary",
         \\    });
         \\    // The CLI resolves SDK-owned package inputs (the vendored WebView2
@@ -979,10 +1563,17 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    // belong to a different checkout than the one this build compiled
         \\    // against, so hand the same root over explicitly.
         \\    package.setEnvironmentVariable("NATIVE_SDK_PATH", b.pathFromRoot(native_sdk_path));
-        \\    package.addFileArg(exe.getEmittedBin());
+        \\    package.addFileArg(package_exe.getEmittedBin());
         \\    package.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
+        \\    // Forward the RESOLVED web-layer decision, never the raw inputs:
+        \\    // this graph already decided web vs native-only for the exe it is
+        \\    // packaging (app.zon declarations plus -Dweb-layer/-Dweb-engine),
+        \\    // and the CLI re-inferring from app.zon alone would miss a
+        \\    // flag-driven override. Handing over the decision itself makes
+        \\    // exe/package agreement structural.
+        \\    package.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
         \\    if (cef_auto_install) package.addArg("--cef-auto-install");
-        \\    package.step.dependOn(&exe.step);
+        \\    package.step.dependOn(&package_exe.step);
         \\    package.step.dependOn(&frontend_build.step);
         \\    const package_step = b.step("package", "Create a local package artifact");
         \\    package_step.dependOn(&package.step);
@@ -990,6 +1581,33 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const tests = b.addTest(.{ .root_module = app_mod });
         \\    const test_step = b.step("test", "Run tests");
         \\    test_step.dependOn(&b.addRunArtifact(tests).step);
+        \\}
+        \\
+        \\// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C
+        \\// calling convention for long mixed int/pointer/double signatures
+        \\// (the platform hosts' view-create calls) and f32-heavy ones (the
+        \\// embed viewport ABI): stack-passed arguments arrive shifted, so a
+        \\// Debug x86_64 build crashes at the first platform call that passes
+        \\// strings on the stack. Force the LLVM backend on x86_64 until the
+        \\// upstream backend is fixed; Release modes already default to LLVM,
+        \\// so this only changes Debug builds.
+        \\fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+        \\    return if (target.result.cpu.arch == .x86_64) true else null;
+        \\}
+        \\
+        \\// Resolve the optimize mode for one exe role (mirrors the Native SDK
+        \\// build graph): an explicit -Doptimize wins for every role, --release
+        \\// resolves through zig's release_mode, and only when neither was
+        \\// passed does the role keep its own default — Debug for the dev loop,
+        \\// ReleaseFast for the exe `zig build package` wraps.
+        \\fn optimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
+        \\    if (requested) |mode| return mode;
+        \\    return switch (b.release_mode) {
+        \\        .off => default_mode,
+        \\        .any, .fast => .ReleaseFast,
+        \\        .safe => .ReleaseSafe,
+        \\        .small => .ReleaseSmall,
+        \\    };
         \\}
         \\
         \\fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
@@ -1073,7 +1691,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    });
         \\}
         \\
-        \\fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, native_sdk_path: []const u8, cef_dir: []const u8, cef_auto_install: bool) void {
+        \\fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, native_sdk_path: []const u8, cef_dir: []const u8, cef_auto_install: bool) void {
         \\    if (platform == .macos) {
         \\        switch (web_engine) {
         \\            .system => {
@@ -1108,6 +1726,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        }
         \\        app_mod.linkFramework("AppKit", .{});
         \\        app_mod.linkFramework("AVFoundation", .{});
+        \\        app_mod.linkFramework("CoreVideo", .{});
         \\        app_mod.linkFramework("MediaToolbox", .{});
         \\        app_mod.linkFramework("Accelerate", .{});
         \\        app_mod.linkFramework("Foundation", .{});
@@ -1120,10 +1739,29 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("c++", .{});
         \\    } else if (platform == .linux) {
         \\        switch (web_engine) {
-        \\            .system => {
+        \\            .system => if (web_layer) {
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{} });
         \\                app_mod.linkSystemLibrary("gtk4", .{});
         \\                app_mod.linkSystemLibrary("webkitgtk-6.0", .{});
+        \\                app_mod.linkSystemLibrary("dl", .{});
+        \\            } else {
+        \\                // Native-only app (nothing in app.zon declares web use):
+        \\                // compile the GTK host without the embedded web layer.
+        \\                // The stub define excludes the layer outright — the host
+        \\                // honors it before probing for the WebKitGTK header, so
+        \\                // the layer stays out even on machines where the
+        \\                // development package is installed — libwebkitgtk is
+        \\                // neither linked nor required at runtime, and the
+        \\                // executable carries no WebKit reference at all. This
+        \\                // is the expected, configured state of every canvas
+        \\                // app on Linux, so the stub compile is deliberately
+        \\                // silent — no build note, no compiler diagnostic (the
+        \\                // host's seam comment explains why even an
+        \\                // informational pragma is dangerous); a stubbed host
+        \\                // teaches at runtime by reporting WebViewNotFound the
+        \\                // moment an app actually uses a WebView.
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+        \\                app_mod.linkSystemLibrary("gtk4", .{});
         \\                app_mod.linkSystemLibrary("dl", .{});
         \\            },
         \\            .chromium => {
@@ -1146,7 +1784,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
         \\    } else if (platform == .windows) {
         \\        switch (web_engine) {
-        \\            .system => {
+        \\            .system => if (web_layer) {
         \\                // The vendored WebView2 SDK header (third_party/webview2)
         \\                // turns on the host's embedded-WebView layer; the host
         \\                // fails the compile by design if it cannot be found.
@@ -1158,6 +1796,24 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // touch it.
         \\                const loader = b.addInstallBinFile(nativeSdkPath(b, native_sdk_path, webView2LoaderSubPath(target)), "WebView2Loader.dll");
         \\                b.getInstallStep().dependOn(&loader.step);
+        \\            } else {
+        \\                // Native-only app (nothing in app.zon declares web use):
+        \\                // compile the host without the embedded-WebView layer.
+        \\                // The stub define excludes the layer outright — the host
+        \\                // honors it before probing for the WebView2 header, so
+        \\                // the layer stays out even on machines where the SDK
+        \\                // headers are reachable through the system include paths
+        \\                // — no WebView2Loader.dll is installed or path-wired,
+        \\                // and the executable carries no reference to it at all.
+        \\                // This is the expected, configured state of every
+        \\                // canvas app on Windows, so the stub compile is
+        \\                // deliberately silent — no build note, no compiler
+        \\                // diagnostic (the host's seam comment explains why
+        \\                // even an informational pragma is dangerous); a
+        \\                // stubbed host teaches at runtime by reporting
+        \\                // WebViewNotFound the moment an app actually uses a
+        \\                // WebView.
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
         \\            },
         \\            .chromium => {
         \\                const cef_check = addCefCheck(b, target, cef_dir);
@@ -1173,10 +1829,13 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
         \\            },
         \\        }
+        \\        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{ "-std=c++17" } });
         \\        app_mod.linkSystemLibrary("c", .{});
         \\        app_mod.linkSystemLibrary("c++", .{});
         \\        app_mod.linkSystemLibrary("user32", .{});
         \\        app_mod.linkSystemLibrary("gdi32", .{});
+        \\        app_mod.linkSystemLibrary("d2d1", .{});
+        \\        app_mod.linkSystemLibrary("dwrite", .{});
         \\        app_mod.linkSystemLibrary("imm32", .{});
         \\        app_mod.linkSystemLibrary("comctl32", .{});
         \\        app_mod.linkSystemLibrary("ole32", .{});
@@ -1203,9 +1862,11 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\/// `zig build run` and `zig build dev` execute the cached artifact, which
         \\/// has no installed WebView2Loader.dll beside it; the vendored loader's
         \\/// directory goes on the step's PATH so the host's LoadLibrary resolves it
-        \\/// (`native dev` passes its environment on to the app it spawns).
-        \\fn addWebView2RuntimeRunFiles(b: *std.Build, target: std.Build.ResolvedTarget, run: *std.Build.Step.Run, web_engine: WebEngineOption, native_sdk_path: []const u8) void {
+        \\/// (`native dev` passes its environment on to the app it spawns). A
+        \\/// native-only build never loads the library, so its PATH stays clean.
+        \\fn addWebView2RuntimeRunFiles(b: *std.Build, target: std.Build.ResolvedTarget, run: *std.Build.Step.Run, web_engine: WebEngineOption, web_layer: bool, native_sdk_path: []const u8) void {
         \\    if (web_engine != .system) return;
+        \\    if (!web_layer) return;
         \\    if (target.result.os.tag != .windows) return;
         \\    const loader_dir = std.fs.path.dirname(webView2LoaderSubPath(target)).?;
         \\    run.addPathDir(b.pathFromRoot(b.pathJoin(&.{ native_sdk_path, loader_dir })));
@@ -1279,10 +1940,42 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    };
         \\}
         \\
-        \\const AppWebEngineConfig = struct {
+        \\/// What this build graph reads out of app.zon: the web-engine/CEF
+        \\/// knobs and the web-layer inference inputs. An unreadable or
+        \\/// unparsable manifest falls back to the system engine WITH the web
+        \\/// layer kept — over-inclusion is a size cost, wrong exclusion is a
+        \\/// broken app.
+        \\const AppManifestBuildConfig = struct {
         \\    web_engine: WebEngineOption = .system,
         \\    cef_dir: []const u8 = "third_party/cef/macos",
         \\    cef_auto_install: bool = false,
+        \\    webview_layer: WebLayerOption = .auto,
+        \\    /// The first web declaration found (for teaching messages), or
+        \\    /// null when app.zon declares no web use. `web_engine = "system"`
+        \\    /// alone is NOT web intent — it is the default in many canvas
+        \\    /// manifests.
+        \\    web_declaration: ?[]const u8 = null,
+        \\};
+        \\
+        \\/// The lenient app.zon shape parsed for inference: only the fields
+        \\/// that decide the web layer and the web engine; everything else is
+        \\/// ignored. Full schema validation stays with `native validate`.
+        \\const InferenceManifest = struct {
+        \\    capabilities: []const []const u8 = &.{},
+        \\    web_engine: []const u8 = "system",
+        \\    webview_layer: []const u8 = "auto",
+        \\    cef: struct {
+        \\        dir: []const u8 = "third_party/cef/macos",
+        \\        auto_install: bool = false,
+        \\    } = .{},
+        \\    frontend: ?struct {} = null,
+        \\    shell: struct {
+        \\        windows: []const struct {
+        \\            views: []const struct {
+        \\                kind: []const u8 = "",
+        \\            } = &.{},
+        \\        } = &.{},
+        \\    } = .{},
         \\};
         \\
         \\fn defaultCefDir(platform: PlatformOption, configured: []const u8) []const u8 {
@@ -1294,17 +1987,62 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    };
         \\}
         \\
-        \\fn appWebEngineConfig() AppWebEngineConfig {
-        \\    const source = @embedFile("app.zon");
-        \\    var config: AppWebEngineConfig = .{};
-        \\    if (stringField(source, ".web_engine")) |value| {
-        \\        config.web_engine = parseWebEngine(value) orelse .system;
-        \\    }
-        \\    if (objectSection(source, ".cef")) |cef| {
-        \\        if (stringField(cef, ".dir")) |value| config.cef_dir = value;
-        \\        if (boolField(cef, ".auto_install")) |value| config.cef_auto_install = value;
-        \\    }
+        \\fn appManifestBuildConfig(b: *std.Build) AppManifestBuildConfig {
+        \\    // The fallback for a manifest this lenient parse cannot read
+        \\    // keeps the web layer (see AppManifestBuildConfig): a shape
+        \\    // mismatch here is not proof the app declares no web use.
+        \\    const fallback: AppManifestBuildConfig = .{ .web_declaration = "an app.zon this build graph could not parse" };
+        \\    const source: [:0]const u8 = @embedFile("app.zon");
+        \\    @setEvalBranchQuota(2000);
+        \\    const raw = std.zon.parse.fromSliceAlloc(InferenceManifest, b.allocator, source, null, .{ .ignore_unknown_fields = true }) catch return fallback;
+        \\    var config: AppManifestBuildConfig = .{
+        \\        .web_engine = parseWebEngine(raw.web_engine) orelse .system,
+        \\        .cef_dir = raw.cef.dir,
+        \\        .cef_auto_install = raw.cef.auto_install,
+        \\        .webview_layer = parseWebLayer(raw.webview_layer) orelse @panic("app.zon .webview_layer must be \"auto\", \"include\", or \"exclude\""),
+        \\    };
+        \\    config.web_declaration = blk: {
+        \\        if (raw.frontend != null) break :blk "a .frontend block";
+        \\        for (raw.capabilities) |capability| {
+        \\            if (std.mem.eql(u8, capability, "webview")) break :blk "the \"webview\" capability";
+        \\        }
+        \\        for (raw.shell.windows) |window| {
+        \\            for (window.views) |view| {
+        \\                if (std.mem.eql(u8, view.kind, "webview")) break :blk "a .shell webview view";
+        \\            }
+        \\        }
+        \\        break :blk null;
+        \\    };
         \\    return config;
+        \\}
+        \\
+        \\/// The web-layer decision for this build — the same declare-to-use
+        \\/// contract the Native SDK's standard build graph, CLI, and runner
+        \\/// apply: an app is WEB when app.zon declares web use (a .frontend
+        \\/// block, the "webview" capability, a .shell webview view) or the
+        \\/// build resolves to the Chromium engine; otherwise it is
+        \\/// NATIVE-ONLY and the platform host compiles without the
+        \\/// embedded-WebView layer. `.webview_layer` (and `-Dweb-layer`)
+        \\/// override the inference — but an exclude that contradicts a web
+        \\/// declaration is a hard configure error, never a silently broken
+        \\/// app.
+        \\fn resolveWebLayer(config: AppManifestBuildConfig, web_engine: WebEngineOption, override: ?WebLayerOption) bool {
+        \\    const setting = override orelse config.webview_layer;
+        \\    const declaration: ?[]const u8 = config.web_declaration orelse
+        \\        (if (web_engine == .chromium) "the Chromium web engine" else null);
+        \\    return switch (setting) {
+        \\        .include => true,
+        \\        .auto => declaration != null,
+        \\        .exclude => {
+        \\            if (declaration) |reason| {
+        \\                std.debug.panic(
+        \\                    "the web layer is excluded ({s}) but the app declares web use ({s}); remove the exclude or drop the web declaration",
+        \\                    .{ if (override != null) "-Dweb-layer=exclude" else "app.zon .webview_layer = \"exclude\"", reason },
+        \\                );
+        \\            }
+        \\            return false;
+        \\        },
+        \\    };
         \\}
         \\
         \\fn parseWebEngine(value: []const u8) ?WebEngineOption {
@@ -1313,39 +2051,10 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    return null;
         \\}
         \\
-        \\fn stringField(source: []const u8, field: []const u8) ?[]const u8 {
-        \\    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-        \\    const equals = std.mem.indexOfScalarPos(u8, source, field_index, '=') orelse return null;
-        \\    const start_quote = std.mem.indexOfScalarPos(u8, source, equals, '"') orelse return null;
-        \\    const end_quote = std.mem.indexOfScalarPos(u8, source, start_quote + 1, '"') orelse return null;
-        \\    return source[start_quote + 1 .. end_quote];
-        \\}
-        \\
-        \\fn objectSection(source: []const u8, field: []const u8) ?[]const u8 {
-        \\    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-        \\    const open = std.mem.indexOfScalarPos(u8, source, field_index, '{') orelse return null;
-        \\    var depth: usize = 0;
-        \\    var index = open;
-        \\    while (index < source.len) : (index += 1) {
-        \\        switch (source[index]) {
-        \\            '{' => depth += 1,
-        \\            '}' => {
-        \\                depth -= 1;
-        \\                if (depth == 0) return source[open + 1 .. index];
-        \\            },
-        \\            else => {},
-        \\        }
-        \\    }
-        \\    return null;
-        \\}
-        \\
-        \\fn boolField(source: []const u8, field: []const u8) ?bool {
-        \\    const field_index = std.mem.indexOf(u8, source, field) orelse return null;
-        \\    const equals = std.mem.indexOfScalarPos(u8, source, field_index, '=') orelse return null;
-        \\    var index = equals + 1;
-        \\    while (index < source.len and std.ascii.isWhitespace(source[index])) : (index += 1) {}
-        \\    if (std.mem.startsWith(u8, source[index..], "true")) return true;
-        \\    if (std.mem.startsWith(u8, source[index..], "false")) return false;
+        \\fn parseWebLayer(value: []const u8) ?WebLayerOption {
+        \\    if (std.mem.eql(u8, value, "auto")) return .auto;
+        \\    if (std.mem.eql(u8, value, "include")) return .include;
+        \\    if (std.mem.eql(u8, value, "exclude")) return .exclude;
         \\    return null;
         \\}
         \\
@@ -1515,6 +2224,8 @@ fn runnerZig() []const u8 {
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
     \\        var info: native_sdk.AppInfo = .{
     \\            .app_name = self.app_name,
+    \\            .has_web_content = manifestHasWebContent(),
+    \\            .declares_tray = manifestDeclaresTrayCapability(),
     \\            .window_title = self.window_title,
     \\            .bundle_id = self.bundle_id,
     \\            .icon_path = self.icon_path,
@@ -1523,6 +2234,30 @@ fn runnerZig() []const u8 {
     \\        if (windows.len > 0) {
     \\            info.main_window = windows[0];
     \\            info.windows = windows;
+    \\        } else {
+    \\            // Scene-first apps declare their one window under
+    \\            // `.shell.windows` — the startup window the host creates
+    \\            // adopts that declaration when the scene loads, but its
+    \\            // CHROME is fixed at create time, so the manifest's
+    \\            // titlebar style threads through here. Same for visibility:
+    \\            // a canvas-first startup window is created ordered-out and
+    \\            // shown after its first canvas frame presents, so launch
+    \\            // never flashes a blank window.
+    \\            info.main_window.titlebar = manifestShellStartupTitlebar();
+    \\            info.main_window.resizable = manifestShellStartupResizable();
+    \\            info.main_window.show = manifestShellStartupShowMode();
+    \\            info.main_window.transparent = manifestShellStartupBool("transparent", false);
+    \\            info.main_window.always_on_top = manifestShellStartupBool("always_on_top", false);
+    \\            info.main_window.click_through = manifestShellStartupBool("click_through", false);
+    \\            info.main_window.activate_on_show = manifestShellStartupBool("activate_on_show", true);
+    \\            // Min-size floors ride the create call like the titlebar:
+    \\            // the scene re-applies size/title later, but the window's
+    \\            // enforced floor is host state from the first frame on.
+    \\            info.main_window.min_width = manifestShellStartupMinSize("min_width");
+    \\            info.main_window.min_height = manifestShellStartupMinSize("min_height");
+    \\            // Close handling is host window state like the titlebar:
+    \\            // the manifest's declaration rides the host create.
+    \\            info.main_window.close_policy = manifestShellStartupClosePolicy();
     \\        }
     \\        return info;
     \\    }
@@ -1646,6 +2381,14 @@ fn runnerZig() []const u8 {
     \\        .resizable = windowBool(window, "resizable", true),
     \\        .restore_state = windowBool(window, "restore_state", true),
     \\        .restore_policy = windowRestorePolicy(window),
+    \\        .titlebar = windowTitlebarStyle(window),
+    \\        .transparent = windowBool(window, "transparent", false),
+    \\        .always_on_top = windowBool(window, "always_on_top", false),
+    \\        .click_through = windowBool(window, "click_through", false),
+    \\        .activate_on_show = windowBool(window, "activate_on_show", true),
+    \\        .min_width = windowMinSize(window, "min_width"),
+    \\        .min_height = windowMinSize(window, "min_height"),
+    \\        .close_policy = windowClosePolicy(window),
     \\    };
     \\}
     \\
@@ -1677,6 +2420,134 @@ fn runnerZig() []const u8 {
     \\    if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     \\    if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     \\    @compileError("unknown app.zon window restore_policy");
+    \\}
+    \\
+    \\/// Window-enforced content min-size floor from app.zon. Validated at
+    \\/// comptime like the titlebar style: a negative floor is an authoring
+    \\/// error, not a silent clamp.
+    \\fn windowMinSize(comptime window: anytype, comptime field: []const u8) f32 {
+    \\    const value: f32 = comptime windowFloat(window, field, 0);
+    \\    comptime {
+    \\        if (!(value >= 0)) @compileError("app.zon window " ++ field ++ " must be non-negative");
+    \\    }
+    \\    return value;
+    \\}
+    \\
+    \\fn windowTitlebarStyle(comptime window: anytype) native_sdk.WindowTitlebarStyle {
+    \\    if (comptime !@hasField(@TypeOf(window), "titlebar")) return .standard;
+    \\    const value = window.titlebar;
+    \\    if (comptime std.mem.eql(u8, value, "standard")) return .standard;
+    \\    if (comptime std.mem.eql(u8, value, "hidden_inset")) return .hidden_inset;
+    \\    if (comptime std.mem.eql(u8, value, "hidden_inset_tall")) return .hidden_inset_tall;
+    \\    if (comptime std.mem.eql(u8, value, "chromeless")) return .chromeless;
+    \\    @compileError("unknown app.zon window titlebar style");
+    \\}
+    \\
+    \\/// The startup window's titlebar style for scene-first apps: app.zon's
+    \\/// `.shell.windows[0].titlebar`. Chrome cannot change after the host
+    \\/// creates the window, so it must ride the create call — unlike
+    \\/// size/title, which the loading scene re-applies.
+    \\fn manifestShellStartupTitlebar() native_sdk.WindowTitlebarStyle {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .standard;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return .standard;
+    \\    if (comptime shell.windows.len == 0) return .standard;
+    \\    return windowTitlebarStyle(shell.windows[0]);
+    \\}
+    \\
+    \\/// The startup window's resizability for scene-first apps: like the
+    \\/// titlebar style, resizable is window chrome fixed at create time.
+    \\fn manifestShellStartupResizable() bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return true;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return true;
+    \\    if (comptime shell.windows.len == 0) return true;
+    \\    return windowBool(shell.windows[0], "resizable", true);
+    \\}
+    \\
+    \\/// One creation-time boolean from app.zon's first shell window.
+    \\fn manifestShellStartupBool(comptime field: []const u8, comptime default_value: bool) bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return default_value;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return default_value;
+    \\    if (comptime shell.windows.len == 0) return default_value;
+    \\    return windowBool(shell.windows[0], field, default_value);
+    \\}
+    \\
+    \\/// The startup window's close policy for scene-first apps: app.zon's
+    \\/// `.shell.windows[0].close_policy`. Like the titlebar, close handling
+    \\/// is host window state fixed at create time.
+    \\fn manifestShellStartupClosePolicy() native_sdk.WindowClosePolicy {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .quit;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return .quit;
+    \\    if (comptime shell.windows.len == 0) return .quit;
+    \\    return windowClosePolicy(shell.windows[0]);
+    \\}
+    \\
+    \\/// The startup window's content min-size floor for scene-first apps:
+    \\/// app.zon's `.shell.windows[0].min_width`/`.min_height` (0 = none).
+    \\fn manifestShellStartupMinSize(comptime field: []const u8) f32 {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return 0;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return 0;
+    \\    if (comptime shell.windows.len == 0) return 0;
+    \\    return windowMinSize(shell.windows[0], field);
+    \\}
+    \\
+    \\/// Present-before-show for the STARTUP window: when app.zon's first
+    \\/// shell window hosts a canvas (`gpu_surface` view), the host creates
+    \\/// it ordered-out and it becomes visible after the first canvas frame
+    \\/// presents. Webview-first startup windows keep immediate visibility.
+    \\fn manifestShellStartupShowMode() native_sdk.WindowShowMode {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .immediate;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return .immediate;
+    \\    if (comptime shell.windows.len == 0) return .immediate;
+    \\    const window = shell.windows[0];
+    \\    if (comptime !@hasField(@TypeOf(window), "views")) return .immediate;
+    \\    inline for (window.views) |view| {
+    \\        if (comptime @hasField(@TypeOf(view), "kind")) {
+    \\            if (comptime std.mem.eql(u8, view.kind, "gpu_surface")) return .on_first_present;
+    \\        }
+    \\    }
+    \\    return .immediate;
+    \\}
+    \\
+    \\/// What the window's close affordance does, from app.zon. `.hide` is
+    \\/// validated against the TARGET platform at comptime: a host with no
+    \\/// affordance to bring a hidden window back (GTK has no status item;
+    \\/// windows without a declared tray, since hiding removes the taskbar
+    \\/// entry and windows has no dock) refuses the declaration here, at
+    \\/// build time, instead of stranding a hidden window at runtime.
+    \\fn windowClosePolicy(comptime window: anytype) native_sdk.WindowClosePolicy {
+    \\    if (comptime !@hasField(@TypeOf(window), "close_policy")) return .quit;
+    \\    const value = window.close_policy;
+    \\    if (comptime std.mem.eql(u8, value, "quit")) return .quit;
+    \\    if (comptime std.mem.eql(u8, value, "hide")) {
+    \\        if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
+    \\            @compileError("app.zon window close_policy \"hide\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \"quit\" (the default), or scope the .hide declaration to macos/windows builds");
+    \\        }
+    \\        if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
+    \\            if (comptime !manifestDeclaresTrayCapability()) {
+    \\                @compileError("app.zon window close_policy \"hide\" on windows requires the \"tray\" capability: hiding removes the taskbar entry and windows has no dock-reopen path, so only a status item (tray) could bring the hidden window back - add \"tray\" to .capabilities and install a status item, or declare \"quit\" (the default); macos needs no capability because the dock reopen path always exists");
+    \\            }
+    \\        }
+    \\        return .hide;
+    \\    }
+    \\    @compileError("unknown app.zon window close_policy - supported values: \"quit\" (close really closes; the default) and \"hide\" (the menu-bar-app shape: close hides the window and the app keeps running)");
+    \\}
+    \\
+    \\/// Whether app.zon declares the "tray" capability — the status item
+    \\/// `.hide` leans on where the OS has no built-in re-show affordance.
+    \\/// Evaluated at comptime over the manifest import, like the web scan.
+    \\fn manifestDeclaresTrayCapability() bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    \\    inline for (app_manifest.capabilities) |capability| {
+    \\        const name: []const u8 = capability;
+    \\        if (comptime std.mem.eql(u8, name, "tray")) return true;
+    \\    }
+    \\    return false;
     \\}
     \\
     \\fn menuItem(comptime item: anytype) native_sdk.MenuItem {
@@ -1732,7 +2603,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `NullPlatform.createWithOptions`/`destroy`).
+    \\    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    \\    defer null_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -1765,6 +2641,7 @@ fn runnerZig() []const u8 {
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
     \\        .js_window_api = options.js_window_api,
+    \\        .web_layer = webLayerEnabled(),
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
@@ -1780,8 +2657,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    \\    defer mac_platform.deinit();
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `MacPlatform.createWithOptions`/`destroy`).
+    \\    const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    \\    defer mac_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -1814,6 +2695,7 @@ fn runnerZig() []const u8 {
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
     \\        .js_window_api = options.js_window_api,
+    \\        .web_layer = webLayerEnabled(),
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
@@ -1829,8 +2711,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    \\    defer linux_platform.deinit();
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `LinuxPlatform.createWithOptions`/`destroy`).
+    \\    const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    \\    defer linux_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -1863,6 +2749,7 @@ fn runnerZig() []const u8 {
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
     \\        .js_window_api = options.js_window_api,
+    \\        .web_layer = webLayerEnabled(),
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
@@ -1878,8 +2765,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    \\    defer windows_platform.deinit();
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `WindowsPlatform.createWithOptions`/`destroy`).
+    \\    const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    \\    defer windows_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -1912,6 +2803,7 @@ fn runnerZig() []const u8 {
     \\        .builtin_bridge = options.builtin_bridge,
     \\        .security = options.security,
     \\        .js_window_api = options.js_window_api,
+    \\        .web_layer = webLayerEnabled(),
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
@@ -1933,6 +2825,48 @@ fn runnerZig() []const u8 {
     \\fn webEngine() native_sdk.WebEngine {
     \\    if (comptime std.mem.eql(u8, build_options.web_engine, "chromium")) return .chromium;
     \\    return .system;
+    \\}
+    \\
+    \\/// Whether app.zon declares web content — the shared declare-to-use
+    \\/// contract (native_sdk.app_manifest.web_layer) over the comptime
+    \\/// manifest import: a .frontend block, the "webview" capability, a
+    \\/// .shell webview view, or .web_engine = "chromium". Hosts build
+    \\/// honest default menus from this — web items like Reload only exist
+    \\/// when a webview can answer them.
+    \\fn manifestHasWebContent() bool {
+    \\    return manifestWebDeclaration() != null;
+    \\}
+    \\
+    \\/// The first web declaration visible in app.zon, evaluated at
+    \\/// comptime. The engine input is the MANIFEST engine: the runner
+    \\/// never sees the -Dweb-engine flag, so an engine resolved to
+    \\/// Chromium by flag alone stays a configure-time error in build.zig,
+    \\/// which does see the flag.
+    \\fn manifestWebDeclaration() ?native_sdk.app_manifest.web_layer.Declaration {
+    \\    const engine: native_sdk.app_manifest.WebEngine = comptime blk: {
+    \\        if (!@hasField(@TypeOf(app_manifest), "web_engine")) break :blk .system;
+    \\        break :blk native_sdk.app_manifest.web_layer.parseWebEngine(app_manifest.web_engine) orelse .system;
+    \\    };
+    \\    return comptime native_sdk.app_manifest.web_layer.webDeclaration(app_manifest, engine);
+    \\}
+    \\
+    \\/// Whether this build ships the embedded web layer (build.zig's
+    \\/// -Dweb-layer inference); a build_options module that predates the
+    \\/// option keeps the layer — over-inclusion is safe.
+    \\fn webLayerEnabled() bool {
+    \\    if (comptime !@hasDecl(build_options, "web_layer")) return true;
+    \\    return build_options.web_layer;
+    \\}
+    \\
+    \\// A build that excludes the web layer while app.zon declares web use
+    \\// must fail at compile time: the declared webviews of a layerless
+    \\// host would otherwise only fail later, at runtime.
+    \\comptime {
+    \\    if (!webLayerEnabled()) {
+    \\        if (manifestWebDeclaration()) |declaration| {
+    \\            @compileError("this build excludes the web layer (-Dweb-layer=exclude) but app.zon declares web use (" ++ declaration.text() ++ "); remove the exclude or drop the web declaration");
+    \\        }
+    \\    }
     \\}
     \\
     \\const StateBuffers = struct {
@@ -2874,13 +3808,55 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend_build.step.dependOn(&frontend_install.step)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"native\", \"dev\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "dev.step.dependOn(&frontend_install.step)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "addWebView2RuntimeRunFiles(b, target, dev, web_engine, native_sdk_path)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "addWebView2RuntimeRunFiles(b, target, dev, web_engine, web_layer, native_sdk_path)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.setEnvironmentVariable(\"NATIVE_SDK_PATH\", b.pathFromRoot(native_sdk_path))") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "chromium") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "cef-dir") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "src/platform/macos/cef_host.mm") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "src/platform/linux/gtk_host.c") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "app_manifest_zon") != null);
+    // The generated graph carries the whole web-layer feature: the
+    // override option, the app.zon inference with its conflict panic,
+    // the option handed to the runner, and the conditional WebView2
+    // wiring (include + source + loader when web, stubbed host and no
+    // loader when native-only).
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "b.option(WebLayerOption, \"web-layer\", \"Override app.zon webview_layer: auto, include, exclude\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const web_layer = resolveWebLayer(app_config, web_engine, web_layer_override)") != null);
+    // The emitted package step forwards the graph's resolved decision so
+    // the packaged artifact structurally agrees with the compiled exe.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addArgs(&.{ \"--web-layer\", if (web_layer) \"include\" else \"exclude\" })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "options.addOption(bool, \"web_layer\", web_layer)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.zon.parse.fromSliceAlloc(InferenceManifest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "the web layer is excluded ({s}) but the app declares web use ({s})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".system => if (web_layer) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"") != null);
+    // The Linux seam mirrors it: gtk_host.c compiles with the WebKitGTK
+    // stub define and webkitgtk-6.0 is not linked when native-only.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (!web_layer) return;") != null);
+    // Release-shaped Windows exes must be GUI-subsystem (same posture as
+    // the SDK build graph) so packaged scaffold apps never flash a console.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.os.tag == .windows and optimize != .Debug) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "exe.subsystem = .windows;") != null);
+    // The package step wraps its own release-shaped exe: Debug stays the
+    // run/dev default, but `zig build package` must never ship a Debug
+    // (console-subsystem) binary unless the user pinned the mode
+    // explicitly. The --optimize arg and the artifact name follow the
+    // package exe's actual mode, and the exe carries its own
+    // subsystem-posture check keyed on that mode.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const optimize_request = b.option(std.builtin.OptimizeMode, \"optimize\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const optimize = optimizeMode(b, optimize_request, .Debug);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const package_optimize = optimizeMode(b, optimize_request, .ReleaseFast);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const package_exe = if (package_optimize == optimize) exe else pkg: {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.os.tag == .windows and package_optimize != .Debug) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "built.subsystem = .windows;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addFileArg(package_exe.getEmittedBin());") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.step.dependOn(&package_exe.step);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package_optimize_name,") != null);
+    // No stale wiring: the package step must not reference the dev exe
+    // or the old single-mode name.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addFileArg(exe.getEmittedBin());") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "standardOptimizeOption") == null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "frontend/dist") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "127.0.0.1:5173") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "@import(\"app_manifest_zon\")") != null);
@@ -2895,12 +3871,55 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestWindowOptions") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.windows = windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "for (restored_windows, 0..)") != null);
+    // The generated manifestWindow must thread every declarable window
+    // option into WindowOptions — a dropped field is a silent no-op for
+    // every `native create` app (the manifest accepts the declaration,
+    // the window ignores it). close_policy shipped with exactly that gap
+    // once; these pins hold the field AND the Linux comptime refusal (a
+    // .hide window with no tray to bring it back must fail the build,
+    // not strand a hidden window at runtime).
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".restore_policy = windowRestorePolicy(window)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".titlebar = windowTitlebarStyle(window)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".min_width = windowMinSize(window, \"min_width\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".min_height = windowMinSize(window, \"min_height\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".close_policy = windowClosePolicy(window)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "close_policy \\\"hide\\\" is not supported on linux") != null);
+    // The windows-conditional twin: `.hide` hides the taskbar entry and
+    // windows has no dock-reopen path, so the declaration requires the
+    // "tray" capability (the status item IS the re-show affordance).
+    // macOS stays exempt — the Dock reopen path always exists.
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "close_policy \\\"hide\\\" on windows requires the \\\"tray\\\" capability") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDeclaresTrayCapability()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".declares_tray = manifestDeclaresTrayCapability()") != null);
+    // The scene-first twin: an app.zon that declares its one window under
+    // `.shell.windows` (the default `native init` shape) hits the
+    // windows.len == 0 branch, and the startup window's host-create state
+    // (chrome, resizability, show mode, min-size floor, close policy)
+    // must thread from the shell declaration exactly like the SDK runner
+    // — a generated runner without this threading silently keeps
+    // quit-on-close (and standard chrome) for every scene-first
+    // manifest. The close-policy helper reuses windowClosePolicy, so the
+    // shell path carries the same Linux comptime refusal pinned above.
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.titlebar = manifestShellStartupTitlebar()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.resizable = manifestShellStartupResizable()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.show = manifestShellStartupShowMode()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.min_width = manifestShellStartupMinSize(\"min_width\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.min_height = manifestShellStartupMinSize(\"min_height\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.close_policy = manifestShellStartupClosePolicy()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "return windowClosePolicy(shell.windows[0])") != null);
     // The Runtime is multi-megabyte; the generated runner must heap-allocate
     // it and construct in place, never build it by value on the stack.
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "std.heap.page_allocator.create(native_sdk.Runtime)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "defer std.heap.page_allocator.destroy(runtime)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "native_sdk.Runtime.initAt(runtime, .{") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "Runtime.init(.{") == null);
+    // The generated runner consumes the same web-layer contract: the
+    // shared inference for honest menus, the build option threaded into
+    // every runtime init, and the comptime conflict guard.
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".has_web_content = manifestHasWebContent()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "native_sdk.app_manifest.web_layer.webDeclaration(app_manifest, engine)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".web_layer = webLayerEnabled(),") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "@compileError(\"this build excludes the web layer") != null);
     try std.testing.expect(std.mem.indexOf(u8, package_json_text, "\"vite\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_js_text, "window.zero") != null);
 
@@ -2908,7 +3927,7 @@ test "writeDefaultApp emits Vite project files" {
     defer std.testing.allocator.free(ci_yaml_text);
     try expectBasicYaml(ci_yaml_text);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build test -Dplatform=null -Dnative-sdk-path=\"$NATIVE_SDK_PATH\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "mlugg/setup-zig@v2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "vercel-labs/setup-zig@v1") != null);
     // Web-frontend workflows stop at logic tests: the automation smoke
     // recipe is native-app specific.
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "smoke:") == null);
@@ -2935,14 +3954,113 @@ test "writeDefaultApp emits frontend-specific Next paths" {
     try std.testing.expect(std.mem.indexOf(u8, tsconfig_text, "\"@/*\": [\"./app/*\"]") != null);
 }
 
-test "writeDefaultApp emits a slim native scaffold by default" {
-    const destination = ".zig-cache/test-native-slim-template";
+test "writeDefaultApp emits the TS-core scaffold by default: three files of truth, zero Zig" {
+    const destination = ".zig-cache/test-ts-slim-template";
     try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native });
+
+    const core_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/core.ts");
+    defer std.testing.allocator.free(core_text);
+    const markup_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/app.native");
+    defer std.testing.allocator.free(markup_text);
+    const ts_app_zon = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    defer std.testing.allocator.free(ts_app_zon);
+    const ts_readme = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
+    defer std.testing.allocator.free(ts_readme);
+
+    // ZERO Zig in the tree, no build files: the build graph detects
+    // src/core.ts and stages the wiring outside the app. Zero-config
+    // parity with the slim Zig scaffold: no CI workflow either — the
+    // full shape owns that surface.
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "src/main.zig"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml"));
+
+    // The starter uses one Cmd and one Sub, declares the lint opt-out, and
+    // exports a bindable helper.
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "Cmd.now(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "Sub.timer(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "export const viewUnbound") != null);
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "export function total(") != null);
+    // The markup binds the model's own TS field names and the helper.
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{tickCount}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{total}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ts_app_zon, "gpu_surface") != null);
+    // The README teaches the loop, node-first.
+    try std.testing.expect(std.mem.indexOf(u8, ts_readme, "native dev --core") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ts_readme, "native check") != null);
+
+    // The editor surface: package.json pins @native-sdk/core at the SDK's
+    // bundled version, tsconfig.json mirrors the checker's options, and
+    // node_modules carries the materialized SDK package so stock tsc
+    // resolves both entry points before the npm publish exists.
+    const package_json = try readTestFile(std.testing.allocator, std.testing.io, destination, "package.json");
+    defer std.testing.allocator.free(package_json);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, "\"name\": \"my-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, "\"private\": true") != null);
+    const bundled_version = try ts_core.bundledSdkVersion(std.testing.allocator, std.testing.io, ".");
+    defer std.testing.allocator.free(bundled_version);
+    const pinned = try std.fmt.allocPrint(std.testing.allocator, "\"@native-sdk/core\": \"{s}\"", .{bundled_version});
+    defer std.testing.allocator.free(pinned);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, pinned) != null);
+
+    const tsconfig = try readTestFile(std.testing.allocator, std.testing.io, destination, "tsconfig.json");
+    defer std.testing.allocator.free(tsconfig);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"strict\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"moduleResolution\": \"bundler\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"noEmit\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"exactOptionalPropertyTypes\": true") != null);
+
+    const editor_manifest = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/package.json");
+    defer std.testing.allocator.free(editor_manifest);
+    try std.testing.expect(std.mem.indexOf(u8, editor_manifest, "\"@native-sdk/core\"") != null);
+    const editor_core = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/core.ts");
+    defer std.testing.allocator.free(editor_core);
+    try std.testing.expect(editor_core.len > 0);
+    const editor_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/text.ts");
+    defer std.testing.allocator.free(editor_text);
+    try std.testing.expect(editor_text.len > 0);
+    const editor_events = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/events.ts");
+    defer std.testing.allocator.free(editor_events);
+    try std.testing.expect(editor_events.len > 0);
+
+    // node_modules is generated surface: ignored, never source.
+    const ts_gitignore = try readTestFile(std.testing.allocator, std.testing.io, destination, ".gitignore");
+    defer std.testing.allocator.free(ts_gitignore);
+    try std.testing.expect(std.mem.indexOf(u8, ts_gitignore, "node_modules/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ts_gitignore, ".native/") != null);
+}
+
+test "writeDefaultApp --full ts-core carries the same editor surface" {
+    const destination = ".zig-cache/test-ts-full-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
+
+    const build_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig");
+    defer std.testing.allocator.free(build_zig_text);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "native_sdk.addApp") != null);
+    const package_json = try readTestFile(std.testing.allocator, std.testing.io, destination, "package.json");
+    defer std.testing.allocator.free(package_json);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, "\"@native-sdk/core\"") != null);
+    const tsconfig = try readTestFile(std.testing.allocator, std.testing.io, destination, "tsconfig.json");
+    defer std.testing.allocator.free(tsconfig);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"moduleResolution\": \"bundler\"") != null);
+    const editor_core = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/core.ts");
+    defer std.testing.allocator.free(editor_core);
+    try std.testing.expect(editor_core.len > 0);
+    const gitignore_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".gitignore");
+    defer std.testing.allocator.free(gitignore_text);
+    try std.testing.expect(std.mem.indexOf(u8, gitignore_text, "node_modules/") != null);
+}
+
+test "writeDefaultApp --template zig-core emits the slim Zig scaffold at ts-core parity" {
+    const destination = ".zig-cache/test-native-slim-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .core = .zig });
 
     const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
     defer std.testing.allocator.free(app_zon_text);
     const main_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/main.zig");
     defer std.testing.allocator.free(main_zig_text);
+    const markup_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/app.native");
+    defer std.testing.allocator.free(markup_text);
     const gitignore_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".gitignore");
     defer std.testing.allocator.free(gitignore_text);
     const readme_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
@@ -2950,14 +4068,34 @@ test "writeDefaultApp emits a slim native scaffold by default" {
     const icon = try readTestFile(std.testing.allocator, std.testing.io, destination, "assets/icon.png");
     defer std.testing.allocator.free(icon);
 
-    // Zero-config: no build files, no editor config, no CI workflow.
+    // Zero-config: no build files, no editor config, no CI workflow — and
+    // none of the TS scaffold's editor surface: a Zig app carries no
+    // package.json/tsconfig/node_modules (zero residue; the tree is the
+    // only language marker).
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig"));
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig.zon"));
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".vscode/settings.json"));
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "package.json"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "tsconfig.json"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/package.json"));
 
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "gpu_surface") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "native_sdk.UiApp(Model, Msg)") != null);
+    // Feature parity with the ts-core starter: the same counter app with a
+    // repeating fx timer (the Sub.timer equivalent), a journaled clock
+    // read (the Cmd.now equivalent), the lint opt-out for the host-fired
+    // arm, and a bindable single-model helper.
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "fx.startTimer(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "fx.wallMs()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, ".update_fx = update,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "pub const view_unbound = .{\"tick\"};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "pub fn total(") != null);
+    // The markup is the ts starter's view over the Zig core's own field
+    // names, bound exactly as main.zig wrote them.
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{tick_count}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{total}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "on-toggle=\"toggle_ticking\"") != null);
     // The generated + derived state is ignored wholesale.
     try std.testing.expect(std.mem.indexOf(u8, gitignore_text, ".native/") != null);
     try std.testing.expect(std.mem.indexOf(u8, gitignore_text, "zig-out/") != null);
@@ -2972,7 +4110,7 @@ test "writeDefaultApp emits a slim native scaffold by default" {
 
 test "writeDefaultApp emits native project files" {
     const destination = ".zig-cache/test-native-init-template";
-    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full, .core = .zig });
 
     const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
     defer std.testing.allocator.free(app_zon_text);
@@ -3016,9 +4154,36 @@ test "writeDefaultApp emits native project files" {
     try std.testing.expect(std.mem.indexOf(u8, readme_text, "hot") != null or std.mem.indexOf(u8, readme_text, "Hot") != null);
 }
 
+test "writeDefaultApp --full ts-core emits a CI workflow with the node tier" {
+    const destination = ".zig-cache/test-ts-ci-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
+
+    const ci_yaml_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml");
+    defer std.testing.allocator.free(ci_yaml_text);
+
+    try expectBasicYaml(ci_yaml_text);
+    // The Zig full template's structure: logic tests plus the Linux
+    // automation smoke, no WebKitGTK for a native-rendered app.
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "  test:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "  smoke:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "vercel-labs/setup-zig@v1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build test -Dplatform=null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev xvfb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libwebkitgtk-6.0-dev") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "xvfb-run -a ./zig-out/bin/my-app &") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "git clone --depth 1 https://github.com/vercel-labs/native.git \"$NATIVE_SDK_PATH\"") != null);
+    // Plus the node tier the TS build needs: node on PATH and the
+    // transpiler's own install inside the fetched SDK's packages/core,
+    // in BOTH jobs (each builds the app, so each transpiles the core).
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "actions/setup-node@v4") != null);
+    const npm_ci = "npm ci --prefix \"$NATIVE_SDK_PATH/packages/core\"";
+    const first = std.mem.indexOf(u8, ci_yaml_text, npm_ci).?;
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text[first + npm_ci.len ..], npm_ci) != null);
+}
+
 test "writeDefaultApp emits a CI workflow for native apps" {
     const destination = ".zig-cache/test-native-ci-template";
-    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full, .core = .zig });
 
     const ci_yaml_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml");
     defer std.testing.allocator.free(ci_yaml_text);
@@ -3028,16 +4193,19 @@ test "writeDefaultApp emits a CI workflow for native apps" {
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "jobs:") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "  test:") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "  smoke:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "mlugg/setup-zig@v2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "vercel-labs/setup-zig@v1") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "version: 0.16.0") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build test -Dplatform=null") != null);
     // The smoke job builds with automation, launches under Xvfb, and drives
-    // the snapshot: the binary name comes from the template context.
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev libwebkitgtk-6.0-dev xvfb") != null);
+    // the snapshot: the binary name comes from the template context. A
+    // native app's smoke never needs WebKitGTK — its host compiles
+    // without the embedded web layer.
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libgtk-4-dev xvfb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "libwebkitgtk-6.0-dev") == null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "xvfb-run -a ./zig-out/bin/my-app &") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate wait") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate assert 'gpu_nonblank=true' 'role=button name=\"Reset\"' 'count: 0'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate assert 'gpu_nonblank=true' 'role=button name=\"Reset\"' 'total: 0'") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate screenshot main-canvas") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "test -s .zig-cache/native-sdk-automation/screenshot-main-canvas.png") != null);
     // The framework fetch step reuses the build.zig.zon dependency path.
@@ -3183,11 +4351,69 @@ fn nativeDependencyPath(allocator: std.mem.Allocator, io: std.Io, destination: [
     defer allocator.free(framework_real);
 
     const relative = try std.fs.path.relative(allocator, cwd, null, destination_real, framework_real);
+    errdefer allocator.free(relative);
+    // On Windows, two different volumes (drive letters or UNC shares) have
+    // no relative path between them, and std.fs.path.relative degrades to
+    // the absolute target — which build.zig.zon rejects. The full scaffold's
+    // build files are user-owned from day one, so the CLI cannot bridge with
+    // a junction it would never refresh; teach the constraint instead.
+    if (junction.crossesVolumes(relative)) {
+        std.debug.print(
+            \\cannot scaffold a full-shape app at {s}:
+            \\the Native SDK ({s})
+            \\sits on a different Windows volume, and the scaffolded
+            \\build.zig.zon needs a relative SDK path — no relative path
+            \\crosses volumes.
+            \\
+        , .{ destination_real, framework_real });
+        std.debug.print(junction.cross_volume_ways_out, .{});
+        return error.CrossVolumeFramework;
+    }
     if (relative.len == 0) {
+        // Dupe before freeing `relative`: if the dupe fails, the errdefer
+        // above still owns `relative` and must free it exactly once.
+        const dot = try allocator.dupe(u8, ".");
         allocator.free(relative);
-        return allocator.dupe(u8, ".");
+        return dot;
     }
     return relative;
+}
+
+test "nativeDependencyPath falls back to `.` for a same-directory scaffold" {
+    const io = std.testing.io;
+    const destination = ".zig-cache/test-native-dependency-same-dir";
+    try std.Io.Dir.cwd().createDirPath(io, destination);
+    const destination_real = try std.Io.Dir.cwd().realPathFileAlloc(io, destination, std.testing.allocator);
+    defer std.testing.allocator.free(destination_real);
+
+    const dependency = try nativeDependencyPath(std.testing.allocator, io, destination, destination_real);
+    defer std.testing.allocator.free(dependency);
+    try std.testing.expectEqualStrings(".", dependency);
+}
+
+fn expectSameDirDependencyDot(allocator: std.mem.Allocator, io: std.Io, destination: []const u8, framework_path: []const u8) !void {
+    const dependency = try nativeDependencyPath(allocator, io, destination, framework_path);
+    defer allocator.free(dependency);
+    try std.testing.expectEqualStrings(".", dependency);
+}
+
+test "nativeDependencyPath survives every allocation-failure point of the `.` fallback" {
+    // Walks every allocation-failure point of the `.` fallback and asserts
+    // no leak and no swallowed OutOfMemory at each index. The fallback's
+    // ownership rule — the errdefer releases the relative path exactly
+    // once, so the fallible dupe must run before the manual free — keeps
+    // this loop clean at the index where the dupe itself fails. (The slice
+    // in this branch is empty, and freeing an empty slice is a no-op, so a
+    // free-then-dupe ordering would not crash here today; the test pins
+    // the ordering so the branch stays safe if it ever handles a non-empty
+    // allocation.)
+    const io = std.testing.io;
+    const destination = ".zig-cache/test-native-dependency-oom";
+    try std.Io.Dir.cwd().createDirPath(io, destination);
+    const destination_real = try std.Io.Dir.cwd().realPathFileAlloc(io, destination, std.testing.allocator);
+    defer std.testing.allocator.free(destination_real);
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, expectSameDirDependencyDot, .{ io, destination, destination_real });
 }
 
 fn appendZigString(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {

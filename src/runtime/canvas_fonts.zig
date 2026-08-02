@@ -7,12 +7,18 @@
 //!
 //! Validation is loud and registration-time only: the bytes must parse as
 //! a TrueType face (`canvas.font_ttf.Face.parse`) under the registry
-//! bounds, or registration fails with a recoverable error — a registered
-//! id therefore ALWAYS resolves at render time, and the only per-glyph
+//! bounds — including the glyph-outline budget gate on the face's
+//! declared `maxp` maxima (`error.FontExceedsGlyphBudgets` when a face
+//! declares denser glyphs than `canvas.font_ttf`'s budgets; the budgets
+//! are sized from real CJK faces, so this refuses only outliers) — or
+//! registration fails with a recoverable error. A registered id
+//! therefore ALWAYS resolves at render time, and the only per-glyph
 //! fallback is the same notdef block built-in faces use for codepoints a
 //! face does not cover. `canvas.font_ttf.parseFailureReason` turns a
-//! rejected file into a teaching sentence for callers that know the
-//! file's name (UiApp's `fonts` option does this).
+//! rejected file into a teaching sentence, and
+//! `canvas.font_ttf.declaredGlyphMaxima` names a budget-refused face's
+//! declared numbers, for callers that know the file's name (UiApp's
+//! `fonts` option uses both).
 //!
 //! Both renderers resolve registered ids exactly like built-ins:
 //! - The frame planner threads the registered set into
@@ -39,8 +45,19 @@
 //! retained caches. Re-using a registered id fails with
 //! `error.FontIdInUse`; there is deliberately no unregister.
 //!
-//! Capacities follow `canvas_limits`: `max_registered_canvas_fonts` slots
-//! of `max_registered_canvas_font_bytes` each, overflow is
+//! Byte storage is on-demand: registration copies the file into an
+//! exact-size heap allocation from the runtime's init-frozen
+//! `owned_allocator` (captured from `Options.allocator`), so
+//! a runtime with no registered fonts carries zero font bytes (embedding
+//! hosts create a Runtime per surface — a reservation-shaped pool at the
+//! 24 MiB CJK bound would embed 192 MiB in every one). Permanence makes
+//! ownership trivial: the bytes live until `Runtime.deinit`, and the
+//! parsed `Face` views, the gpu-surface host copy, and the measure
+//! provider all borrow them for exactly that lifetime.
+//!
+//! Capacities follow `canvas_limits` as VALIDATION bounds, not storage
+//! reservations: at most `max_registered_canvas_fonts` registrations of
+//! at most `max_registered_canvas_font_bytes` each, overflow is
 //! `error.FontRegistryFull` / `error.FontTooLarge` — never silent.
 
 const std = @import("std");
@@ -51,12 +68,41 @@ const canvas_limits = @import("canvas_limits.zig");
 pub const max_registered_canvas_fonts = canvas_limits.max_registered_canvas_fonts;
 pub const max_registered_canvas_font_bytes = canvas_limits.max_registered_canvas_font_bytes;
 
-/// One registered font's metadata; the bytes live in the runtime's slot
-/// pool and the parsed face view in the parallel face array at the same
-/// index.
+/// One registered font: its id and the exact-size heap copy of its
+/// TrueType bytes (owned by the runtime's init-frozen `owned_allocator`,
+/// freed at `Runtime.deinit`); the parsed face view lives in the parallel
+/// face array at the same index and points into these bytes.
 pub const CanvasFontEntry = struct {
     id: canvas.FontId = 0,
-    byte_len: usize = 0,
+    bytes: []const u8 = &.{},
+    /// The host-side unregistration owner — the platform's
+    /// `unregister_gpu_surface_font_fn` and its context, captured from
+    /// the services in effect when THIS registration was pushed to the
+    /// host. Captured precisely because `Runtime.options` is public and
+    /// mutable while registration and teardown can be a whole runtime
+    /// lifetime apart: the registration must be returned to the host
+    /// that received it, so `Runtime.deinit` unregisters through this
+    /// captured pair and mutating `options.platform` on a live runtime
+    /// retargets nothing (the `owned_allocator` identity-freeze
+    /// doctrine, applied to the host seam — a deinit that read the live
+    /// options would unregister against whatever platform the option
+    /// points at by teardown time, stranding the original host's
+    /// descriptor and caches). Null when the platform at registration
+    /// time had no unregister seam: it retained nothing to return.
+    host_unregister_fn: ?*const fn (context: ?*anyopaque, id: u64, token: u64) anyerror!void = null,
+    host_unregister_context: ?*anyopaque = null,
+    /// The host's ownership token for THIS registration, returned by
+    /// `registerGpuSurfaceFont` and passed back through the owner above
+    /// at deinit. Host font state is per-process while ids are only
+    /// permanent per-runtime, so a later runtime may re-register this
+    /// entry's id (last wins, the documented lifecycle); the host
+    /// removes an id's state only while its current registration still
+    /// carries the presented token, which keeps an older runtime's
+    /// deinit from tearing down a newer runtime's live face. 0 when the
+    /// platform returned no token (a stateless accept, or no register
+    /// seam at all): nothing was installed for this registration, and
+    /// an unregister carrying 0 removes nothing.
+    host_registration_token: u64 = 0,
 };
 
 /// Placeholder measure fn for the runtime's font-aware provider field
@@ -82,14 +128,18 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// `error.InvalidFontId` (id 0 is the "inherit run font"
         /// sentinel), `error.ReservedFontId` (below
         /// `canvas.min_registered_font_id` — reserved for built-in
-        /// faces), `error.FontTooLarge` (over the per-slot bound
+        /// faces), `error.FontTooLarge` (over the per-font bound
         /// `canvas_limits.max_registered_canvas_font_bytes`),
         /// `error.FontIdInUse` (ids are permanent; see the module doc),
         /// `error.FontRegistryFull` (all
-        /// `canvas_limits.max_registered_canvas_fonts` slots hold other
-        /// ids), `error.FontParseFailed` (not a parseable TrueType face —
+        /// `canvas_limits.max_registered_canvas_fonts` registrations
+        /// hold other ids), `error.FontParseFailed` (not a parseable TrueType face —
         /// `canvas.font_ttf.parseFailureReason(ttf)` names what is wrong),
-        /// `error.FontHostRegistrationUnsupported` (the platform measures
+        /// `error.FontExceedsGlyphBudgets` (the face's `maxp` declares
+        /// glyphs denser than `canvas.font_ttf`'s outline budgets, so its
+        /// densest glyphs could not render as outlines —
+        /// `canvas.font_ttf.declaredGlyphMaxima(ttf)` names the declared
+        /// maxima), `error.FontHostRegistrationUnsupported` (the platform measures
         /// and draws text host-side but has no font registration seam, so
         /// the face could not be honored pixel-honestly).
         pub fn registerCanvasFont(self: *Runtime, id: canvas.FontId, ttf: []const u8) anyerror!void {
@@ -100,9 +150,27 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
             if (self.canvas_font_count >= max_registered_canvas_fonts) return error.FontRegistryFull;
 
             const index = self.canvas_font_count;
-            const pooled = self.canvas_font_bytes[index][0..ttf.len];
+            // Exact-size heap copy, owned by the runtime until deinit
+            // (registration is permanent — no unregister — so this is
+            // the only allocation and the only free the registry ever
+            // makes). On-demand allocation instead of a slot pool keeps
+            // a fontless Runtime at zero font bytes.
+            // Alloc and every free (the refusal paths below, the deinit
+            // free) go through the runtime's init-frozen ownership
+            // allocator: `options.allocator` is publicly mutable and a
+            // swap between registration and teardown must never split
+            // the alloc/free identity.
+            const pooled = try self.owned_allocator.alloc(u8, ttf.len);
+            errdefer self.owned_allocator.free(pooled);
             @memcpy(pooled, ttf);
-            const face = canvas.font_ttf.Face.parse(pooled) catch return error.FontParseFailed;
+            const face = canvas.font_ttf.Face.parse(pooled) catch |err| switch (err) {
+                // The registration-time glyph-budget gate: refusing the
+                // face here (loudly, with its declared numbers available
+                // via `declaredGlyphMaxima`) is what keeps render-time
+                // glyph resolution total for registered ids.
+                error.FontGlyphTooComplex => return error.FontExceedsGlyphBudgets,
+                else => return error.FontParseFailed,
+            };
 
             // Host sync BEFORE committing the slot: platforms with
             // host-side text (measure_text_fn) must learn the face or the
@@ -111,16 +179,38 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
             // exact silent fallback this seam forbids. Platforms without
             // host-side text may lack the seam (`UnsupportedService`):
             // the engine measures with the parsed face and inks it
-            // through the reference renderer, so nothing is lost.
-            self.options.platform.services.registerGpuSurfaceFont(.{ .id = id, .ttf = pooled }) catch |err| switch (err) {
-                error.UnsupportedService => {
-                    if (self.options.platform.services.measure_text_fn != null) return error.FontHostRegistrationUnsupported;
+            // through the reference renderer, so nothing is lost. ONE
+            // services read serves both the sync and the captured return
+            // path below, so the host that hears the registration is the
+            // host the entry's unregister owner names.
+            const services = self.options.platform.services;
+            // The returned token is the host's ownership handle for THIS
+            // registration (0 when the host retained nothing); it rides
+            // the entry beside the captured owner so deinit can tell the
+            // host which registration to remove — see
+            // `CanvasFontEntry.host_registration_token`.
+            const host_token: u64 = services.registerGpuSurfaceFont(.{ .id = id, .ttf = pooled }) catch |err| switch (err) {
+                error.UnsupportedService => blk: {
+                    if (services.measure_text_fn != null) return error.FontHostRegistrationUnsupported;
+                    break :blk 0;
                 },
                 else => return err,
             };
 
             self.canvas_font_faces[index] = face;
-            self.canvas_font_entries[index] = .{ .id = id, .byte_len = ttf.len };
+            // The entry carries its own host unregistration owner,
+            // captured now (see `CanvasFontEntry.host_unregister_fn`):
+            // `options.platform` is publicly mutable, and the teardown
+            // return must land on the host that received this
+            // registration, never on whatever platform the option holds
+            // by `Runtime.deinit` time.
+            self.canvas_font_entries[index] = .{
+                .id = id,
+                .bytes = pooled,
+                .host_unregister_fn = services.unregister_gpu_surface_font_fn,
+                .host_unregister_context = services.context,
+                .host_registration_token = host_token,
+            };
             self.canvas_font_count = index + 1;
             // Bind the font-aware measure provider on first registration.
             // The runtime address is stable from here on (registration
@@ -138,9 +228,9 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         }
 
         /// The registered set as the `ReferenceFont` slice both renderers
-        /// consume, rebuilt into runtime scratch (faces are borrowed from
-        /// the slot pool; with no unregister they stay valid for the
-        /// runtime's lifetime).
+        /// consume, rebuilt into runtime scratch (faces borrow each
+        /// entry's heap-owned bytes; with no unregister they stay valid
+        /// for the runtime's lifetime).
         pub fn registeredCanvasFonts(self: *Runtime) []const canvas.ReferenceFont {
             for (self.canvas_font_entries[0..self.canvas_font_count], 0..) |entry, index| {
                 self.canvas_font_resources_scratch[index] = .{
@@ -210,7 +300,12 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// A face joined the registry: force every gpu_surface view to
         /// re-render its next frame (text referencing the id may already
         /// be retained) and request frames so the repaint is not gated on
-        /// other input — the image-registry choreography.
+        /// other input — the image-registry choreography. Re-rendering
+        /// alone re-inks RETAINED geometry; installed UiApps complete the
+        /// late-registration story by comparing the registered count on
+        /// each presented frame and rebuilding every surface so layout
+        /// re-measures with the new face (ui_app.zig,
+        /// `rebuildForRegisteredFonts`).
         fn noteCanvasFontsChanged(self: *Runtime) void {
             // A new face changes what the measurement seam answers for
             // its id (host providers just learned the face; the engine

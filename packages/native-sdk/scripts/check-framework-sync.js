@@ -19,6 +19,17 @@ const mirrors = [
   { source: 'skills', target: 'skills' },
   { source: 'skill-data', target: 'skill-data' },
   { source: 'third_party/webview2', target: 'third_party/webview2' },
+  // The @native-sdk/core closure TypeScript app builds resolve from the
+  // installed package: the transpiler, the SDK library modules (also the
+  // editor package), the rt kernel, and the manifest + lockfile that make
+  // `npm ci` work inside packages/core on the npm-installed layout.
+  // Entry-by-entry on purpose — test/ and scripts/ are repo-dev surface
+  // and must NOT ship, so the whole-directory comparison stays off.
+  { source: 'packages/core/src', target: 'packages/core/src' },
+  { source: 'packages/core/sdk', target: 'packages/core/sdk' },
+  { source: 'packages/core/rt', target: 'packages/core/rt' },
+  { source: 'packages/core/package.json', target: 'packages/core/package.json' },
+  { source: 'packages/core/package-lock.json', target: 'packages/core/package-lock.json' },
 ];
 
 const errors = [];

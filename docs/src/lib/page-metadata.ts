@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { PAGE_TITLES } from "./page-titles";
+import { docsPath } from "./site";
 
 const DESCRIPTION =
   "Toolkit for building native desktop apps: declarative markup views, a predictable message-based state model, and its own engine rendering into real OS windows — no browser or WebView in the binary.";
@@ -11,14 +12,17 @@ export function pageMetadata(slug: string): Metadata {
   const displayTitle = title.replace(/\n/g, " ");
   const fullTitle = `${displayTitle} | Native SDK`;
   const ogImageUrl = slug ? `/og/${slug}` : "/og";
+  const canonicalUrl = `${docsPath}/${slug}`;
 
   return {
     title: displayTitle,
+    alternates: { canonical: canonicalUrl },
     openGraph: {
       type: "website",
       locale: "en_US",
       siteName: "Native SDK",
       title: fullTitle,
+      url: canonicalUrl,
       description: DESCRIPTION,
       images: [
         {

@@ -152,6 +152,31 @@ test "NSUI round-trips the input-group vocabulary under its fresh codes" {
     try testing.expectEqual(@as(u16, 63), schema.elementByName("input-group-actions").?.code);
 }
 
+test "NSUI round-trips the media surface under its fresh codes" {
+    // media-surface and its surface binding serialize like any element —
+    // fresh registry codes ride the wire automatically, no schema bump —
+    // so a media document survives encode/decode node-for-node.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\<column gap="8">
+        \\  <media-surface surface="{preview}" width="320" height="180" label="Camera preview" />
+        \\</column>
+    ;
+    const document = try parseSource(arena, source);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(document));
+
+    var diagnostic = nsui.CodecDiagnostic{};
+    const bytes = try nsui.encode(arena, document, .{}, &diagnostic);
+    const decoded = try nsui.decode(arena, bytes, &diagnostic);
+    try expectNodesEqual(document.root.?, decoded.root.?);
+
+    // The wire carries the registry codes, never the names.
+    try testing.expectEqual(@as(u16, 66), schema.elementByName("media-surface").?.code);
+    try testing.expectEqual(@as(u16, 81), schema.attrByName("surface").?.code);
+}
+
 test "NSUI round-trips the split layout-tween pair under its fresh codes" {
     // resize-duration/resize-easing serialize like any attribute — fresh
     // registry codes ride the wire automatically, no schema bump — so a

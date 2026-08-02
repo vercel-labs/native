@@ -43,11 +43,14 @@ static void *NativeSdkAppKitAppearanceObservationContext = &NativeSdkAppKitAppea
  * is not paused, but no audio comes out until bytes arrive). */
 static void *NativeSdkAppKitAudioItemStatusContext = &NativeSdkAppKitAudioItemStatusContext;
 static void *NativeSdkAppKitAudioTimeControlContext = &NativeSdkAppKitAudioTimeControlContext;
+static void *NativeSdkAppKitVideoItemStatusContext = &NativeSdkAppKitVideoItemStatusContext;
+static void *NativeSdkAppKitVideoTimeControlContext = &NativeSdkAppKitVideoTimeControlContext;
 /* Render-thread ring state for the spectrum tap; defined with the rest
  * of the spectrum machinery in the audio section below. */
 typedef struct native_sdk_spectrum_tap_state native_sdk_spectrum_tap_state_t;
 static NSRect constrainFrame(NSRect frame);
 static NSString *NativeSdkAppKitBridgeScript(void);
+static NSString *NativeSdkMenuKeyEquivalent(NSString *key);
 static NSString *NativeSdkMimeTypeForPath(NSString *path);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
 static void NativeSdkRegisterBundledFonts(void);
@@ -57,6 +60,7 @@ static NSArray<NSString *> *NativeSdkPolicyListFromBytes(const char *bytes, size
 static NSString *NativeSdkOriginForURL(NSURL *url);
 static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url);
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event);
+static BOOL NativeSdkTextNavigationNeedsRawKeyEvent(NSEvent *event);
 static BOOL NativeSdkShortcutUsesImplicitShift(NSString *key, NSEvent *event);
 static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
 static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers);
@@ -301,10 +305,22 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) BOOL observesContentLayout;
 @end
 
+/// NSApp's delegate, installed by runWithCallback: — this host
+/// otherwise drives NSApplication entirely through notification
+/// observers, and staying that way for activation keeps those events
+/// single-sourced (a delegate implementing applicationDidBecomeActive:
+/// would ALSO receive the notification, double-emitting). The one job
+/// here is the Dock-icon reopen: with no window visible, re-show the
+/// windows the .hide close policy hid.
+@interface NativeSdkAppDelegate : NSObject <NSApplicationDelegate>
+@property(nonatomic, assign) NativeSdkAppKitHost *host;
+@end
+
 @interface NativeSdkWebView : WKWebView <NSDraggingDestination>
 @property(nonatomic, strong) NSArray<NSValue *> *coveredMouseRects;
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
+@property(nonatomic, strong) NSString *viewLabel;
 @end
 
 @interface NativeSdkBridgeScriptHandler : NSObject <WKScriptMessageHandler>
@@ -329,6 +345,16 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * overlay knob stays grabbable). */
 @interface NativeSdkScrollDriverView : NSScrollView
 @property(nonatomic, assign) uint64_t driverId;
+@property(nonatomic, assign) uint64_t parentDriverId;
+/* Bit i set = occluder i of the surface's occluder array hit-blocks
+ * this region at points it contains. */
+@property(nonatomic, assign) uint32_t occluderMask;
+/* The region's axis grants (the runtime's widgetScrollsAxis), pushed on
+ * every reconcile: the wheel winner-resolution's fallback rule needs
+ * grants, not range — a granted axis with short content still owns a
+ * bounce, an ungranted one owns nothing. */
+@property(nonatomic, assign) BOOL grantsX;
+@property(nonatomic, assign) BOOL grantsY;
 @end
 
 /* Captures the selected item id of a context-menu popUp; NSMenuItem
@@ -379,6 +405,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) NativeSdkMetalSurfaceView *surfaceView;
 @property(nonatomic, assign) uint64_t widgetId;
 @property(nonatomic, assign) uint32_t actionFlags;
+@property(nonatomic, assign) BOOL canUndo;
+@property(nonatomic, assign) BOOL canRedo;
 - (BOOL)emitSetTextAccessibilityValue:(id)value;
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value;
 @end
@@ -389,6 +417,12 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
 @property(nonatomic, strong) id<MTLBuffer> sampleBuffer;
 @property(nonatomic, strong) id<MTLTexture> canvasTexture;
+/* Reused conversion storage for the CPU reference renderer's
+ * straight-alpha RGBA8 frames. A nonopaque CAMetalLayer participates in
+ * Core Animation's premultiplied-alpha compositing, so software
+ * fallbacks must enter the shared canvas texture in the same encoding
+ * as packet-rendered frames. */
+@property(nonatomic, strong) NSMutableData *canvasPixelUploadScratch;
 @property(nonatomic, strong) id<MTLRenderPipelineState> canvasRenderPipeline;
 @property(nonatomic, strong) id<MTLSamplerState> canvasSampler;
 @property(nonatomic, assign) CGColorSpaceRef canvasColorSpace;
@@ -555,6 +589,13 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint64_t lastPacketDecodeNs;
 @property(nonatomic, assign) uint64_t lastPacketDrawNs;
 @property(nonatomic, strong) NSCursor *surfaceCursor;
+/* Higher-layer sibling views covering this surface, in surface
+ * coordinates. AppKit cursor rects are geometric rather than hit-test
+ * aware: one full-bounds rect here would keep winning over an embedded
+ * WKWebView layered above the canvas (the workbench's browser pane), so
+ * resetCursorRects subtracts these occluders before registering the
+ * retained widget cursor. */
+@property(nonatomic, strong) NSArray<NSValue *> *coveredMouseRects;
 @property(nonatomic, strong) NSTrackingArea *surfaceTrackingArea;
 @property(nonatomic, copy) NSString *markedText;
 @property(nonatomic, assign) NSRange markedTextRange;
@@ -562,17 +603,36 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) BOOL interpretedKeyEventEmittedInput;
 @property(nonatomic, strong) NSArray<NSAccessibilityElement *> *widgetAccessibilityElements;
 @property(nonatomic, strong) NSMutableArray<NativeSdkScrollDriverView *> *scrollDrivers;
-@property(nonatomic, weak) NativeSdkScrollDriverView *activeWheelDriver;
+@property(nonatomic, assign) NSPoint wheelGesturePoint;
+@property(nonatomic, assign) BOOL wheelGestureActive;
+/* The last phase-less wheel's timestamp: discrete streams have no
+ * gesture phases, so a quiet gap IS the gesture boundary. */
+@property(nonatomic, assign) uint64_t lastLegacyWheelTimestampNs;
+/* The gesture's most recent native recipient: zero-delta phase events
+ * (begins, the terminal Ended/Cancelled) resolve no owner but still
+ * carry the bookkeeping the scroller's overscroll recovery keys off,
+ * so they forward here. */
+@property(nonatomic, weak) NativeSdkScrollDriverView *lastNativeWheelDriver;
+/* Driver ids the WIRE has scrolled during this gesture: once the engine
+ * applies relative deltas to a region, later ABSOLUTE native reports
+ * from the same region would erase them, so a wire-scrolled region
+ * never becomes the native recipient again until the gesture ends. */
+@property(nonatomic, strong) NSMutableSet *wireBoundDriverIds;
+/* Occluder rects (view space): floating surfaces and modal catchers
+ * that hit-block scroll regions beneath them. */
+@property(nonatomic, strong) NSArray *scrollOccluderRects;
 @property(nonatomic, assign) BOOL applyingScrollDriverOffset;
 @property(nonatomic, assign) BOOL scrollDriverEventPending;
 @property(nonatomic, assign) uint64_t pendingScrollDriverId;
+@property(nonatomic, assign) double pendingScrollDriverOffsetX;
 @property(nonatomic, assign) double pendingScrollDriverOffsetY;
 @property(nonatomic, assign) uint64_t scrollDriverEventLastEmitNs;
 @property(nonatomic, assign) BOOL controlClickActive;
+@property(nonatomic, assign) BOOL pinchGestureActive;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
-- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
+- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects sourceIsPremultiplied:(BOOL)sourceIsPremultiplied rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuPacketWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuPacketBinaryWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable packet:(const uint8_t *)packet byteLength:(NSUInteger)byteLength;
 - (NSInteger)presentGpuPacketObject:(NSDictionary *)packet surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount;
@@ -611,8 +671,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)queuePointerMotionInputEvent:(NSEvent *)event kind:(NSInteger)kind button:(NSInteger)button;
 - (void)emitQueuedPointerMotionInputEvent;
-- (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY;
+- (void)queueScrollInputEvent:(NSEvent *)event atPoint:(NSPoint)point deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitQueuedScrollInputEvent;
+- (void)emitPinchInputEventWithKind:(NSInteger)kind event:(NSEvent *)event magnification:(double)magnification;
+- (void)emitPinchChangeForEvent:(NSEvent *)event;
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers;
 - (void)updateSurfaceTrackingArea;
@@ -622,7 +684,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action text:(NSString *)text selectedRange:(NSRange)selectedRange hasSelectedRange:(BOOL)hasSelectedRange;
 - (void)setSurfaceCursor:(NSCursor *)cursor;
-- (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count;
+- (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount;
 @end
 
 @interface NativeSdkAssetSchemeHandler : NSObject <WKURLSchemeHandler>
@@ -659,6 +721,23 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 /// color, packed RGBA8 per window — so residual gaps (resize slack,
 /// titlebar bands) show the app's background, never a blank default.
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *windowClearColors;
+/// close_policy per window (0 = quit, the default; 1 = hide). Applied
+/// by native_sdk_appkit_set_window_close_policy right after create —
+/// the delegate's windowShouldClose: consults it, so the user's close
+/// affordance hides a .hide window instead of closing it.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *windowClosePolicies;
+/// Windows whose implicit reveal is passive (`activate_on_show=false`).
+/// Explicit focusWindow bypasses this set and activates deliberately.
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *passiveShowWindows;
+/// Windows currently hidden BY their .hide close policy — the set the
+/// Dock reopen re-shows, and the truth emitWindowFrameForWindowId's
+/// hidden flag reports. Ordinary orderOut/minimize states never enter
+/// it.
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *policyHiddenWindows;
+/// Strong ref for NSApp.delegate (which is unretained): the tiny
+/// delegate that turns a Dock-icon reopen into re-showing
+/// policy-hidden windows.
+@property(nonatomic, strong) id reopenDelegate;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *childWebViews;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *nativeViews;
 /// App-owned NSViews adopted into native view containers (native-surface
@@ -732,6 +811,69 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * when a new load replaces the stream; orphaned (left to finish) when
  * the stream completes naturally. */
 @property(nonatomic, strong) NSURLSessionDownloadTask *audioCacheDownload;
+/* The app's single video player and its two timers. One player is the
+ * whole surface, exactly like audio: a video app shows one stream at a
+ * time, and a second concurrent decode would be compositor design the
+ * platform seam has not earned. The position tick runs only while
+ * playing, at the audio tier's coarse honest cadence — position is a
+ * readout, not a frame clock; the FRAME timer (1/60 s, the
+ * scheduleFrame cadence) is the clock that actually paces decoded
+ * pixels into the sink, armed with the transport plus one-shot polls
+ * after seek/pause so a paused scrub still shows its frame. */
+@property(nonatomic, strong) AVPlayer *videoPlayer;
+@property(nonatomic, strong) AVPlayerItem *videoItem;
+/* The frame tap: created at readyToPlay (the presentation size is only
+ * decoded then), sized to FIT the sink's per-frame pixel budget. */
+@property(nonatomic, strong) AVPlayerItemVideoOutput *videoOutput;
+@property(nonatomic, strong) NSTimer *videoPositionTimer;
+@property(nonatomic, strong) NSTimer *videoFrameTimer;
+/* Where decoded frames go: the C push trampoline and its context,
+ * installed by the load entries. Every timer callback runs on the main
+ * run loop, so no locking guards the pair. */
+@property(nonatomic, assign) native_sdk_appkit_video_sink_push_t videoSinkPush;
+@property(nonatomic, assign) void *videoSinkContext;
+/* The reusable RGBA conversion target: malloc'd once per load to the
+ * output's max frame size, freed on stop/replace. Frames are converted
+ * BGRA -> tightly packed straight-alpha RGBA8 into it before the push. */
+@property(nonatomic, assign) uint8_t *videoFrameBuffer;
+@property(nonatomic, assign) size_t videoFrameBufferLen;
+/* The STREAM's decoded pixel dimensions (presentationSize, falling back
+ * to the track's transformed naturalSize) — what LOADED reports, even
+ * when the output texture is fitted smaller. */
+@property(nonatomic, assign) uint64_t videoStreamWidth;
+@property(nonatomic, assign) uint64_t videoStreamHeight;
+/* The poster-frame hunt: a load that acknowledges LOADED while paused
+ * (autoplay = false, "the poster-frame shape") still owes the surface
+ * its first decoded frame — the frame timer normally runs only while
+ * playing. Set on LOADED; the pump clears it at the first delivered
+ * frame (stopping the timer if still paused), and the tick counter
+ * bounds the hunt so an output that never yields a frame cannot poll
+ * at 60 Hz forever. */
+@property(nonatomic, assign) BOOL videoPosterPending;
+@property(nonatomic, assign) int videoPosterTicks;
+/* The engine-minted token of the CURRENT load, echoed in every video
+ * event (see the header's video_token) so a replaced playback's queued
+ * straggler can never be attributed to the replacement. */
+@property(nonatomic, assign) uint64_t videoToken;
+/* Whether the loaded source is a local file: local sources never
+ * report buffering. */
+@property(nonatomic, assign) BOOL videoSourceIsLocal;
+/* NSNotificationCenter block-observer tokens for the item's natural
+ * end and mid-flight failure; removed on teardown. */
+@property(nonatomic, strong) id videoEndObserver;
+@property(nonatomic, strong) id videoFailObserver;
+/* KVO registration flag so teardown removes observers exactly once. */
+@property(nonatomic, assign) BOOL videoObservingStatus;
+/* The LOADED acknowledgment fires once per load (item status can
+ * bounce through readyToPlay again after a stall). */
+@property(nonatomic, assign) BOOL videoLoadedEmitted;
+/* The honest buffering mirror emitted with every video event: YES from
+ * stream start (no bytes yet) until the player reports it is actually
+ * rolling, then follows timeControlStatus. Never set for local files. */
+@property(nonatomic, assign) BOOL videoBuffering;
+/* Loop intent: a looping player wraps from the natural end back to
+ * zero and keeps playing — no COMPLETED, because it never ends. */
+@property(nonatomic, assign) BOOL videoLooping;
 @property(nonatomic, strong) NSString *appName;
 /* The human-facing app name (app.zon display_name, falling back through
  * the window title to the binary name). Everything the OS labels the
@@ -761,10 +903,16 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) void *context;
 @property(nonatomic, assign) void *bridgeContext;
 @property(nonatomic, assign) BOOL didShutdown;
+/* A quit verb that arrived before [NSApp run] (see
+ * native_sdk_appkit_request_stop): parked here, drained at top level
+ * by runWithCallback's drainPendingPreRunStop calls once the pre-run
+ * dispatch that carried it has returned. */
+@property(nonatomic, assign) BOOL pendingPreRunStop;
 @property(nonatomic, assign) BOOL observesApplicationActivation;
 @property(nonatomic, assign) BOOL observesAppearanceChanges;
 @property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
 @property(nonatomic, strong) id shortcutEventMonitor;
+@property(nonatomic, strong) id viewFocusEventMonitor;
 @property(nonatomic, strong) id willTerminateObserver;
 @property(nonatomic, strong) dispatch_source_t sigtermSource;
 @property(nonatomic, strong) NSArray<NativeSdkShortcut *> *shortcuts;
@@ -774,12 +922,16 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy;
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy makeMain:(BOOL)makeMain;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
+- (void)orderWindowForImplicitShow:(uint64_t)windowId;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
 - (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
+- (void)hideWindowWithId:(uint64_t)windowId;
+- (void)showWindowWithId:(uint64_t)windowId;
+- (BOOL)reopenPolicyHiddenWindows;
 - (BOOL)startWindowDragWithId:(uint64_t)windowId;
 - (BOOL)chromeInsetsForWindowId:(uint64_t)windowId top:(double *)top left:(double *)left bottom:(double *)bottom right:(double *)right buttonsX:(double *)buttonsX buttonsY:(double *)buttonsY buttonsWidth:(double *)buttonsWidth buttonsHeight:(double *)buttonsHeight;
 - (WKWebView *)ensureMainWebViewForWindowId:(uint64_t)windowId;
@@ -804,7 +956,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (NSInteger)presentGpuSurfacePacketBinaryInWindow:(uint64_t)windowId label:(NSString *)label surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable packet:(const uint8_t *)packet byteLength:(NSUInteger)byteLength;
 - (BOOL)requestGpuSurfaceFrameInWindow:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)noteGpuSurfaceInputInWindow:(uint64_t)windowId label:(NSString *)label;
-- (BOOL)setGpuSurfaceScrollDriversInWindow:(uint64_t)windowId label:(NSString *)label drivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count;
+- (BOOL)setGpuSurfaceScrollDriversInWindow:(uint64_t)windowId label:(NSString *)label drivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount;
 - (BOOL)showContextMenuInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y token:(uint64_t)token items:(const native_sdk_appkit_context_menu_item_t *)items count:(NSUInteger)count;
 - (BOOL)uploadGpuSurfaceImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
 - (BOOL)removeGpuSurfaceImageWithId:(uint64_t)imageId;
@@ -840,6 +992,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount;
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context;
 - (void)stop;
+- (BOOL)drainPendingPreRunStop;
 - (void)emitEvent:(native_sdk_appkit_event_t)event;
 - (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId;
 - (void)startApplicationActivationObservers;
@@ -881,6 +1034,29 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)stopAudioSpectrumTimer;
 - (BOOL)anyHostWindowVisibleOnGlass;
 - (void)audioSpectrumTimerFired:(NSTimer *)timer;
+- (int)videoLoadPath:(NSString *)path token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (int)videoLoadURL:(NSString *)urlString token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (void)videoInstallItem:(AVPlayerItem *)item localSource:(BOOL)localSource pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (BOOL)videoAttachOutputForItem:(AVPlayerItem *)item;
+- (void)videoTearDownPlayer;
+- (void)videoItemStatusChanged;
+- (void)videoTimeControlChanged;
+- (void)videoDidPlayToEnd;
+- (void)videoDidFail;
+- (int)videoPlay;
+- (int)videoPause;
+- (int)videoStop;
+- (int)videoSeekToMs:(uint64_t)positionMs;
+- (int)videoSetVolume:(double)volume;
+- (int)videoSetMuted:(BOOL)muted;
+- (int)videoSetLoop:(BOOL)loop;
+- (void)emitVideoEventOfKind:(int)kind;
+- (void)stopVideoPositionTimer;
+- (void)videoPositionTimerFired:(NSTimer *)timer;
+- (void)startVideoFrameTimer;
+- (void)stopVideoFrameTimer;
+- (void)videoFrameTimerFired:(NSTimer *)timer;
+- (void)videoPumpFrame;
 - (void)wakeFromAnyThread;
 - (void)scheduleBridgeFrames;
 - (void)emitFrame;
@@ -1019,6 +1195,22 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     return [self.host emitDroppedFileURLs:urls windowId:self.windowId];
 }
 
+// close_policy .hide: the USER's close affordance (the red button,
+// cmd+W — anything routed through performClose:) hides the window
+// instead of closing it, and the app keeps running behind its status
+// item. Runtime-initiated closes bypass this hook deliberately
+// (closeWindowWithId: calls -close directly for .hide windows), so an
+// app that decides to really close its window still can. A future
+// .event tier would land here too — the delegate forwarding the close
+// request to the model instead of deciding — the enum keeps that room.
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    (void)sender;
+    NSNumber *policy = self.host.windowClosePolicies[@(self.windowId)];
+    if (policy.intValue != 1) return YES;
+    [self.host hideWindowWithId:self.windowId];
+    return NO;
+}
+
 - (void)windowWillClose:(NSNotification *)notification {
     (void)notification;
     if (self.observesContentLayout) {
@@ -1026,6 +1218,10 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
         [window removeObserver:self forKeyPath:@"contentLayoutRect"];
         self.observesContentLayout = NO;
     }
+    // A really-closing window is closed, not hidden: leave the
+    // policy-hidden set before the frame emit so open=false never
+    // carries a stale hidden=true.
+    [self.host.policyHiddenWindows removeObject:@(self.windowId)];
     [self.host emitWindowFrameForWindowId:self.windowId open:NO];
     [self.host closeWebViewsInWindow:self.windowId];
     [self.host closeNativeViewsInWindow:self.windowId];
@@ -1038,10 +1234,26 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     [self.host.windowLabels removeObjectForKey:key];
     [self.host.deferredShowWindows removeObjectForKey:key];
     [self.host.windowClearColors removeObjectForKey:key];
+    [self.host.windowClosePolicies removeObjectForKey:key];
+    [self.host.passiveShowWindows removeObject:key];
     if (self.host.windows.count == 0) {
         [self.host emitShutdown];
         [self.host stop];
     }
+}
+
+@end
+
+@implementation NativeSdkAppDelegate
+
+// Clicking the Dock icon with every window gone from the glass: when
+// policy-hidden windows exist, re-show them and answer NO (the reopen
+// is handled); otherwise answer YES so AppKit keeps its default
+// behavior (deminiaturizing, ordering in) untouched.
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
+    (void)sender;
+    if (flag) return YES;
+    return ![self.host reopenPolicyHiddenWindows];
 }
 
 @end
@@ -1760,19 +1972,122 @@ static NSMutableDictionary<NSNumber *, id> *NativeSdkRegisteredFontDescriptors(v
     return table;
 }
 
-// The registered face for a canvas font id at `size`, or nil when the id
-// has no registered face. Checked BEFORE the built-in candidates and
-// their cache so a registered id can never be masked by a font resolved
-// for that id earlier (ids are engine-validated and permanent, so cached
-// NSFonts here never go stale).
-static NSFont *NativeSdkRegisteredFontForId(unsigned long long value, CGFloat size) {
-    NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
-    static NSMutableDictionary<NSString *, NSFont *> *sizeCache = nil;
+// The per-(id, size) NSFont cache for registered faces, keyed "id/size".
+// Ids are permanent within ONE runtime (`error.FontIdInUse` guards
+// re-use for a runtime's lifetime), but this cache is per-PROCESS and
+// runtimes are not: an embedder that destroys its runtime
+// (`Runtime.deinit`) and registers a DIFFERENT face under the same
+// valid id in a new runtime is inside the documented lifecycle. Entries
+// therefore go stale exactly when an id's descriptor is (re)installed,
+// so `native_sdk_appkit_register_font` evicts the id's cached sizes
+// before installing the new descriptor. The measured-width NSCache
+// (`NativeSdkMeasuredWidthCache`) goes stale at the same moment but
+// cannot be prefix-evicted (NSCache does not enumerate keys), so it is
+// invalidated by registration token instead — see
+// NativeSdkRegisteredFontTokens below. Accessed only under the
+// descriptor table's @synchronized guard, like the descriptors.
+static NSMutableDictionary<NSString *, NSFont *> *NativeSdkRegisteredFontSizeCache(void) {
+    static NSMutableDictionary<NSString *, NSFont *> *cache = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sizeCache = [[NSMutableDictionary alloc] init];
+        cache = [[NSMutableDictionary alloc] init];
     });
+    return cache;
+}
+
+// Per-id registration tokens, the invalidation handle for the
+// measured-width NSCache (`NativeSdkMeasuredWidthCache`). That
+// cache has the same lifetime hazard as the size cache above (per-
+// process cache, per-runtime id permanence) but no way to evict an
+// id's entries — NSCache cannot enumerate keys — so every registration
+// stamps its id with the next value of ONE process-global monotonic
+// counter and the width-cache key includes the stamp. Tokens never
+// repeat, so no registration can ever reach widths a previous life of
+// its id cached (re-registration leaves those unreachable entries to
+// age out under the cache's count limit; unregistration clears the
+// cache outright — see `native_sdk_appkit_unregister_font`) — which is
+// exactly what makes an id's record REMOVABLE at unregister, retaining
+// zero state per retired id.
+// A per-id bump counter could not offer that: deleting a per-id count
+// would let a future registration of the id restart at 1 and collide
+// with the retired life's still-cached widths, so retired ids would
+// each pin a record for the process lifetime. Ids never registered
+// (the built-in faces) have no record and measure under token 0 — the
+// same value an unregistered id returns to, honest because both states
+// resolve through the same built-in candidates. Accessed only under
+// the descriptor table's @synchronized guard, like the descriptors.
+static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontTokens(void) {
+    static NSMutableDictionary<NSNumber *, NSNumber *> *table = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        table = [[NSMutableDictionary alloc] init];
+    });
+    return table;
+}
+
+// The process-global registration token counter: pre-incremented at
+// every registration, so 0 is never a live token and stays the honest
+// "no registered face" value. Mutated only under the descriptor
+// table's @synchronized guard, like every table here.
+static unsigned long long NativeSdkRegisteredFontTokenCounter = 0;
+
+// The measured-width NSCache `native_sdk_appkit_measure_text` memoizes
+// shaped widths in, hoisted out of that function (exactly the shared-
+// accessor shape the NSFont size cache above took) so
+// `native_sdk_appkit_unregister_font` can reach it at teardown: a
+// retiring token's entries can never be SERVED again (tokens never
+// repeat) but a function-local static left them RESIDENT — up to the
+// full count limit of keys, each carrying the measured text itself —
+// until memory pressure. NSCache is thread-safe, so unlike the
+// dictionaries above this cache is deliberately NOT confined to the
+// descriptor table's @synchronized guard: measure_text shapes outside
+// the critical section on purpose (see the snapshot comment) and
+// re-enters the guard only to recheck the token before a
+// registered-token write (see the recheck comment in measure_text).
+static NSCache<NSString *, NSNumber *> *NativeSdkMeasuredWidthCache(void) {
+    static NSCache<NSString *, NSNumber *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 16384;
+    });
+    return cache;
+}
+
+// The id's current registration token AND the registered face that
+// token resolves to, snapshotted under ONE acquisition of the
+// descriptor table's @synchronized guard. The pair must be atomic
+// because measure_text keys its width memoization by (id, token): with
+// the token read and the face resolved under SEPARATE acquisitions, a
+// registration landing between them pairs token 0 with the NEW
+// registered face and caches a registered-face width under the
+// reusable token-0 key — served again after the registration is torn
+// down, when token 0 honestly means built-in resolution. One critical
+// section makes a torn pair unrepresentable; the width computation
+// itself stays outside the lock (see measure_text), because a
+// stale-but-consistent pair is harmless: measure_text rechecks the
+// token under the guard before caching, so a pair retired mid-shape
+// is never even written. Returns nil with
+// *out_token = 0 when the id holds no registration, so token 0 only
+// ever pairs with built-in resolution. (A registered descriptor whose
+// CTFont creation fails also answers nil, under its live token: the
+// built-in fallback then caches under that token — still one
+// consistent resolution per registration life, since the failure is a
+// property of the installed descriptor.)
+//
+// The registered-face NSFonts cached here stay honest because
+// registration evicts an id's entries when its descriptor changes (see
+// NativeSdkRegisteredFontSizeCache) — an id is only permanent within
+// one runtime, and this cache outlives runtimes. Registered faces are
+// checked BEFORE the built-in candidates and their cache so a
+// registered id can never be masked by a font resolved for that id
+// earlier.
+static NSFont *NativeSdkRegisteredFontSnapshot(unsigned long long value, CGFloat size, unsigned long long *out_token) {
+    NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
+    NSMutableDictionary<NSString *, NSFont *> *sizeCache = NativeSdkRegisteredFontSizeCache();
     @synchronized (table) {
+        NSNumber *tokenNumber = NativeSdkRegisteredFontTokens()[@(value)];
+        *out_token = tokenNumber ? tokenNumber.unsignedLongLongValue : 0;
         id descriptorObject = table[@(value)];
         if (!descriptorObject) return nil;
         NSString *key = [NSString stringWithFormat:@"%llu/%.3f", value, (double)size];
@@ -1786,36 +2101,133 @@ static NSFont *NativeSdkRegisteredFontForId(unsigned long long value, CGFloat si
     }
 }
 
+// The registered face for a canvas font id at `size`, or nil when the id
+// has no registered face — the snapshot above for callers that resolve
+// but do not memoize by token (packet drawing, the advances batch).
+static NSFont *NativeSdkRegisteredFontForId(unsigned long long value, CGFloat size) {
+    unsigned long long token = 0;
+    return NativeSdkRegisteredFontSnapshot(value, size, &token);
+}
+
 // Engine-validated TrueType bytes for a registered canvas font id: parse
 // them into a font descriptor once and key it by id, so measurement and
 // packet text drawing resolve the id to this exact face. Returns 1 on
 // success, 0 when CoreText rejects the data — the engine already parsed
 // the face, so a rejection here is surfaced as a loud registration
-// error engine-side, never a silent fallback at draw time.
-int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size_t bytes_len) {
-    if (font_id == 0 || !bytes || bytes_len == 0) return 0;
+// error engine-side, never a silent fallback at draw time. On success
+// `*out_token` reports the registration token minted below — the
+// ownership handle unregister_font matches against, so a teardown can
+// only remove the registration it owns.
+int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size_t bytes_len, uint64_t *out_token) {
+    if (out_token) *out_token = 0;
+    if (font_id == 0 || !bytes || bytes_len == 0 || !out_token) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytes:bytes length:bytes_len];
         CTFontDescriptorRef descriptor = CTFontManagerCreateFontDescriptorFromData((__bridge CFDataRef)data);
         if (!descriptor) return 0;
         NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
         @synchronized (table) {
+            // Evict the id's cached NSFonts BEFORE installing the new
+            // descriptor: the process may still hold fonts a PREVIOUS
+            // runtime resolved for this id (ids are per-runtime
+            // permanent, the cache is per-process), and serving them
+            // would measure and draw the old face under the new id.
+            NSMutableDictionary<NSString *, NSFont *> *sizeCache = NativeSdkRegisteredFontSizeCache();
+            NSString *stalePrefix = [NSString stringWithFormat:@"%llu/", (unsigned long long)font_id];
+            NSArray<NSString *> *cachedKeys = sizeCache.allKeys;
+            for (NSString *cachedKey in cachedKeys) {
+                if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];
+            }
+            // The measured-width cache holds the same stale state but
+            // cannot be enumerated for eviction, so stamp the id with a
+            // fresh process-global token instead: width-cache keys
+            // include the token, tokens never repeat, and everything
+            // cached under any previous stamp becomes unreachable. The
+            // stamp doubles as the registration's ownership token,
+            // reported to the caller so its teardown can name exactly
+            // this registration.
+            unsigned long long token = ++NativeSdkRegisteredFontTokenCounter;
+            NativeSdkRegisteredFontTokens()[@(font_id)] = @(token);
             table[@(font_id)] = (__bridge_transfer id)descriptor;
+            *out_token = token;
         }
         return 1;
     }
 }
 
-// Resolves a canvas font id to the NSFont presentation draws with. Both
-// packet text drawing and native_sdk_appkit_measure_text go through this
-// single function so measured layout and drawn glyphs share font
-// resolution. Ids 3-6 are the reserved sans span variants (medium, bold,
-// italic, bold italic); everything else keeps the regular sans/mono
-// candidates. Registered faces win first (see above). Resolved
-// built-in fonts are cached per (font id, size).
-static NSFont *NativeSdkFontForFontId(unsigned long long value, CGFloat size) {
-    NSFont *registered = NativeSdkRegisteredFontForId(value, size);
-    if (registered) return registered;
+// Teardown twin of the registration above, called by Runtime.deinit for
+// each id the dying runtime registered: font ids are per-runtime but
+// every table here is per-process, so without this removal an embedder
+// cycling runtimes with fresh ids grows the descriptor table (and its
+// caches) for the process lifetime. Removal drops EVERYTHING the
+// registration installed: the id's cached NSFonts (the same prefix
+// eviction re-registration runs), the id's registration token record,
+// the descriptor itself, and — by clearing the measured-width NSCache
+// wholesale, the only eviction NSCache permits — the widths measured
+// under the retiring token. Zero retained state per retired id, so
+// runtime cycles truly do not accumulate host entries. Deleting the
+// token record (rather than bumping it) is safe precisely because
+// tokens come from one process-global monotonic counter: a future
+// registration of this id takes a fresh, never-repeated token, so no
+// per-id record has to survive to keep this life's width-cache keys
+// unreachable. An id
+// with no installed descriptor (never registered host-side, or already
+// returned) is a no-op accept.
+//
+// Removal is token-guarded: `token` is the ownership handle the id's
+// register call reported, and state comes out ONLY while the id's
+// current registration still carries it. Font ids are per-runtime while
+// this state is per-process, so a later runtime may have re-registered
+// the id (last wins — its face is the live one measurement and drawing
+// resolve); an id-keyed removal here would let the OLDER runtime's
+// deinit delete the newer runtime's descriptor and caches, dropping its
+// host text to the default family while its engine still holds the
+// face. A stale token is a no-op accept, not an error: the registration
+// it owned is already gone, which is exactly the state its owner asked
+// this call to establish.
+int native_sdk_appkit_unregister_font(uint64_t font_id, uint64_t token) {
+    if (font_id == 0) return 0;
+    @autoreleasepool {
+        NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
+        @synchronized (table) {
+            NSNumber *current = NativeSdkRegisteredFontTokens()[@(font_id)];
+            if (!current || current.unsignedLongLongValue != token) return 1;
+            NSMutableDictionary<NSString *, NSFont *> *sizeCache = NativeSdkRegisteredFontSizeCache();
+            NSString *stalePrefix = [NSString stringWithFormat:@"%llu/", (unsigned long long)font_id];
+            NSArray<NSString *> *cachedKeys = sizeCache.allKeys;
+            for (NSString *cachedKey in cachedKeys) {
+                if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];
+            }
+            [NativeSdkRegisteredFontTokens() removeObjectForKey:@(font_id)];
+            [table removeObjectForKey:@(font_id)];
+            // The retiring token's measured widths can never be served
+            // again (tokens never repeat) but would otherwise stay
+            // resident until memory pressure. NSCache cannot enumerate
+            // keys, so a per-id eviction is impossible and clearing the
+            // WHOLE cache is the only honest release. The collateral is
+            // cheap where it lands: unregistration is a teardown-
+            // frequency event, and every other live id re-warms each
+            // width it still needs in one measure call. The clear runs
+            // only on this token-matched path — a stale-token no-op
+            // above must not cost live registrations their warm cache.
+            // A measurement in flight during this teardown cannot
+            // repopulate the cleared cache: measure_text rechecks the
+            // id's token under this same guard before caching, and this
+            // removal already retired the token it snapshotted.
+            [NativeSdkMeasuredWidthCache() removeAllObjects];
+        }
+        return 1;
+    }
+}
+
+// The built-in-candidates half of font resolution: never consults the
+// registered tables, so callers that already hold a registered-face
+// snapshot (measure_text) fall back here without re-reading state the
+// snapshot fixed. Ids 3-6 are the reserved sans span variants (medium,
+// bold, italic, bold italic); everything else keeps the regular
+// sans/mono candidates. Resolved built-in fonts are cached per
+// (font id, size).
+static NSFont *NativeSdkBuiltInFontForFontId(unsigned long long value, CGFloat size) {
     static NSCache<NSString *, NSFont *> *cache = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -1863,6 +2275,19 @@ static NSFont *NativeSdkFontForFontId(unsigned long long value, CGFloat size) {
     return font;
 }
 
+// Resolves a canvas font id to the NSFont presentation draws with. Both
+// packet text drawing and native_sdk_appkit_measure_text go through this
+// resolution order (registered faces win, then the built-in candidates)
+// so measured layout and drawn glyphs share font resolution —
+// measure_text inlines the two halves around its width cache because it
+// must key that cache by the registration-token snapshot the first half
+// fixes.
+static NSFont *NativeSdkFontForFontId(unsigned long long value, CGFloat size) {
+    NSFont *registered = NativeSdkRegisteredFontForId(value, size);
+    if (registered) return registered;
+    return NativeSdkBuiltInFontForFontId(value, size);
+}
+
 static NSFont *NativeSdkPacketPreferredFont(NSDictionary *text, CGFloat size) {
     NSNumber *fontId = [text[@"font"] isKindOfClass:[NSNumber class]] ? text[@"font"] : nil;
     unsigned long long value = fontId ? fontId.unsignedLongLongValue : 1;
@@ -1880,19 +2305,58 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
     @autoreleasepool {
         NSString *value = [[NSString alloc] initWithBytes:text length:text_len encoding:NSUTF8StringEncoding];
         if (!value) return -1;
-        static NSCache<NSString *, NSNumber *> *widthCache = nil;
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            widthCache = [[NSCache alloc] init];
-            widthCache.countLimit = 16384;
-        });
-        NSString *key = [NSString stringWithFormat:@"%llu/%.3f/%@", (unsigned long long)font_id, (double)clamped, value];
+        NSCache<NSString *, NSNumber *> *widthCache = NativeSdkMeasuredWidthCache();
+        // The key carries the id's registration token so a face
+        // re-registered under the same id (a new runtime in this
+        // process) never serves a previous face's widths — see
+        // NativeSdkRegisteredFontTokens for why token, not eviction,
+        // invalidates this cache. Token and registered face come from
+        // ONE snapshot (one critical section — see
+        // NativeSdkRegisteredFontSnapshot): reading them under separate
+        // acquisitions let a registration land between the reads and
+        // cache the new face's width under the reusable token-0 key,
+        // serving stale registered widths in the unregistered state
+        // after teardown.
+        unsigned long long token = 0;
+        NSFont *registered = NativeSdkRegisteredFontSnapshot((unsigned long long)font_id, clamped, &token);
+        NSString *key = [NSString stringWithFormat:@"%llu/%llu/%.3f/%@", (unsigned long long)font_id, token, (double)clamped, value];
         NSNumber *cached = [widthCache objectForKey:key];
         if (cached) return cached.doubleValue;
-        NSFont *font = NativeSdkFontForFontId(font_id, clamped);
+        // A nil snapshot means built-in resolution — with token 0 by the
+        // snapshot's contract unless a live descriptor's CTFont creation
+        // failed, so token 0 only ever keys built-in widths. Shaping
+        // stays OUTSIDE the critical section: a registration or
+        // unregistration landing after the snapshot leaves this width
+        // stale but consistent, and the token recheck below drops the
+        // write instead of caching it.
+        NSFont *font = registered ?: NativeSdkBuiltInFontForFontId(font_id, clamped);
         if (!font) return -1;
         double width = [value sizeWithAttributes:@{ NSFontAttributeName : font }].width;
-        [widthCache setObject:@(width) forKey:key];
+        if (token == 0) {
+            // Token 0 is built-in resolution: built-in faces are never
+            // registered, so no unregister can ever clear widths keyed
+            // under it — this write needs no recheck.
+            [widthCache setObject:@(width) forKey:key];
+            return width;
+        }
+        // A registered-token width is cached only after RECHECKING the
+        // token under the guard. Unregister's only possible eviction is
+        // clearing the whole width cache, and shaping ran outside the
+        // critical section: an unconditional write here would land AFTER
+        // that clear whenever the teardown ran inside the shaping window,
+        // repopulating the cleared cache with a retired-token entry — one
+        // no lookup can ever serve (tokens never repeat) but that stays
+        // resident until memory pressure. A mismatch means the
+        // registration was torn down (or replaced) mid-shape — dropping
+        // the write costs one re-measure of a face that is already gone,
+        // and keeps teardown's cleared cache actually clear.
+        NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
+        @synchronized (table) {
+            NSNumber *currentToken = NativeSdkRegisteredFontTokens()[@(font_id)];
+            if (currentToken && currentToken.unsignedLongLongValue == token) {
+                [widthCache setObject:@(width) forKey:key];
+            }
+        }
         return width;
     }
 }
@@ -1907,6 +2371,14 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
 // call per text run replaces one measure_text round-trip per cluster of
 // every growing line prefix — the engine caches the batch, so a run is
 // typically shaped here once per content change, not once per frame.
+//
+// Unlike measure_text this needs no registration-token snapshot: it
+// memoizes nothing host-side (the engine caches the batch and
+// invalidates it by its own measure generation, bumped at every
+// registration), so each call resolves the font once and uses it
+// immediately — there is no (token, face) pairing that could tear
+// across lock acquisitions or outlive the registration it was read
+// from.
 int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const char *text, size_t text_len, float *advances) {
     if (!text || text_len == 0 || !advances) return 0;
     CGFloat clamped = MAX(1, size);
@@ -2486,7 +2958,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v4).
+ * Compact binary gpu-surface packet decoding (wire format v5).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -2501,7 +2973,8 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * keyed upserts + the full draw-order vector) against the view's retained
  * command dictionary; v3 added the flag-gated dirty rect list after the
  * scissor; v4 added the per-command stroke end-cap code after
- * stroke_width. The version this comment names and the encoder's spec
+ * stroke_width; v5 added compact positioned glyph runs after text UTF-8.
+ * The version this comment names and the encoder's spec
  * comment must agree with `binary_packet_version` (serialization.zig);
  * the `test-wire-format-version-prose` build check pins all three.
  */
@@ -2531,6 +3004,14 @@ static BOOL NativeSdkBinaryHasBytes(NativeSdkBinaryPacketReader *reader, NSUInte
 static uint8_t NativeSdkBinaryReadU8(NativeSdkBinaryPacketReader *reader) {
     if (!NativeSdkBinaryHasBytes(reader, 1)) return 0;
     return reader->bytes[reader->offset++];
+}
+
+static uint16_t NativeSdkBinaryReadU16(NativeSdkBinaryPacketReader *reader) {
+    if (!NativeSdkBinaryHasBytes(reader, 2)) return 0;
+    uint16_t value = 0;
+    memcpy(&value, reader->bytes + reader->offset, 2);
+    reader->offset += 2;
+    return CFSwapInt16LittleToHost(value);
 }
 
 static uint32_t NativeSdkBinaryReadU32(NativeSdkBinaryPacketReader *reader) {
@@ -2737,6 +3218,45 @@ static NSDictionary *NativeSdkBinaryReadText(NativeSdkBinaryPacketReader *reader
         @"color" : color,
         @"text" : text,
     }];
+    uint8_t hasPositionedGlyphs = NativeSdkBinaryReadU8(reader);
+    if (reader->failed) return nil;
+    if (hasPositionedGlyphs) {
+        uint32_t glyphCount = NativeSdkBinaryReadU32(reader);
+        if (reader->failed || glyphCount > 65536 || glyphCount > (reader->length - reader->offset) / 15) {
+            reader->failed = YES;
+            return nil;
+        }
+        NSMutableArray *glyphs = [NSMutableArray arrayWithCapacity:glyphCount];
+        for (uint32_t index = 0; index < glyphCount; index++) {
+            uint16_t glyphId = NativeSdkBinaryReadU16(reader);
+            uint8_t flags = NativeSdkBinaryReadU8(reader);
+            if (flags > 1) {
+                reader->failed = YES;
+                return nil;
+            }
+            uint64_t glyphFontId = (flags & 1) != 0 ? NativeSdkBinaryReadU64(reader) : fontId;
+            NSNumber *x = NativeSdkBinaryReadF32Number(reader);
+            NSNumber *baseline = NativeSdkBinaryReadF32Number(reader);
+            NSNumber *advance = NativeSdkBinaryReadF32Number(reader);
+            if (reader->failed) return nil;
+            [glyphs addObject:@{ @"id" : @(glyphId), @"font" : @(glyphFontId), @"x" : x, @"baseline" : baseline, @"advance" : advance }];
+        }
+        uint32_t fragmentCount = NativeSdkBinaryReadU32(reader);
+        if (reader->failed || fragmentCount > 64 || fragmentCount > (reader->length - reader->offset) / 12) {
+            reader->failed = YES;
+            return nil;
+        }
+        NSMutableArray *fragments = [NSMutableArray arrayWithCapacity:fragmentCount];
+        for (uint32_t index = 0; index < fragmentCount; index++) {
+            NSNumber *x = NativeSdkBinaryReadF32Number(reader);
+            NSNumber *baseline = NativeSdkBinaryReadF32Number(reader);
+            NSString *fragmentText = NativeSdkBinaryReadString(reader);
+            if (reader->failed || !fragmentText) return nil;
+            [fragments addObject:@{ @"x" : x, @"baseline" : baseline, @"text" : fragmentText }];
+        }
+        result[@"positionedGlyphs"] = glyphs;
+        result[@"positionedFragments"] = fragments;
+    }
     uint8_t hasLayout = NativeSdkBinaryReadU8(reader);
     if (reader->failed) return nil;
     if (!hasLayout) return result;
@@ -2886,7 +3406,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 4) return nil;
+    if (version != 5) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */
@@ -3013,15 +3533,28 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 @implementation NativeSdkScrollDriverView
 
 - (NSView *)hitTest:(NSPoint)point {
-    // Scroll-wheel events route to the driver through the ordinary hit
-    // test so AppKit's own (responsive) scrolling machinery handles them
-    // — a programmatically forwarded scrollWheel: is ignored by that
-    // path. Everything else passes through to the canvas beneath, except
-    // the overlay scrollers themselves (the knob stays grabbable).
+    // Wheel events deliberately do NOT hit the driver: they fall
+    // through to the surface, whose scrollWheel: resolves the gesture's
+    // dominant axis against every driver under the pointer, locks the
+    // gesture, forwards it to the winner, and splits any residual axis
+    // to the engine wire — per-axis routing that direct NSScrollView
+    // delivery cannot perform (NSScrollView consumes whole events, so a
+    // diagonal gesture over a nested vertical list would swallow the
+    // horizontal component its ancestor owns). The forwarded event
+    // skips AppKit's concurrent responsive-scrolling fast path, but the
+    // scroller still owns feel — momentum, rubber-band, and the overlay
+    // scroller all run from forwarded events (the responder-chain
+    // fallback always relied on exactly that). Everything else passes
+    // through to the canvas beneath, except the overlay scrollers
+    // themselves (the knob stays grabbable).
     NSView *hit = [super hitTest:point];
     if (!hit) return nil;
+    // Wheel events never hit-test into the driver — not even over a
+    // visible overlay scroller: a wheel over the knob still needs the
+    // splitter, or its cross-axis component would be swallowed. Only
+    // pointer interaction keeps the knob grabbable.
     NSEvent *current = NSApp.currentEvent;
-    if (current && current.type == NSEventTypeScrollWheel) return hit;
+    if (current && current.type == NSEventTypeScrollWheel) return nil;
     NSView *candidate = hit;
     while (candidate && candidate != self) {
         if ([candidate isKindOfClass:[NSScroller class]]) return hit;
@@ -3040,6 +3573,18 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 @end
+
+static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *destination, NSUInteger pixelCount) {
+    if (!source || !destination) return;
+    for (NSUInteger index = 0; index < pixelCount; index += 1) {
+        const NSUInteger offset = index * 4;
+        const uint32_t alpha = source[offset + 3];
+        destination[offset + 0] = (uint8_t)((source[offset + 0] * alpha + 127) / 255);
+        destination[offset + 1] = (uint8_t)((source[offset + 1] * alpha + 127) / 255);
+        destination[offset + 2] = (uint8_t)((source[offset + 2] * alpha + 127) / 255);
+        destination[offset + 3] = (uint8_t)alpha;
+    }
+}
 
 @implementation NativeSdkMetalSurfaceView
 
@@ -3120,11 +3665,12 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (BOOL)isOpaque {
-    return YES;
+    return self.window ? self.window.opaque : YES;
 }
 
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
+    self.metalLayer.opaque = self.window ? self.window.opaque : YES;
     self.window.acceptsMouseMovedEvents = YES;
     [self updateDrawableSize];
     [self updateSurfaceTrackingArea];
@@ -3214,10 +3760,26 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     }
 }
 
-- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+- (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects sourceIsPremultiplied:(BOOL)sourceIsPremultiplied rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
     if (![self isAvailable] || !rgba8 || width == 0 || height == 0) return NO;
     if (byteLength != width * height * 4) return NO;
     if (![self ensureCanvasPresenter]) return NO;
+
+    const uint8_t *presentBytes = rgba8;
+    /* Raw runtime presents carry straight RGBA, while the packet renderer's
+     * Core Graphics context already writes premultiplied RGBA. Metal blends
+     * both through the same premultiplied-alpha texture contract. */
+    if (self.window && !self.window.opaque && !sourceIsPremultiplied) {
+        if (!self.canvasPixelUploadScratch || self.canvasPixelUploadScratch.length != byteLength) {
+            self.canvasPixelUploadScratch = [NSMutableData dataWithLength:byteLength];
+        }
+        if (!self.canvasPixelUploadScratch || self.canvasPixelUploadScratch.length != byteLength) return NO;
+        NativeSdkPremultiplyStraightRgba8(
+            rgba8,
+            self.canvasPixelUploadScratch.mutableBytes,
+            byteLength / 4);
+        presentBytes = self.canvasPixelUploadScratch.bytes;
+    }
 
     BOOL textureChanged = NO;
     if (!self.canvasTexture || self.canvasTextureWidth != width || self.canvasTextureHeight != height) {
@@ -3292,21 +3854,21 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
                 return YES;
             }
         }
-        const uint8_t *uploadBytes = rgba8 + ((uploadY * width + uploadX) * 4);
+        const uint8_t *uploadBytes = presentBytes + ((uploadY * width + uploadX) * 4);
         [self.canvasTexture replaceRegion:MTLRegionMake2D(uploadX, uploadY, uploadWidth, uploadHeight)
                               mipmapLevel:0
                                 withBytes:uploadBytes
                               bytesPerRow:width * 4];
         if (backingBytes) {
             if (uploadFullTexture) {
-                memcpy(backingBytes, rgba8, byteLength);
+                memcpy(backingBytes, presentBytes, byteLength);
                 /* A full foreign upload (raw-pixels present) makes the
                  * backing match the glass byte-for-byte again. */
                 self.canvasPacketPixelsValid = YES;
             } else {
                 for (NSUInteger row = 0; row < uploadHeight; row++) {
                     const NSUInteger rowOffset = ((uploadY + row) * width + uploadX) * 4;
-                    memcpy((uint8_t *)backingBytes + rowOffset, rgba8 + rowOffset, uploadWidth * 4);
+                    memcpy((uint8_t *)backingBytes + rowOffset, presentBytes + rowOffset, uploadWidth * 4);
                 }
             }
         }
@@ -4830,7 +5392,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }
 
     BOOL uploadDirtyRect = directRetainedDirtyUpdate;
-    BOOL presented = [self presentPixelsWithWidth:pixelWidth height:pixelHeight scale:normalizedScale hasDirtyRect:uploadDirtyRect dirtyX:scissorRect.origin.x dirtyY:scissorRect.origin.y dirtyWidth:scissorRect.size.width dirtyHeight:scissorRect.size.height dirtyRects:(uploadDirtyRect ? dirtyRects : nil) rgba8:(const uint8_t *)pixels.bytes byteLength:pixels.length];
+    BOOL presented = [self presentPixelsWithWidth:pixelWidth height:pixelHeight scale:normalizedScale hasDirtyRect:uploadDirtyRect dirtyX:scissorRect.origin.x dirtyY:scissorRect.origin.y dirtyWidth:scissorRect.size.width dirtyHeight:scissorRect.size.height dirtyRects:(uploadDirtyRect ? dirtyRects : nil) sourceIsPremultiplied:YES rgba8:(const uint8_t *)pixels.bytes byteLength:pixels.length];
     if (getenv("NATIVE_SDK_GPU_DRAW_TRACE")) {
         /* Per-present phase split (draw vs texture upload + Metal present),
          * NATIVE_SDK_WINDOW_TIMING-style stderr diagnostics. */
@@ -5026,6 +5588,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         element.accessibilityEnabled = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_ENABLED) != 0;
         element.accessibilityFocused = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_FOCUSED) != 0;
         element.accessibilitySelected = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_SELECTED) != 0;
+        element.canUndo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_UNDO) != 0;
+        element.canRedo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_REDO) != 0;
         if ((node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_EXPANDED) != 0) {
             element.accessibilityExpanded = YES;
         } else if ((node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_COLLAPSED) != 0) {
@@ -5351,12 +5915,22 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     const double red = self.hasCanvasTexture ? 0.965 : 0.10 + 0.08 * sin(phase * 6.283185307179586);
     const double green = self.hasCanvasTexture ? 0.973 : 0.18 + 0.10 * sin((phase + 0.33) * 6.283185307179586);
     const double blue = self.hasCanvasTexture ? 0.988 : 0.34 + 0.16 * sin((phase + 0.66) * 6.283185307179586);
+    const BOOL transparentWindow = window != nil && !window.opaque;
 
     MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
     descriptor.colorAttachments[0].texture = drawable.texture;
     descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
     descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
-    descriptor.colorAttachments[0].clearColor = MTLClearColorMake(red, green, blue, 1.0);
+    // The clear remains visible when the renderer has not supplied a
+    // canvas texture yet, and briefly while a resize's retained texture
+    // does not match the new drawable. An opaque placeholder is useful
+    // for an ordinary window, but it defeats a transparent overlay's
+    // contract exactly when the late-reveal fallback exposes that state.
+    // Clear transparent glass to transparent black (valid premultiplied
+    // alpha); a matching canvas texture still draws over the whole pass.
+    descriptor.colorAttachments[0].clearColor = transparentWindow
+        ? MTLClearColorMake(0.0, 0.0, 0.0, 0.0)
+        : MTLClearColorMake(red, green, blue, 1.0);
 
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
     if (!commandBuffer) return;
@@ -5443,13 +6017,74 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 - (void)resetCursorRects {
     [super resetCursorRects];
-    [self addCursorRect:self.bounds cursor:self.surfaceCursor ?: [NSCursor arrowCursor]];
+    // Cursor rects do not honor sibling occlusion. Register the canvas
+    // cursor only on the visible fragments left after higher-layer
+    // native/web views are subtracted, so an overlaid WKWebView keeps
+    // authority over its own link/text CSS cursors.
+    NSMutableArray<NSValue *> *visibleCursorRects = [NSMutableArray arrayWithObject:[NSValue valueWithRect:self.bounds]];
+    for (NSValue *coveredValue in self.coveredMouseRects) {
+        NSRect covered = coveredValue.rectValue;
+        NSMutableArray<NSValue *> *nextVisibleRects = [[NSMutableArray alloc] init];
+        for (NSValue *visibleValue in visibleCursorRects) {
+            NSRect visible = visibleValue.rectValue;
+            NSRect intersection = NSIntersectionRect(visible, covered);
+            if (NSIsEmptyRect(intersection)) {
+                [nextVisibleRects addObject:visibleValue];
+                continue;
+            }
+
+            const CGFloat visibleMinX = NSMinX(visible);
+            const CGFloat visibleMaxX = NSMaxX(visible);
+            const CGFloat visibleMinY = NSMinY(visible);
+            const CGFloat visibleMaxY = NSMaxY(visible);
+            const CGFloat coveredMinX = NSMinX(intersection);
+            const CGFloat coveredMaxX = NSMaxX(intersection);
+            const CGFloat coveredMinY = NSMinY(intersection);
+            const CGFloat coveredMaxY = NSMaxY(intersection);
+
+            if (coveredMinY > visibleMinY) {
+                [nextVisibleRects addObject:[NSValue valueWithRect:NSMakeRect(
+                    visibleMinX, visibleMinY, visible.size.width, coveredMinY - visibleMinY)]];
+            }
+            if (coveredMaxY < visibleMaxY) {
+                [nextVisibleRects addObject:[NSValue valueWithRect:NSMakeRect(
+                    visibleMinX, coveredMaxY, visible.size.width, visibleMaxY - coveredMaxY)]];
+            }
+            if (coveredMinX > visibleMinX) {
+                [nextVisibleRects addObject:[NSValue valueWithRect:NSMakeRect(
+                    visibleMinX, coveredMinY, coveredMinX - visibleMinX, intersection.size.height)]];
+            }
+            if (coveredMaxX < visibleMaxX) {
+                [nextVisibleRects addObject:[NSValue valueWithRect:NSMakeRect(
+                    coveredMaxX, coveredMinY, visibleMaxX - coveredMaxX, intersection.size.height)]];
+            }
+        }
+        visibleCursorRects = nextVisibleRects;
+    }
+
+    NSCursor *cursor = self.surfaceCursor ?: [NSCursor arrowCursor];
+    for (NSValue *visibleValue in visibleCursorRects) {
+        [self addCursorRect:visibleValue.rectValue cursor:cursor];
+    }
 }
 
 - (void)setSurfaceCursor:(NSCursor *)cursor {
     _surfaceCursor = cursor ?: [NSCursor arrowCursor];
     [self.window invalidateCursorRectsForView:self];
-    [_surfaceCursor set];
+    // The runtime changes cursor intent from mouseMoved:. Its tracking
+    // area spans the geometric surface even where a sibling webview is
+    // layered above it, so never let that immediate update clobber the
+    // higher view's cursor. The visible cursor rect takes over again as
+    // soon as the pointer returns to the canvas.
+    NSPoint mousePoint = [self convertPoint:self.window.mouseLocationOutsideOfEventStream fromView:nil];
+    BOOL covered = NO;
+    for (NSValue *coveredValue in self.coveredMouseRects) {
+        if (NSPointInRect(mousePoint, coveredValue.rectValue)) {
+            covered = YES;
+            break;
+        }
+    }
+    if (!covered && NSPointInRect(mousePoint, self.bounds)) [_surfaceCursor set];
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -5519,19 +6154,185 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 - (void)scrollWheel:(NSEvent *)event {
-    NativeSdkScrollDriverView *driver = [self scrollDriverForWheelEvent:event];
-    if (driver) {
-        // The OS scroller owns input + physics for this region (momentum,
-        // rubber-band, overlay scroller); the resulting contentOffset
-        // flows back through the clip-view bounds-change notification.
-        [driver scrollWheel:event];
+    if (self.scrollDrivers.count == 0) {
+        [self queueScrollInputEvent:event atPoint:[self convertPoint:event.locationInWindow fromView:nil] deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
         return;
     }
-    [self queueScrollInputEvent:event deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
+    // Gesture anchoring: owners resolve at the point where the GESTURE
+    // began (so momentum and wire hand-offs keep working the same
+    // regions after the pointer wanders), re-evaluated EVERY event
+    // against the drivers' live offsets — which is what hands an axis
+    // to the ancestor the moment the inner region saturates, mirroring
+    // the engine's per-event walk. Legacy wheels (no phases) resolve at
+    // the live pointer; a quiet gap is their gesture boundary.
+    const BOOL legacy = event.phase == NSEventPhaseNone && event.momentumPhase == NSEventPhaseNone;
+    NSPoint point;
+    if (legacy) {
+        point = [self convertPoint:event.locationInWindow fromView:nil];
+        const uint64_t now = NativeSdkTimestampNanoseconds();
+        const BOOL freshBurst = self.lastLegacyWheelTimestampNs == 0 ||
+            now - self.lastLegacyWheelTimestampNs > 250000000ull;
+        self.lastLegacyWheelTimestampNs = now;
+        if (freshBurst) {
+            [self.wireBoundDriverIds removeAllObjects];
+            self.lastNativeWheelDriver = nil;
+        }
+    } else {
+        if (event.phase == NSEventPhaseBegan || event.phase == NSEventPhaseMayBegin) {
+            self.wheelGesturePoint = [self convertPoint:event.locationInWindow fromView:nil];
+            self.wheelGestureActive = YES;
+            [self.wireBoundDriverIds removeAllObjects];
+            self.lastLegacyWheelTimestampNs = 0;
+            self.lastNativeWheelDriver = nil;
+        }
+        point = self.wheelGestureActive ? self.wheelGesturePoint : [self convertPoint:event.locationInWindow fromView:nil];
+        if (event.momentumPhase == NSEventPhaseEnded || event.momentumPhase == NSEventPhaseCancelled) {
+            self.wheelGestureActive = NO;
+        }
+    }
+    if (!self.wireBoundDriverIds) self.wireBoundDriverIds = [[NSMutableSet alloc] init];
+
+    const double canvasDx = -event.scrollingDeltaX;
+    const double canvasDy = -event.scrollingDeltaY;
+
+    // Zero-delta phase events (begins, the terminal Ended/Cancelled)
+    // resolve no owner but still carry the bookkeeping the scroller's
+    // overscroll recovery keys off — they forward to the gesture's last
+    // native recipient and nowhere else.
+    if (canvasDx == 0 && canvasDy == 0) {
+        if (!legacy && self.lastNativeWheelDriver) {
+            [self.lastNativeWheelDriver scrollWheel:event];
+        }
+        return;
+    }
+
+    NSArray *chain = [self wheelCandidateChainAtPoint:point];
+    NativeSdkScrollDriverView *ownerX = nil;
+    NativeSdkScrollDriverView *ownerY = nil;
+    [self resolveWheelOwnersInChain:chain canvasDx:canvasDx canvasDy:canvasDy ownerX:&ownerX ownerY:&ownerY];
+
+    // ONE owner takes the whole event natively; everything ambiguous
+    // rides the wire, where the engine's real routing decides:
+    //   - no owner at all (dead axes, an overlay over the anchor);
+    //   - the two axes owned by DIFFERENT regions (one NSScrollView
+    //     cannot keep the axes apart — the engine applies each axis to
+    //     its own region and the set-offset flags sync the scrollers);
+    //   - an owner the wire already scrolled this gesture (the engine
+    //     applied relative deltas its next ABSOLUTE report would
+    //     erase).
+    // A partially consumable delta stays NATIVE and clamps at the edge
+    // — exactly the engine's rule (the region that can move consumes
+    // the whole event; the remainder dies), so native and engine-only
+    // execution agree.
+    const BOOL dominantVertical = fabs(canvasDy) >= fabs(canvasDx);
+    NativeSdkScrollDriverView *native = dominantVertical ? (ownerY ?: ownerX) : (ownerX ?: ownerY);
+    const BOOL splitOwners = ownerX && ownerY && ownerX != ownerY;
+    const BOOL nativeWireBound = native && [self.wireBoundDriverIds containsObject:@(native.driverId)];
+    if (!native || splitOwners || nativeWireBound) {
+        if (ownerX) [self.wireBoundDriverIds addObject:@(ownerX.driverId)];
+        if (ownerY) [self.wireBoundDriverIds addObject:@(ownerY.driverId)];
+        // Offsets first (one clock): the wire routing consults the
+        // runtime's offsets, so any coalesced driver report must land
+        // before the deltas that depend on it.
+        [self emitQueuedScrollDriverEvent];
+        [self queueScrollInputEvent:event atPoint:point deltaX:canvasDx deltaY:canvasDy];
+        return;
+    }
+
+    // The OS scroller owns input + physics for this event (momentum,
+    // rubber-band, overlay scroller); the resulting contentOffset flows
+    // back through the clip-view bounds-change notification.
+    self.lastNativeWheelDriver = native;
+    [native scrollWheel:event];
+}
+
+- (void)magnifyWithEvent:(NSEvent *)event {
+    // Trackpad pinch, phase-explicit. A cancelled gesture folds into
+    // PINCH_END: pinch delivers incremental deltas the app applies as
+    // they arrive, so there is no un-committed transient to roll back
+    // the way pointer_cancel rolls back an in-flight press —
+    // cancellation just means "the delta stream stops here".
+    //
+    // Change deltas emit uncoalesced (no per-frame queue like scroll):
+    // the cumulative gesture scale is the PRODUCT of (1 + delta), and
+    // summing coalesced deltas would drift from what the fingers did.
+    //
+    // HOW TO READ NSEvent.magnification — settled; do not "fix" again.
+    // Apple's documentation contradicts itself: the NSEvent API
+    // reference's prose says to ADD each event's magnification to your
+    // scale factor, while Apple's own Event Handling Guide example
+    // MULTIPLIES (currentSize *= 1 + event.magnification). The de facto
+    // platform behavior is what the browser engines ship, and every
+    // engine reads raw magnification as the MULTIPLICATIVE per-event
+    // delta:
+    //   - WebKit, ViewGestureControllerMac.mm:
+    //       m_magnification += m_magnification * scaleWithResistance;
+    //     i.e. zoom *= 1 + event.magnification, per event.
+    //   - Chromium's mac gesture-event builder emits
+    //       pinch_update.scale = event.magnification + 1.0;
+    //     compounded multiplicatively downstream.
+    // Ruling: raw event.magnification IS the multiplicative per-event
+    // delta. This handler forwards it untransformed (per-event floor
+    // aside — see emitPinchChangeForEvent:), and the app-side product
+    // of (1 + scale) is the zoom users already experience for the same
+    // gesture in Safari and Chrome. Do NOT reintroduce a running-sum
+    // "additive normalization" here: it matches neither Apple's example
+    // nor any engine — a raw +0.25, +0.20 stream must land on
+    // 1.25 * 1.20 = 1.5, where a sum-normalized stream lands on 1.45.
+    //
+    // EVERY magnifyWithEvent: carries the magnification since the
+    // previous event — the terminal (Ended/Cancelled) one included —
+    // so each branch below must forward a nonzero magnification as a
+    // PINCH_CHANGE or the cumulative product diverges from what the
+    // OS delivered.
+    const NSEventPhase phase = event.phase;
+    if (phase & NSEventPhaseBegan) {
+        [self emitQueuedPointerMotionInputEvent];
+        self.pinchGestureActive = YES;
+        [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_BEGIN event:event magnification:0];
+        [self emitPinchChangeForEvent:event];
+        return;
+    }
+    if (phase & NSEventPhaseChanged) {
+        if (!self.pinchGestureActive) {
+            // A gesture already in flight when this view became the
+            // hit target skips Began; open the stream cleanly anyway.
+            self.pinchGestureActive = YES;
+            [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_BEGIN event:event magnification:0];
+        }
+        [self emitPinchChangeForEvent:event];
+        return;
+    }
+    if (phase & (NSEventPhaseEnded | NSEventPhaseCancelled)) {
+        if (!self.pinchGestureActive) return;
+        self.pinchGestureActive = NO;
+        // The terminal event's nonzero magnification emits as a final
+        // PINCH_CHANGE before the end marker (a zero-magnification
+        // terminal event emits only PINCH_END). Cancelled takes the
+        // same path deliberately: our model applies deltas
+        // incrementally with no rollback (see above), so the honest
+        // stream reports every delta the OS measured, then says the
+        // gesture is over.
+        [self emitPinchChangeForEvent:event];
+        [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_END event:event magnification:0];
+        return;
+    }
+    // NSEventPhaseMayBegin / stationary phases carry no gesture fact.
 }
 
 - (void)keyDown:(NSEvent *)event {
     if ([self focusedTextAccessibilityElement]) {
+        // The shared canvas editor already maps Command/Option+Left/Right
+        // (including Shift variants) onto line/word navigation. Preserve
+        // those physical keys instead of letting interpretKeyEvents turn
+        // Command+Left/Right into modifier-less Home/End selectors. A
+        // focused terminal needs the modifiers even more: its emulator
+        // translates the natural macOS gestures to shell bindings, and
+        // negotiated key protocols must see every other combined chord.
+        if (NativeSdkTextNavigationNeedsRawKeyEvent(event)) {
+            [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_KEY_DOWN event:event button:0 deltaX:0 deltaY:0];
+            return;
+        }
         self.interpretedKeyEventEmittedInput = NO;
         [self interpretKeyEvents:@[event]];
         if (!self.interpretedKeyEventEmittedInput) {
@@ -5660,10 +6461,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                           deltaY:0];
 }
 
-- (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY {
+// The POINT is caller-supplied: driver hand-offs pass the gesture's
+// anchor so residual and saturated-momentum deltas route to the same
+// regions the native side resolved, however far the pointer wandered.
+- (void)queueScrollInputEvent:(NSEvent *)event atPoint:(NSPoint)point deltaX:(double)deltaX deltaY:(double)deltaY {
     if (!self.host || self.surfaceLabel.length == 0 || !event) return;
     if (deltaX == 0 && deltaY == 0) return;
-    self.pendingScrollPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    self.pendingScrollPoint = point;
     self.pendingScrollDeltaX += deltaX;
     self.pendingScrollDeltaY += deltaY;
     self.pendingScrollModifiers = NativeSdkModifierFlagsForEvent(event);
@@ -5710,6 +6514,59 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                           deltaY:deltaY];
 }
 
+// --- Pinch change forwarding ---------------------------------------------
+// Raw event.magnification IS the wire's multiplicative per-event delta
+// (see the doctrine note at magnifyWithEvent:); it forwards untransformed.
+// One guard stands between the OS and the wire: a single event whose
+// magnification is at or below -1 would put a factor (1 + delta) <= 0 on
+// the wire — a zoom inverting through zero scale, which no physical pinch
+// can perform (only a driver/toolkit glitch could report it), and which
+// downstream products cannot recover from. Clamp PER EVENT to a floor
+// just above -1; the epsilon is 2^-10 (~0.001, exactly representable in
+// f32 and f64), so a glitched event's factor bottoms out at 2^-10 and
+// every emitted factor stays > 0.
+static const double NativeSdkPinchMagnificationFloor = -1.0 + 0x1p-10;
+
+static double NativeSdkClampedPinchMagnification(double magnification) {
+    return magnification < NativeSdkPinchMagnificationFloor ? NativeSdkPinchMagnificationFloor : magnification;
+}
+
+// Forward one magnify event's raw magnification as a PINCH_CHANGE
+// (nothing to emit when the event measured no magnification).
+- (void)emitPinchChangeForEvent:(NSEvent *)event {
+    const double magnification = NativeSdkClampedPinchMagnification(event.magnification);
+    if (magnification == 0) return;
+    [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_CHANGE event:event magnification:magnification];
+}
+
+// Pinch input: the shared input-emit shape (converted point, top-left
+// origin flip, host timestamp, modifier flags) with the magnification
+// delta riding the event's `scale` field — unused (zero) on every other
+// input kind, so the runtime reads it unconditionally. The x/y point is
+// the POINTER anchor: AppKit reports gesture events at locationInWindow
+// (the pointer location), never a midpoint between the fingers — NSTouch
+// positions are trackpad-normalized and have no view-space meaning, and
+// zoom-at-cursor is the anchoring apps want.
+- (void)emitPinchInputEventWithKind:(NSInteger)kind event:(NSEvent *)event magnification:(double)magnification {
+    if (!self.host || self.surfaceLabel.length == 0 || !event) return;
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    CGFloat y = self.bounds.size.height - point.y;
+    const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    [self.host emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_INPUT,
+        .window_id = self.windowId,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+        .x = point.x,
+        .y = y,
+        .scale = magnification,
+        .view_label = labelBytes,
+        .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .shortcut_modifiers = NativeSdkModifierFlagsForEvent(event),
+        .input_kind = (int)kind,
+    }];
+    [self requestRetainedCanvasFrame];
+}
+
 // --- Native scroll drivers ---------------------------------------------
 // Each scrollable canvas region gets an invisible NSScrollView subview
 // sized to the region and backed by a flipped document view sized to the
@@ -5719,8 +6576,18 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 // IS the canvas scroll offset, reported back per frame interval through
 // GPU_SURFACE_SCROLL_DRIVER events.
 
-- (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count {
+- (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount {
     if (!self.scrollDrivers) self.scrollDrivers = [[NSMutableArray alloc] init];
+    // Occluder rects arrive in canvas coordinates (top-left origin,
+    // y-down); store them flipped into this view's space, like the
+    // driver frames.
+    NSMutableArray *occluderRects = [[NSMutableArray alloc] initWithCapacity:occluderCount];
+    for (NSUInteger index = 0; index < occluderCount; index += 1) {
+        const native_sdk_appkit_scroll_occluder_t occluder = occluders[index];
+        const NSRect rect = NSMakeRect(occluder.x, self.bounds.size.height - occluder.y - occluder.height, occluder.width, occluder.height);
+        [occluderRects addObject:[NSValue valueWithRect:rect]];
+    }
+    self.scrollOccluderRects = occluderRects;
     for (NSInteger index = (NSInteger)self.scrollDrivers.count - 1; index >= 0; index -= 1) {
         NativeSdkScrollDriverView *driver = self.scrollDrivers[(NSUInteger)index];
         BOOL present = NO;
@@ -5735,6 +6602,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [driver removeFromSuperview];
         [self.scrollDrivers removeObjectAtIndex:(NSUInteger)index];
     }
+    // Rebuilt in SPEC order every push: the specs ride layout pre-order
+    // (outermost first, deepest last), and the wheel selection walk
+    // depends on that order — a keyed reorder that keeps ids must not
+    // leave a stale creation order deciding which region is "deepest".
+    NSMutableArray *ordered = [[NSMutableArray alloc] initWithCapacity:count];
     for (NSUInteger spec = 0; spec < count; spec += 1) {
         const native_sdk_appkit_scroll_driver_t desired = drivers[spec];
         NativeSdkScrollDriverView *driver = nil;
@@ -5751,10 +6623,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             driver.driverId = desired.driver_id;
             driver.drawsBackground = NO;
             driver.hasVerticalScroller = YES;
-            driver.hasHorizontalScroller = NO;
+            // The horizontal scroller engages only when the driver's
+            // content is wider than its frame — the runtime pins
+            // content_width to the frame width on regions without a
+            // horizontal axis grant, so vertical-only regions never
+            // grow one.
+            driver.hasHorizontalScroller = YES;
             driver.scrollerStyle = NSScrollerStyleOverlay;
             driver.autohidesScrollers = YES;
-            driver.horizontalScrollElasticity = NSScrollElasticityNone;
             driver.automaticallyAdjustsContentInsets = NO;
             NativeSdkScrollDriverDocumentView *document = [[NativeSdkScrollDriverDocumentView alloc] initWithFrame:NSMakeRect(0, 0, MAX(desired.content_width, 1), MAX(desired.content_height, 1))];
             driver.documentView = document;
@@ -5767,52 +6643,159 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         // against anything but the actual frame races with relayout.
         // Elasticity rides the same reconcile: a region's edge behavior
         // (pin at the edges vs bounce past them) is per-region state the
-        // runtime owns.
-        NSScrollElasticity elasticity = desired.rubber_band ? NSScrollElasticityAllowed : NSScrollElasticityNone;
-        if (driver.verticalScrollElasticity != elasticity) driver.verticalScrollElasticity = elasticity;
+        // runtime owns, armed ONLY on axes the region grants — an
+        // ungranted axis must never bounce or report a native offset the
+        // runtime would ignore and fight back.
+        NSScrollElasticity verticalElasticity = (desired.rubber_band && desired.scrolls_y) ? NSScrollElasticityAllowed : NSScrollElasticityNone;
+        if (driver.verticalScrollElasticity != verticalElasticity) driver.verticalScrollElasticity = verticalElasticity;
+        NSScrollElasticity horizontalElasticity = (desired.rubber_band && desired.scrolls_x) ? NSScrollElasticityAllowed : NSScrollElasticityNone;
+        if (driver.horizontalScrollElasticity != horizontalElasticity) driver.horizontalScrollElasticity = horizontalElasticity;
+        // Scroller chrome follows the grants the same way, and the
+        // grants themselves ride the view for the wheel winner walk.
+        if (driver.hasVerticalScroller != (desired.scrolls_y != 0)) driver.hasVerticalScroller = desired.scrolls_y != 0;
+        if (driver.hasHorizontalScroller != (desired.scrolls_x != 0)) driver.hasHorizontalScroller = desired.scrolls_x != 0;
+        driver.grantsX = desired.scrolls_x != 0;
+        driver.grantsY = desired.scrolls_y != 0;
+        driver.parentDriverId = desired.parent_driver_id;
+        driver.occluderMask = desired.occluder_mask;
         NSRect target = NSMakeRect(desired.x, self.bounds.size.height - desired.y - desired.height, desired.width, desired.height);
         if (!NSEqualRects(driver.frame, target)) driver.frame = target;
         NSSize contentSize = NSMakeSize(MAX(desired.content_width, 1), MAX(desired.content_height, 1));
         if (driver.documentView && !NSEqualSizes(driver.documentView.frame.size, contentSize)) {
             [driver.documentView setFrameSize:contentSize];
         }
-        if (created || desired.set_offset) [self applyScrollDriverOffset:driver offsetY:desired.offset_y];
+        if (created || desired.set_offset_x || desired.set_offset_y) {
+            [self applyScrollDriverOffset:driver
+                                  offsetX:desired.offset_x
+                                     setX:(created || desired.set_offset_x)
+                                  offsetY:desired.offset_y
+                                     setY:(created || desired.set_offset_y)];
+        }
+        [ordered addObject:driver];
     }
+    self.scrollDrivers = ordered;
 }
 
-- (void)applyScrollDriverOffset:(NativeSdkScrollDriverView *)driver offsetY:(double)offsetY {
+// Per-axis programmatic offset write: an axis the runtime did not move
+// keeps the native scroller's CURRENT origin, so a vertical write can
+// never drag a stale horizontal offset over native motion whose
+// coalesced report is still in flight (and vice versa).
+- (void)applyScrollDriverOffset:(NativeSdkScrollDriverView *)driver offsetX:(double)offsetX setX:(BOOL)setX offsetY:(double)offsetY setY:(BOOL)setY {
+    const NSPoint current = driver.contentView.bounds.origin;
     self.applyingScrollDriverOffset = YES;
-    [driver.contentView setBoundsOrigin:NSMakePoint(0, offsetY)];
+    [driver.contentView setBoundsOrigin:NSMakePoint(setX ? offsetX : current.x, setY ? offsetY : current.y)];
     [driver reflectScrolledClipView:driver.contentView];
     self.applyingScrollDriverOffset = NO;
+    // A queued (frame-coalesced) report for THIS driver predates the
+    // programmatic write: rewrite it to the offsets the clip view
+    // actually settled on, so the stale pair can never re-land and
+    // yank the region back after the runtime moved it.
+    if (self.scrollDriverEventPending && self.pendingScrollDriverId == driver.driverId) {
+        self.pendingScrollDriverOffsetX = driver.contentView.bounds.origin.x;
+        self.pendingScrollDriverOffsetY = driver.contentView.bounds.origin.y;
+    }
 }
 
-- (NativeSdkScrollDriverView *)scrollDriverForPoint:(NSPoint)viewPoint {
-    // Driver specs arrive in layout pre-order, so the LAST hit is the
-    // deepest scroll region under the pointer.
-    NativeSdkScrollDriverView *result = nil;
+// Direction-aware consumption, the engine's nested-handoff predicate
+// (`canvasWidgetScrollCanConsumeAxis`) restated against the native
+// scroller with the engine's EXACT bounds (no edge tolerance — the
+// engine compares exactly, and a half-point slack would hand an
+// almost-home inner region's delta to its ancestor where the engine
+// still moves the inner one): a driver consumes a delta on an axis
+// only while its offset can still move in that direction, so a
+// saturated inner region hands an outward swipe to its ancestor
+// exactly like the engine walk does.
+static BOOL NativeSdkScrollDriverCanConsumeVertically(NativeSdkScrollDriverView *driver, double canvasDelta) {
+    if (canvasDelta == 0) return NO;
+    const double offset = driver.contentView.bounds.origin.y;
+    const double maxOffset = driver.documentView.frame.size.height - driver.contentView.bounds.size.height;
+    return canvasDelta > 0 ? offset < maxOffset : offset > 0;
+}
+
+static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverView *driver, double canvasDelta) {
+    if (canvasDelta == 0) return NO;
+    const double offset = driver.contentView.bounds.origin.x;
+    const double maxOffset = driver.documentView.frame.size.width - driver.contentView.bounds.size.width;
+    return canvasDelta > 0 ? offset < maxOffset : offset > 0;
+}
+
+// The wheel CANDIDATE CHAIN at a point: the deepest driver under the
+// point (specs ride layout pre-order, so the last containing entry is
+// the hit region) plus its ancestors by parent id — the widget-tree
+// containment chain the engine's route walks. Restricting owner
+// resolution to this chain keeps a geometrically overlapping but
+// UNRELATED region (a background scroller behind a floating surface)
+// from stealing an axis the engine would never give it. Ordered
+// outermost first, like the spec array.
+- (NSArray *)wheelCandidateChainAtPoint:(NSPoint)viewPoint {
+    // Occluders first: an overlay containing the point hit-blocks every
+    // region beneath it (bit set in the region's mask), exactly where
+    // the engine's hit test would give the point to the overlay's
+    // branch. Blocked drivers decline outright — the wheel then rides
+    // the wire, where real hit-testing decides.
+    uint32_t blockedBits = 0;
+    NSUInteger occluderIndex = 0;
+    for (NSValue *value in self.scrollOccluderRects) {
+        if (NSPointInRect(viewPoint, value.rectValue)) blockedBits |= (uint32_t)1 << occluderIndex;
+        occluderIndex += 1;
+    }
+    NativeSdkScrollDriverView *hit = nil;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
-        if (NSPointInRect(viewPoint, driver.frame)) result = driver;
+        if ((driver.occluderMask & blockedBits) != 0) continue;
+        if (NSPointInRect(viewPoint, driver.frame)) hit = driver;
     }
-    return result;
+    if (!hit) return @[];
+    NSMutableArray *chain = [[NSMutableArray alloc] init];
+    NativeSdkScrollDriverView *current = hit;
+    while (current) {
+        if ((current.occluderMask & blockedBits) == 0) [chain insertObject:current atIndex:0];
+        uint64_t parentId = current.parentDriverId;
+        NativeSdkScrollDriverView *parent = nil;
+        if (parentId != 0) {
+            for (NativeSdkScrollDriverView *candidate in self.scrollDrivers) {
+                if (candidate.driverId == parentId) {
+                    parent = candidate;
+                    break;
+                }
+            }
+        }
+        current = parent;
+    }
+    return chain;
 }
 
-- (NativeSdkScrollDriverView *)scrollDriverForWheelEvent:(NSEvent *)event {
-    if (self.scrollDrivers.count == 0) return nil;
-    const BOOL legacy = event.phase == NSEventPhaseNone && event.momentumPhase == NSEventPhaseNone;
-    if (legacy) {
-        return [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+// Resolve each axis's OWNER independently over the candidate chain —
+// the engine's per-axis walk restated over the native drivers: an axis
+// routes to the DEEPEST chain region that can consume its delta right
+// now (direction-aware, so a saturated inner region hands an outward
+// swipe to its ancestor), falling back to the OUTERMOST region granted
+// that axis — which bounces if elastic (rubber-band needs no range,
+// short content included) and clamps into a harmless no-op if not,
+// exactly the engine's outermost-applies rule. Nil means no native
+// region owns the axis. Elastic-take deliberately never outranks a
+// consumer: an elastic inner list that saturates while its parent still
+// has range hands the axis over instead of bouncing forever.
+- (void)resolveWheelOwnersInChain:(NSArray *)chain
+                         canvasDx:(double)canvasDx
+                         canvasDy:(double)canvasDy
+                           ownerX:(NativeSdkScrollDriverView **)ownerX
+                           ownerY:(NativeSdkScrollDriverView **)ownerY {
+    NativeSdkScrollDriverView *consumerX = nil;
+    NativeSdkScrollDriverView *fallbackX = nil;
+    NativeSdkScrollDriverView *consumerY = nil;
+    NativeSdkScrollDriverView *fallbackY = nil;
+    for (NativeSdkScrollDriverView *driver in chain) {
+        if (canvasDx != 0 && driver.grantsX) {
+            if (NativeSdkScrollDriverCanConsumeHorizontally(driver, canvasDx)) consumerX = driver;
+            if (!fallbackX) fallbackX = driver;
+        }
+        if (canvasDy != 0 && driver.grantsY) {
+            if (NativeSdkScrollDriverCanConsumeVertically(driver, canvasDy)) consumerY = driver;
+            if (!fallbackY) fallbackY = driver;
+        }
     }
-    if (event.phase == NSEventPhaseBegan || event.phase == NSEventPhaseMayBegin) {
-        // Lock the gesture to the region under the pointer so momentum
-        // keeps scrolling it after the pointer wanders.
-        self.activeWheelDriver = [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil]];
-    }
-    NativeSdkScrollDriverView *driver = self.activeWheelDriver;
-    if (event.momentumPhase == NSEventPhaseEnded || event.momentumPhase == NSEventPhaseCancelled) {
-        self.activeWheelDriver = nil;
-    }
-    return driver;
+    *ownerX = consumerX ?: fallbackX;
+    *ownerY = consumerY ?: fallbackY;
 }
 
 - (void)scrollDriverBoundsDidChange:(NSNotification *)note {
@@ -5820,17 +6803,18 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSClipView *clipView = note.object;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
         if (driver.contentView != clipView) continue;
-        [self queueScrollDriverEventWithId:driver.driverId offsetY:clipView.bounds.origin.y];
+        [self queueScrollDriverEventWithId:driver.driverId offsetX:clipView.bounds.origin.x offsetY:clipView.bounds.origin.y];
         return;
     }
 }
 
-- (void)queueScrollDriverEventWithId:(uint64_t)driverId offsetY:(double)offsetY {
+- (void)queueScrollDriverEventWithId:(uint64_t)driverId offsetX:(double)offsetX offsetY:(double)offsetY {
     if (!self.host || self.surfaceLabel.length == 0) return;
     if (self.scrollDriverEventPending && self.pendingScrollDriverId != driverId) {
         [self emitQueuedScrollDriverEvent];
     }
     self.pendingScrollDriverId = driverId;
+    self.pendingScrollDriverOffsetX = offsetX;
     self.pendingScrollDriverOffsetY = offsetY;
     if (self.scrollDriverEventPending) return;
     self.scrollDriverEventPending = YES;
@@ -5852,6 +6836,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)emitQueuedScrollDriverEvent {
     if (!self.scrollDriverEventPending) return;
     const uint64_t driverId = self.pendingScrollDriverId;
+    const double offsetX = self.pendingScrollDriverOffsetX;
     const double offsetY = self.pendingScrollDriverOffsetY;
     self.scrollDriverEventPending = NO;
     if (!self.host || self.surfaceLabel.length == 0) return;
@@ -5864,6 +6849,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .timestamp_ns = NativeSdkTimestampNanoseconds(),
         .widget_id = driverId,
+        .scroll_driver_offset_x = offsetX,
         .scroll_driver_offset_y = offsetY,
     }];
 }
@@ -6080,6 +7066,20 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self emitSelectAllTextInputCommand];
 }
 
+// The runtime owns canvas-editor history, so Edit-menu actions take the
+// same Command+Z / Command+Shift+Z route as physical keyboard events.
+- (void)undo:(id)sender {
+    (void)sender;
+    if (![self focusedTextAccessibilityElement]) return;
+    [self emitSyntheticKeyDownWithKey:@"z" modifiers:(NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand)];
+}
+
+- (void)redo:(id)sender {
+    (void)sender;
+    if (![self focusedTextAccessibilityElement]) return;
+    [self emitSyntheticKeyDownWithKey:@"z" modifiers:(NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand | NativeSdkShortcutModifierShift)];
+}
+
 // Edit-menu clipboard actions on the canvas: the runtime already
 // resolves cmd+C/X/V key events against the focused editable widget or
 // the view's text selection, so the menu items ride the same path as
@@ -6105,8 +7105,18 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
-    if (menuItem.action == @selector(cut:) || menuItem.action == @selector(paste:) || menuItem.action == @selector(selectAll:)) {
-        return [self focusedTextAccessibilityElement] != nil;
+    NativeSdkWidgetAccessibilityElement *focusedText =
+        (NativeSdkWidgetAccessibilityElement *)[self focusedTextAccessibilityElement];
+    if (menuItem.action == @selector(undo:)) {
+        return focusedText != nil && focusedText.canUndo;
+    }
+    if (menuItem.action == @selector(redo:)) {
+        return focusedText != nil && focusedText.canRedo;
+    }
+    if (menuItem.action == @selector(cut:) ||
+        menuItem.action == @selector(paste:) ||
+        menuItem.action == @selector(selectAll:)) {
+        return focusedText != nil;
     }
     return YES;
 }
@@ -6249,7 +7259,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 @implementation NativeSdkAppKitHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
     self = [super init];
     if (!self) {
         return nil;
@@ -6277,6 +7287,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.windowLabels = [[NSMutableDictionary alloc] init];
     self.deferredShowWindows = [[NSMutableDictionary alloc] init];
     self.windowClearColors = [[NSMutableDictionary alloc] init];
+    self.windowClosePolicies = [[NSMutableDictionary alloc] init];
+    self.passiveShowWindows = [[NSMutableSet alloc] init];
+    self.policyHiddenWindows = [[NSMutableSet alloc] init];
     self.childWebViews = [[NSMutableDictionary alloc] init];
     self.nativeViews = [[NSMutableDictionary alloc] init];
     self.adoptedViewSurfaces = [[NSMutableDictionary alloc] init];
@@ -6292,14 +7305,15 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self configureApplication];
     NativeSdkLaunchLap("app_configured");
 
-    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame resizable:resizable titlebarStyle:titlebarStyle showPolicy:showPolicy makeMain:YES];
+    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame resizable:resizable titlebarStyle:titlebarStyle showPolicy:showPolicy windowFlags:windowFlags makeMain:YES];
     self.didShutdown = NO;
+    self.pendingPreRunStop = NO;
     self.observesApplicationActivation = NO;
 
     return self;
 }
 
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy makeMain:(BOOL)makeMain {
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {
     NSNumber *key = @(windowId);
     if (self.windows[key]) {
         return NO;
@@ -6356,6 +7370,15 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     // next autorelease-pool drain; the main window only ever closes at
     // shutdown, which is why this stayed hidden until windows_fn).
     window.releasedWhenClosed = NO;
+    // Overlay behavior is installed before the first order-front so no
+    // opaque, focus-taking, or interactive intermediate window can flash.
+    if ((windowFlags & (1u << 0)) != 0) {
+        window.opaque = NO;
+        window.backgroundColor = NSColor.clearColor;
+    }
+    if ((windowFlags & (1u << 1)) != 0) window.level = NSFloatingWindowLevel;
+    if ((windowFlags & (1u << 2)) != 0) window.ignoresMouseEvents = YES;
+    if ((windowFlags & (1u << 3)) != 0) [self.passiveShowWindows addObject:key];
     [window setTitle:(title.length > 0 ? title : self.appName)];
     if (titlebarStyle == 1 || titlebarStyle == 2) {
         window.titlebarAppearsTransparent = YES;
@@ -6377,6 +7400,30 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }
     if (!restoreFrame) {
         [window center];
+        // AppKit centers every new window by default, which leaves a
+        // model-declared secondary window exactly covering the editor that
+        // opened it. Cascade from the active window like Win32's default
+        // placement so repeated Command+N windows stay visibly distinct.
+        NSWindow *referenceWindow = NSApp.keyWindow ?: self.window;
+        if (!makeMain && referenceWindow) {
+            NSRect referenceFrame = referenceWindow.frame;
+            NSRect cascadedFrame = window.frame;
+            cascadedFrame.origin.x = NSMinX(referenceFrame) + 24.0;
+            cascadedFrame.origin.y = NSMaxY(referenceFrame) - 24.0 - NSHeight(cascadedFrame);
+
+            // A maximized or edge-positioned reference must not push the new
+            // window beyond the usable screen. Fit the complete frame when
+            // possible; an oversized window keeps its leading/bottom edge.
+            NSScreen *referenceScreen = referenceWindow.screen ?: window.screen ?: NSScreen.mainScreen;
+            if (referenceScreen) {
+                NSRect visibleFrame = referenceScreen.visibleFrame;
+                CGFloat maxOriginX = MAX(NSMinX(visibleFrame), NSMaxX(visibleFrame) - NSWidth(cascadedFrame));
+                CGFloat maxOriginY = MAX(NSMinY(visibleFrame), NSMaxY(visibleFrame) - NSHeight(cascadedFrame));
+                cascadedFrame.origin.x = MIN(MAX(NSMinX(cascadedFrame), NSMinX(visibleFrame)), maxOriginX);
+                cascadedFrame.origin.y = MIN(MAX(NSMinY(cascadedFrame), NSMinY(visibleFrame)), maxOriginY);
+            }
+            [window setFrame:cascadedFrame display:NO];
+        }
     }
     if (makeMain) NativeSdkLaunchLap("window_chrome_ready");
 
@@ -6427,10 +7474,25 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         self.delegate = delegate;
         self.windowLabel = label.length > 0 ? label : @"main";
     } else if (showPolicy != 1) {
-        [window makeKeyAndOrderFront:nil];
-        [NSApp activate];
+        [self orderWindowForImplicitShow:windowId];
     }
     return YES;
+}
+
+// Implicit shows honor `activate_on_show`: passive overlays are ordered
+// front without changing the active app or key window. Explicit focus
+// continues to activate and makeKeyAndOrderFront. Activation comes
+// first: a first-present window can reveal while the app is inactive,
+// and asking that inactive app to make a window key is only best effort.
+- (void)orderWindowForImplicitShow:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    if ([self.passiveShowWindows containsObject:@(windowId)]) {
+        [window orderFront:nil];
+    } else {
+        [NSApp activate];
+        [window makeKeyAndOrderFront:nil];
+    }
 }
 
 // Order a deferred-show window front exactly once — from the first
@@ -6447,8 +7509,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         const double elapsedMs = (double)(NativeSdkTimestampNanoseconds() - createdNs.unsignedLongLongValue) / 1e6;
         fprintf(stderr, "native-sdk: window %llu shown (%s) %.1f ms after create wall_ns=%llu\n", (unsigned long long)windowId, reason, elapsedMs, (unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
     }
-    [window makeKeyAndOrderFront:nil];
-    [NSApp activate];
+    [self orderWindowForImplicitShow:windowId];
     [self emitWindowFrameForWindowId:windowId open:YES];
     [self scheduleFrame];
 }
@@ -6471,6 +7532,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)dealloc {
     [self invalidateAppTimers];
     [self audioStop];
+    [self videoStop];
     /* The vDSP plan outlives individual playbacks (created lazily
      * once); the host's end is where it retires. */
     if (self.audioSpectrumFft) {
@@ -6481,6 +7543,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
+    }
+    if (self.viewFocusEventMonitor) {
+        [NSEvent removeMonitor:self.viewFocusEventMonitor];
+        self.viewFocusEventMonitor = nil;
     }
     [self removeAllChildBridgeHandlers];
     for (WKWebView *webView in self.webViews.allValues) {
@@ -6494,8 +7560,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     // An explicit focus overrides a pending present-before-show defer:
     // the runtime asked for the window NOW.
     [self.deferredShowWindows removeObjectForKey:@(windowId)];
-    [window makeKeyAndOrderFront:nil];
     [NSApp activate];
+    [window makeKeyAndOrderFront:nil];
     [self emitWindowFrameForWindowId:windowId open:YES];
     [self scheduleFrame];
 }
@@ -6503,6 +7569,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)closeWindowWithId:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
+    // A runtime-initiated close is the app DECIDING to close: it must
+    // not bounce off the window's own .hide close policy, so it skips
+    // performClose: (which runs windowShouldClose:) and closes
+    // directly — the full windowWillClose teardown still runs.
+    if ([self.windowClosePolicies[@(windowId)] intValue] == 1) {
+        [window close];
+        return;
+    }
     // performClose: simulates the titlebar close button, which a
     // chromeless (borderless) window does not have — AppKit just beeps.
     // Closing directly runs the same delegate teardown
@@ -6512,6 +7586,50 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         return;
     }
     [window performClose:nil];
+}
+
+// close_policy .hide, the hiding half: order the window out (it keeps
+// its views, its webviews, and its host records — nothing tears down),
+// remember it as policy-hidden, and report the state on the frame
+// channel so the runtime's window table and the session journal both
+// carry the truth. orderOut composes with the host's bookkeeping where
+// close would not: the windows dictionary still owns the window, so
+// the count never reaches zero and no shutdown emits.
+- (void)hideWindowWithId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    [self.policyHiddenWindows addObject:@(windowId)];
+    [window orderOut:nil];
+    [self emitWindowFrameForWindowId:windowId open:YES];
+}
+
+// The counterpart show verb: bring a hidden (or merely unfocused)
+// window back to the glass, activating unless its creation-time
+// presentation policy is passive — the tray-menu
+// "Open" consequence and the Dock reopen both land here. Also clears a
+// pending present-before-show defer and a minimize, for the same
+// reason focusWindowWithId: does: the runtime asked for the window NOW.
+- (void)showWindowWithId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    [self.policyHiddenWindows removeObject:@(windowId)];
+    [self.deferredShowWindows removeObjectForKey:@(windowId)];
+    if (window.miniaturized) [window deminiaturize:nil];
+    [self orderWindowForImplicitShow:windowId];
+    [self emitWindowFrameForWindowId:windowId open:YES];
+    [self scheduleFrame];
+}
+
+// The Dock-icon reopen consequence: with no window visible, re-show
+// every window the .hide close policy hid. Returns whether any window
+// was re-shown (the app delegate then suppresses AppKit's default
+// reopen handling for exactly that case).
+- (BOOL)reopenPolicyHiddenWindows {
+    if (self.policyHiddenWindows.count == 0) return NO;
+    for (NSNumber *key in [self.policyHiddenWindows copy]) {
+        [self showWindowWithId:key.unsignedLongLongValue];
+    }
+    return YES;
 }
 
 // The real OS minimize verb, for app-drawn window controls (chromeless
@@ -6648,6 +7766,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     WKWebView *webView = [[NativeSdkWebView alloc] initWithFrame:container.bounds configuration:configuration];
     ((NativeSdkWebView *)webView).host = self;
     ((NativeSdkWebView *)webView).windowId = windowId;
+    ((NativeSdkWebView *)webView).viewLabel = @"main";
     [webView registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     webView.wantsLayer = YES;
     webView.layer.zPosition = 0;
@@ -7030,7 +8149,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
      * resync. (The packet path calls presentPixelsWithWidth internally,
      * so the invalidation lives here at the raw entry, not inside it.) */
     surface.hasCanvasRetainedState = NO;
-    const BOOL presented = [surface presentPixelsWithWidth:width height:height scale:scale hasDirtyRect:hasDirtyRect dirtyX:dirtyX dirtyY:dirtyY dirtyWidth:dirtyWidth dirtyHeight:dirtyHeight dirtyRects:nil rgba8:rgba8 byteLength:byteLength];
+    const BOOL presented = [surface presentPixelsWithWidth:width height:height scale:scale hasDirtyRect:hasDirtyRect dirtyX:dirtyX dirtyY:dirtyY dirtyWidth:dirtyWidth dirtyHeight:dirtyHeight dirtyRects:nil sourceIsPremultiplied:NO rgba8:rgba8 byteLength:byteLength];
     if (presented) [self showDeferredWindowIfPending:windowId reason:"first-present"];
     return presented;
 }
@@ -7080,11 +8199,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     return YES;
 }
 
-- (BOOL)setGpuSurfaceScrollDriversInWindow:(uint64_t)windowId label:(NSString *)label drivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count {
+- (BOOL)setGpuSurfaceScrollDriversInWindow:(uint64_t)windowId label:(NSString *)label drivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount {
     NSString *key = [self nativeViewKeyForWindow:windowId label:label];
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return NO;
-    [(NativeSdkMetalSurfaceView *)view setScrollDrivers:drivers count:count];
+    [(NativeSdkMetalSurfaceView *)view setScrollDrivers:drivers count:count occluders:occluders occluderCount:occluderCount];
     return YES;
 }
 
@@ -7330,6 +8449,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     WKWebView *webview = [[NativeSdkWebView alloc] initWithFrame:[self webViewFrameForWindow:window x:x y:y width:width height:height] configuration:configuration];
     ((NativeSdkWebView *)webview).host = self;
     ((NativeSdkWebView *)webview).windowId = windowId;
+    ((NativeSdkWebView *)webview).viewLabel = label;
     [webview registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     webview.wantsLayer = YES;
     webview.layer.zPosition = layer;
@@ -7534,18 +8654,27 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }];
 
     for (NSUInteger index = 0; index < views.count; index++) {
-        if (![views[index] isKindOfClass:[NativeSdkWebView class]]) continue;
-        NativeSdkWebView *webView = (NativeSdkWebView *)views[index];
+        NSView *coveredView = views[index];
+        const BOOL isWebView = [coveredView isKindOfClass:[NativeSdkWebView class]];
+        const BOOL isMetalSurface = [coveredView isKindOfClass:[NativeSdkMetalSurfaceView class]];
+        if (!isWebView && !isMetalSurface) continue;
         NSMutableArray<NSValue *> *coveredRects = [[NSMutableArray alloc] init];
         for (NSUInteger coverIndex = index + 1; coverIndex < views.count; coverIndex++) {
             NSView *coveringView = views[coverIndex];
             if (coveringView.hidden) continue;
-            NSRect intersection = NSIntersectionRect(webView.frame, coveringView.frame);
+            NSRect intersection = NSIntersectionRect(coveredView.frame, coveringView.frame);
             if (NSIsEmptyRect(intersection)) continue;
-            [coveredRects addObject:[NSValue valueWithRect:[webView convertRect:intersection fromView:contentView]]];
+            [coveredRects addObject:[NSValue valueWithRect:[coveredView convertRect:intersection fromView:contentView]]];
         }
-        webView.coveredMouseRects = coveredRects;
-        [self applyCoveredMouseRects:coveredRects toWebView:webView];
+        if (isWebView) {
+            NativeSdkWebView *webView = (NativeSdkWebView *)coveredView;
+            webView.coveredMouseRects = coveredRects;
+            [self applyCoveredMouseRects:coveredRects toWebView:webView];
+        } else {
+            NativeSdkMetalSurfaceView *surfaceView = (NativeSdkMetalSurfaceView *)coveredView;
+            surfaceView.coveredMouseRects = coveredRects;
+            [surfaceView.window invalidateCursorRectsForView:surfaceView];
+        }
     }
 }
 
@@ -7960,14 +9089,12 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [mainMenu addItem:editMenuItem];
     NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
     [editMenuItem setSubmenu:editMenu];
-    if (self.hasWebContent) {
-        // Undo/Redo answer only inside web content (the webview's own
-        // editing stack); the canvas text editor has no undo stack, so
-        // canvas-only apps do not show items nothing can perform.
-        [editMenu addItem:[self menuItem:@"Undo" action:@selector(undo:) key:@"z" modifiers:NSEventModifierFlagCommand]];
-        [editMenu addItem:[self menuItem:@"Redo" action:@selector(redo:) key:@"Z" modifiers:NSEventModifierFlagCommand]];
-        [editMenu addItem:[NSMenuItem separatorItem]];
-    }
+    // Web content answers through its native responder. A focused canvas
+    // editor answers through NativeSdkGpuSurfaceView's synthetic-key
+    // bridge into the runtime's per-editor history.
+    [editMenu addItem:[self menuItem:@"Undo" action:@selector(undo:) key:@"z" modifiers:NSEventModifierFlagCommand]];
+    [editMenu addItem:[self menuItem:@"Redo" action:@selector(redo:) key:@"Z" modifiers:NSEventModifierFlagCommand]];
+    [editMenu addItem:[NSMenuItem separatorItem]];
     [editMenu addItem:[self menuItem:@"Cut" action:@selector(cut:) key:@"x" modifiers:NSEventModifierFlagCommand]];
     [editMenu addItem:[self menuItem:@"Copy" action:@selector(copy:) key:@"c" modifiers:NSEventModifierFlagCommand]];
     [editMenu addItem:[self menuItem:@"Paste" action:@selector(paste:) key:@"v" modifiers:NSEventModifierFlagCommand]];
@@ -8031,7 +9158,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 }
 
 - (NSMenuItem *)commandMenuItem:(NSString *)title command:(NSString *)command key:(NSString *)key modifiers:(uint32_t)modifiers enabled:(BOOL)enabled checked:(BOOL)checked {
-    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title ?: @"" action:@selector(menuCommandItemClicked:) keyEquivalent:key ?: @""];
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title ?: @"" action:@selector(menuCommandItemClicked:) keyEquivalent:NativeSdkMenuKeyEquivalent(key ?: @"")];
     item.target = self;
     item.enabled = enabled;
     item.representedObject = command ?: @"";
@@ -8095,13 +9222,22 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     self.callback = callback;
     self.context = context;
 
+    // The Dock-reopen delegate (close_policy .hide's re-show path).
+    // NSApp.delegate is free in this host — everything else rides
+    // notification observers — and NSApp does not retain it.
+    if (!NSApp.delegate) {
+        NativeSdkAppDelegate *reopenDelegate = [[NativeSdkAppDelegate alloc] init];
+        reopenDelegate.host = self;
+        self.reopenDelegate = reopenDelegate;
+        NSApp.delegate = reopenDelegate;
+    }
+
     // Present-before-show: a deferred startup window stays ordered out
     // here and appears when its first canvas present lands (or the
     // create-time fallback deadline fires).
     if (!self.deferredShowWindows[@1]) {
-        [self.window makeKeyAndOrderFront:nil];
+        [self orderWindowForImplicitShow:1];
     }
-    [NSApp activate];
     if (!self.shortcutEventMonitor) {
         __weak NativeSdkAppKitHost *weakSelf = self;
         self.shortcutEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
@@ -8115,14 +9251,50 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
             return event;
         }];
     }
+    if (!self.viewFocusEventMonitor) {
+        __weak NativeSdkAppKitHost *weakSelf = self;
+        self.viewFocusEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+            (NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown)
+            handler:^NSEvent *(NSEvent *event) {
+                NativeSdkAppKitHost *strongSelf = weakSelf;
+                NSView *content = event.window.contentView;
+                if (!strongSelf || !content) return event;
+                NSPoint point = [content convertPoint:event.locationInWindow fromView:nil];
+                NSView *hit = [content hitTest:point];
+                while (hit && ![hit isKindOfClass:[NativeSdkWebView class]]) {
+                    hit = hit.superview;
+                }
+                if (![hit isKindOfClass:[NativeSdkWebView class]]) return event;
+                NativeSdkWebView *webView = (NativeSdkWebView *)hit;
+                const char *label = webView.viewLabel.UTF8String ?: "";
+                [strongSelf emitEvent:(native_sdk_appkit_event_t){
+                    .kind = NATIVE_SDK_APPKIT_EVENT_VIEW_FOCUSED,
+                    .window_id = webView.windowId,
+                    .view_label = label,
+                    .view_label_len = strlen(label),
+                }];
+                return event;
+            }];
+    }
 
     [self startApplicationActivationObservers];
     [self startAppearanceObservers];
 
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_START }];
+    // A VALID quit can arrive during the START dispatch (an update that
+    // returns fx.quitApp() at boot). Pre-run there is no queue turn to
+    // defer it to, so native_sdk_appkit_request_stop parked it — and
+    // THIS is its drain point: emitShutdown + stop run at top level,
+    // after the START dispatch has committed to the session recorder,
+    // never nested inside it (a nested emit seals the journal before
+    // the start record commits and replay refuses the recording).
+    [self drainPendingPreRunStop];
     // A failed START handler requests shutdown synchronously, before the
     // run loop exists — [NSApp stop:] is a no-op there. Honor the request
-    // here instead of stranding a live app behind a blank window.
+    // here instead of stranding a live app behind a blank window. (That
+    // request is the HOST side's native_sdk_appkit_stop, which keeps its
+    // inline pre-run emit — distinct from the quit verb's pending flag
+    // drained above.)
     if (self.didShutdown) return;
     [self emitAppearanceChanged];
     [self emitResize];
@@ -8138,6 +9310,14 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
             [(NativeSdkMetalSurfaceView *)view flushQueuedFirstCanvasFrameRequestNow];
         }
     }
+
+    // The appearance/resize/window-frame emits and the synchronous
+    // first canvas frame above are pre-run dispatches too — a boot
+    // command's update (a TS core's first-frame command included) can
+    // return the quit verb during any of them. Drain the parked quit
+    // here at top level before the run-loop machinery arms; when it
+    // drains, the app never enters [NSApp run].
+    if ([self drainPendingPreRunStop]) return;
 
     // Terminations that bypass the host's own stop path — cmd+Q's
     // default NSApp terminate, an AppleScript quit — must still deliver
@@ -8182,9 +9362,14 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     self.timer = nil;
     [self invalidateAppTimers];
     [self audioStop];
+    [self videoStop];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
+    }
+    if (self.viewFocusEventMonitor) {
+        [NSEvent removeMonitor:self.viewFocusEventMonitor];
+        self.viewFocusEventMonitor = nil;
     }
     [self stopAppearanceObservers];
     [self stopApplicationActivationObservers];
@@ -8199,6 +9384,22 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
                                            data1:0
                                            data2:0];
     [NSApp postEvent:event atStart:NO];
+}
+
+/* Drain the quit verb a pre-run dispatch parked (see
+ * native_sdk_appkit_request_stop): emitShutdown + stop at TOP LEVEL,
+ * strictly after the requesting dispatch returned, so the session
+ * recorder commits the requesting event before the shutdown record
+ * seals the journal. Answers YES only when it drained; a request that
+ * raced an already-emitted shutdown (a failed emit's inline stop) is
+ * consumed without a second emit. */
+- (BOOL)drainPendingPreRunStop {
+    if (!self.pendingPreRunStop) return NO;
+    self.pendingPreRunStop = NO;
+    if (self.didShutdown) return NO;
+    [self emitShutdown];
+    [self stop];
+    return YES;
 }
 
 - (void)emitEvent:(native_sdk_appkit_event_t)event {
@@ -8290,6 +9491,22 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         });
         return;
     }
+    /* Same hop for the video player's observers: every video entry
+     * point is loop-thread only too. */
+    if (context == NativeSdkAppKitVideoItemStatusContext) {
+        __weak NativeSdkAppKitHost *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf videoItemStatusChanged];
+        });
+        return;
+    }
+    if (context == NativeSdkAppKitVideoTimeControlContext) {
+        __weak NativeSdkAppKitHost *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf videoTimeControlChanged];
+        });
+        return;
+    }
     [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
 }
 
@@ -8347,6 +9564,10 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         .scale = window.backingScaleFactor,
         .open = open ? 1 : 0,
         .focused = window.isKeyWindow ? 1 : 0,
+        // The hidden flag reports host truth, not a parameter: every
+        // frame emit while a window sits in the policy-hidden set
+        // carries it, and hide/show flip the set before they emit.
+        .hidden = [self.policyHiddenWindows containsObject:@(windowId)] ? 1 : 0,
         .label = label.UTF8String,
         .label_len = [label lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
     }];
@@ -8460,7 +9681,12 @@ static double NativeSdkSecondsFromCMTime(CMTime time) {
 
 static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
     CMTime time;
-    time.value = (CMTimeValue)ms;
+    /* The millisecond position arrives as u64; CMTimeValue is signed
+     * 64-bit, so an absurd request past INT64_MAX must clamp rather
+     * than wrap negative. AVPlayer then clamps the (still enormous)
+     * positive time to the item's duration — seek-past-end lands at
+     * the end, per the transport contract. */
+    time.value = (ms > (uint64_t)INT64_MAX) ? INT64_MAX : (CMTimeValue)ms;
     time.timescale = 1000;
     time.flags = kCMTimeFlags_Valid;
     time.epoch = 0;
@@ -8633,9 +9859,14 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
         double duration = self.audioItem ? NativeSdkSecondsFromCMTime(self.audioItem.duration) : 0.0;
         if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
         if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
-        /* rate > 0 is the transport intent (un-paused); the buffering
-         * flag beside it says whether audio is actually coming out.
-         * Local files never buffer — the flag is stream-only. */
+        /* rate > 0 is the transport intent (un-paused), NOT the
+         * effective rate: a stream stalled in AVPlayer's waiting state
+         * keeps rate at the requested value (see the video twin in
+         * emitVideoEventOfKind for the AVPlayer.h contract), so a
+         * stalled-but-unpaused stream reports playing=1 with the
+         * buffering flag beside it saying whether audio is actually
+         * coming out. Local files never buffer — the flag is
+         * stream-only. */
         playing = player.rate > 0 ? 1 : 0;
         buffering = (!self.audioSourceIsLocal && self.audioBuffering) ? 1 : 0;
     }
@@ -9169,6 +10400,679 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     return 1;
 }
 
+/* ---------------------------------------------------- video player
+ *
+ * The app's single video player: one AVPlayer whose
+ * AVPlayerItemVideoOutput frames feed the sink push handed to the load
+ * entries. The transport, events, and buffering vocabulary mirror the
+ * audio player above; the one addition is the frame pump — a 1/60 s
+ * timer (the scheduleFrame cadence) that polls the output, converts
+ * each new BGRA pixel buffer into the reusable tightly packed RGBA8
+ * buffer, and pushes it through the sink. Pixels never ride events. */
+
+/* The sink's per-frame ceiling, mirrored from the Zig side
+ * (max_media_surface_pixel_bytes): the output is sized to FIT it. */
+#define NATIVE_SDK_VIDEO_MAX_FRAME_BYTES (8 * 1024 * 1024)
+
+/* Fit the stream's natural size to the frame budget: scale DOWN
+ * preserving aspect when width * height * 4 exceeds it (4K fits to
+ * roughly 1867x1050), never up — a small video decodes at its own
+ * size. */
+static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, size_t *outWidth, size_t *outHeight) {
+    double width = naturalWidth >= 1.0 ? naturalWidth : 1.0;
+    double height = naturalHeight >= 1.0 ? naturalHeight : 1.0;
+    const double budget_pixels = (double)(NATIVE_SDK_VIDEO_MAX_FRAME_BYTES / 4);
+    const double pixels = width * height;
+    if (pixels > budget_pixels) {
+        const double scale = sqrt(budget_pixels / pixels);
+        width = floor(width * scale);
+        height = floor(height * scale);
+        if (width < 1.0) width = 1.0;
+        if (height < 1.0) height = 1.0;
+    }
+    *outWidth = (size_t)width;
+    *outHeight = (size_t)height;
+}
+
+/* Emit one video report carrying the live position/duration readout of
+ * the app's single AVPlayer. Runs on the loop thread — every video
+ * entry point is loop-thread only; the player's KVO and notification
+ * handlers hop to the main queue before landing here. */
+- (void)emitVideoEventOfKind:(int)kind {
+    AVPlayer *player = self.videoPlayer;
+    uint64_t position_ms = 0;
+    uint64_t duration_ms = 0;
+    int playing = 0;
+    int buffering = 0;
+    if (player) {
+        double position = NativeSdkSecondsFromCMTime(player.currentTime);
+        double duration = self.videoItem ? NativeSdkSecondsFromCMTime(self.videoItem.duration) : 0.0;
+        if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
+        if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
+        /* rate > 0 is the transport intent (un-paused), NOT the
+         * effective rate: while a stream stalls into
+         * AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate, the
+         * AVPlayer.h contract keeps rate at the requested value ("the
+         * value of the rate property is not currently effective but
+         * instead indicates the rate at which playback will start or
+         * resume"), so a stalled-but-unpaused playback reports
+         * playing=1 with the buffering flag beside it saying whether
+         * frames are actually coming out — the transport control keeps
+         * offering Pause. AVPlayer resets rate to 0.0 on its own only
+         * with waits-to-minimize-stalling disabled (our LOCAL-file
+         * configuration, where a mid-file stall has no bytes to wait
+         * for and playback would not self-resume — reporting paused,
+         * and offering Play, is then the honest affordance). Local
+         * files never buffer — the flag is stream-only. */
+        playing = player.rate > 0 ? 1 : 0;
+        buffering = (!self.videoSourceIsLocal && self.videoBuffering) ? 1 : 0;
+    }
+    native_sdk_appkit_event_t event = {
+        .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
+        .video_kind = kind,
+        .video_token = self.videoToken,
+        .video_position_ms = position_ms,
+        .video_duration_ms = duration_ms,
+        .video_playing = playing,
+        .video_buffering = buffering,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    };
+    if (kind == NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED) {
+        /* The acknowledgment carries the STREAM's true dimensions —
+         * the honest source geometry, even when the output texture is
+         * fitted smaller to the frame budget. */
+        event.video_width = self.videoStreamWidth;
+        event.video_height = self.videoStreamHeight;
+    }
+    [self emitEvent:event];
+}
+
+- (void)stopVideoPositionTimer {
+    [self.videoPositionTimer invalidate];
+    self.videoPositionTimer = nil;
+}
+
+- (void)videoPositionTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if (!self.videoPlayer) {
+        [self stopVideoPositionTimer];
+        return;
+    }
+    [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_POSITION];
+}
+
+- (void)startVideoFrameTimer {
+    if (self.videoFrameTimer) return;
+    /* The pixel clock (1/60 s, the scheduleFrame cadence). Common
+     * modes so frames keep flowing during live resize and menu
+     * tracking (default-mode timers do not fire in tracking
+     * runloops). Block-based with a WEAK host: a target-selector
+     * repeating timer retains its target through the run loop, so a
+     * host destroyed mid-playback could never dealloc — the timer
+     * self-invalidates when the host is gone instead. */
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    NSTimer *tick = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
+                                           repeats:YES
+                                             block:^(NSTimer *timer) {
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf) {
+            [timer invalidate];
+            return;
+        }
+        [strongSelf videoFrameTimerFired:timer];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+    self.videoFrameTimer = tick;
+}
+
+- (void)stopVideoFrameTimer {
+    [self.videoFrameTimer invalidate];
+    self.videoFrameTimer = nil;
+}
+
+- (void)videoFrameTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if (!self.videoPlayer) {
+        [self stopVideoFrameTimer];
+        return;
+    }
+    [self videoPumpFrame];
+    /* The poster hunt's bound: a paused hunt that has not yielded a
+     * frame within ~3s (180 ticks) stops polling — honest surrender,
+     * the placeholder stays. A PLAYING stream never surrenders here;
+     * its timer belongs to playback. */
+    if (self.videoPosterPending &&
+        self.videoPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+        self.videoPosterTicks += 1;
+        if (self.videoPosterTicks > 180) {
+            self.videoPosterPending = NO;
+            [self stopVideoFrameTimer];
+        }
+    }
+}
+
+/* One poll of the video output: if a new frame is due at the current
+ * host time, convert it and push it through the sink. Also called
+ * one-shot after pause and seek, so a paused scrub still paints the
+ * frame it landed on. Main-thread only, like every video entry. */
+- (void)videoPumpFrame {
+    AVPlayerItemVideoOutput *output = self.videoOutput;
+    native_sdk_appkit_video_sink_push_t push = self.videoSinkPush;
+    if (!output || !push || !self.videoFrameBuffer) return;
+    CMTime itemTime = [output itemTimeForHostTime:CACurrentMediaTime()];
+    if (![output hasNewPixelBufferForItemTime:itemTime]) return;
+    CVPixelBufferRef pixels = [output copyPixelBufferForItemTime:itemTime itemTimeForDisplay:NULL];
+    if (!pixels) return;
+    const size_t width = CVPixelBufferGetWidth(pixels);
+    const size_t height = CVPixelBufferGetHeight(pixels);
+    const size_t frame_len = width * height * 4;
+    if (frame_len == 0 || frame_len > self.videoFrameBufferLen) {
+        CFRelease(pixels);
+        return;
+    }
+    /* A failed lock never mapped the buffer: the base address would be
+     * garbage and the matching unlock would unbalance the buffer's lock
+     * count. Drop this frame and keep hunting — the poster latch stays
+     * set for the same reason a converted-but-unpushed tick keeps it
+     * (below): only an actual push verdict may end the hunt. */
+    if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+        CFRelease(pixels);
+        return;
+    }
+    void *base = CVPixelBufferGetBaseAddress(pixels);
+    /* -1 = no push happened (NULL base address or a failed channel
+     * permutation). Only an actual push verdict may end the poster
+     * hunt or release the claim below; a converted-but-unpushed tick
+     * must keep hunting, or a paused load's surface stays blank. */
+    int result = -1;
+    if (base) {
+        /* BGRA -> RGBA is one channel permutation; vImage reads the
+         * buffer's bytesPerRow stride and writes the tightly packed
+         * rows the sink contract requires. */
+        vImage_Buffer source = {
+            .data = base,
+            .height = height,
+            .width = width,
+            .rowBytes = CVPixelBufferGetBytesPerRow(pixels),
+        };
+        vImage_Buffer destination = {
+            .data = self.videoFrameBuffer,
+            .height = height,
+            .width = width,
+            .rowBytes = width * 4,
+        };
+        const uint8_t permute[4] = { 2, 1, 0, 3 };
+        if (vImagePermuteChannels_ARGB8888(&source, &destination, permute, kvImageNoFlags) == kvImageNoError) {
+            result = push(self.videoSinkContext, width, height, self.videoFrameBuffer, frame_len);
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
+    CFRelease(pixels);
+    /* The first delivered frame ends the poster hunt: a paused load
+     * has painted its poster, so the timer stops until play; a playing
+     * load keeps its timer, the latch just clears. */
+    if (result == 0 && self.videoPosterPending) {
+        self.videoPosterPending = NO;
+        AVPlayer *player = self.videoPlayer;
+        if (player && player.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+            [self stopVideoFrameTimer];
+        }
+    }
+    /* 1 says the receiving claim was released (the sink is
+     * latest-wins; a released claim just means stop pushing) — the
+     * frame timer has nothing left to feed. Any other nonzero result
+     * is one dropped frame; the decode keeps rolling. */
+    if (result == 1) {
+        self.videoPosterPending = NO;
+        [self stopVideoFrameTimer];
+    }
+}
+
+/* Local files on the app's single video player. Unlike audio there is
+ * no synchronous decode verdict to probe for (AVAudioPlayer's header
+ * decode has no video twin), so the existence check is the only
+ * synchronous refusal — an undecodable file reports asynchronously as
+ * one FAILED event. */
+- (int)videoLoadPath:(NSString *)path token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+    [self videoStop];
+    self.videoToken = token;
+    /* Relative paths resolve against the bundle's Resources inside a
+     * packaged .app (where the process cwd is meaningless — `open`
+     * launches at /), and keep their cwd meaning everywhere else. */
+    NSString *resolved = NativeSdkResolvedAssetFilePath(path);
+    if (![[NSFileManager defaultManager] fileExistsAtPath:resolved]) return 1;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:resolved] options:nil];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    [self videoInstallItem:item localSource:YES pushFn:pushFn pushContext:pushContext];
+    return 0;
+}
+
+/* URL sources: a progressive AVPlayer stream — playable as soon as
+ * enough bytes arrive, never download-then-play. No cache layer here
+ * (unlike audio's verified-entry two-step): video bytes are large and
+ * the streaming path alone is the honest slice. Returns 0 for a
+ * started stream, 2 when the URL cannot be parsed; everything
+ * asynchronous — readiness, stalls, natural end, network death —
+ * arrives as EVENT_VIDEO reports. */
+- (int)videoLoadURL:(NSString *)urlString token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+    [self videoStop];
+    self.videoToken = token;
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url || !url.scheme) return 2;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    [self videoInstallItem:item localSource:NO pushFn:pushFn pushContext:pushContext];
+    return 0;
+}
+
+/* Shared install for both sources: the single AVPlayer, its status and
+ * time-control observers, the end/failure notifications, and the sink
+ * destination. The LOADED acknowledgment stays asynchronous by
+ * contract (readyToPlay KVO -> videoItemStatusChanged, which also
+ * attaches the video output — the presentation size is only decoded
+ * then): emitting inside the service call would re-enter the runtime
+ * while it is still dispatching the command that asked for the load. */
+- (void)videoInstallItem:(AVPlayerItem *)item localSource:(BOOL)localSource pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+    AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
+    /* Stall policy by source: a local file has all its bytes, so
+     * playback starts immediately; a stream keeps the default — start
+     * as soon as sustained playback is likely, roll through short gaps.
+     * Stated explicitly because immediate progressive start is the
+     * contract for streams. */
+    player.automaticallyWaitsToMinimizeStalling = localSource ? NO : YES;
+    self.videoItem = item;
+    self.videoPlayer = player;
+    self.videoSinkPush = pushFn;
+    self.videoSinkContext = pushContext;
+    self.videoSourceIsLocal = localSource;
+    /* Buffering follows timeControlStatus (videoTimeControlChanged):
+     * the moment an un-paused stream needs bytes, the player enters
+     * the waiting state and the observer flips this flag. Presetting
+     * it would make a PAUSED fresh stream read as buffering — a
+     * paused player is paused, not waiting. */
+    self.videoBuffering = NO;
+    self.videoLoadedEmitted = NO;
+    [item addObserver:self
+           forKeyPath:@"status"
+              options:NSKeyValueObservingOptionNew
+              context:NativeSdkAppKitVideoItemStatusContext];
+    [player addObserver:self
+             forKeyPath:@"timeControlStatus"
+                options:NSKeyValueObservingOptionNew
+                context:NativeSdkAppKitVideoTimeControlContext];
+    self.videoObservingStatus = YES;
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    /* Both blocks re-check the notification's item against the CURRENT
+     * one: removeObserver (the teardown a replacing load runs) stops
+     * future deliveries, but a notification already enqueued on the
+     * main queue still executes its block — ungated, a replaced item's
+     * terminal would tear down the replacement's player and emit a
+     * false terminal event for the playback that replaced it. */
+    self.videoEndObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                    object:item
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+                    NativeSdkAppKitHost *host = weakSelf;
+                    if (!host || note.object != host.videoItem) return;
+                    [host videoDidPlayToEnd];
+                }];
+    self.videoFailObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
+                    object:item
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+                    NativeSdkAppKitHost *host = weakSelf;
+                    if (!host || note.object != host.videoItem) return;
+                    [host videoDidFail];
+                }];
+}
+
+/* Attach the frame tap once the item is ready — presentationSize is
+ * only decoded then. The output's pixel buffers are BGRA fitted to the
+ * frame budget; the STREAM dimensions recorded here are what LOADED
+ * reports. Returns NO when this playback could never paint a frame:
+ * an item with no video geometry at all (an audio-only file loaded as
+ * video — sound over a permanently blank surface is a broken video
+ * playback, and audio-only sources belong to the audio channel), or a
+ * conversion buffer that cannot be allocated after geometry promised
+ * frames. Either way the caller reports the load FAILED instead of
+ * acknowledging a playback that can never paint. */
+- (BOOL)videoAttachOutputForItem:(AVPlayerItem *)item {
+    /* Rotated media (iPhone portrait: encoded landscape, presented
+     * through a 90-degree track preferredTransform) needs the
+     * transform BAKED into the vended frames: a raw output tap gets
+     * the encoded orientation — sideways and stretched into the
+     * requested attributes — while AVPlayerLayer would have applied
+     * the transform for presentation. A properties-of-asset video
+     * composition renders it in (verified against a portrait-flagged
+     * H.264 asset: the tap vends encoded orientation without it and
+     * display orientation with it). Identity-transform assets skip
+     * the composition's render pass, and track-less items (streams)
+     * have no transform to bake. */
+    NSArray<AVAssetTrack *> *videoTracks = [item.asset tracksWithMediaType:AVMediaTypeVideo];
+    if (videoTracks.count > 0 && !CGAffineTransformIsIdentity(videoTracks.firstObject.preferredTransform)) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        /* The synchronous variant: this runs at readyToPlay, where the
+         * asset's properties are already loaded, and the completion-
+         * handler replacement is not available on every supported
+         * macOS. */
+        item.videoComposition = [AVMutableVideoComposition videoCompositionWithPropertiesOfAsset:item.asset];
+#pragma clang diagnostic pop
+    }
+    CGSize natural = item.presentationSize;
+    if (natural.width < 1.0 || natural.height < 1.0) {
+        /* Fallback: the first video track's naturalSize with its
+         * preferredTransform applied (rotated media reports a
+         * transposed natural size). */
+        if (videoTracks.count > 0) {
+            AVAssetTrack *track = videoTracks.firstObject;
+            CGSize transformed = CGSizeApplyAffineTransform(track.naturalSize, track.preferredTransform);
+            natural = CGSizeMake(fabs(transformed.width), fabs(transformed.height));
+        }
+    }
+    if (natural.width < 1.0 || natural.height < 1.0) return NO;
+    self.videoStreamWidth = (uint64_t)llround(natural.width);
+    self.videoStreamHeight = (uint64_t)llround(natural.height);
+    size_t fitted_width = 0;
+    size_t fitted_height = 0;
+    NativeSdkVideoFittedSize(natural.width, natural.height, &fitted_width, &fitted_height);
+    /* The width/height attributes are client REQUIREMENTS on the
+     * vended buffers (AVPlayerItemVideoOutput's pixelBufferAttributes
+     * contract), not hints: the output converts AND scales every frame
+     * to satisfy them, so a 3840x2160 source tapped with fitted
+     * attributes vends fitted-size buffers (verified against a UHD
+     * H.264 asset: requested 1866x1050, vended 1866x1050). The
+     * oversized-frame drop in videoPumpFrame is defense in depth
+     * against a hypothetical host ignoring the attributes, never an
+     * expected path. */
+    AVPlayerItemVideoOutput *output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
+        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferWidthKey: @(fitted_width),
+        (id)kCVPixelBufferHeightKey: @(fitted_height),
+    }];
+    [item addOutput:output];
+    self.videoOutput = output;
+    /* The reusable conversion target: one allocation per load at the
+     * output's max frame size, freed on stop/replace. Allocation
+     * failure is a FAILED load, never a silent zero-frame playback. */
+    if (self.videoFrameBuffer) free(self.videoFrameBuffer);
+    self.videoFrameBufferLen = fitted_width * fitted_height * 4;
+    self.videoFrameBuffer = malloc(self.videoFrameBufferLen);
+    if (!self.videoFrameBuffer) {
+        self.videoFrameBufferLen = 0;
+        return NO;
+    }
+    return YES;
+}
+
+/* Release the player, its observers, the frame tap, and the conversion
+ * buffer. The sink destination is cleared with them — a retired
+ * playback must never push another frame. */
+- (void)videoTearDownPlayer {
+    AVPlayerItem *item = self.videoItem;
+    AVPlayer *player = self.videoPlayer;
+    if (self.videoObservingStatus) {
+        [item removeObserver:self forKeyPath:@"status" context:NativeSdkAppKitVideoItemStatusContext];
+        [player removeObserver:self forKeyPath:@"timeControlStatus" context:NativeSdkAppKitVideoTimeControlContext];
+        self.videoObservingStatus = NO;
+    }
+    if (self.videoEndObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.videoEndObserver];
+        self.videoEndObserver = nil;
+    }
+    if (self.videoFailObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.videoFailObserver];
+        self.videoFailObserver = nil;
+    }
+    [player pause];
+    if (self.videoOutput && item) [item removeOutput:self.videoOutput];
+    self.videoOutput = nil;
+    self.videoItem = nil;
+    self.videoPlayer = nil;
+    self.videoSinkPush = NULL;
+    self.videoSinkContext = NULL;
+    self.videoSourceIsLocal = NO;
+    self.videoBuffering = NO;
+    self.videoLoadedEmitted = NO;
+    self.videoLooping = NO;
+    self.videoStreamWidth = 0;
+    self.videoStreamHeight = 0;
+    self.videoPosterPending = NO;
+    self.videoPosterTicks = 0;
+    self.videoToken = 0;
+    if (self.videoFrameBuffer) {
+        free(self.videoFrameBuffer);
+        self.videoFrameBuffer = NULL;
+        self.videoFrameBufferLen = 0;
+    }
+}
+
+/* Item status flipped (main queue, hopped from KVO): readyToPlay is
+ * the load's LOADED acknowledgment — the geometry is decoded, the
+ * frame tap attaches, and playback is rolling or about to; failed is
+ * the honest terminal report for an unreachable host or an
+ * undecodable payload. */
+- (void)videoItemStatusChanged {
+    AVPlayerItem *item = self.videoItem;
+    if (!item) return;
+    if (item.status == AVPlayerItemStatusReadyToPlay) {
+        if (self.videoLoadedEmitted) return;
+        self.videoLoadedEmitted = YES;
+        if (![self videoAttachOutputForItem:item]) {
+            /* No video geometry (an audio-only asset) or no conversion
+             * buffer: acknowledging LOADED would promise frames that
+             * can never arrive, so the load fails honestly. */
+            [self videoDidFail];
+            return;
+        }
+        [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED];
+        /* The poster frame: a paused load (autoplay = false) runs no
+         * frame timer, so start a bounded first-frame hunt — the
+         * output needs a beat past readyToPlay to yield the frame at
+         * position zero. A playing load clears the latch at its first
+         * pumped frame and the timer just keeps rolling. */
+        self.videoPosterPending = YES;
+        self.videoPosterTicks = 0;
+        [self startVideoFrameTimer];
+        return;
+    }
+    if (item.status == AVPlayerItemStatusFailed) {
+        [self videoDidFail];
+    }
+}
+
+/* timeControlStatus flipped (main queue, hopped from KVO): waiting to
+ * play at the requested rate IS buffering — for streams. A local file
+ * has all its bytes, so the flag never surfaces for local sources
+ * (waits-to-minimize-stalling is off for them anyway). Emit the
+ * transition immediately as a position report so the UI flips its
+ * buffering state now, not at the next 500ms tick. */
+- (void)videoTimeControlChanged {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return;
+    /* Playback actually rolling: make sure the pixel clock runs. The
+     * poster hunt may have stopped the frame timer while the stream
+     * buffered (or surrendered past its bound), and nothing else
+     * restarts it when AVPlayer's waiting phase finally ends —
+     * startVideoFrameTimer is idempotent, so a timer videoPlay already
+     * armed is untouched. */
+    if (player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+        [self startVideoFrameTimer];
+    }
+    if (self.videoSourceIsLocal) return;
+    BOOL buffering = player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
+    if (buffering == self.videoBuffering) return;
+    self.videoBuffering = buffering;
+    /* A transition INTO paused is the caller's own pause landing (rate
+     * hit zero): pause emits no acknowledgment by contract — the
+     * engine's command mirror already cleared its buffering flag — and
+     * position reports are for playback in motion, so the flag update
+     * above stays silent. Waiting and playing transitions still emit:
+     * they are the stream's own news. */
+    if (player.timeControlStatus == AVPlayerTimeControlStatusPaused) return;
+    [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_POSITION];
+}
+
+/* Natural end of the video, both sources. A looping playback wraps to
+ * zero and keeps rolling, emitting NOTHING — a playback that never
+ * ends never completes (the documented contract); position ticks keep
+ * telling the truth on their own cadence. A non-looping end is
+ * retire-before-emit, the audio pattern: the completion Msg routinely
+ * starts the NEXT video from inside its own dispatch, and tearing down
+ * afterwards would destroy the player that load just installed. The
+ * duration is captured first so the event still carries the honest
+ * terminal position. */
+- (void)videoDidPlayToEnd {
+    if (!self.videoPlayer) return;
+    if (self.videoLooping) {
+        CMTime zero = NativeSdkCMTimeFromMs(0);
+        [self.videoPlayer seekToTime:zero toleranceBefore:zero toleranceAfter:zero];
+        [self.videoPlayer play];
+        return;
+    }
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    uint64_t duration_ms = 0;
+    if (self.videoItem) {
+        double duration = NativeSdkSecondsFromCMTime(self.videoItem.duration);
+        if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
+    }
+    const uint64_t token = self.videoToken;
+    [self videoTearDownPlayer];
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
+        .video_kind = NATIVE_SDK_APPKIT_VIDEO_EVENT_COMPLETED,
+        .video_token = token,
+        .video_position_ms = duration_ms,
+        .video_duration_ms = duration_ms,
+        .video_playing = 0,
+        .video_buffering = 0,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    }];
+}
+
+/* Playback died — a stream lost its network, a local file hit a decode
+ * error mid-file, or an item never became playable (an undecodable
+ * payload, an unreachable host): one FAILED event, player retired
+ * first. */
+- (void)videoDidFail {
+    if (!self.videoPlayer) return;
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    const uint64_t token = self.videoToken;
+    [self videoTearDownPlayer];
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
+        .video_kind = NATIVE_SDK_APPKIT_VIDEO_EVENT_FAILED,
+        .video_token = token,
+        .video_position_ms = 0,
+        .video_duration_ms = 0,
+        .video_playing = 0,
+        .video_buffering = 0,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    }];
+}
+
+- (int)videoPlay {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    /* AVPlayer's play is asynchronous by nature (it starts when
+     * buffered bytes allow), so play always "applies" — readiness and
+     * stalls report through the event stream. */
+    [player play];
+    if (!self.videoPositionTimer) {
+        /* Common modes for the same reason app timers use them: the
+         * readout must keep ticking while a menu is open or the window
+         * is live-resizing. Weak-host block timer, the pixel clock's
+         * rule: no retain cycle through the run loop. */
+        __weak NativeSdkAppKitHost *weakSelf = self;
+        NSTimer *tick = [NSTimer timerWithTimeInterval:0.5
+                                               repeats:YES
+                                                 block:^(NSTimer *timer) {
+            NativeSdkAppKitHost *strongSelf = weakSelf;
+            if (!strongSelf) {
+                [timer invalidate];
+                return;
+            }
+            [strongSelf videoPositionTimerFired:timer];
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+        self.videoPositionTimer = tick;
+    }
+    [self startVideoFrameTimer];
+    return 1;
+}
+
+- (int)videoPause {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    [player pause];
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    /* One final poll: the frame the pause landed on may not have been
+     * pumped yet, and a paused surface should hold it. */
+    [self videoPumpFrame];
+    return 1;
+}
+
+- (int)videoStop {
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    if (!self.videoPlayer) return 0;
+    [self videoTearDownPlayer];
+    return 1;
+}
+
+- (int)videoSeekToMs:(uint64_t)positionMs {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    /* AVPlayer clamps to the seekable ranges it has (or fetches the
+     * range it needs); exact tolerance keeps the readout honest
+     * against the requested position. */
+    CMTime zero = NativeSdkCMTimeFromMs(0);
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    [player seekToTime:NativeSdkCMTimeFromMs(positionMs)
+       toleranceBefore:zero
+        toleranceAfter:zero
+     completionHandler:^(BOOL finished) {
+         if (!finished) return;
+         /* One-shot poll on the loop thread so a PAUSED scrub still
+          * paints the sought frame — the frame timer only runs while
+          * playing. */
+         dispatch_async(dispatch_get_main_queue(), ^{
+             [weakSelf videoPumpFrame];
+         });
+     }];
+    return 1;
+}
+
+- (int)videoSetVolume:(double)volume {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    player.volume = (float)volume;
+    return 1;
+}
+
+- (int)videoSetMuted:(BOOL)muted {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    player.muted = muted;
+    return 1;
+}
+
+- (int)videoSetLoop:(BOOL)loop {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    self.videoLooping = loop;
+    /* A looping player must not pause itself at the end notification's
+     * moment — the wrap seek in videoDidPlayToEnd restarts it
+     * seamlessly. */
+    player.actionAtItemEnd = loop ? AVPlayerActionAtItemEndNone : AVPlayerActionAtItemEndPause;
+    return 1;
+}
+
 - (void)scheduleBridgeFrames {
     self.bridgeFrameKeepalive = NativeSdkBridgeFrameKeepaliveFrames;
     [self scheduleFrame];
@@ -9531,6 +11435,58 @@ static NSString *NativeSdkOriginForURL(NSURL *url) {
     return [NSString stringWithFormat:@"%@://%@", scheme, host];
 }
 
+/* The canonical key name -> NSMenuItem key equivalent. Single characters
+ * pass through; named keys become the character AppKit expects (function
+ * keys and navigation keys are private-use unichars, editing keys their
+ * control characters). An unknown name degrades to no key equivalent
+ * rather than a multi-character string AppKit would misread. */
+static NSString *NativeSdkMenuKeyEquivalent(NSString *key) {
+    if (key.length == 0) return @"";
+    // Lowercase single characters too (key names validate
+    // case-insensitively): an uppercase key equivalent implies Shift to
+    // AppKit, which the explicit modifier mask already expresses.
+    if (key.length == 1) return key.lowercaseString;
+    static NSDictionary<NSString *, NSString *> *named = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        named = @{
+            @"escape": [NSString stringWithFormat:@"%C", (unichar)0x1b],
+            @"enter": @"\r",
+            @"tab": @"\t",
+            @"space": @" ",
+            /* The physical Mac Delete/backspace key emits 0x7f (what the
+             * key-event normalizer maps to "backspace"), not the nominal
+             * BS control 0x08 — key equivalents must match what the key
+             * actually produces or the accelerator never fires. */
+            @"backspace": [NSString stringWithFormat:@"%C", (unichar)0x7f],
+            @"arrowup": [NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey],
+            @"arrowdown": [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey],
+            @"arrowleft": [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey],
+            @"arrowright": [NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey],
+            @"delete": [NSString stringWithFormat:@"%C", (unichar)NSDeleteFunctionKey],
+            @"home": [NSString stringWithFormat:@"%C", (unichar)NSHomeFunctionKey],
+            @"end": [NSString stringWithFormat:@"%C", (unichar)NSEndFunctionKey],
+            @"pageup": [NSString stringWithFormat:@"%C", (unichar)NSPageUpFunctionKey],
+            @"pagedown": [NSString stringWithFormat:@"%C", (unichar)NSPageDownFunctionKey],
+            @"insert": [NSString stringWithFormat:@"%C", (unichar)NSInsertFunctionKey],
+            @"f1": [NSString stringWithFormat:@"%C", (unichar)NSF1FunctionKey],
+            @"f2": [NSString stringWithFormat:@"%C", (unichar)NSF2FunctionKey],
+            @"f3": [NSString stringWithFormat:@"%C", (unichar)NSF3FunctionKey],
+            @"f4": [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey],
+            @"f5": [NSString stringWithFormat:@"%C", (unichar)NSF5FunctionKey],
+            @"f6": [NSString stringWithFormat:@"%C", (unichar)NSF6FunctionKey],
+            @"f7": [NSString stringWithFormat:@"%C", (unichar)NSF7FunctionKey],
+            @"f8": [NSString stringWithFormat:@"%C", (unichar)NSF8FunctionKey],
+            @"f9": [NSString stringWithFormat:@"%C", (unichar)NSF9FunctionKey],
+            @"f10": [NSString stringWithFormat:@"%C", (unichar)NSF10FunctionKey],
+            @"f11": [NSString stringWithFormat:@"%C", (unichar)NSF11FunctionKey],
+            @"f12": [NSString stringWithFormat:@"%C", (unichar)NSF12FunctionKey],
+        };
+    });
+    NSString *equivalent = named[key.lowercaseString];
+    return equivalent ?: @"";
+}
+
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event) {
     NSString *characters = event.charactersIgnoringModifiers ?: @"";
     if (characters.length == 0) return @"";
@@ -9543,6 +11499,21 @@ static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event) {
         case NSDeleteFunctionKey: return @"delete";
         case NSHomeFunctionKey: return @"home";
         case NSEndFunctionKey: return @"end";
+        case NSPageUpFunctionKey: return @"pageup";
+        case NSPageDownFunctionKey: return @"pagedown";
+        case NSInsertFunctionKey: return @"insert";
+        case NSF1FunctionKey: return @"f1";
+        case NSF2FunctionKey: return @"f2";
+        case NSF3FunctionKey: return @"f3";
+        case NSF4FunctionKey: return @"f4";
+        case NSF5FunctionKey: return @"f5";
+        case NSF6FunctionKey: return @"f6";
+        case NSF7FunctionKey: return @"f7";
+        case NSF8FunctionKey: return @"f8";
+        case NSF9FunctionKey: return @"f9";
+        case NSF10FunctionKey: return @"f10";
+        case NSF11FunctionKey: return @"f11";
+        case NSF12FunctionKey: return @"f12";
         case 0x1b: return @"escape";
         case '\r': return @"enter";
         case '\t': return @"tab";
@@ -9572,6 +11543,14 @@ static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event) {
         case '~': return @"`";
         default: return characters.lowercaseString;
     }
+}
+
+static BOOL NativeSdkTextNavigationNeedsRawKeyEvent(NSEvent *event) {
+    if (!event) return NO;
+    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if ((flags & (NSEventModifierFlagCommand | NSEventModifierFlagOption)) == 0) return NO;
+    NSString *key = NativeSdkShortcutKeyForEvent(event);
+    return [key isEqualToString:@"arrowleft"] || [key isEqualToString:@"arrowright"];
 }
 
 static BOOL NativeSdkShortcutUsesImplicitShift(NSString *key, NSEvent *event) {
@@ -9626,7 +11605,7 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url) 
     return NO;
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     @autoreleasepool {
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"native-sdk";
         NSString *displayNameString = [[NSString alloc] initWithBytes:display_name length:display_name_len encoding:NSUTF8StringEncoding] ?: @"";
@@ -9636,7 +11615,7 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *bundleIdString = [[NSString alloc] initWithBytes:bundle_id length:bundle_id_len encoding:NSUTF8StringEncoding] ?: @"dev.native_sdk.app";
         NSString *iconPathString = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *windowLabelString = [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] ?: @"main";
-        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy];
+        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
     }
 }
@@ -9758,6 +11737,55 @@ int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double vo
     return [object audioSetVolume:volume];
 }
 
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *path_string = [[NSString alloc] initWithBytes:path length:path_len encoding:NSUTF8StringEncoding];
+    if (!path_string) return 1;
+    return [object videoLoadPath:path_string token:token pushFn:push_fn pushContext:push_context];
+}
+
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *url_string = [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding];
+    if (!url_string) return 2;
+    return [object videoLoadURL:url_string token:token pushFn:push_fn pushContext:push_context];
+}
+
+int native_sdk_appkit_video_play(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoPlay];
+}
+
+int native_sdk_appkit_video_pause(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoPause];
+}
+
+int native_sdk_appkit_video_stop(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoStop];
+}
+
+int native_sdk_appkit_video_seek(native_sdk_appkit_host_t *host, uint64_t position_ms) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSeekToMs:position_ms];
+}
+
+int native_sdk_appkit_video_set_volume(native_sdk_appkit_host_t *host, double volume) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSetVolume:volume];
+}
+
+int native_sdk_appkit_video_set_muted(native_sdk_appkit_host_t *host, int muted) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSetMuted:(muted != 0)];
+}
+
+int native_sdk_appkit_video_set_loop(native_sdk_appkit_host_t *host, int loop) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSetLoop:(loop != 0)];
+}
+
 void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     [object wakeFromAnyThread];
@@ -9765,8 +11793,58 @@ void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {
 
 void native_sdk_appkit_stop(native_sdk_appkit_host_t *host) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
-    [object emitShutdown];
-    [object stop];
+    /* The HOST side's shutdown request — a failed event emit asks for
+     * the teardown (see RunState.emit's catch in macos/root.zig). Not
+     * the quit verb's landing point: that is
+     * native_sdk_appkit_request_stop below. Queued while the run loop
+     * is live, so the emit lands on the next turn at top level; [NSApp
+     * run] drains the main queue and stop's posted wake event unwinds
+     * it, so a stop that is the last thing an app ever does still
+     * exits promptly. */
+    if (!NSApp.running) {
+        /* Before [NSApp run] there is no loop to drain the queue — a
+         * failed START handler requests shutdown synchronously (see
+         * runWithCallback's didShutdown check) and must keep getting
+         * the inline emit, or the request would strand until a run
+         * loop that may never start. */
+        [object emitShutdown];
+        [object stop];
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [object emitShutdown];
+        [object stop];
+    });
+}
+
+void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    /* The quit VERB's landing point (fx.quitApp). The verb arrives MID
+     * DISPATCH — some update returned it, so the runtime is still
+     * inside that event's dispatch. Emitting SHUTDOWN here would nest
+     * the shutdown dispatch inside the requester's: the session
+     * recorder commits nested events innermost-first and seals the
+     * journal on shutdown, so the nested seal makes the OUTER commit a
+     * no-op and the journal loses the very event (and model mutation)
+     * that quit the app — replay diverges. While the run loop is live,
+     * one main-queue hop delivers the identical emitShutdown + stop on
+     * the next loop turn, after the requesting dispatch has committed.
+     * Before [NSApp run] there is no queue turn that would drain in
+     * time — a quit from App.start's update, or from a boot command
+     * during the synchronous first canvas frame, must NOT fall back to
+     * an inline emit (the same nesting bug, just pre-run) — so the
+     * request parks in pendingPreRunStop and runWithCallback drains it
+     * at top level once the pre-run dispatch that carried it returns.
+     * (The inline pre-run emit lives only in native_sdk_appkit_stop
+     * above, for the host-side failed-START request.) */
+    if (!NSApp.running) {
+        object.pendingPreRunStop = YES;
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [object emitShutdown];
+        [object stop];
+    });
 }
 
 void native_sdk_appkit_load_webview(native_sdk_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {
@@ -9835,11 +11913,11 @@ void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char 
     [object setShortcutsWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
 }
 
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy) {
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy makeMain:NO] ? 1 : 0;
+    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags makeMain:NO] ? 1 : 0;
 }
 
 int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height) {
@@ -9873,6 +11951,22 @@ int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t w
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object miniaturizeWindowWithId:window_id];
+    return 1;
+}
+
+int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object showWindowWithId:window_id];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_close_policy(native_sdk_appkit_host_t *host, uint64_t window_id, int close_policy) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    // Applied right after create, like the content min-size floor —
+    // close handling is host window state fixed for the window's life.
+    object.windowClosePolicies[@(window_id)] = @(close_policy);
     return 1;
 }
 
@@ -9981,10 +12075,10 @@ int native_sdk_appkit_note_gpu_surface_input(native_sdk_appkit_host_t *host, uin
     return [object noteGpuSurfaceInputInWindow:window_id label:labelString ?: @""] ? 1 : 0;
 }
 
-int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count) {
+int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count, const native_sdk_appkit_scroll_occluder_t *occluders, size_t occluder_count) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
-    return [object setGpuSurfaceScrollDriversInWindow:window_id label:labelString ?: @"" drivers:drivers count:count] ? 1 : 0;
+    return [object setGpuSurfaceScrollDriversInWindow:window_id label:labelString ?: @"" drivers:drivers count:count occluders:occluders occluderCount:occluder_count] ? 1 : 0;
 }
 
 int native_sdk_appkit_show_context_menu(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const native_sdk_appkit_context_menu_item_t *items, size_t count) {
@@ -10221,7 +12315,7 @@ native_sdk_appkit_open_dialog_result_t native_sdk_appkit_show_open_dialog(native
             NSString *path = [[NSString alloc] initWithBytes:opts->default_path length:opts->default_path_len encoding:NSUTF8StringEncoding];
             panel.directoryURL = [NSURL fileURLWithPath:path];
         }
-        panel.canChooseFiles = YES;
+        panel.canChooseFiles = opts->allow_directories == 0;
         panel.canChooseDirectories = opts->allow_directories != 0;
         panel.allowsMultipleSelection = opts->allow_multiple != 0;
         NativeSdkConfigurePanelExtensions(panel, NativeSdkParseExtensions(opts->extensions, opts->extensions_len));

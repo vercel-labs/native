@@ -9,6 +9,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const clock_mod = @import("clock.zig");
 
 const canvas_label = "fetch-canvas";
 
@@ -100,6 +101,9 @@ var test_payload: ?[]const u8 = null;
 var test_timeout_ms: u32 = effects_mod.default_effect_fetch_timeout_ms;
 var test_response_mode: effects_mod.FetchResponseMode = .buffered;
 var test_max_line_bytes: usize = effects_mod.max_effect_line_bytes;
+/// The poll idiom (one-shot): when set, the update reacts to a response
+/// by immediately fetching the same key again.
+var test_refetch_on_response: bool = false;
 
 fn fetchUpdate(model: *FetchModel, msg: FetchMsg, fx: *FetchEffects) void {
     switch (msg) {
@@ -117,7 +121,17 @@ fn fetchUpdate(model: *FetchModel, msg: FetchMsg, fx: *FetchEffects) void {
         }),
         .stop => fx.cancel(fetch_key),
         .line => |line| model.recordLine(line),
-        .response => |response| model.record(response),
+        .response => |response| {
+            model.record(response);
+            if (test_refetch_on_response) {
+                test_refetch_on_response = false;
+                fx.fetch(.{
+                    .key = fetch_key,
+                    .url = test_url,
+                    .on_response = FetchEffects.responseMsg(.response),
+                });
+            }
+        },
     }
 }
 
@@ -980,6 +994,47 @@ test "real fetch reports connection refused as connect_failed" {
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.body_len);
 }
 
+test "a fetch whose exchange cannot start cancellably is rejected, never run inline" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    // Pin the no-capacity path through the injectable seam (the real
+    // trigger — the executor refusing `std.Io.concurrent` — needs
+    // resource exhaustion). If a regression ran the exchange inline
+    // instead, this loopback connect would fail fast as
+    // `.connect_failed` and the assert below would catch the lie.
+    fx.fetch_concurrent_start = false;
+
+    var url_buffer: [128]u8 = undefined;
+    test_url = std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:9/", .{}) catch unreachable;
+    test_method = .GET;
+    test_headers = &.{};
+    test_payload = null;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForResponse(&h);
+
+    // Exactly one honest `.rejected` terminal — the fetch never
+    // started — counted through the rejection seam.
+    try std.testing.expectEqual(effects_mod.EffectFetchOutcome.rejected, h.app_state.model.outcome.?);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(@as(u16, 0), h.app_state.model.status);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.body_len);
+    try std.testing.expectEqual(@as(u32, 1), fx.fetch_start_rejections.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
+
+    // Teardown returns promptly: no uncancelable inline exchange is
+    // left for the unconditional fetch join to wait on.
+    const start_ns = clock_mod.monotonicNanoseconds();
+    fx.deinit();
+    const elapsed_ms = (clock_mod.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+    try std.testing.expect(elapsed_ms < 10_000);
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
+}
+
 test "real fetch times out against a hanging route" {
     var h = try Harness.create();
     defer h.destroy();
@@ -1028,4 +1083,79 @@ test "real fetch cancels mid-flight with exactly one cancelled terminal" {
     try h.drainWakes();
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.response_count);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
+}
+
+test "a fetch response still undelivered occupies its key against a second fetch; delivery frees it" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_url = "https://api.example.com/v1/data";
+    test_method = .GET;
+    test_headers = &.{};
+    test_payload = null;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    test_response_mode = .buffered;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+
+    // The fed response queues the terminal and parks the slot in
+    // `.draining` — posted but undelivered. A second fetch of the same
+    // key inside that window must reject: under session replay the
+    // first request is still a parked `.running` fake here (its
+    // journaled response feeds at the recorded delivery position), so
+    // a live accept would journal a Msg stream replay rejects.
+    try fx.feedResponse(fetch_key, 200, "first");
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+
+    // Delivery order: the staged rejection first (loop-side pending),
+    // then the queued response.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(effects_mod.EffectFetchOutcome.ok, h.app_state.model.outcome.?);
+
+    // The window ends at delivery: the same key fetches again.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    try fx.feedResponse(fetch_key, 201, "second");
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 3), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(u16, 201), h.app_state.model.status);
+}
+
+test "an update that refetches the same key from its own response parks instead of rejecting" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_url = "https://api.example.com/v1/poll";
+    test_method = .GET;
+    test_headers = &.{};
+    test_payload = null;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    test_response_mode = .buffered;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    test_refetch_on_response = true;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try fx.feedResponse(fetch_key, 200, "first");
+
+    // The drain retires the slot BEFORE the terminal Msg reaches
+    // update, so the handler's refetch of its own key is a fresh
+    // accepted fetch — the poll idiom must not regress.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+
+    // The refetched occupancy is fully live: its own terminal delivers.
+    try fx.feedResponse(fetch_key, 201, "second");
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(u16, 201), h.app_state.model.status);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.rejected_count);
 }

@@ -168,6 +168,169 @@ test "keyboard-only selection (shift+arrows) feeds copy" {
     try std.testing.expectEqualStrings("ry", try harness.runtime.readClipboard(&clipboard_buffer));
 }
 
+test "a focused terminal copies its emulator selection" {
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = canvas.TerminalGrid{
+        .background = canvas.Color.rgba(0, 0, 0, 1),
+        .foreground = canvas.Color.rgba(1, 1, 1, 1),
+        .cursor_color = canvas.Color.rgba(1, 1, 1, 1),
+        .selection_color = canvas.Color.rgba(0, 0.5, 1, 1),
+        .screen_text = "alpha beta",
+        .selection_text = "beta",
+        .selection_active = true,
+    };
+    const terminal = canvas.Widget{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(12, 16, 200, 80),
+        .terminal = .{ .pty = 7, .grid = &grid },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{terminal} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 40, 40));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("c", cmd));
+
+    var clipboard_buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("beta", try harness.runtime.readClipboard(&clipboard_buffer));
+
+    // An active whitespace-only selection owns Copy too: its trimmed
+    // text is empty, so it clears rather than falling through to some
+    // unrelated selection in the view.
+    grid.selection_text = "";
+    try harness.runtime.writeClipboard("stale");
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("c", cmd));
+    try std.testing.expectEqualStrings("", try harness.runtime.readClipboard(&clipboard_buffer));
+}
+
+test "a multi-line paste into a single-line field strips line breaks; a textarea keeps them" {
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .text_field,
+            .frame = geometry.RectF.init(12, 16, 200, 36),
+            .text = "",
+        },
+        .{
+            .id = 3,
+            .kind = .textarea,
+            .frame = geometry.RectF.init(12, 64, 280, 100),
+            .text = "",
+        },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Interior LF, CRLF, and a trailing CR: the single-line field strips
+    // every break (the HTML value-sanitization rule — lines join with
+    // nothing between them), and the app-facing keyboard event carries
+    // the SAME stripped insert so a model mirror stays byte-identical.
+    try harness.runtime.writeClipboard("alpha\nbeta\r\ngamma\r");
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 100, 30));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("v", cmd));
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("alphabetagamma", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(14), retained.nodes[1].widget.text_selection.?);
+    try std.testing.expectEqualStrings("alphabetagamma", app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+    try std.testing.expect(!app_state.saw_truncated);
+
+    // The SAME clipboard pasted into the textarea keeps its breaks: only
+    // single-line kinds sanitize.
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 100, 100));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("v", cmd));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("alpha\nbeta\r\ngamma\r", retained.nodes[2].widget.text);
+    try std.testing.expectEqualStrings("alpha\nbeta\r\ngamma\r", app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+}
+
+test "a paste of only line breaks into a single-line field inserts nothing and keeps the selection" {
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 200, 36),
+        .text = "Keep",
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Select all, then paste bare newlines: the sanitized insert is
+    // EMPTY, so the edit suppresses — nothing inserts, the live
+    // selection survives, and the app hears no insert at all (an empty
+    // insert is cut's delete-selection edit, which this must never be).
+    try harness.runtime.writeClipboard("\r\n\n");
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 100, 30));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("a", cmd));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("v", cmd));
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Keep", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 4 }, retained.nodes[1].widget.text_selection.?);
+    try std.testing.expect(!app_state.saw_empty_insert);
+    try std.testing.expectEqual(@as(usize, 0), app_state.last_edit_insert_len);
+}
+
+test "a near-capacity multi-line paste sanitizes before it clamps" {
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Fill the view's shared widget-text storage to EXACTLY three free
+    // bytes, the boundary where the sanitize/clamp ordering shows:
+    // pasting "a\nbc" must land "abc" (sanitized 3 bytes, fits whole).
+    // Clamping the raw clipboard first would spend the third byte on
+    // the '\n' the seam strips anyway — "a\nb" then "ab" — silently
+    // discarding the valid 'c' and flagging a truncation that never
+    // happened to the bytes that count.
+    const fill_len = canvas_limits.max_canvas_widget_text_bytes_per_view - 3;
+    const fill = try std.testing.allocator.alloc(u8, fill_len);
+    defer std.testing.allocator.free(fill);
+    @memset(fill, 'x');
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 200, 36),
+        .text = fill,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    // Pin the boundary premise: exactly 3 bytes of capacity remain.
+    try std.testing.expectEqual(fill_len, harness.runtime.views[0].widget_text_len);
+
+    try harness.runtime.writeClipboard("a\nbc");
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 100, 30));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("end", .{}));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("v", cmd));
+
+    // The retained editor holds the whole sanitized suffix ...
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const text = retained.nodes[1].widget.text;
+    try std.testing.expectEqual(fill_len + 3, text.len);
+    try std.testing.expectEqualStrings("abc", text[text.len - 3 ..]);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(text.len), retained.nodes[1].widget.text_selection.?);
+    // ... the app's stamped edit is byte-identical to what the editor
+    // applied, and nothing was (falsely) reported truncated.
+    try std.testing.expectEqualStrings("abc", app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+    try std.testing.expect(!app_state.saw_truncated);
+}
+
 test "paste clamps to view text capacity and flags truncation loudly" {
     var app_state: ClipboardTestApp = .{};
     const app = app_state.app();
@@ -187,16 +350,19 @@ test "paste clamps to view text capacity and flags truncation loudly" {
     const used = harness.runtime.views[0].widget_text_len;
     const available = canvas_limits.max_canvas_widget_text_bytes_per_view - used;
 
-    // A clipboard payload over the view's REMAINING shared text storage
-    // (the semantics label already consumed a few bytes, and the widget
-    // text capacity now matches the clipboard bound exactly).
+    // Fill the view with repeated maximum clipboard payloads. The retained
+    // source budget is intentionally larger than one clipboard transfer;
+    // only the final paste clamps against the remaining shared storage.
     const big = try std.testing.allocator.alloc(u8, platform.max_clipboard_data_bytes);
     defer std.testing.allocator.free(big);
     @memset(big, 'a');
     try harness.runtime.writeClipboard(big);
 
     try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 100, 30));
-    try harness.runtime.dispatchPlatformEvent(app, keyInput("v", cmd));
+    const paste_count = std.math.divCeil(usize, available, big.len) catch unreachable;
+    for (0..paste_count) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, keyInput("v", cmd));
+    }
 
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(available, retained.nodes[1].widget.text.len);
@@ -320,6 +486,106 @@ test "static text drag selection highlights, copies, and clears" {
     // With nothing selected, copy leaves the clipboard untouched.
     try harness.runtime.dispatchPlatformEvent(app, keyInput("c", cmd));
     try std.testing.expectEqualStrings(body, try harness.runtime.readClipboard(&clipboard_buffer));
+
+    // Shift is an editable-text extension gesture. It must not prevent a
+    // fresh static-text drag from establishing its own press anchor.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 13,
+        .y = 18,
+        .modifiers = .{ .shift = true },
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_drag, 211, 75));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = body.len }, retained.nodes[1].widget.text_selection.?);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_selected_text_id);
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_up, 211, 75));
+}
+
+test "grouped code paragraphs select and copy across chunk boundaries" {
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const first = "alpha\r\n";
+    const second = "beta";
+    const first_spans = [_]canvas.TextSpan{.{
+        .text = first,
+        .monospace = true,
+        .color = .syntax_plain,
+    }};
+    const second_spans = [_]canvas.TextSpan{.{
+        .text = second,
+        .monospace = true,
+        .color = .syntax_plain,
+    }};
+    const group_id: canvas.ObjectId = 77;
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .text,
+            .frame = geometry.RectF.init(12, 16, 220, 40),
+            .text = first,
+            .spans = &first_spans,
+            .static_text_group_id = group_id,
+            .static_text_group_offset = 0,
+        },
+        .{
+            .id = 3,
+            .kind = .text,
+            .frame = geometry.RectF.init(12, 64, 220, 40),
+            .text = second,
+            .spans = &second_spans,
+            .static_text_group_id = group_id,
+            .static_text_group_offset = first.len,
+        },
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(12, 128, 100, 32),
+            .text = "Clear",
+        },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .kind = .stack, .children = &children },
+        geometry.RectF.init(0, 0, 320, 200),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 13, 18));
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_drag, 231, 103));
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(
+        canvas.TextSelection{ .anchor = 0, .focus = first.len },
+        retained.findById(2).?.widget.text_selection.?,
+    );
+    try std.testing.expectEqualDeep(
+        canvas.TextSelection{ .anchor = 0, .focus = second.len },
+        retained.findById(3).?.widget.text_selection.?,
+    );
+
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("c", cmd));
+    var clipboard_buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "alpha\r\nbeta",
+        try harness.runtime.readClipboard(&clipboard_buffer),
+    );
+
+    // Every selected chunk survives an unchanged rebuild, and pressing
+    // elsewhere clears the whole grouped highlight.
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(2).?.widget.text_selection != null);
+    try std.testing.expect(retained.findById(3).?.widget.text_selection != null);
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 20, 140));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(2).?.widget.text_selection == null);
+    try std.testing.expect(retained.findById(3).?.widget.text_selection == null);
 }
 
 test "span paragraph drag selection copies the concatenated bytes" {
@@ -358,6 +624,52 @@ test "span paragraph drag selection copies the concatenated bytes" {
     const copied = try harness.runtime.readClipboard(&clipboard_buffer);
     try std.testing.expectEqualStrings(paragraph[range.start..range.end], copied);
     try std.testing.expectEqualStrings(paragraph, copied);
+}
+
+test "numbered code selection copies source without decorative gutter digits" {
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const source = "alpha\nbeta";
+    const spans = [_]canvas.TextSpan{.{
+        .text = source,
+        .monospace = true,
+        .color = .syntax_plain,
+    }};
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(12, 16, 220, 60),
+        .text = source,
+        .spans = &spans,
+        .code_line_number_digits = 1,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .kind = .stack, .children = &children },
+        geometry.RectF.init(0, 0, 320, 200),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Start inside the source column (past the renderer-owned gutter) and
+    // drag beyond the final visual line.
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 34, 18));
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_drag, 231, 75));
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(
+        canvas.TextSelection{ .anchor = 0, .focus = source.len },
+        retained.nodes[1].widget.text_selection.?,
+    );
+
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("c", cmd));
+    var clipboard_buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        source,
+        try harness.runtime.readClipboard(&clipboard_buffer),
+    );
 }
 
 test "focused editable selection wins copy over a stale static selection" {

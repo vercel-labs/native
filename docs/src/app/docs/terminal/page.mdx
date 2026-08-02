@@ -1,0 +1,274 @@
+import { CodeToggle } from "@/components/code-toggle";
+
+# Terminal
+
+Run a real shell on a pseudo-terminal, stream its output into a terminal emulator, and paint the grid as **real text** on the canvas. The pty vocabulary is effects-as-data all the way down: your core names a model-owned pty key, a command, and a grid size; the host opens the pty, forks the child onto it, and streams coalesced output back as Msgs. Nothing in `update` ever touches a file descriptor or forks a process.
+
+The headline capability: **record a terminal session and it replays byte-identical offline** — no shell runs, the journaled output batches and exit are the whole session.
+
+The terminal state itself — cursor, styles, scrollback, wrapping, reflow, selection — is owned by [libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's extracted VT core, consumed as the `ghostty-vt` Zig module. The toolkit never parses escape sequences; it owns the transport (the pty) and the pixels (the canvas), and hands the bytes between.
+
+## The `<terminal>` element
+
+The declarative shape is one element. Spawn a pty from your model (`fx.ptySpawn`, an ordinary effect), then bind its key to a `<terminal>`: the toolkit owns the emulator behind that key and the element renders its grid — real text, geometric box drawing, the theme-derived ANSI palette, selection, cursor, and scrollback — and routes keys, IME text, and wheel scrollback to the session when focused. The model carries a pty key and, if it wants, the scrollback position; nothing about the emulator's cells, modes, or selection.
+
+<CodeToggle>
+
+```ts
+import { Cmd } from "@native-sdk/core";
+
+const shellKey = 1;
+
+export function view(model: Model) {
+  return terminal({ pty: shellKey, scrollback: model.scrollback, grow: 1, label: "Shell", onTerminal: "termState" });
+}
+
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    // The runtime-applied view state (scrollback, history, cols, rows).
+    // Echo scrollback back and user scrollback survives rebuilds.
+    case "termState": return { ...model, scrollback: msg.state.scrollback };
+  }
+}
+```
+
+```zig
+const shell_key: u64 = 1;
+
+pub fn view(ui: *Ui, model: *const Model) Ui.Node {
+    return ui.terminal(.{
+        .pty = shell_key,
+        .scrollback = model.scrollback,
+        .grow = 1,
+        .semantics = .{ .label = "Shell" },
+        .on_terminal = Ui.terminalMsg(.term_state),
+    });
+}
+
+pub fn update(model: *Model, msg: Msg) void {
+    switch (msg) {
+        // canvas.TerminalState: scrollback, history, cols, rows — the
+        // app-visible view state. Echo scrollback back under the same
+        // source-wins rule scroll offsets follow; the emulator's cell
+        // state stays framework-owned.
+        .term_state => |state| model.scrollback = state.scrollback,
+    }
+}
+```
+
+</CodeToggle>
+
+`pty` is the model-owned pty key — one `{binding}`, never a markup literal, exactly like `<media-surface surface>` and `<image image>`. A `<terminal>` without it is refused at validation the way a `<media-surface>` without `surface` is: dead markup can never attach a session. The grid derives its `cols`/`rows` from the frame the layout gives it, so size the element like any leaf (`grow`, or a definite `width`/`height`); the runtime pushes the derived size to the pty with `ptyResize`.
+
+Behind the binding, the runtime owns the session: it feeds the key's output batches into the emulator as they are journaled, encodes the focused element's keys and committed IME text back through `ptyWrite`, answers the device queries a program sends (cursor position, device attributes), scrolls history on the wheel, and reports the applied view state through `on-terminal`. Pointer selection follows terminal conventions: drag selects cells, double-click selects a word, triple-click selects a line, and Cmd/Ctrl+C copies the emulator's selected text instead of forwarding the chord to the child. Because every byte in both directions crosses the journaled effect boundary, a recorded session replays to the same screen with no shell present — the same guarantee the raw vocabulary gives, through the element.
+
+### Enabling live sessions
+
+The emulator is opt-in per app, so an app that never renders a terminal never pays for one. Pin `ghostty` as a **lazy** dependency in your app's `build.zig.zon` and ask for sessions in its `build.zig`:
+
+```zig
+pub fn build(b: *std.Build) void {
+    _ = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{
+        .name = "workbench",
+        .terminal_sessions = true,
+    });
+}
+```
+
+Without that flag — every scaffolded app, by default — `<terminal>` renders its empty surface and the build never traverses the emulator's dependency graph. `native_sdk.runtime.terminal_sessions_enabled` reports which half the build carries, so an app's tests can gate on it.
+
+[`examples/workbench`](https://github.com/native-sdk/native-sdk/tree/main/examples/workbench) is the element end to end: a live shell beside a browser in one resizable split, with no emulator wiring in the app at all.
+
+The rest of this page is the effect vocabulary the element sits on — spawn a pty yourself when you want the raw stream, or let the element own the session end to end.
+
+## Spawn, then stream
+
+The pty key is ordinary model data — pick it like an effect key. Spawn the shell, feed each output batch into the emulator, and write typed input back to the pty. Exactly one exit event ends the session.
+
+<CodeToggle>
+
+```ts
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+const shellKey = 1;
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "start":
+      return [model, Cmd.ptySpawn(
+        [asciiBytes("/bin/zsh"), asciiBytes("-i")],
+        { cols: model.cols, rows: model.rows, event: "shell" },
+      )];
+    case "shell":
+      // A coalesced output batch, or the exactly-one exit.
+      if (msg.kind2 === "output") return { ...model, screen: feed(model.screen, msg.bytes) };
+      return { ...model, phase: msg.reason === "exited" ? "ended" : "failed" };
+    case "type":
+      return [model, Cmd.ptyWrite(shellKey, msg.bytes)];
+    case "viewport":
+      return [model, Cmd.ptyResize(shellKey, msg.cols, msg.rows)];
+  }
+}
+```
+
+```zig
+const shell_key: u64 = 1;
+
+fn initFx(model: *Model, fx: *Fx) void {
+    fx.ptySpawn(.{
+        .key = shell_key,
+        .argv = &.{ "/bin/zsh", "-i" },
+        .cols = model.cols,
+        .rows = model.rows,
+        .on_event = Fx.ptyMsg(.shell),
+    });
+}
+
+pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
+    switch (msg) {
+        .shell => |event| switch (event.kind) {
+            // A coalesced output batch: feed the emulator, then flush
+            // any query answers (DSR, DA1) back to the pty.
+            .output => {
+                model.session.feed(event.bytes);
+                const answers = model.session.pendingResponses();
+                if (answers.len > 0) _ = fx.ptyWrite(shell_key, answers);
+                model.session.clearResponses();
+            },
+            // The exactly-one terminal: exited, signaled, cancelled,
+            // rejected, or spawn_failed.
+            .exit => model.phase = if (event.reason == .exited) .ended else .failed,
+            // Write-admission verdicts are journal/replay machinery;
+            // they never arrive as events.
+            .write => unreachable,
+        },
+        // Typed text goes straight to the child's stdin. `ptyWrite`
+        // returns whether the payload was accepted whole — a caller
+        // that must not lose bytes retains a refused payload and
+        // retries as the child reads (see the example's outbound ring).
+        .text => |event| _ = fx.ptyWrite(shell_key, event.text),
+        .viewport => |size| {
+            model.session.resize(size.cols, size.rows);
+            fx.ptyResize(shell_key, size.cols, size.rows);
+        },
+    }
+}
+```
+
+</CodeToggle>
+
+The full app lives in [`examples/terminal`](https://github.com/native-sdk/native-sdk/tree/main/examples/terminal): the grid renderer, keyboard-first selection and scrollback, clipboard copy, and the record/replay tests.
+
+## The vocabulary
+
+<table>
+  <thead>
+    <tr>
+      <th>Verb</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ptySpawn</code></td>
+      <td>Open a pty, fork <code>argv</code> onto it as its controlling terminal, and stream output back through <code>on_event</code>. Initial <code>cols</code>/<code>rows</code> and an optional <code>term</code> (default <code>xterm-256color</code>).</td>
+    </tr>
+    <tr>
+      <td><code>ptyWrite</code></td>
+      <td>Bytes toward the child's stdin (keystrokes, pastes, query answers), all-or-nothing: returns whether the payload was accepted, so a caller that must not lose bytes retains a refusal and retries. Journaled as command payloads — verdicts included — so replay reproduces them for free.</td>
+    </tr>
+    <tr>
+      <td><code>ptyResize</code></td>
+      <td>Push a new grid size; the child receives SIGWINCH and re-queries (on Windows, <code>ResizePseudoConsole</code> and the console window-size change).</td>
+    </tr>
+    <tr>
+      <td><code>ptyKill</code></td>
+      <td>Terminate the child's job (SIGKILL to its process group — the whole foreground job; a descendant that re-grouped itself escapes, POSIX offering no kill-whole-session primitive. On Windows: <code>TerminateProcess</code> plus the pseudoconsole teardown, which reaches everything still attached to the console). The exit then reports <code>cancelled</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+A pty is **a spawn with a different transport**, so it rides the same seams as `Cmd.spawn`: the same `command` permission in [`app.zon`](/docs/app-zon), the same environment policy (the child inherits the host environment the app bound, plus `TERM`), the same argv budgets, and the same one key space as spawns, fetches, and channels — a pty key is occupied from spawn until its exit Msg delivers.
+
+## Output is coalesced, never per-read
+
+Output arriving between frames coalesces into **one batch per drain**, bounded at 64 KiB. `cat largefile` does not journal a record per `read()` — it journals per-frame batches, so a firehose stays a handful of Msgs per frame and the session journal stays small. The transport applies real back-pressure to the child (its staging ring is lossless: a full ring parks the reader and the kernel slows the writer, exactly a terminal's native flow control), so **no byte is ever dropped** — a fast producer is paced, not truncated.
+
+## One exit, honest classes
+
+Exactly one `.exit` event ends every spawn — accepted or refused:
+
+- **`exited`** carries the child's exit code.
+- **`signaled`** carries the terminating signal number (the code is `-1`). POSIX only — Windows has no signal channel; see the platform notes below.
+- **`cancelled`** follows `ptyKill` — after the verb, the exit always says so, even if the child was already exiting.
+- **`rejected`** is a request refused before a child existed: an over-budget argv, a zero grid dimension, a duplicate live key, a full pty table, or a platform without pty support.
+- **`spawn_failed`** is a pty or exec that could not start (a missing binary).
+
+The exit also reports `dropped_writes` — `ptyWrite` payloads refused over the session's life (an over-bound single write, or a child that stopped reading and filled the outbound buffer). Zero means every keystroke reached the child.
+
+One contract rides the whole family: the toolkit forks each pty child, is its **sole reaper**, and never touches SIGCHLD disposition — an embedding process must not either. A host that ignores SIGCHLD (the kernel auto-reaps), sets `SA_NOCLDWAIT`, or `wait()`s on children it did not spawn frees pids outside the toolkit's kill/reap fence; POSIX offers no portable way to signal a pid safely once a third party can reap it first.
+
+## Rendering the grid
+
+The emulator owns cell state and damage; the app paints the viewport as real text through the canvas primitives. The example maps the palette honestly:
+
+- **ANSI-16** derives from the active [theme tokens](/docs/theming) wherever the emulator still holds its default palette entry — so a themed app and its terminal read as one surface. The moment a program restyles a slot (OSC 4), the programmed color wins verbatim.
+- **256-color** (the cube and the grayscale ramp) and **truecolor** always pass through exactly.
+- **Wide CJK cells** occupy two columns with a spacer tail, straight from the emulator's width semantics; the [registered mono font](/docs/fonts) supplies the glyphs.
+
+Scrollback windows the viewport through the emulator's page list; keyboard-first selection (line and block) reads real cell text for clipboard copy. Pointer-drag selection is not wired in the example — the grid is keyboard-first by design.
+
+## Recorded sessions replay byte-identical, offline
+
+The output bytes **are** the effect result, and the session journal treats them the way [dynamic images](/docs/dynamic-images) treat decoded pixels. When a recorded session streams pty output, each batch's bytes are written — at effect-result time — into the content-addressed blob store beside the journal (`blobs/<sha256[..16]>`), and the journal record carries the hash and length. Identical batches (a repeated prompt, a redrawn screen) share one blob.
+
+**Replay never spawns a process.** The `ptySpawn` is an ordinary replayed dispatch that parks the pty (the key registers as live; `ptyWrite`/`ptyResize`/`ptyKill` send nothing — the recorded output already carries their consequences), and the journaled output batches and exit feed verbatim: the blob store supplies the bytes, the emulator re-runs the same VT parsing, and the fingerprint checkpoints verify the replayed grid against the recording frame by frame. `ptyWrite` admission verdicts are journaled too — whether the outbound buffer had room is executor truth, like the bytes themselves — so a replayed write returns exactly what the live one did and an app that retains refused input takes the identical path. A journal whose `blobs/` directory is missing or damaged refuses loudly rather than replaying a different session.
+
+```sh
+NATIVE_SDK_SESSION_RECORD=session/app.journal native run   # records blobs/ beside the journal
+NATIVE_SDK_SESSION_REPLAY=session/app.journal native run   # replays offline, verifying fingerprints
+```
+
+Adding the pty record kind moved the journal format's layout fingerprint: recordings from older builds are refused at the preamble with the standard re-record teaching — the format's usual honest break.
+
+## Platform support
+
+<table>
+  <thead>
+    <tr>
+      <th>Platform</th>
+      <th>Pty transport</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>macOS</td>
+      <td>Supported — <code>openpty</code> + a controlling terminal via libSystem.</td>
+    </tr>
+    <tr>
+      <td>Linux</td>
+      <td>Supported — <code>openpty</code> + a controlling terminal (glibc 2.34+ or musl).</td>
+    </tr>
+    <tr>
+      <td>Windows</td>
+      <td>Supported on Windows 10 1809+ (the first ConPTY release; the backend links <code>CreatePseudoConsole</code> directly, so that is the binary's floor) — ConPTY over an overlapped pipe pair; UTF-8 with VT sequences in both directions, which is the pseudoconsole's own pipe contract. Behavioral differences below.</td>
+    </tr>
+    <tr>
+      <td>Null / headless</td>
+      <td>A scriptable fake pty drives the whole vocabulary in tests — spawn requests, output and exit feeds, write capture — with no process, so CI is fully deterministic.</td>
+    </tr>
+  </tbody>
+</table>
+
+### Windows semantics, stated plainly
+
+The vocabulary is identical — the terminal example runs unchanged — but ConPTY differs from a POSIX pty in ways an app may observe:
+
+- **Exit codes only.** Windows has no signals, so `signaled` never occurs there: every ending is `exited` with a process exit code (a crash surfaces the NTSTATUS bit-cast to `i32` — an access violation's `0xC0000005` arrives negative), `cancelled` after `ptyKill`, or the shared refusal classes. Apps that branch on `signal` should treat it as the POSIX-only detail it is.
+- **Rendered stream, not raw bytes.** ConPTY output is conhost's VT rendering of the child's screen, not the child's literal write stream — a terminal emulator consumes it identically, but byte-exact expectations against child output do not transfer.
+- **`ptyKill` reach.** The kill is `TerminateProcess` on the direct child plus the pseudoconsole teardown, which takes down every descendant still attached to the console; a descendant that detached (`FreeConsole`, `DETACHED_PROCESS`) escapes — the same documented limit as a POSIX descendant that left the process group.
+- **`ptyResize`** maps to `ResizePseudoConsole`; conhost delivers the window-size change to the child through the console APIs (the SIGWINCH analog). Console geometry is 16-bit signed there, so dimensions above 32767 clamp to it — the declared mirrors keep the requested value, the child observes the clamp.
+- **Session lifetime follows the direct child.** Conhost never breaks the output pipe on its own — not even after every attached process has exited — so the backend watches the child's process handle and closes the pseudoconsole once the pipe has stayed quiet past a bounded grace after its exit. An attached descendant that outlives the direct child (a launcher's `start /b` grandchild) ends with the console teardown, where a POSIX descendant holding the pty child end would have kept the session open; a detached one escapes, as above.
+- **Environment policy is unchanged** — the child sees the bound host environment plus `TERM` — with one Windows spelling: environment names are case-insensitive there, so a caller-supplied `Term` is still the entry the injected value replaces. `argv[0]` resolves through the caller environment's `PATH` (`;`-separated) against the executable kinds the spawn can start (`.exe`, `.cmd`, `.bat`, `.com`, tried before a bare extension-less spelling); the current directory is deliberately never searched.
+- **Batch targets run through an explicit `cmd.exe /d /s /c`** (AutoRun disabled, standard quote treatment), and arguments — or a script path — carrying bytes cmd's reparse could reinterpret (`& | < > ^ % ! "` or line breaks) refuse the spawn: cmd's grammar has no lossless quoting for them (`%` expands inside and outside quotes), so delivering them verbatim to a script is not something any spawner can promise — refusal over a silently different command line. Direct executables carry the full argv byte-exactly, as everywhere.
+- **The reaping contract reads differently.** Windows process objects self-release when the last handle closes, so the POSIX sole-reaper/SIGCHLD paragraph above has no Windows analog — there is nothing an embedder can reap out from under the toolkit.

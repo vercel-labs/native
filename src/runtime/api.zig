@@ -1,6 +1,7 @@
 const std = @import("std");
 const trace = @import("trace");
 const canvas = @import("canvas");
+const geometry = @import("geometry");
 const automation = @import("../automation/root.zig");
 const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
@@ -64,11 +65,12 @@ pub const CanvasWidgetPointerEvent = struct {
     /// cursor, and text selection stay on `target`.
     press_target: ?canvas.WidgetHit = null,
     route: []const canvas.WidgetEventRouteEntry = &.{},
-    /// A text edit this pointer gesture performed on `target` (the
-    /// search field's built-in clear affordance). The runtime already
-    /// applied it (the optimistic echo; the source tree is truth on the
-    /// next rebuild); `UiApp` maps it through the tree's handler table
-    /// to the field's `on_input` Msg so a model-owned buffer clears too.
+    /// A text edit this pointer gesture performed on `target` (an
+    /// editable field's caret/selection move, or the search field's
+    /// built-in clear affordance). The runtime already applied it (the
+    /// optimistic echo; the source tree is truth on the next rebuild);
+    /// `UiApp` maps it through the tree's handler table to the field's
+    /// `on_input` Msg so a model-owned buffer stays in lockstep too.
     edit: ?canvas.TextInputEvent = null,
 };
 
@@ -78,6 +80,30 @@ pub const CanvasWidgetKeyboardEvent = struct {
     keyboard: canvas.WidgetKeyboardEvent,
     target: ?canvas.WidgetFocusTarget = null,
     route: []const canvas.WidgetEventRouteEntry = &.{},
+    /// This committed-text payload came from terminal Paste (the
+    /// clipboard shortcut or context menu), not ordinary typing or IME
+    /// input. UiApp routes it through the emulator's paste encoder
+    /// (bracketed-paste framing, newline normalization, and unsafe-
+    /// control stripping) before writing it to the pty.
+    terminal_paste: bool = false,
+    /// True when this event is dispatched OUTSIDE a gpu-surface input
+    /// cycle — the accessibility selection edits and the default
+    /// context-menu cut/paste/select-all, which have no terminal
+    /// `gpu_surface_input` dispatch following them. The ui-app layer's
+    /// hover drain, which normally defers mid-cycle keyboard events to
+    /// that terminal dispatch, drains standalone ones at their own
+    /// tail so an edit that unmounts the hovered listener never
+    /// strands its leave.
+    standalone: bool = false,
+    /// Continuation edits replay an existing history entry and must not
+    /// themselves create a new entry.
+    history_replay: bool = false,
+    /// Stable retained-history identity for a compound undo/redo. Follow-up
+    /// edits are re-derived from this entry after every controlled-tree
+    /// rebuild instead of retaining borrowed slices into the compactable
+    /// history byte pool.
+    history_replay_serial: u64 = 0,
+    history_replay_redo: bool = false,
 };
 
 /// A scroll container's offset changed from a user gesture (wheel,
@@ -202,6 +228,38 @@ pub const CanvasWidgetContextMenuEvent = struct {
     view_label: []const u8,
     target_id: canvas.ObjectId,
     item_index: usize,
+    /// The resolved request's correlation token. When it matches a
+    /// `canvas_widget_context_menu_shown` snapshot, `UiApp` resolves the
+    /// selection against that snapshot — never the live tree, which may
+    /// have rebuilt (and reordered or re-mapped the items) while the
+    /// asynchronous menu was open. A token without a snapshot (the
+    /// automation verb's direct dispatch, which validates against the
+    /// live tree itself) resolves through the live tree.
+    token: u64 = 0,
+};
+
+/// A widget's app-declared context menu was handed to the native
+/// presenter. `UiApp` answers by snapshotting the shown items' dispatch
+/// payloads keyed by `token`: presentation is asynchronous (GTK
+/// popovers outlive event dispatch), so the selection must resolve
+/// against what the user SAW, not the tree at selection time.
+pub const CanvasWidgetContextMenuShownEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    target_id: canvas.ObjectId,
+    token: u64,
+    item_count: usize,
+};
+
+/// The presented app-declared context menu closed WITHOUT a selection.
+/// `UiApp` answers by disarming the matching token's snapshot and
+/// releasing the presented build's pinned storage — without this
+/// notice, a dismissed menu's pin would hold that storage until the
+/// next presentation.
+pub const CanvasWidgetContextMenuDismissedEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    token: u64,
 };
 
 /// A right/ctrl-click landed on a widget with a declared context menu,
@@ -213,6 +271,10 @@ pub const CanvasWidgetContextMenuRequestEvent = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8,
     target_id: canvas.ObjectId,
+    /// The secondary click's pointer location (view-local canvas points):
+    /// the fallback surface anchors here — like a native menu — not at a
+    /// target-widget edge.
+    point: geometry.PointF = .{},
 };
 
 /// A window the RUNTIME knew as open was closed by the platform — the
@@ -269,6 +331,12 @@ pub const Event = union(enum) {
     /// tick, completion, failure): the ui-app layer routes it back
     /// through `Effects.takeAudioMsg` into the app's `on_event` Msg.
     audio: platform.AudioEvent,
+    /// A platform video player report (load acknowledgment with
+    /// dimensions, position tick, completion, failure): routed back
+    /// through `Effects.takeVideoMsg` into the app's `on_event` Msg.
+    /// Pixels never ride events — frames feed the media-surface
+    /// texture channel platform-side.
+    video: platform.VideoEvent,
     files_dropped: platform.FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -279,6 +347,8 @@ pub const Event = union(enum) {
     canvas_widget_file_drop: CanvasWidgetFileDropEvent,
     canvas_widget_drag: CanvasWidgetDragEvent,
     canvas_widget_context_menu: CanvasWidgetContextMenuEvent,
+    canvas_widget_context_menu_shown: CanvasWidgetContextMenuShownEvent,
+    canvas_widget_context_menu_dismissed: CanvasWidgetContextMenuDismissedEvent,
     canvas_widget_context_menu_request: CanvasWidgetContextMenuRequestEvent,
     canvas_widget_dismiss: CanvasWidgetDismissEvent,
     canvas_widget_context_press: CanvasWidgetContextPressEvent,
@@ -296,6 +366,7 @@ pub const Event = union(enum) {
             .timer => "timer",
             .effects_wake => "effects_wake",
             .audio => "audio",
+            .video => "video",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
@@ -306,6 +377,8 @@ pub const Event = union(enum) {
             .canvas_widget_file_drop => "canvas_widget_file_drop",
             .canvas_widget_drag => "canvas_widget_drag",
             .canvas_widget_context_menu => "canvas_widget_context_menu",
+            .canvas_widget_context_menu_shown => "canvas_widget_context_menu_shown",
+            .canvas_widget_context_menu_dismissed => "canvas_widget_context_menu_dismissed",
             .canvas_widget_context_menu_request => "canvas_widget_context_menu_request",
             .canvas_widget_dismiss => "canvas_widget_dismiss",
             .canvas_widget_context_press => "canvas_widget_context_press",
@@ -322,10 +395,16 @@ pub const Event = union(enum) {
 /// switches the app's effects channel into replay mode (fake executor,
 /// journaled results as the only terminal source) before the first
 /// replayed event; `.feed` delivers one journaled effect result into
-/// the stub executor's pending request with the matching key.
+/// the stub executor's pending request with the matching key; `.finish`
+/// runs the end-of-journal consistency checks and must ERROR if any
+/// journaled feed went unconsumed, any replayed read outran the
+/// journal, or any queued record was never claimed by the load it
+/// named — divergence a fingerprint checkpoint cannot see because the
+/// optimistic answer changed no state.
 pub const ReplayControl = union(enum) {
     arm,
     feed: runtime_effects.EffectResultRecord,
+    finish,
 };
 
 pub fn App(comptime Runtime: type) type {
@@ -384,6 +463,21 @@ pub fn App(comptime Runtime: type) type {
 
 pub const Options = struct {
     platform: platform.Platform,
+    /// Allocator for the runtime's on-demand storage (registered
+    /// canvas font bytes, sized per file at registration; registered
+    /// canvas image slot buffers, one slot-budget buffer per used slot
+    /// allocated at the slot's first registration; and adopted
+    /// media-surface texture buffers, one frame-budget buffer per
+    /// texture entry allocated at first adoption — a runtime with no
+    /// registered fonts, no registered images, and no media producers
+    /// allocates nothing; the fixed-capacity per-view storage stays
+    /// embedded in the Runtime struct). The default suits process-lifetime runtimes; embedders
+    /// that create and destroy runtimes in one process (tests, the docs
+    /// wasm preview host) pass their own and call `Runtime.deinit`. The
+    /// runtime captures this into its `owned_allocator` at init:
+    /// mutating `options.allocator` on a live runtime retargets
+    /// nothing — pick the owning allocator here, before init.
+    allocator: std.mem.Allocator = std.heap.page_allocator,
     trace_sink: ?trace.Sink = null,
     log_path: ?[]const u8 = null,
     extensions: ?extensions.ModuleRegistry = null,
@@ -396,6 +490,13 @@ pub const Options = struct {
     automation: ?automation.Server = null,
     window_state_store: ?window_state.Store = null,
     js_window_api: bool = false,
+    /// Whether this build ships the embedded web layer. The app runner
+    /// sets it from the build graph's app.zon inference (declare-to-use:
+    /// a .frontend block, the "webview" capability, or a .shell webview
+    /// view). When false, every webview-creating path fails fast with
+    /// `error.WebViewLayerNotBuilt` and its teaching message instead of
+    /// reaching a platform host whose web layer was compiled out.
+    web_layer: bool = true,
     gpu_surface_frame_diagnostics: bool = true,
     /// Pixels-only presentation hosts (the mobile embed host) opt in to
     /// keeping the view's keyed command mirror alive across PIXEL

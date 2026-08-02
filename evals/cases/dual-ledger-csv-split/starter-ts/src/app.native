@@ -1,0 +1,20 @@
+<!-- The ledger view: the expense table, per-row remove, the total, and a
+     reset. Markup binds the core's emitted snake_case names and helpers;
+     validate with: native check -->
+<column gap="12" padding="16" grow="1">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Expenses</text>
+    <button size="sm" variant="ghost" on-press="reset">Reset</button>
+  </row>
+  <table grow="1">
+    <for each="expenses" as="e" key="id">
+      <table-row>
+        <table-cell>{e.label}</table-cell>
+        <table-cell>{e.category}</table-cell>
+        <table-cell>{e.cents}</table-cell>
+        <table-cell on-press="remove:{e.id}">remove</table-cell>
+      </table-row>
+    </for>
+  </table>
+  <status-bar>{expense_count} expenses · {total_cents} cents</status-bar>
+</column>

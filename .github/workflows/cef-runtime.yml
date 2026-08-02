@@ -49,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
 

@@ -1,0 +1,15 @@
+<!-- The notes view: sidebar of note titles, editor over the selected body.
+     Markup binds the model's fields and pub helpers; validate with:
+     native markup check src/app.native -->
+<row gap="12" padding="16" grow="1">
+  <column gap="4" width="180">
+    <text size="heading">Notes</text>
+    <for each="notes" as="n" key="id">
+      <list-item on-press="select:{n.id}" selected="{n.id == selected_id}">{n.title}</list-item>
+    </for>
+  </column>
+  <column gap="8" grow="1">
+    <text size="heading">{selectedTitle}</text>
+    <textarea text="{editorText}" on-input="edit" grow="1" label="Note body" />
+  </column>
+</row>

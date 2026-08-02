@@ -5,6 +5,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const clock_mod = @import("clock.zig");
 const platform_mod = @import("../platform/root.zig");
 
 const canvas_label = "stream-canvas";
@@ -356,7 +357,7 @@ test "a cancel that races the natural exit still reports cancelled and drops lin
     try std.testing.expectEqual(effects_mod.EffectExitReason.cancelled, h.app_state.model.exit_reason.?);
 }
 
-test "queue overflow drops lines loudly and truncates over-long lines" {
+test "queue overflow drops lines with a carried drop count and truncates over-long lines" {
     var h = try Harness.create();
     defer h.destroy();
     const fx = &h.app_state.effects;
@@ -366,22 +367,26 @@ test "queue overflow drops lines loudly and truncates over-long lines" {
     test_stdin = null;
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
 
-    // Fill the queue, then push three more lines that must drop.
+    // Fill the queue, then push more: a FED line against a full queue
+    // reports `EffectQueueFull` — never the live drop accounting, which
+    // would silently convert a journaled delivery into a drop under
+    // session replay (the live worker path keeps its counted drops; the
+    // replay pump answers this error by draining and feeding again).
     var index: usize = 0;
     while (index < effects_mod.max_effect_queue_entries) : (index += 1) {
         try fx.feedLine(stream_key, "fits");
     }
-    try fx.feedLine(stream_key, "dropped 1");
-    try fx.feedLine(stream_key, "dropped 2");
-    try fx.feedLine(stream_key, "dropped 3");
+    try std.testing.expectError(error.EffectQueueFull, fx.feedLine(stream_key, "refused 1"));
+    try std.testing.expectError(error.EffectQueueFull, fx.feedLine(stream_key, "refused 2"));
 
     try h.drainWakes();
     try std.testing.expectEqual(@as(u32, 0), h.app_state.model.dropped_before_total);
 
-    // The next delivered line carries the drop count; nothing is silent.
+    // Refusals counted nothing: the next delivered line reports zero
+    // drops before it.
     try fx.feedLine(stream_key, "after the storm");
     try h.drainWakes();
-    try std.testing.expectEqual(@as(u32, 3), h.app_state.model.dropped_before_total);
+    try std.testing.expectEqual(@as(u32, 0), h.app_state.model.dropped_before_total);
 
     // Over-long lines arrive truncated and flagged.
     const long_line = [_]u8{'x'} ** (effects_mod.max_effect_line_bytes + 100);
@@ -389,10 +394,11 @@ test "queue overflow drops lines loudly and truncates over-long lines" {
     try h.drainWakes();
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.truncated_count);
 
-    // The exit reports the lifetime drop total.
+    // The exit's lifetime drop total stays zero — nothing was dropped,
+    // only refused.
     try fx.feedExit(stream_key, 0);
     try h.drainWakes();
-    try std.testing.expectEqual(@as(u32, 3), h.app_state.model.exit_dropped_lines);
+    try std.testing.expectEqual(@as(u32, 0), h.app_state.model.exit_dropped_lines);
 }
 
 test "a raised per-spawn line bound delivers long lines intact and truncates at the override" {
@@ -799,6 +805,36 @@ fn sawLine(model: *const StreamModel) bool {
     return model.line_count > 0;
 }
 
+test "Windows background spawns run without an attached console" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // Ask the spawned process itself, rather than inferring from window
+    // enumeration: a GUI-subsystem host used to omit CREATE_NO_WINDOW, so a
+    // console-subsystem helper received a console even though Effects.spawn
+    // exposes only pipes. PowerShell's redirected stdout still works with no
+    // console and carries the direct GetConsoleWindow verdict back to us.
+    test_argv = &.{
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Add-Type -Namespace NativeSdk -Name ConsoleProbe -MemberDefinition '[System.Runtime.InteropServices.DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();'; if ([NativeSdk.ConsoleProbe]::GetConsoleWindow() -eq [IntPtr]::Zero) { 'detached' } else { 'attached' }",
+    };
+    test_stdin = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForRealCompletion(&h, sawExit);
+
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.line_count);
+    // Spawn line framing removes LF; a Windows child's CRLF leaves CR in the
+    // delivered bytes, matching the effect's byte-honest stream contract.
+    try std.testing.expectEqualStrings("detached\r", h.app_state.model.lineAt(0));
+    try std.testing.expectEqual(@as(i32, 0), h.app_state.model.exit_code);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+}
+
 test "real executor streams a process's stdout lines into the model" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var h = try Harness.create();
@@ -862,6 +898,292 @@ test "real executor cancels a long-running stream cleanly" {
     try std.testing.expectEqual(lines_after_cancel, h.app_state.model.line_count);
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
+}
+
+test "teardown mid-stream kills the real child and joins its worker before returning" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // A child that would outlive the whole suite: only the teardown's
+    // kill can end it. Waiting for the first line proves the worker is
+    // mid-stream (child spawned, stdout pipe open) when deinit runs —
+    // the exact posture of the e2e battery's timed-out cancel test.
+    test_argv = &.{ "/bin/sh", "-c", "echo streaming; sleep 30" };
+    test_stdin = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForRealCompletion(&h, sawLine);
+
+    const fx = &h.app_state.effects;
+    const start_ns = clock_mod.monotonicNanoseconds();
+    fx.deinit();
+    const elapsed_ms = (clock_mod.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+
+    // The kill ended the child — nothing waited out its 30s sleep
+    // (generous bound: a loaded runner still reaps a SIGKILLed child
+    // orders of magnitude faster than the sleep)...
+    try std.testing.expect(elapsed_ms < 10_000);
+    // ...and every worker was JOINED, not abandoned: no slot keeps a
+    // thread handle and none is still running, so the owner may free
+    // the channel's memory immediately. This pins the ownership hole
+    // behind the e2e cascade: a timed-out harness used to free the
+    // channel while a detached worker still held its slot pointer,
+    // and the worker segfaulted the NEXT test inside
+    // `slot.child_mutex.lock()`. The abandonment itself was a
+    // thread-timing window; the joined-and-idle invariant asserted
+    // here is its deterministic contract.
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
+    // Joined, not abandoned: the group-kill converged this worker well
+    // inside the spawn deadline, so the abandon safety net stayed quiet.
+    try std.testing.expectEqual(@as(u32, 0), fx.abandoned_spawn_workers);
+}
+
+// The escaped-descendant shape the spawn teardown deadline exists for:
+// `set -m` enables job control in the child shell, which puts the
+// background job in its OWN process group — outside the group
+// `killPublishedChild` signals — while the job keeps the inherited
+// stdout write end open. The shell exits at once; the escapee never
+// sees the kill; EOF never arrives; the worker's blocking read would
+// hold teardown forever. (This is `setsid` daemonization in portable
+// clothes — macOS ships no setsid(1), but /bin/bash is everywhere the
+// POSIX suites run.) Echoing `$!` hands the test the escapee's pid.
+const escaped_holder_argv: []const []const u8 = &.{ "/bin/bash", "-c", "set -m; sleep 300 & echo $!" };
+
+fn parseEscapedPid(h: *Harness) !std.posix.pid_t {
+    return std.fmt.parseInt(std.posix.pid_t, h.app_state.model.lineAt(0), 10);
+}
+
+test "teardown interrupts a spawn worker held hostage by an escaped descendant and joins it with no leak" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    // Interruption stays on (the default): the group-kill provably
+    // misses the escapee, so the best-effort cancel at the halfway
+    // mark must interrupt the blocked pipe read and JOIN the worker —
+    // the abandon safety net must never fire here.
+    fx.spawn_join_deadline_ms = 2_000;
+
+    test_argv = escaped_holder_argv;
+    test_stdin = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    // The echoed pid line proves the worker is mid-stream: child
+    // spawned and published, stdout pipe open, read blocked.
+    try waitForRealCompletion(&h, sawLine);
+    const escaped_pid = try parseEscapedPid(&h);
+    // The escapee outlives the interruption by design (nothing kills
+    // it); reap it so a 300s sleeper never leaks into the suite.
+    defer std.posix.kill(escaped_pid, .KILL) catch {};
+
+    fx.deinit();
+
+    // Joined, not leaked: the syscall interruption converged the worker
+    // inside the deadline (deinit is deadline-bounded either way, so
+    // reaching these asserts already proves it returned).
+    try std.testing.expectEqual(@as(u32, 0), fx.abandoned_spawn_workers);
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
+}
+
+test "teardown abandons a spawn worker held hostage by an escaped descendant and leaks its context loudly" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    // Tiny injected budget, interruption disabled: this test pins the
+    // SAFETY NET (abandon-and-leak). The interruption path that
+    // normally converges this shape first has its own test above.
+    fx.spawn_join_deadline_ms = 300;
+    fx.spawn_join_interrupt = false;
+
+    test_argv = escaped_holder_argv;
+    test_stdin = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForRealCompletion(&h, sawLine);
+    const escaped_pid = try parseEscapedPid(&h);
+
+    // Grab the worker context before teardown abandons the slot: after
+    // the abandon it is exactly the leaked, process-lived memory the
+    // test walks to reach the direct child's recorded pid.
+    var leaked: @TypeOf(fx.slots[0].spawn_ctx) = null;
+    for (&fx.slots) |*slot| {
+        if (slot.kind == .spawn and slot.state.load(.acquire) == .running) leaked = slot.spawn_ctx;
+    }
+    try std.testing.expect(leaked != null);
+
+    const start_ns = clock_mod.monotonicNanoseconds();
+    fx.deinit();
+    const elapsed_ms = (clock_mod.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+
+    // Teardown returned on the injected budget's order of magnitude
+    // (generous bound for congested runners) instead of waiting out the
+    // escapee's 300s sleep...
+    try std.testing.expect(elapsed_ms < 10_000);
+    // ...and abandoned exactly the stuck worker, loudly through the
+    // counter seam, leaving no joinable thread and no running slot —
+    // the owner may free the channel's memory right now.
+    try std.testing.expectEqual(@as(u32, 1), fx.abandoned_spawn_workers);
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
+
+    // The process stays healthy after the leak: a fresh channel runs a
+    // spawn to completion and its own safety net stays quiet.
+    var h2 = try Harness.create();
+    defer h2.destroy();
+    test_argv = &.{ "/bin/sh", "-c", "printf 'alive\\n'" };
+    try h2.app_state.dispatch(&h2.harness.runtime, 1, .start);
+    try waitForRealCompletion(&h2, sawExit);
+    try std.testing.expectEqual(@as(u32, 0), h2.app_state.effects.abandoned_spawn_workers);
+
+    // Wake the abandoned worker under the leak invariant: killing the
+    // escaped holder closes the last stdout write end, the blocked read
+    // reaches EOF, and the worker walks its leaked context — the child
+    // handshake it locks to mark reaping, the pid recorded there — to
+    // reap the (zombie) direct child, then finds itself abandoned and
+    // exits without touching the torn-down channel. If the leak were
+    // not honored, this walk is where a use-after-free would crash the
+    // test. The direct child's disappearance is the deterministic proof
+    // the worker really woke and completed the walk: only its
+    // `child.wait` reaps that zombie.
+    const direct_pid = leaked.?.child_id.?;
+    try std.posix.kill(escaped_pid, .KILL);
+    var waited_ms: usize = 0;
+    while (waited_ms < 20_000) : (waited_ms += 10) {
+        if (std.posix.kill(direct_pid, @enumFromInt(0))) |_| {
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+        } else |err| {
+            try std.testing.expectEqual(error.ProcessNotFound, err);
+            break;
+        }
+    }
+    try std.testing.expectError(error.ProcessNotFound, std.posix.kill(direct_pid, @enumFromInt(0)));
+}
+
+test "an abandoned spawn worker survives the owner's allocator dying: its leak is process-lived only" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+
+    // The channel — and every caller-side allocation it makes — lives
+    // in an arena backed by the leak-checking testing allocator and is
+    // deinitialized right after teardown: the exact owner-lifetime
+    // posture the abandon leak must survive (mirroring the file
+    // worker's arena test). The channel struct itself sits in the arena
+    // too, so even the worker's `self` pointer dies with the owner.
+    const Channel = effects_mod.Effects(StreamMsg);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var arena_live = true;
+    defer if (arena_live) arena.deinit();
+    const fx = try arena.allocator().create(Channel);
+    fx.* = Channel.init(arena.allocator());
+    fx.spawn_join_deadline_ms = 300;
+    fx.spawn_join_interrupt = false;
+
+    // A short-lived escapee this time: it exits on its own (~2s), so
+    // the abandoned worker's wake needs no outside kill — by then the
+    // leaked context is the only handle on the effect left anywhere.
+    fx.spawn(.{
+        .key = 1,
+        .argv = &.{ "/bin/bash", "-c", "set -m; sleep 2 & echo held" },
+        .on_line = null,
+        .on_exit = null,
+    });
+    // The queued "held" line proves the worker published its child and
+    // reached the blocking read (publish happens-before the enqueue).
+    var setup_ms: usize = 0;
+    while (setup_ms < 20_000) : (setup_ms += 10) {
+        if (fx.hasPending()) break;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(fx.hasPending());
+    var leaked: @TypeOf(fx.slots[0].spawn_ctx) = null;
+    for (&fx.slots) |*slot| {
+        if (slot.kind == .spawn and slot.state.load(.acquire) == .running) leaked = slot.spawn_ctx;
+    }
+    try std.testing.expect(leaked != null);
+
+    fx.deinit();
+    try std.testing.expectEqual(@as(u32, 1), fx.abandoned_spawn_workers);
+    const direct_pid = leaked.?.child_id.?;
+
+    // Kill the owner's allocator: everything the channel ever got from
+    // it — including the channel struct — is gone. The abandoned worker
+    // must not notice: all it can still reach (its context, that
+    // context's buffers, the executor io) is `process_allocator`
+    // storage.
+    arena.deinit();
+    arena_live = false;
+
+    // The escapee exits on its own; EOF wakes the abandoned worker,
+    // which walks only its leaked context (marking reaping under the
+    // context's child mutex, reaping the zombie direct child) and exits
+    // without touching the dead arena — if any of its reachable memory
+    // were caller-allocated, this walk is where the use-after-free
+    // would crash the test. The zombie's disappearance proves the wake.
+    var waited_ms: usize = 0;
+    while (waited_ms < 20_000) : (waited_ms += 10) {
+        if (std.posix.kill(direct_pid, @enumFromInt(0))) |_| {
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+        } else |err| {
+            try std.testing.expectEqual(error.ProcessNotFound, err);
+            break;
+        }
+    }
+    try std.testing.expectError(error.ProcessNotFound, std.posix.kill(direct_pid, @enumFromInt(0)));
+
+    // And the happy path still frees everything through the same seams:
+    // a fresh channel backed DIRECTLY by the testing allocator runs a
+    // real spawn to completion and tears down joined — the leak check
+    // at test end guards the caller-side allocations, and
+    // `joinWorker`/`deinit` return the context and executor io to
+    // `process_allocator`.
+    var healthy = Channel.init(std.testing.allocator);
+    defer healthy.deinit();
+    healthy.spawn(.{
+        .key = 2,
+        .argv = &.{ "/bin/sh", "-c", "printf 'alive\\n'" },
+        .on_line = null,
+        .on_exit = null,
+    });
+    var healthy_ms: usize = 0;
+    while (healthy_ms < 20_000) : (healthy_ms += 10) {
+        if (healthy.hasPending()) break;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(healthy.hasPending());
+    healthy.deinit();
+    try std.testing.expectEqual(@as(u32, 0), healthy.abandoned_spawn_workers);
+}
+
+test "a spawn teardown storm never leaks a worker into the next harness" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // The e2e cascade's shape, run deterministically and repeatedly: a
+    // harness dies while its real child still streams (or while a
+    // cancel is racing the spawn), then the next round builds a fresh
+    // executor over recycled heap. Before the join fix an abandoned
+    // worker could resume inside freed memory and crash a later round;
+    // with it, destroy cannot return while any worker lives. Bounded
+    // iterations keep the storm CI-cheap.
+    var round: usize = 0;
+    while (round < 8) : (round += 1) {
+        var h = try Harness.create();
+        // Runs at each iteration's end — the storm's teardown — and on
+        // an error return alike.
+        defer h.destroy();
+        test_argv = &.{ "/bin/sh", "-c", "echo tick; sleep 30" };
+        test_stdin = null;
+        try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+        // Odd rounds race a wire cancel against the spawn before the
+        // teardown; even rounds tear down against the bare stream.
+        if (round % 2 == 1) try h.app_state.dispatch(&h.harness.runtime, 1, .stop);
+    }
 }
 
 test "real executor children inherit the parent environment" {
@@ -1248,4 +1570,157 @@ test "real executor reports unspawnable binaries as spawn_failed" {
     try waitForRealCompletion(&h, sawExit);
     try std.testing.expectEqual(effects_mod.EffectExitReason.spawn_failed, h.app_state.model.exit_reason.?);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.line_count);
+}
+
+test "a spawn exit still undelivered occupies its key against a respawn; delivery frees it" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+
+    // The fed exit queues the terminal and parks the slot — posted but
+    // undelivered. A respawn of the same key inside that window must
+    // reject: under session replay the first spawn is still a parked
+    // `.running` fake here (its journaled exit feeds at the recorded
+    // delivery position), so a live accept would journal a Msg stream
+    // replay rejects.
+    try fx.feedExit(stream_key, 0);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+
+    // Delivery order: the staged rejection first (loop-side pending),
+    // then the queued exit.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.exit_count);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+    try std.testing.expectEqual(@as(i32, 0), h.app_state.model.exit_code);
+
+    // The window ends at delivery: the same key spawns again.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+}
+
+/// One-shot flag for the respawn-from-own-exit idiom test below.
+var test_respawn_on_exit: bool = false;
+
+/// `streamUpdate` plus the restart idiom: the exit handler answers its
+/// own terminal by respawning the same key (one-shot).
+fn respawnUpdate(model: *StreamModel, msg: StreamMsg, fx: *StreamEffects) void {
+    if (msg == .done and test_respawn_on_exit) {
+        test_respawn_on_exit = false;
+        model.recordExit(msg.done);
+        fx.spawn(.{
+            .key = stream_key,
+            .argv = test_argv,
+            .on_line = StreamEffects.lineMsg(.line),
+            .on_exit = StreamEffects.exitMsg(.done),
+        });
+        return;
+    }
+    streamUpdate(model, msg, fx);
+}
+
+test "an update that respawns the same key from its own exit parks instead of rejecting" {
+    var h = try Harness.createWith(respawnUpdate);
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    test_respawn_on_exit = true;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try fx.feedExit(stream_key, 0);
+
+    // The drain clears the undelivered-exit marker AND retires the slot
+    // BEFORE the terminal Msg reaches update, so the handler's respawn
+    // of its own key is a fresh accepted spawn — the restart idiom must
+    // not regress. (The retire is the loop-side half of the worker's
+    // post-then-store epilogue; on this fed path the slot was already
+    // `.draining`, so the drain's store is an idempotent re-store.)
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+
+    // The respawned occupancy is a full fresh effect, not a resurrected
+    // slot: its own exit delivers and the cycle restarts cleanly.
+    test_respawn_on_exit = true;
+    try fx.feedExit(stream_key, 7);
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.exit_count);
+    try std.testing.expectEqual(@as(i32, 7), h.app_state.model.exit_code);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    test_respawn_on_exit = false;
+}
+
+/// Spawn slots carrying a set undelivered-exit marker.
+fn markedExitSlotCount(fx: *StreamEffects) usize {
+    var count: usize = 0;
+    for (&fx.slots) |*slot| {
+        if (slot.kind == .spawn and slot.exit_undelivered) count += 1;
+    }
+    return count;
+}
+
+test "consuming a fed lines exit clears the undelivered-exit marker" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(fx));
+
+    // Posted but undelivered: the marker holds the slot (and the key).
+    try fx.feedExit(stream_key, 0);
+    try std.testing.expectEqual(@as(usize, 1), markedExitSlotCount(fx));
+
+    // Dequeueing the exit IS its delivery: the drain must clear the
+    // marker when it consumes the exit, or `reclaimSlots` holds the
+    // slot out of `.idle` forever.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
+    try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(fx));
+}
+
+test "every delivered lines exit hands its slot back for reuse" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+
+    test_argv = &.{"/nonexistent/native-sdk-effects-test-binary"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    // Each round runs the real worker epilogue end to end (an
+    // unspawnable binary is still worker truth: the worker posts a
+    // `.spawn_failed` exit through the same mark-then-post commit) and
+    // must return its slot. More rounds than the pool has slots proves
+    // delivery frees them: a marker the drain's consume ever missed
+    // would strand its slot in `.draining`, exhaust the pool, and turn
+    // a later round's reason into `.rejected`.
+    const io = std.testing.io;
+    var round: usize = 1;
+    while (round <= effects_mod.max_effects + 1) : (round += 1) {
+        try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+        var waited_ms: usize = 0;
+        while (h.app_state.model.exit_count < round) : (waited_ms += 10) {
+            if (waited_ms >= 20_000) return error.TestTimedOut;
+            try h.drainWakes();
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+        }
+        try std.testing.expectEqual(round, h.app_state.model.exit_count);
+        try std.testing.expectEqual(effects_mod.EffectExitReason.spawn_failed, h.app_state.model.exit_reason.?);
+        try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(&h.app_state.effects));
+    }
 }
