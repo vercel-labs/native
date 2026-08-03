@@ -49,17 +49,19 @@ try {
   }
 
   const zig = (args) => execFileSync("zig", args, { cwd: work, stdio: "inherit" });
+  const executableName = (name) => process.platform === "win32" ? `${name}.exe` : name;
+  const executable = (name) => path.join(work, executableName(name));
 
   // 3. Build ReleaseSafe (the shipping mode: index checks stay on).
-  zig(["build-lib", "-OReleaseSafe", "-femit-bin=libinbox.a", "shim.zig"]);
+  zig(["build-lib", "-OReleaseSafe", "-femit-bin=libinbox.a", "shim.zig", "-lc"]);
   zig([
-    "build-exe", "-OReleaseSafe", "-femit-bin=bench_safe",
+    "build-exe", "-OReleaseSafe", `-femit-bin=${executableName("bench_safe")}`,
     "--dep", "impl", "-Mroot=bench.zig", "-Mimpl=impl.zig", "libinbox.a", "-lc",
   ]);
   log("built ReleaseSafe");
 
   // 4. run1k digest gate.
-  execFileSync(path.join(work, "bench_safe"), ["run1k", "run1k.txt"], { cwd: work, stdio: "inherit" });
+  execFileSync(executable("bench_safe"), ["run1k", "run1k.txt"], { cwd: work, stdio: "inherit" });
   const digest = createHash("md5").update(fs.readFileSync(path.join(work, "run1k.txt"))).digest("hex");
   if (digest !== ORACLE_RUN1K_MD5) {
     console.error(`[gate] FAIL run1k digest ${digest} != oracle ${ORACLE_RUN1K_MD5}`);
@@ -70,14 +72,14 @@ try {
   // 5. Perf band.
   if (!skipBench) {
     log("bench10k (ReleaseSafe):");
-    execFileSync(path.join(work, "bench_safe"), ["bench10k"], { cwd: work, stdio: "inherit" });
-    zig(["build-lib", "-OReleaseFast", "-femit-bin=libinbox_fast.a", "shim.zig"]);
+    execFileSync(executable("bench_safe"), ["bench10k"], { cwd: work, stdio: "inherit" });
+    zig(["build-lib", "-OReleaseFast", "-femit-bin=libinbox_fast.a", "shim.zig", "-lc"]);
     zig([
-      "build-exe", "-OReleaseFast", "-femit-bin=bench_fast",
+      "build-exe", "-OReleaseFast", `-femit-bin=${executableName("bench_fast")}`,
       "--dep", "impl", "-Mroot=bench.zig", "-Mimpl=impl.zig", "libinbox_fast.a", "-lc",
     ]);
     log("bench10k (ReleaseFast):");
-    execFileSync(path.join(work, "bench_fast"), ["bench10k"], { cwd: work, stdio: "inherit" });
+    execFileSync(executable("bench_fast"), ["bench10k"], { cwd: work, stdio: "inherit" });
   }
 
   log("PASS");

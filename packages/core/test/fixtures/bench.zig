@@ -125,24 +125,23 @@ fn run1k(alloc: std.mem.Allocator, io: std.Io, out_path: []const u8) !void {
     std.debug.print("run1k wrote {s} ({d} bytes, {d} effect bytes)\n", .{ out_path, out.items.len, eff_len });
 }
 
-// Raw monotonic nanoseconds (darwin). ~41ns granularity on Apple Silicon.
-extern "c" fn clock_gettime_nsec_np(clock_id: c_int) u64;
-const CLOCK_UPTIME_RAW: c_int = 8;
-inline fn nowNs() u64 {
-    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+// Monotonic awake-time nanoseconds. This maps to CLOCK_UPTIME_RAW on macOS
+// while retaining the same benchmark contract on other supported hosts.
+inline fn nowNs(io: std.Io) u64 {
+    return @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 0));
 }
 
-fn bench10k(alloc: std.mem.Allocator) !void {
+fn bench10k(alloc: std.mem.Allocator, io: std.Io) !void {
     impl.reset();
     var rng = SplitMix{ .state = 0xdead_beef_cafe_f00d };
     const iters = 10_000;
     const samples = try alloc.alloc(u64, iters);
 
-    const bench_start = nowNs();
+    const bench_start = nowNs(io);
     for (0..iters) |i| {
         // Keystroke-shaped mix: mostly single-char inserts.
         const roll = rng.below(1000);
-        const t0 = nowNs();
+        const t0 = nowNs(io);
         if (roll < 700) {
             impl.pushText(@floatFromInt(0x61 + rng.below(26)));
             _ = impl.dispatch(4, 0, 0, 0, 0, 0);
@@ -159,9 +158,9 @@ fn bench10k(alloc: std.mem.Allocator) !void {
         } else {
             _ = impl.dispatch(3, 0, 0, 0, 0, 0); // clear_done
         }
-        samples[i] = nowNs() - t0;
+        samples[i] = nowNs(io) - t0;
     }
-    const wall_total = nowNs() - bench_start;
+    const wall_total = nowNs(io) - bench_start;
 
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
     var total: u64 = 0;
@@ -190,15 +189,15 @@ pub fn main(init: std.process.Init) !void {
     const alloc = init.arena.allocator();
     impl.init();
 
-    const argv = init.minimal.args.vector;
-    const mode: []const u8 = if (argv.len > 1) std.mem.span(argv[1]) else "smoke";
+    const args = try init.minimal.args.toSlice(alloc);
+    const mode: []const u8 = if (args.len > 1) args[1] else "smoke";
 
     if (std.mem.eql(u8, mode, "smoke")) {
         try smoke(alloc);
     } else if (std.mem.eql(u8, mode, "run1k")) {
-        try run1k(alloc, init.io, std.mem.span(argv[2]));
+        try run1k(alloc, init.io, args[2]);
     } else if (std.mem.eql(u8, mode, "bench10k")) {
-        try bench10k(alloc);
+        try bench10k(alloc, init.io);
     } else {
         std.debug.print("unknown mode {s}\n", .{mode});
     }
