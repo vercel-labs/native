@@ -1,3 +1,4 @@
+
 // R2 integer inference: JS semantics are f64 everywhere, but the emitter may
 // use i64 wherever that is unobservable. A `number` slot (const, local, param,
 // field, return) is emitted as i64 when:
@@ -1408,7 +1409,10 @@ export class IntInference {
           );
           if (hardFed || tentativeFed) {
             demandSlot(s, !hardFed);
-            changed = true;
+            // Comparison-only demand is rejected when this slot touches an
+            // exported host boundary. Iterate again only when the claim
+            // actually landed; otherwise the fixed point never converges.
+            if (s.demanded) changed = true;
           }
         } else if (s.comparisonDemanded && hardFed) {
           demandSlot(s, false);
