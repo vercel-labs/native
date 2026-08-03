@@ -2016,12 +2016,15 @@ export class Emitter {
     }
     const en = this.table.enums.get(name);
     if (en) {
-      // R5: string-literal union -> enum(u8), declaration order (wire-stable).
+      // R5: string-literal union -> enum, declaration order (wire-stable).
+      // Use u16 only when a zero-based ordinal exceeds u8 (257+ members);
+      // 256 members occupy the complete 0...255 range.
+      const tag = en.members.length > 256 ? "u16" : "u8";
       const members = en.members.map((m, i) => `${zigId(m)} = ${i}`).join(", ");
-      const oneLine = `${pub}const ${name} = enum(u8) { ${members} };`;
+      const oneLine = `${pub}const ${name} = enum(${tag}) { ${members} };`;
       if (oneLine.length <= 100) this.out.push(oneLine);
       else {
-        this.out.push(`${pub}const ${name} = enum(u8) {`);
+        this.out.push(`${pub}const ${name} = enum(${tag}) {`);
         en.members.forEach((m, i) => this.out.push(`    ${zigId(m)} = ${i},`));
         this.out.push(`};`);
       }
