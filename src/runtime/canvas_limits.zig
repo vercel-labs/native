@@ -33,18 +33,13 @@ const canvas = @import("canvas");
 // so RuntimeView measures 3.44 MiB -> 4.83 MiB and the 32-slot Runtime
 // 110.0 MiB -> 154.5 MiB of fixed-capacity address space.
 //
-// This budget deliberately stops short of a MAXIMALLY dense terminal.
-// A viewport with a distinct foreground AND background per cell merges
-// nothing and wants two commands per cell: ~24,000 for 200x60, ~60,000
-// for 300x100. At ~696 B per slot that is 16 MiB and 40 MiB per view —
-// 500 MiB and 1.3 GiB across the 32 slots — and a trial raise to 8192
-// alone (255 MiB) already crashed runtime construction. Terminal
-// fidelity past realistic styling is not a number in this file; it
-// needs a packed cell-grid command the host renderers expand
-// themselves (see the header of primitives/canvas/terminal_grid.zig).
-// What this file guarantees instead is that the ceiling is never hit
-// SILENTLY: the grid painter reports the rows it dropped and the
-// runtime logs the budget by name.
+// The terminal no longer spends this budget at all. A screen is one
+// `cell_grid` command (canvas/cell_grid.zig) whose cost is CELLS —
+// see `max_canvas_cells_per_view` — so a 300x100 truecolor viewport
+// costs four commands, not sixty thousand. What remains here is the
+// headroom the raise bought every OTHER surface, and it could come back
+// down to 2048 (saving ~45 MiB of address space) once no consumer needs
+// it; that is a separate change with its own measurement.
 pub const max_canvas_commands_per_view: usize = 4096;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
@@ -61,6 +56,17 @@ pub const max_canvas_gradient_stops_per_view: usize = 64;
 // draw paths.
 pub const max_canvas_path_elements_per_view: usize = 2048;
 pub const max_canvas_glyphs_per_view: usize = 8192;
+// Packed terminal CELLS per view (canvas.cell_grid): the budget that
+// replaced the terminal's command budget. A `cell_grid` command is one
+// command carrying a whole screen, so a terminal's cost stopped being
+// "commands" and became "area" — and area is what a terminal actually
+// scales with. One cell is 20 B, so 32768 is 640 KB in the view's
+// retained copy and the same again in the frame's builder-owned store
+// (threadlocal, one per planning thread). It covers a 300x100 viewport
+// (30,000 cells) with room over, or two 160x100 split panes exactly.
+// Beyond it the painter degrades row-atomically and says so, the same
+// contract every other frame budget carries.
+pub const max_canvas_cells_per_view: usize = 32768;
 // Frame TEXT bytes: every `draw_text` in the finished display list,
 // builder-owned and referenced alike. Raised 32 KiB -> 64 KiB with the
 // terminal work: a terminal viewport is one widget whose every visible

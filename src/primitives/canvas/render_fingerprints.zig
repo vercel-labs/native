@@ -1,3 +1,4 @@
+const std = @import("std");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const hash_model = @import("hash.zig");
@@ -16,6 +17,7 @@ const Shadow = drawing_model.Shadow;
 const Blur = drawing_model.Blur;
 const Glyph = text_model.Glyph;
 const DrawText = text_model.DrawText;
+const CellGrid = @import("cell_grid.zig").CellGrid;
 const TextLayoutOptions = text_model.TextLayoutOptions;
 
 const resourceHashTag = hash_model.resourceHashTag;
@@ -94,6 +96,29 @@ pub fn linearGradientFingerprint(gradient: LinearGradient) u64 {
         hash = resourceHashF32(hash, stop.offset);
         hash = resourceHashColor(hash, stop.color);
     }
+    return hash;
+}
+
+/// A grid's content fingerprint.
+///
+/// Covers exactly what a renderer draws: the lattice geometry, the font,
+/// the cluster blob, and every cell byte. The cells fold in as raw bytes
+/// (`Cell` is `extern` and hole-free — a comptime assert pins its size),
+/// which makes the hash both exact and cheap enough to run per frame
+/// over a 30,000-cell screen. `measure` is excluded, like `DrawText`'s.
+pub fn cellGridFingerprint(grid: CellGrid) u64 {
+    var hash = resourceHashTag("cell_grid");
+    hash = resourceHashU64(hash, grid.font_id);
+    hash = resourceHashF32(hash, grid.font_size);
+    hash = resourceHashPoint(hash, grid.origin);
+    hash = resourceHashF32(hash, grid.cell_width);
+    hash = resourceHashF32(hash, grid.cell_height);
+    hash = resourceHashF32(hash, grid.baseline);
+    hash = resourceHashU32(hash, grid.cols);
+    hash = resourceHashU32(hash, grid.rows);
+    hash = resourceHashBytes(hash, grid.text);
+    hash = resourceHashUsize(hash, grid.cells.len);
+    hash = resourceHashBytes(hash, std.mem.sliceAsBytes(grid.cells));
     return hash;
 }
 
@@ -189,6 +214,10 @@ fn resourceHashCanvasCommand(hash: u64, command: anytype) u64 {
             next = resourceHashPoint(next, value.from);
             next = resourceHashPoint(next, value.to);
             next = resourceHashStroke(next, value.stroke);
+        },
+        .cell_grid => |value| {
+            next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));
+            next = resourceHashU64(next, cellGridFingerprint(value));
         },
         .fill_path => |value| {
             next = resourceHashOptionalObjectId(next, nonZeroObjectId(value.id));

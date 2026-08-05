@@ -16,6 +16,7 @@ const textBounds = text_model.textBounds;
 
 const drawImageFingerprint = fingerprints.drawImageFingerprint;
 const drawTextFingerprint = fingerprints.drawTextFingerprint;
+const cellGridFingerprint = fingerprints.cellGridFingerprint;
 const linearGradientFingerprint = fingerprints.linearGradientFingerprint;
 const shadowFingerprint = fingerprints.shadowFingerprint;
 const blurFingerprint = fingerprints.blurFingerprint;
@@ -102,6 +103,19 @@ pub const RenderResourcePlanner = struct {
                 .glyph_count = value.glyphs.len,
                 .text_len = value.text.len,
                 .fingerprint = drawTextFingerprint(value),
+            }),
+            .cell_grid => |value| try self.append(.{
+                .kind = .glyph_run,
+                .command_index = index,
+                .id = nonZeroObjectId(value.id),
+                .bounds = value.bounds(),
+                .font_id = value.font_id,
+                // A grid names no shaped glyphs: renderers map each
+                // cell's cluster themselves, so the resource is the
+                // FACE plus the cluster blob, not a glyph run.
+                .glyph_count = 0,
+                .text_len = value.text.len,
+                .fingerprint = cellGridFingerprint(value),
             }),
             .shadow => |value| try self.append(.{
                 .kind = .shadow,

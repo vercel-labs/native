@@ -535,7 +535,7 @@ test "runtime next canvas frame retains renderer cache families" {
     try std.testing.expectEqual(@as(usize, 1), first_frame.visual_effect_plan.shadowCount());
     try std.testing.expectEqual(@as(usize, 1), first_frame.visual_effect_cache_plan.uploadCount());
 
-    const first_info = runtimeViewInfo(harness.runtime.views[0]);
+    const first_info = runtimeViewInfo(&harness.runtime.views[0]);
     try std.testing.expectEqual(@as(usize, 1), first_info.canvas_frame_path_geometry_count);
     try std.testing.expect(first_info.canvas_frame_path_geometry_vertex_count > 0);
     try std.testing.expect(first_info.canvas_frame_path_geometry_index_count > 0);
@@ -605,7 +605,7 @@ test "runtime next canvas frame retains renderer cache families" {
     try std.testing.expectEqual(@as(usize, 0), retained_frame.visual_effect_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 1), retained_frame.visual_effect_cache_plan.retainCount());
 
-    const retained_info = runtimeViewInfo(harness.runtime.views[0]);
+    const retained_info = runtimeViewInfo(&harness.runtime.views[0]);
     try std.testing.expectEqual(@as(usize, 1), retained_info.canvas_frame_path_geometry_retain_count);
     try std.testing.expectEqual(@as(usize, 1), retained_info.canvas_frame_image_retain_count);
     try std.testing.expectEqual(@as(usize, 1), retained_info.canvas_frame_layer_retain_count);

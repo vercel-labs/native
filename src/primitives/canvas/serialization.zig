@@ -89,6 +89,21 @@ pub fn writeCommandJson(command: CanvasCommand, writer: anytype) !void {
             try writer.writeAll(",\"fill\":");
             try writeFillJson(value.fill, writer);
         },
+        // A grid's JSON is its SHAPE, not its 30,000 cells: the display
+        // list's JSON form is a debugging and snapshot surface, and a
+        // per-cell dump would bury every other command in the scene. The
+        // cell bytes reach a renderer through the command itself, never
+        // through this encoding.
+        .cell_grid => |value| {
+            try writer.print(",\"id\":{d},\"origin\":", .{value.id});
+            try writePointJson(value.origin, writer);
+            try writer.print(",\"cols\":{d},\"rows\":{d},\"cell\":[{d},{d}],\"font\":{d},\"size\":{d},\"cells\":{d},\"text_len\":{d}", .{
+                value.cols,       value.rows,
+                value.cell_width, value.cell_height,
+                value.font_id,    value.font_size,
+                value.cells.len,  value.text.len,
+            });
+        },
         .stroke_rect => |value| {
             try writer.print(",\"id\":{d},\"rect\":", .{value.id});
             try writeRectJson(value.rect, writer);

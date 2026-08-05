@@ -26,6 +26,9 @@ const DrawImage = drawing_model.DrawImage;
 const Shadow = drawing_model.Shadow;
 const Blur = drawing_model.Blur;
 const DrawText = text_model.DrawText;
+const cell_grid_model = @import("cell_grid.zig");
+const CellGrid = cell_grid_model.CellGrid;
+const CellDecoration = cell_grid_model.CellDecoration;
 const TextLayoutOptions = text_model.TextLayoutOptions;
 const TextLine = text_model.TextLine;
 const RenderCommand = render_model.RenderCommand;
@@ -306,6 +309,7 @@ pub const ReferenceRenderSurface = struct {
             .shadow => |value| try self.drawShadow(command, value, draw_bounds),
             .blur => |value| try self.drawBlur(command, value, draw_bounds),
             .draw_text => |value| try self.drawText(command, value, draw_bounds),
+            .cell_grid => |value| try self.drawCellGrid(command, value, draw_bounds),
             else => return error.ReferenceRenderUnsupportedCommand,
         }
     }
@@ -751,6 +755,130 @@ pub const ReferenceRenderSurface = struct {
         for (layout.lines) |line| {
             try self.drawTextLine(command, value, draw_bounds, line);
         }
+    }
+
+    /// The packed cell grid (`cell_grid.zig`), the renderer that makes
+    /// this module the terminal's oracle.
+    ///
+    /// Two passes, and the order is the contract: EVERY background
+    /// first, then every glyph and decoration. A single pass would let
+    /// cell N+1's background erase the part of cell N's glyph that
+    /// overhangs into it — real mono faces overhang constantly (italics
+    /// and box-adjacent glyphs worst), and the seam would appear only
+    /// on styled screens, which is the worst kind of bug to find.
+    ///
+    /// Each cell's ink goes through `drawGlyphBox`, the exact path a
+    /// `draw_text` glyph takes: same outline rasterizer, same coverage
+    /// blend, same block fallback for unmapped codepoints. A grid cell
+    /// and a text run therefore paint the same glyph the same way, by
+    /// construction rather than by inspection.
+    fn drawCellGrid(self: ReferenceRenderSurface, command: RenderCommand, value: CellGrid, draw_bounds: geometry.RectF) Error!void {
+        if (value.cell_width <= 0 or value.cell_height <= 0) return;
+        if (value.cols == 0 or value.rows == 0) return;
+
+        // Pass 1: backgrounds.
+        for (value.cells, 0..) |cell, index| {
+            const flags = cell.style();
+            if (!flags.has_background) continue;
+            const x = index % value.cols;
+            const y = index / value.cols;
+            if (y >= value.rows) break;
+            const rect = command.transform.transformRect(value.cellRect(x, y)).normalized();
+            self.fillTextRect(rect, draw_bounds, cell.bg.toColor(), command.opacity);
+        }
+
+        // Pass 2: ink and decorations. The synthetic `DrawText` carries
+        // exactly what the glyph path reads — face, size, colour — so a
+        // cell is a one-glyph run in every way that reaches a pixel.
+        var run = DrawText{
+            .id = value.id,
+            .font_id = value.font_id,
+            .size = value.font_size,
+            .origin = value.origin,
+            .color = Color.rgba(0, 0, 0, 1),
+        };
+        for (value.cells, 0..) |cell, index| {
+            const flags = cell.style();
+            if (flags.width == .spacer) continue;
+            if (!cell.hasInk()) continue;
+            const x = index % value.cols;
+            const y = index / value.cols;
+            if (y >= value.rows) break;
+            const rect = value.cellRect(x, y);
+            run.color = cell.fg.toColor();
+
+            const cluster = cell.cluster(value.text);
+            if (cluster.len > 0) {
+                const baseline = rect.y + value.baseline;
+                // A wide cell inks across two columns, so its fallback
+                // block and its outline centring both use the doubled
+                // advance.
+                const advance = if (flags.width == .wide) value.cell_width * 2 else value.cell_width;
+                // Every codepoint of the cluster paints at the SAME pen:
+                // the primary plus its combining marks are one glyph
+                // stack over one cell, and advancing between them would
+                // walk the marks into the next column.
+                var iterator = std.unicode.Utf8Iterator{ .bytes = cluster, .i = 0 };
+                while (iterator.nextCodepoint()) |codepoint| {
+                    const glyph_rect = geometry.RectF.init(rect.x, baseline - value.font_size, advance, value.font_size);
+                    self.drawGlyphBox(command, run, draw_bounds, codepoint, rect.x, baseline, glyph_rect);
+                }
+            }
+
+            self.drawCellDecorations(command, value, cell, flags, rect, draw_bounds);
+        }
+    }
+
+    /// Underline (six styles), strikethrough, and overline for one
+    /// cell. Geometry comes from `CellDecoration` rather than from
+    /// numbers written here, so a host encoder that wants to match this
+    /// renderer reads the same source.
+    fn drawCellDecorations(
+        self: ReferenceRenderSurface,
+        command: RenderCommand,
+        value: CellGrid,
+        cell: cell_grid_model.Cell,
+        flags: cell_grid_model.CellFlags,
+        rect: geometry.RectF,
+        draw_bounds: geometry.RectF,
+    ) void {
+        const width = if (flags.width == .wide)
+            geometry.RectF.init(rect.x, rect.y, rect.width * 2, rect.height)
+        else
+            rect;
+        if (flags.overline) {
+            self.fillCellRect(command, CellDecoration.overlineRect(width, value.font_size), draw_bounds, cell.fg.toColor());
+        }
+        if (flags.strikethrough) {
+            self.fillCellRect(command, CellDecoration.strikethroughRect(width, value.font_size), draw_bounds, cell.fg.toColor());
+        }
+        if (flags.underline == .none) return;
+        const color = if (flags.has_underline_color) cell.underline_color.toColor() else cell.fg.toColor();
+        const line = CellDecoration.underlineRect(width, value.font_size);
+        switch (flags.underline) {
+            .none => {},
+            .single => self.fillCellRect(command, line, draw_bounds, color),
+            .double => {
+                self.fillCellRect(command, line, draw_bounds, color);
+                self.fillCellRect(command, CellDecoration.underlineSecondRect(width, value.font_size), draw_bounds, color);
+            },
+            .dotted, .dashed => {
+                var segment: usize = 0;
+                while (CellDecoration.dashSegment(line, flags.underline, segment)) |piece| : (segment += 1) {
+                    self.fillCellRect(command, piece, draw_bounds, color);
+                }
+            },
+            .curly => {
+                var segment: usize = 0;
+                while (CellDecoration.curlSegment(line, value.font_size, segment)) |piece| : (segment += 1) {
+                    self.fillCellRect(command, piece, draw_bounds, color);
+                }
+            },
+        }
+    }
+
+    fn fillCellRect(self: ReferenceRenderSurface, command: RenderCommand, rect: geometry.RectF, draw_bounds: geometry.RectF, color: Color) void {
+        self.fillTextRect(command.transform.transformRect(rect).normalized(), draw_bounds, color, command.opacity);
     }
 
     fn drawTextLine(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF, line: TextLine) Error!void {

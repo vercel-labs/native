@@ -477,6 +477,14 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
     };
 
     switch (command.command) {
+        // The packed cell grid has no GPU-packet encoding yet: it stays
+        // `.unsupported`, which makes the frame planner refuse the
+        // retained packet and present through the CPU pixel path — the
+        // reference renderer, the same oracle the automation
+        // screenshots go through. Correct on every host from day one,
+        // and slower than it should be until each host learns to expand
+        // a lattice itself (see cell_grid.zig).
+        .cell_grid => {},
         .fill_rect => |value| {
             packet_command.kind = canvasGpuFillRectKind(value.fill);
             packet_command.pipeline = canvasGpuFillPipeline(value.fill);

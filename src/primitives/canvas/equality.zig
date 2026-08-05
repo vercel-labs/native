@@ -23,6 +23,9 @@ const StrokePath = drawing_model.StrokePath;
 const DrawImage = drawing_model.DrawImage;
 const Shadow = drawing_model.Shadow;
 const Blur = drawing_model.Blur;
+const cell_grid_model = @import("cell_grid.zig");
+const CellGrid = cell_grid_model.CellGrid;
+const Cell = cell_grid_model.Cell;
 const Glyph = text_model.Glyph;
 const DrawText = text_model.DrawText;
 const TextLayoutOptions = text_model.TextLayoutOptions;
@@ -81,6 +84,10 @@ pub fn commandsEqual(a: CanvasCommand, b: CanvasCommand) bool {
         },
         .draw_text => |value| switch (b) {
             .draw_text => |other| drawTextsEqual(value, other),
+            else => false,
+        },
+        .cell_grid => |value| switch (b) {
+            .cell_grid => |other| cellGridsEqual(value, other),
             else => false,
         },
         .shadow => |value| switch (b) {
@@ -142,6 +149,24 @@ pub fn drawTextsEqual(a: DrawText, b: DrawText) bool {
         std.mem.eql(u8, a.text, b.text) and
         glyphsEqual(a.glyphs, b.glyphs) and
         optionalTextLayoutOptionsEqual(a.text_layout, b.text_layout);
+}
+
+/// Grid equality is CONTENT equality: two grids are the same command
+/// when they cover the same lattice with the same cells and the same
+/// cluster bytes. The cells compare as raw bytes — `Cell` is `extern`
+/// with no padding holes by construction (a comptime assert pins its
+/// size), so `std.mem.eql` over the byte view is both exact and the
+/// fastest thing available for a 30,000-element array. `measure` is
+/// excluded, exactly as `DrawText`'s is: process-local layout context,
+/// not drawn content.
+pub fn cellGridsEqual(a: CellGrid, b: CellGrid) bool {
+    if (a.id != b.id or a.cols != b.cols or a.rows != b.rows or
+        a.font_id != b.font_id or a.font_size != b.font_size or
+        a.cell_width != b.cell_width or a.cell_height != b.cell_height or
+        a.baseline != b.baseline or !pointsEqual(a.origin, b.origin)) return false;
+    if (a.cells.len != b.cells.len) return false;
+    if (!std.mem.eql(u8, a.text, b.text)) return false;
+    return std.mem.eql(u8, std.mem.sliceAsBytes(a.cells), std.mem.sliceAsBytes(b.cells));
 }
 
 pub fn optionalTextLayoutOptionsEqual(a: ?TextLayoutOptions, b: ?TextLayoutOptions) bool {

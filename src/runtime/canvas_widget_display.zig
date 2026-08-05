@@ -398,8 +398,8 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             defer launch_timing.lapOnce("first_display_list_emitted");
 
             const scratch = widget_display_scratch.get();
-            scratch.chrome = .{};
-            scratch.builder = canvas.Builder.init(&scratch.commands);
+            scratch.chrome.reset();
+            scratch.builder.initAt(&scratch.commands);
             const builder = &scratch.builder;
             const chrome_storage = &scratch.chrome;
             const current = self.views[view_index].canvasDisplayList();

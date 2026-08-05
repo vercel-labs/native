@@ -9,6 +9,7 @@ const max_canvas_gradient_stops_per_view = canvas_limits.max_canvas_gradient_sto
 const max_canvas_path_elements_per_view = canvas_limits.max_canvas_path_elements_per_view;
 const max_canvas_glyphs_per_view = canvas_limits.max_canvas_glyphs_per_view;
 const max_canvas_text_bytes_per_view = canvas_limits.max_canvas_text_bytes_per_view;
+const max_canvas_cells_per_view = canvas_limits.max_canvas_cells_per_view;
 
 const appendCanvasSummaryChange = canvas_frame_helpers.appendCanvasSummaryChange;
 const unionRects = canvas_frame_helpers.unionRects;
@@ -31,6 +32,7 @@ pub const CanvasRenderAnimationDirtyBounds = struct {
 
 pub const CanvasResourceCounts = struct {
     command_count: usize = 0,
+    cell_count: usize = 0,
     gradient_stop_count: usize = 0,
     path_element_count: usize = 0,
     glyph_count: usize = 0,
@@ -62,6 +64,13 @@ pub const CanvasResourceCounts = struct {
                 try addCanvasCount(&self.text_byte_count, value.text.len, max_canvas_text_bytes_per_view, error.CanvasTextTooLarge);
                 try addCanvasCount(&self.glyph_count, value.glyphs.len, max_canvas_glyphs_per_view, error.CanvasGlyphLimitReached);
             },
+            // A grid charges CELLS and its interned cluster blob. It
+            // charges no glyphs: renderers map each cell's cluster
+            // themselves, so there is no shaped-glyph array to bound.
+            .cell_grid => |value| {
+                try addCanvasCount(&self.cell_count, value.cells.len, max_canvas_cells_per_view, error.CanvasCellLimitReached);
+                try addCanvasCount(&self.text_byte_count, value.text.len, max_canvas_text_bytes_per_view, error.CanvasTextTooLarge);
+            },
             .shadow => |value| {
                 _ = value;
             },
@@ -89,6 +98,20 @@ pub const CanvasDisplayListScratch = struct {
     glyph_count: usize = 0,
     text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     text_len: usize = 0,
+    cells: [max_canvas_cells_per_view]canvas.Cell = undefined,
+    cell_count: usize = 0,
+
+    /// Empty the scratch WITHOUT rebuilding it. Same reason as
+    /// `canvas.Builder.initAt`: the struct carries a frame's worth of
+    /// inline storage, so `scratch.* = .{}` is a megabyte-scale stack
+    /// temporary.
+    pub fn reset(self: *CanvasDisplayListScratch) void {
+        self.gradient_stop_count = 0;
+        self.path_element_count = 0;
+        self.glyph_count = 0;
+        self.text_len = 0;
+        self.cell_count = 0;
+    }
 
     pub fn appendCopiedCommand(self: *CanvasDisplayListScratch, builder: *canvas.Builder, command: canvas.CanvasCommand) anyerror!void {
         try builder.append(try self.copyCanvasCommand(command));
@@ -140,6 +163,12 @@ pub const CanvasDisplayListScratch = struct {
                 copy.glyphs = try self.copyCanvasGlyphs(value.glyphs);
                 break :blk .{ .draw_text = copy };
             },
+            .cell_grid => |value| blk: {
+                var copy = value;
+                copy.cells = try self.copyCanvasCells(value.cells);
+                copy.text = try self.copyCanvasText(value.text);
+                break :blk .{ .cell_grid = copy };
+            },
             .shadow => |value| .{ .shadow = value },
             .blur => |value| .{ .blur = value },
         };
@@ -178,6 +207,15 @@ pub const CanvasDisplayListScratch = struct {
         @memcpy(self.path_elements[start..end], elements);
         self.path_element_count = end;
         return self.path_elements[start..end];
+    }
+
+    pub fn copyCanvasCells(self: *CanvasDisplayListScratch, cells: []const canvas.Cell) anyerror![]const canvas.Cell {
+        const end = self.cell_count + cells.len;
+        if (end > self.cells.len) return error.CanvasCellLimitReached;
+        const start = self.cell_count;
+        @memcpy(self.cells[start..end], cells);
+        self.cell_count = end;
+        return self.cells[start..end];
     }
 
     pub fn copyCanvasGlyphs(self: *CanvasDisplayListScratch, glyphs: []const canvas.Glyph) anyerror![]const canvas.Glyph {
@@ -287,6 +325,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             self.canvas_path_element_count = 0;
             self.canvas_glyph_count = 0;
             self.canvas_text_len = 0;
+            self.canvas_cell_count = 0;
 
             for (display_list.commands) |command| {
                 self.canvas_commands[self.canvas_command_count] = try self.copyCanvasCommand(command);
@@ -811,6 +850,12 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                     copy.glyphs = try self.copyCanvasGlyphs(value.glyphs);
                     break :blk .{ .draw_text = copy };
                 },
+                .cell_grid => |value| blk: {
+                    var copy = value;
+                    copy.cells = try self.copyCanvasCells(value.cells);
+                    copy.text = try self.copyCanvasText(value.text);
+                    break :blk .{ .cell_grid = copy };
+                },
                 .shadow => |value| .{ .shadow = value },
                 .blur => |value| .{ .blur = value },
             };
@@ -849,6 +894,15 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             @memcpy(self.canvas_path_elements[start..end], elements);
             self.canvas_path_element_count = end;
             return self.canvas_path_elements[start..end];
+        }
+
+        pub fn copyCanvasCells(self: *RuntimeView, cells: []const canvas.Cell) anyerror![]const canvas.Cell {
+            const end = self.canvas_cell_count + cells.len;
+            if (end > self.canvas_cells.len) return error.CanvasCellLimitReached;
+            const start = self.canvas_cell_count;
+            @memcpy(self.canvas_cells[start..end], cells);
+            self.canvas_cell_count = end;
+            return self.canvas_cells[start..end];
         }
 
         pub fn copyCanvasGlyphs(self: *RuntimeView, glyphs: []const canvas.Glyph) anyerror![]const canvas.Glyph {

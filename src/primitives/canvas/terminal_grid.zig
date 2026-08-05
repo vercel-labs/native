@@ -16,30 +16,46 @@
 //! painter draws the colors it is handed, so two producers with
 //! different palette policies still paint through one code path.
 //!
-//! Budgets: painting degrades ROW-ATOMICALLY under three ceilings — the
-//! display-list command budget, the text-byte store, and the
-//! glyph-atlas proxy — so a pathological screen paints fewer complete
-//! rows instead of failing the whole frame. Each ceiling's preflight
-//! mirrors the paint loop's emissions exactly; counting bytes the loop
-//! would suppress would silently blank every row after a paintable one.
-//! Degrading is never SILENT: `paintReport` returns the rows that
-//! reached the list and the store that stopped it, and every paint —
-//! including the void-returning `paint` — records the same fact on the
-//! builder (`canvas.DisplayListDegradation`) for the runtime and the
-//! host app to surface. A user looking at a half-blank terminal must be
-//! able to learn that a budget, not their program, ate the bottom of
-//! the screen.
+//! Budgets: painting degrades ROW-ATOMICALLY under the frame's shared
+//! ceilings — the packed-cell store, the cluster-text store, the
+//! display-list command budget (box geometry and selection washes), and
+//! the glyph-atlas proxy — so a pathological screen paints fewer
+//! complete rows instead of failing the whole frame. Degrading is never
+//! SILENT: `paintReport` returns the rows that reached the list and the
+//! store that stopped it, and every paint — including the
+//! void-returning `paint` — records the same fact on the builder
+//! (`canvas.DisplayListDegradation`) for the runtime and the host app to
+//! surface. A user looking at a half-blank terminal must be able to
+//! learn that a budget, not their program, ate the bottom of the screen.
 //!
-//! What the budgets CANNOT do: a screen whose every cell carries its
-//! own foreground and background costs two commands per cell (one
-//! background run, one text run — nothing merges), so a 200x60
-//! truecolor viewport wants ~24,000 display-list commands and a 300x100
-//! one ~60,000. The per-view command budget is 4,096, and each slot
-//! costs ~700 B across the view's retained mirrors, so that density is
-//! not reachable by raising a number: it needs a PACKED CELL-GRID
-//! COMMAND the host renderers expand themselves. Until then the budgets
-//! carry realistic styling (a syntax-highlighted editor, htop, a
-//! colored build log) and say so out loud when they cannot.
+//! A screen is ONE COMMAND. The painter emits a packed `cell_grid`
+//! (`cell_grid.zig`) carrying every cell's background, cluster,
+//! foreground, and style, and every renderer expands the lattice
+//! itself. What that replaced: one background command per contiguous
+//! same-colour run plus one text command per contiguous same-foreground
+//! run, which merged into nothing on a styled screen and put a 200x60
+//! truecolor viewport at ~24,000 commands against a budget of 4,096 —
+//! nine rows of sixty, the rest bare background. Measured after: 60 of
+//! 60 rows in four commands, and a 300x100 truecolor screen (30,000
+//! cells, 585 KB) in four commands as well. Cost is linear in CELLS at
+//! 20 bytes each, and constant in commands.
+//!
+//! Three things fall out of that shape, and all three were bugs before:
+//!   - Reflow is safe. A screen is one retained key replaced wholesale,
+//!     so a row that loses a run cannot orphan a per-run command whose
+//!     stale pixels then survive a resize.
+//!   - Cell geometry is exact. A cell's position is its INDEX, so a
+//!     combining mark or a wide cluster can no longer advance its
+//!     neighbours out of their columns, whatever the face does.
+//!   - Every SGR attribute has somewhere to live: bold, italic,
+//!     strikethrough, overline, six underline styles, and an underline
+//!     colour, none of which a `draw_text` run could carry.
+//!
+//! What still emits its own commands, deliberately: box-drawing cells
+//! (exact GEOMETRY at cell bounds — glyphs fill the em box, not the
+//! padded cell, and borders drawn from them show seams), the selection
+//! wash, the cursor, the keyboard caret, and the scrollback thumb. All
+//! composite OVER the lattice and all are a handful of commands.
 
 const std = @import("std");
 const canvas = @import("root.zig");
@@ -75,6 +91,10 @@ pub const widget_text_reserve: usize = 8192;
 pub const widget_path_reserve: usize = 2 * chart_ceiling + 16;
 const chart_ceiling: usize = canvas.max_chart_points_per_series;
 pub const widget_glyph_budget: usize = 8192 - 512;
+/// Packed cells held back for a SECOND terminal in the same view: a
+/// split gives each pane half the store, which is exactly what two
+/// 160x100 panes need out of the 32768-cell frame budget.
+pub const widget_cell_reserve: usize = canvas.max_display_list_cells / 2;
 
 /// One text run's staging capacity — shared by the paint loop's scratch
 /// and the preflight's per-cell cap so measure and emission agree.
@@ -89,6 +109,17 @@ const text_scratch_bytes: usize = canvas.max_display_list_text_bytes;
 /// is pre-resolved by the producer to extend the primary's, so a styled
 /// wide character never paints over half its width).
 pub const TerminalWide = enum(u2) { narrow, wide, spacer };
+
+/// SGR underline styles a cell can carry. Selected by
+/// `TerminalCell.underline_style` and painted only when `underline` is
+/// set, so the historical boolean keeps its exact meaning.
+pub const TerminalUnderline = enum {
+    single,
+    double,
+    curly,
+    dotted,
+    dashed,
+};
 
 /// One resolved viewport cell. `cp == 0` paints no ink (an empty cell,
 /// or one whose style suppressed it — the producer resolves invisible
@@ -107,6 +138,21 @@ pub const TerminalCell = struct {
     bg: ?canvas.Color = null,
     underline: bool = false,
     wide: TerminalWide = .narrow,
+    /// The remaining SGR attributes. They arrive resolved like the
+    /// colours do and ride the packed cell grid to every renderer; a
+    /// producer that does not track one simply leaves the default.
+    /// `bold` and `italic` reach the cell but need registered companion
+    /// faces to change the GLYPH — with a single mono face they are
+    /// carried, not synthesised, which is the honest behaviour and what
+    /// the docs already state about weight axes.
+    bold: bool = false,
+    italic: bool = false,
+    strikethrough: bool = false,
+    overline: bool = false,
+    /// Which underline `underline` paints.
+    underline_style: TerminalUnderline = .single,
+    /// SGR 58 underline colour; null takes the cell foreground.
+    underline_color: ?canvas.Color = null,
 };
 
 pub const TerminalRow = struct {
@@ -117,12 +163,25 @@ pub const TerminalRow = struct {
     selection: ?[2]u16 = null,
 };
 
-pub const TerminalCursorShape = enum { block, bar, underline };
+/// `block_hollow` is a SHAPE the emulator asked for, distinct from the
+/// hollow outline an unfocused window paints: a focused terminal whose
+/// program requested a hollow block gets one, and the focus-driven
+/// outline stays a property of focus. Conflating them (the historical
+/// behaviour) made "hollow" mean two different things at once.
+pub const TerminalCursorShape = enum { block, block_hollow, bar, underline };
 
 pub const TerminalCursor = struct {
     x: u16 = 0,
     y: u16 = 0,
     shape: TerminalCursorShape = .block,
+    /// The emulator asked the cursor to blink. The painter draws the
+    /// visible phase and stamps the state on the cursor command; the
+    /// BLINKING itself is the host's animation to arm, so a producer
+    /// that sets this and a renderer that ignores it still agree about
+    /// where the cursor is.
+    blinking: bool = false,
+    /// The cursor sits on a wide cell and covers two columns.
+    wide: bool = false,
 };
 
 pub const TerminalCellPos = struct { x: u16 = 0, y: u16 = 0 };
@@ -302,6 +361,10 @@ pub const TerminalPaintOptions = struct {
     /// columns. Painting stops row-atomically BEFORE the row whose new
     /// code points would cross it. 0 means unbounded.
     glyph_budget: usize = 0,
+    /// Packed-grid CELLS to hold back for the widgets after this one
+    /// (another terminal in a split, a code view). The grid degrades to
+    /// fewer painted rows instead of starving them.
+    cell_reserve: usize = 0,
 };
 
 /// What stopped a paint short of the grid's last row.
@@ -314,6 +377,10 @@ pub const TerminalPaintOptions = struct {
 /// preflights, and the partial row was rolled back whole.
 pub const TerminalPaintStop = enum {
     commands,
+    /// The frame's packed-cell store. The terminal's own budget now: a
+    /// screen costs cells, and this is the one that bounds how big a
+    /// screen can be.
+    cells,
     text_bytes,
     path_elements,
     glyphs,
@@ -352,6 +419,7 @@ pub const TerminalPaintReport = struct {
     fn store(stop: TerminalPaintStop) ?canvas.DisplayListStore {
         return switch (stop) {
             .commands, .torn => .commands,
+            .cells => .cells,
             .text_bytes => .text_bytes,
             .path_elements => .path_elements,
             .glyphs => .glyphs,
@@ -523,76 +591,30 @@ fn multiCodepointCluster(cell: TerminalCell) bool {
     return cell.cluster.len > primary_len;
 }
 
-/// Exact upper bound on the commands emitted for one row. This mirrors the
-/// painter's background and ink run boundaries instead of pricing every cell
-/// as an independent background + text command. Full-screen TUIs often carry
-/// hundreds of sparse colored cells per row; pessimistically charging their
-/// empty spans was truncating otherwise representable screens halfway down.
+/// Exact upper bound on the commands emitted for one row.
+///
+/// Backgrounds and text runs cost NOTHING here any more: they are cells
+/// in the row's slice of the packed grid, and the whole grid is one
+/// command. What still emits per row is the ink the lattice cannot
+/// express — box-drawing geometry at exact cell bounds — plus the
+/// selection wash.
 fn rowCommandCost(row: TerminalRow) usize {
     var total: usize = if (row.selection != null) 1 else 0;
-
-    // Backgrounds emit one command per contiguous same-color run.
-    var run_color: ?canvas.Color = null;
-    var background_index: usize = 0;
-    while (background_index <= row.cells.len) : (background_index += 1) {
-        const bg: ?canvas.Color = if (background_index < row.cells.len)
-            row.cells[background_index].bg
-        else
-            null;
-        if (run_color) |color| {
-            const same = if (bg) |next| colorEql(color, next) else false;
-            if (!same) {
-                total += 1;
-                run_color = bg;
-            }
-        } else if (bg != null) {
-            run_color = bg;
-        }
-    }
-
-    // Ink emits merged text or box runs plus an underline only when present.
     var i: usize = 0;
     while (i < row.cells.len) {
         const cell = row.cells[i];
-        if (cell.wide == .spacer or cell.cp == 0) {
+        if (cell.wide == .spacer or cell.cp == 0 or !box.isBoxDrawing(cell.cp)) {
             i += 1;
             continue;
         }
-        if (box.isBoxDrawing(cell.cp)) {
-            var span: usize = 1;
-            if (box.mergesHorizontally(cell.cp)) {
-                while (i + span < row.cells.len) : (span += 1) {
-                    const next = row.cells[i + span];
-                    if (next.cp != cell.cp or !colorEql(next.fg, cell.fg) or next.underline != cell.underline) break;
-                }
-            }
-            total += box.maxCommands(cell.cp) + @intFromBool(cell.underline);
-            i += span;
-            continue;
-        }
-
-        // Combining clusters deliberately paint alone. Plain cells merge while
-        // foreground, decoration, and scratch capacity agree.
-        if (multiCodepointCluster(cell)) {
-            total += 1 + @as(usize, @intFromBool(cell.underline));
-            i += 1;
-            continue;
-        }
-        const fg = cell.fg;
-        const underline = cell.underline;
-        var text_bytes = cell.cluster.len;
         var span: usize = 1;
-        while (i + span < row.cells.len) : (span += 1) {
-            const next = row.cells[i + span];
-            if (next.wide == .spacer or next.cp == 0 or box.isBoxDrawing(next.cp) or
-                multiCodepointCluster(next) or !colorEql(next.fg, fg) or
-                next.underline != underline or text_bytes + next.cluster.len > text_scratch_bytes)
-            {
-                break;
+        if (box.mergesHorizontally(cell.cp)) {
+            while (i + span < row.cells.len) : (span += 1) {
+                const next = row.cells[i + span];
+                if (next.cp != cell.cp or !colorEql(next.fg, cell.fg)) break;
             }
-            text_bytes += next.cluster.len;
         }
-        total += 1 + @as(usize, @intFromBool(underline));
+        total += box.maxCommands(cell.cp);
         i += span;
     }
     return total;
@@ -600,6 +622,113 @@ fn rowCommandCost(row: TerminalRow) usize {
 
 fn colorEql(a: canvas.Color, b: canvas.Color) bool {
     return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a;
+}
+
+/// Slots in the cluster intern table. Open-addressed, power of two,
+/// zero meaning empty (a stored value is `offset + 1` so offset 0 never
+/// aliases an empty slot). A screen's DISTINCT clusters are its
+/// alphabet — hundreds, not tens of thousands — so 4096 slots keep the
+/// table far under half load and lookups O(1); a screen that somehow
+/// fills it simply stops interning and appends, which costs bytes, not
+/// correctness.
+const cluster_intern_slots: usize = 4096;
+
+/// Intern `cluster` into `blob`, returning its offset. Repeat clusters
+/// (every space, every `e`) resolve to the copy already there.
+fn internCluster(
+    cluster: []const u8,
+    blob: *[text_scratch_bytes]u8,
+    blob_len: *usize,
+    slots: *[cluster_intern_slots]u32,
+) ?u32 {
+    if (cluster.len == 0) return null;
+    var hash: u32 = 2166136261;
+    for (cluster) |byte| hash = (hash ^ byte) *% 16777619;
+    var index: usize = (hash *% 0x9E37_79B1) >> (32 - 12);
+    var probes: usize = 0;
+    while (probes < cluster_intern_slots) : (probes += 1) {
+        const entry = slots[index];
+        if (entry == 0) break;
+        const start = entry - 1;
+        const end = start + cluster.len;
+        if (end <= blob_len.* and std.mem.eql(u8, blob[start..end], cluster)) return start;
+        index = (index + 1) & (cluster_intern_slots - 1);
+    }
+    if (blob_len.* + cluster.len > blob.len) return null;
+    const offset: u32 = @intCast(blob_len.*);
+    @memcpy(blob[offset..][0..cluster.len], cluster);
+    blob_len.* += cluster.len;
+    if (probes < cluster_intern_slots) slots[index] = offset + 1;
+    return offset;
+}
+
+/// Resolve one producer cell into its packed form. Box-drawing cells
+/// keep their BACKGROUND here and contribute no cluster: their ink is
+/// exact geometry the painter emits separately, and a glyph drawn in
+/// their place would show seams between rows.
+fn packCell(
+    cell: TerminalCell,
+    blob: *[text_scratch_bytes]u8,
+    blob_len: *usize,
+    slots: *[cluster_intern_slots]u32,
+) canvas.Cell {
+    var flags = canvas.CellFlags{
+        .bold = cell.bold,
+        .italic = cell.italic,
+        .strikethrough = cell.strikethrough,
+        .overline = cell.overline,
+        .width = switch (cell.wide) {
+            .narrow => .narrow,
+            .wide => .wide,
+            .spacer => .spacer,
+        },
+    };
+    if (cell.underline) {
+        flags.underline = switch (cell.underline_style) {
+            .single => .single,
+            .double => .double,
+            .curly => .curly,
+            .dotted => .dotted,
+            .dashed => .dashed,
+        };
+    }
+    var packed_cell = canvas.Cell{
+        .fg = canvas.CellColor.fromColor(cell.fg),
+    };
+    if (cell.bg) |color| {
+        packed_cell.bg = canvas.CellColor.fromColor(color);
+        flags.has_background = true;
+    }
+    if (cell.underline_color) |color| {
+        packed_cell.underline_color = canvas.CellColor.fromColor(color);
+        flags.has_underline_color = true;
+    }
+    const inks = cell.cp != 0 and cell.wide != .spacer and !box.isBoxDrawing(cell.cp);
+    if (inks and cell.cluster.len > 0 and cell.cluster.len <= 255) {
+        if (internCluster(cell.cluster, blob, blob_len, slots)) |offset| {
+            packed_cell.text_offset = offset;
+            packed_cell.text_len = @intCast(cell.cluster.len);
+        }
+    }
+    packed_cell.flags = flags.bits();
+    return packed_cell;
+}
+
+/// Fill one lattice row. Columns past the producer's row are left as
+/// default cells — no background, no ink — which is exactly what a
+/// short row looks like.
+fn fillGridRow(
+    row: TerminalRow,
+    out: []canvas.Cell,
+    blob: *[text_scratch_bytes]u8,
+    blob_len: *usize,
+    slots: *[cluster_intern_slots]u32,
+) void {
+    const shared = @min(out.len, row.cells.len);
+    for (out[0..shared], row.cells[0..shared]) |*slot, cell| {
+        slot.* = packCell(cell, blob, blob_len, slots);
+    }
+    for (out[shared..]) |*slot| slot.* = .{};
 }
 
 /// Paint the grid into the display list: per-row background runs, the
@@ -710,69 +839,60 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
     // stroke a terminal font would carry at this size).
     const box_thickness: f32 = @max(1, @round(metrics.font_size / 8));
 
-    // A run's staging buffer, sized to the whole text store (see
-    // `text_scratch_bytes`): any cluster the store can hold stages
-    // whole. The run-break flushes when the buffer nears full, so long
-    // runs simply split across draw commands rather than overflow.
-    var text_scratch: [text_scratch_bytes]u8 = undefined;
+    // The lattice this paint will cover. Columns come from the widest
+    // row the producer handed over (short rows pad with empty cells), so
+    // the grid stays the rectangle every renderer indexes by (x, y)
+    // arithmetic instead of a ragged array with a per-row offset table.
+    var cols: usize = 0;
+    for (grid.rows) |row| cols = @max(cols, row.cells.len);
+    cols = @min(cols, max_cols);
+
+    // The cluster INTERN table. A screen repeats a tiny alphabet across
+    // tens of thousands of cells, so the grid's text blob holds ONE copy
+    // of each distinct cluster and cells point at it. A 300x100 ASCII
+    // screen interns to a few hundred bytes instead of 30 KB, which is
+    // what keeps a full-screen grid inside the frame's shared text
+    // budget with room for every other widget's labels.
+    var blob: [text_scratch_bytes]u8 = undefined;
+    var blob_len: usize = 0;
+    var intern_slots: [cluster_intern_slots]u32 = undefined;
+    @memset(&intern_slots, 0);
+
     // Rows painted so far (the loop paints 0..N contiguously from the
     // top and stops at the first row a budget rejects): the cursor and
     // caret below are suppressed on any row this never reached, so a row
     // dropped for budget never leaves its lone cursor floating over the
     // blank background.
     var painted_rows: usize = 0;
+    // Commands this paint will emit once the second pass runs: the
+    // prologue already in the builder, plus one row's box geometry and
+    // wash at a time, plus the grid command itself.
+    var projected_commands: usize = builder.len + 1;
+    // Cells are claimed from the builder's store up front for the most
+    // rows that could possibly paint, then the unused tail is handed
+    // back (the store is a bump allocator, and nothing else claims cells
+    // in between). That buys a single pass: a row can be filled and then
+    // rejected by a later budget without leaving a hole.
+    const cell_ceiling = builder.cells.len -| options.cell_reserve;
+    const cells_available = cell_ceiling -| builder.cell_len;
+    // A viewport of empty rows has no cells to store but still has
+    // ROWS: they paint as bare surface, and the cursor sitting on one
+    // is on a painted row. Bounding those by the cell store would
+    // suppress the cursor of an empty terminal.
+    const cell_row_limit = if (cols == 0) grid.rows.len else cells_available / cols;
+    const claim_rows = @min(grid.rows.len, cell_row_limit);
+    var cells: []canvas.Cell = &.{};
+    if (claim_rows > 0) {
+        cells = builder.allocCells(claim_rows * cols) catch &.{};
+    }
+    if (cells.len == 0 and grid.rows.len > 0 and cols > 0) report.stopped_by = .cells;
+
     for (grid.rows, 0..) |row, row_index| {
-        // Command-count stop, ATOMIC per row: this row's actual
-        // upper-bound cost plus the epilogue must fit the budget, so a
-        // cheap wide row paints while a genuinely too-dense row (and
-        // everything after it) is skipped whole — never started and torn.
-        if (options.command_budget > 0 and
-            builder.len + rowCommandCost(row) + epilogue_reserve > options.command_budget)
-        {
-            report.stopped_by = .commands;
+        if (row_index >= claim_rows) {
+            // Ran out of cell store rather than out of screen.
+            if (row_index < grid.rows.len) report.stopped_by = .cells;
             break;
         }
-        // Text stop, ATOMIC per row, against the view-global running
-        // total (all draw_text already in the list plus this row's
-        // bytes) — stop BEFORE a row that would cross the per-view text
-        // ceiling, never emit its first runs and then have the frame
-        // rejected at commit. A row that ADDS no text can never cross
-        // anything, so it paints even when earlier widgets already sit
-        // past the grid's reserved share — the ceiling bounds what the
-        // grid adds, not what its siblings spent.
-        const row_text = rowTextBytes(row);
-        if (row_text > 0 and text_total + row_text > text_ceiling) {
-            report.stopped_by = .text_bytes;
-            break;
-        }
-        // Path-element stop, ATOMIC per row, against the view-global
-        // running total (static sibling paths included): a row of rounded
-        // corners is skipped BEFORE it would cross the per-view
-        // path-element budget; a row adding none paints regardless.
-        const row_paths = rowPathElements(row);
-        if (row_paths > 0 and path_total + row_paths > path_ceiling) {
-            report.stopped_by = .path_elements;
-            break;
-        }
-        // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
-        // whose new DISTINCT code points would cross the atlas proxy —
-        // the frame degrades to fewer rows instead of failing whole on
-        // `GlyphAtlasListFull`.
-        if (glyph_budget > 0) {
-            glyphs_counted += rowNewGlyphs(row, &glyph_seen) * atlas_variants_per_glyph;
-            if (glyphs_counted > glyph_budget) {
-                report.stopped_by = .glyphs;
-                break;
-            }
-        }
-        // Row-atomic rollback snapshot: the preflights above make a tear
-        // unreachable, but if a builder store is ever exhausted mid-row
-        // anyway, these restore points drop the partial row's commands
-        // whole (see the `row_torn` handling below) so nothing half a row
-        // ever reaches the glass.
-        const row_start_len = builder.len;
-        const row_start_paths = builder.path_element_len;
-        const row_start_text = builder.text_byte_len;
         const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
         // Rows STARTING at or past the frame's bottom paint nothing
         // visible; a row straddling the edge still paints and the clip
@@ -781,39 +901,130 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
             report.stopped_by = .viewport;
             break;
         }
-        const row_id = @as(u64, @intCast(row_index)) << 16;
-
-        // Background runs: contiguous cells sharing a non-default bg
-        // (the producer already extended a wide primary's background
-        // onto its spacer column).
-        var run_start: usize = 0;
-        var run_color: ?canvas.Color = null;
-        var x: usize = 0;
-        while (x <= row.cells.len) : (x += 1) {
-            const bg: ?canvas.Color = if (x < row.cells.len) row.cells[x].bg else null;
-            if (run_color) |color| {
-                const same = if (bg) |next| colorEql(color, next) else false;
-                if (!same) {
-                    try builder.fillRect(.{
-                        .id = ids.at(row_id + 1 + run_start),
-                        .rect = geometry.RectF.init(
-                            origin_x + @as(f32, @floatFromInt(run_start)) * cell_w,
-                            row_y,
-                            @as(f32, @floatFromInt(x - run_start)) * cell_w,
-                            cell_h,
-                        ),
-                        .fill = .{ .color = color },
-                    });
-                    run_color = bg;
-                    run_start = x;
-                }
-            } else if (bg != null) {
-                run_color = bg;
-                run_start = x;
+        // Command-count stop, ATOMIC per row. Backgrounds and text no
+        // longer cost commands at all — they are cells now — so this
+        // prices only what still emits: the row's box-drawing geometry
+        // and its selection wash. The running PROJECTION is what makes
+        // it correct: those commands are emitted in the second pass
+        // below, so `builder.len` does not move while this loop runs and
+        // charging against it would price every row as if it were the
+        // first.
+        const row_commands = rowCommandCost(row);
+        if (options.command_budget > 0 and
+            projected_commands + row_commands + epilogue_reserve > options.command_budget)
+        {
+            report.stopped_by = .commands;
+            break;
+        }
+        projected_commands += row_commands;
+        // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
+        // whose new DISTINCT code points would cross the atlas proxy.
+        if (glyph_budget > 0) {
+            glyphs_counted += rowNewGlyphs(row, &glyph_seen) * atlas_variants_per_glyph;
+            if (glyphs_counted > glyph_budget) {
+                report.stopped_by = .glyphs;
+                break;
             }
         }
+        // Text stop, ATOMIC per row, against the interned blob. The row
+        // is filled into a SNAPSHOT of the intern state so a row that
+        // crosses the ceiling can be rolled back whole.
+        const blob_before = blob_len;
+        if (cols > 0) {
+            const row_cells = cells[row_index * cols ..][0..cols];
+            fillGridRow(row, row_cells, &blob, &blob_len, &intern_slots);
+            // A row that ADDS no cluster bytes can never cross anything,
+            // so it paints even when earlier widgets already sit past
+            // the grid's reserved share — the ceiling bounds what the
+            // grid adds, not what its siblings spent. Interning makes
+            // that the common case: a row of characters the screen has
+            // already shown costs zero new bytes.
+            if (blob_len > blob_before and text_total + blob_len > text_ceiling) {
+                blob_len = blob_before;
+                report.stopped_by = .text_bytes;
+                break;
+            }
+        }
+        painted_rows = row_index + 1;
+    }
 
-        // Selection wash (under the ink, over the backgrounds).
+    // Hand back the rows that never painted, then publish the grid as
+    // ONE command. `text` is the interned blob, copied into the
+    // builder's own store so the command outlives this frame's stack.
+    if (claim_rows > painted_rows) builder.cell_len -= (claim_rows - painted_rows) * cols;
+    if (painted_rows > 0 and cols > 0) {
+        const grid_text = builder.allocTextBytes(blob[0..blob_len]) catch blk: {
+            // The preflight reserved this; the catch is a defensive
+            // floor that paints the lattice without ink rather than
+            // taking the frame down.
+            report.stopped_by = .text_bytes;
+            break :blk "";
+        };
+        try builder.cellGrid(.{
+            .id = ids.at(0x62_0000),
+            .origin = geometry.PointF.init(origin_x, origin_y),
+            .cell_width = cell_w,
+            .cell_height = cell_h,
+            .cols = @intCast(cols),
+            .rows = @intCast(painted_rows),
+            .cells = cells[0 .. painted_rows * cols],
+            .text = grid_text,
+            .font_id = tokens.typography.mono_font_id,
+            .font_size = metrics.font_size,
+            // The baseline the canvas boxes a run at: one em of ascent
+            // above the origin and a quarter below, centred in the cell.
+            // Computed once here so every renderer puts it in the same
+            // place instead of re-deriving it from metrics it may not
+            // share.
+            .baseline = (cell_h - metrics.font_size * 1.25) * 0.5 + metrics.font_size,
+            .measure = tokens.text_measure,
+        });
+        text_total += blob_len;
+    }
+
+    // Over the lattice: box-drawing geometry (exact cell-bound shapes,
+    // never glyphs) and the selection wash. Both composite ON TOP of the
+    // grid, which is why they run after it rather than inside the fill
+    // loop above.
+    for (grid.rows[0..painted_rows], 0..) |row, row_index| {
+        const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
+        const row_id = @as(u64, @intCast(row_index)) << 16;
+        const row_paths = rowPathElements(row);
+        const paths_fit = row_paths == 0 or path_total + row_paths <= path_ceiling;
+        var x: usize = 0;
+        while (x < row.cells.len) : (x += 1) {
+            const cell = row.cells[x];
+            if (cell.wide == .spacer or cell.cp == 0) continue;
+            if (!box.isBoxDrawing(cell.cp)) continue;
+            // Merge a run of the same seamless piece (a border's long
+            // `─`) into ONE command: fewer commands and one unbroken bar
+            // instead of per-cell segments.
+            var span: usize = 1;
+            if (box.mergesHorizontally(cell.cp)) {
+                while (x + span < row.cells.len) : (span += 1) {
+                    const next = row.cells[x + span];
+                    if (next.cp != cell.cp or !colorEql(next.fg, cell.fg)) break;
+                }
+            }
+            if (!paths_fit and cellPathElements(cell) > 0) {
+                x += span - 1;
+                continue;
+            }
+            const rect = geometry.RectF.init(
+                origin_x + @as(f32, @floatFromInt(x)) * cell_w,
+                row_y,
+                @as(f32, @floatFromInt(span)) * cell_w,
+                cell_h,
+            );
+            // Eight-command stride per column: a pure-double joint emits
+            // up to eight commands, so a shorter stride would collide
+            // the ids of adjacent double cells.
+            box.paint(builder, ids.at(row_id + 0x6000 + @as(u64, @intCast(x)) * commands_per_cell), rect, cell.cp, cell.fg, box_thickness) catch {};
+            x += span - 1;
+        }
+        if (paths_fit) path_total += row_paths;
+
+        // Selection wash (over the backgrounds and the ink).
         if (row.selection) |range| {
             const wash = canvas.Color.rgba(
                 grid.selection_color.r,
@@ -821,7 +1032,7 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
                 grid.selection_color.b,
                 0.30,
             );
-            try builder.fillRect(.{
+            builder.fillRect(.{
                 .id = ids.at(row_id + 0x4000),
                 .rect = geometry.RectF.init(
                     origin_x + @as(f32, @floatFromInt(range[0])) * cell_w,
@@ -830,217 +1041,8 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
                     cell_h,
                 ),
                 .fill = .{ .color = wash },
-            });
+            }) catch {};
         }
-
-        // Text runs: contiguous cells sharing a foreground, flushed on
-        // color or decoration change (bold/italic render with the one
-        // mono face — weight axes require registered companion faces,
-        // a limitation the docs state outright).
-        // A builder-store exhaustion mid-row (the display list, its text
-        // bytes, or its path elements filling despite the reserves) TEARS
-        // the row: the reserves make it unreachable in the widget path,
-        // but if it ever happens the row is left incomplete, so it must
-        // NOT count as painted and no further row may start — otherwise
-        // the cursor could paint over content the tear dropped.
-        var row_torn = false;
-        var run_len: usize = 0;
-        var run_x: usize = 0;
-        var run_fg: canvas.Color = grid.foreground;
-        var run_underline = false;
-        var text_len: usize = 0;
-        // Multi-codepoint clusters (combining marks) paint as their OWN
-        // single-cell run at their exact cell origin: inside a merged
-        // run their advance would come from the text layout, and a
-        // layout that advances a combining mark by a full glyph would
-        // shift every later cell in the run off the grid — while the
-        // backgrounds, cursor, and selection stayed cell-aligned.
-        // Isolating the cluster pins its neighbors to their own cell
-        // origins whatever the mark advances to; plain single-scalar
-        // runs keep the merged fast path.
-        var break_after_cluster = false;
-        x = 0;
-        while (x <= row.cells.len) : (x += 1) {
-            var cp: u21 = 0;
-            var fg = grid.foreground;
-            var underline = false;
-            var skip = false;
-            var box_cp: u21 = 0;
-            var cell_bytes: usize = 0;
-            var multi_cluster = false;
-            if (x < row.cells.len) {
-                const cell = row.cells[x];
-                if (cell.wide == .spacer) skip = true;
-                cp = cell.cp;
-                fg = cell.fg;
-                underline = cell.underline;
-                // Box-drawing, block, and shade cells render as GEOMETRY
-                // at exact cell bounds, never font glyphs: glyphs fill
-                // the em box, not the padded cell, so borders drawn from
-                // them show seams between rows and columns. The cell
-                // still breaks the text run (cp zeroes) and paints below.
-                if (cp != 0 and !skip and box.isBoxDrawing(cp)) {
-                    box_cp = cp;
-                    cp = 0;
-                }
-                // The current cell's full byte need: the run breaks
-                // BEFORE a cell that would not fit the remaining
-                // scratch, so the cell restarts in a fresh buffer and a
-                // large grapheme landing near the buffer's end keeps
-                // all its marks instead of being cut.
-                if (cp != 0 and !skip) {
-                    cell_bytes = cell.cluster.len;
-                    const primary_len = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
-                    multi_cluster = cell.cluster.len > primary_len;
-                }
-            }
-            const breaks = x == row.cells.len or skip or cp == 0 or
-                !colorEql(fg, run_fg) or underline != run_underline or
-                multi_cluster or break_after_cluster or
-                text_len + cell_bytes > text_scratch.len;
-            if (breaks and run_len > 0 and text_len > 0) {
-                // The row-wise text ceiling reserves enough that this
-                // append fits; the catch is a defensive floor that stops
-                // the run cleanly if it ever did not (never a torn cell).
-                const run_text = builder.allocTextBytes(text_scratch[0..text_len]) catch {
-                    row_torn = true;
-                    break;
-                };
-                try builder.drawText(.{
-                    .id = ids.at(row_id + 0x8000 + run_x),
-                    .font_id = tokens.typography.mono_font_id,
-                    .size = metrics.font_size,
-                    // `origin` is the BASELINE, not the glyph top: the
-                    // canvas boxes a run as one em of ascent above the
-                    // origin and a quarter below, so centering that
-                    // 1.25em box in the cell puts the baseline at
-                    // row top + (cell - 1.25*size)/2 + size. Anchoring
-                    // the top here instead paints every row one line
-                    // high — and the clip swallows row zero whole.
-                    .origin = geometry.PointF.init(
-                        origin_x + @as(f32, @floatFromInt(run_x)) * cell_w,
-                        row_y + (cell_h - metrics.font_size * 1.25) * 0.5 + metrics.font_size,
-                    ),
-                    .color = run_fg,
-                    .text = run_text,
-                    // The run carries the measurement seam for one
-                    // reason: a command's raster extent comes from its
-                    // own declared bounds, and without a provider those
-                    // bounds are the estimator's 0.6 em mono pitch. A
-                    // host face with a wider pitch (macOS resolves the
-                    // mono id to the system monospaced face at 0.618 em
-                    // when Geist Mono is absent) then inks past the
-                    // declared extent, and a full-width row loses its
-                    // last cell — measured: column 50 of 50 sheared to a
-                    // two-pixel sliver. Measuring the run the way the
-                    // host inks it makes the bounds cover the ink for
-                    // whatever face resolves. Line breaking stays off
-                    // (`wrap = .none`, no `max_width`), so the run still
-                    // paints as one line at this exact baseline.
-                    .text_layout = .{
-                        .wrap = .none,
-                        .line_height = cell_h,
-                        .measure = tokens.text_measure,
-                    },
-                });
-                if (run_underline) {
-                    try builder.fillRect(.{
-                        .id = ids.at(row_id + 0xc000 + run_x),
-                        .rect = geometry.RectF.init(
-                            origin_x + @as(f32, @floatFromInt(run_x)) * cell_w,
-                            row_y + cell_h - 2,
-                            @as(f32, @floatFromInt(run_len)) * cell_w,
-                            1,
-                        ),
-                        .fill = .{ .color = run_fg },
-                    });
-                }
-                text_len = 0;
-                run_len = 0;
-            }
-            if (x >= row.cells.len or skip) continue;
-            if (box_cp != 0) {
-                // Merge a run of the same seamless piece (a border's
-                // long `─`) into ONE command: fewer commands and one
-                // unbroken bar instead of per-cell segments. Cells merge
-                // only when they match on EVERY channel the span paints —
-                // code point, foreground, AND underline — so a run where
-                // underline toggles mid-way breaks into separate spans
-                // and each keeps its own decoration.
-                var span: usize = 1;
-                if (box.mergesHorizontally(box_cp)) {
-                    while (x + span < row.cells.len) : (span += 1) {
-                        const next = row.cells[x + span];
-                        if (next.cp != box_cp or !colorEql(next.fg, fg) or next.underline != underline) break;
-                    }
-                }
-                const rect = geometry.RectF.init(
-                    origin_x + @as(f32, @floatFromInt(x)) * cell_w,
-                    row_y,
-                    @as(f32, @floatFromInt(span)) * cell_w,
-                    cell_h,
-                );
-                // Eight-command stride per column: a pure-double joint
-                // emits up to eight commands (two bars per side), so a
-                // four-wide stride would collide the ids of adjacent
-                // double cells and fail the retained diff with
-                // DuplicateObjectId.
-                box.paint(builder, ids.at(row_id + 0x6000 + @as(u64, @intCast(x)) * commands_per_cell), rect, box_cp, fg, box_thickness) catch {
-                    row_torn = true;
-                    break;
-                };
-                // A box/block cell can still carry SGR underline: the
-                // geometry replaces the glyph, not its decoration, so an
-                // underlined `─` or `█` keeps its underline like any other
-                // styled cell (0xd000 id range, clear of the box geometry
-                // and text ranges).
-                if (underline) {
-                    builder.fillRect(.{
-                        .id = ids.at(row_id + 0xd000 + @as(u64, @intCast(x))),
-                        .rect = geometry.RectF.init(rect.x, row_y + cell_h - 2, rect.width, 1),
-                        .fill = .{ .color = fg },
-                    }) catch {
-                        row_torn = true;
-                        break;
-                    };
-                }
-                x += span - 1;
-                continue;
-            }
-            if (cp == 0) continue;
-            if (run_len == 0) {
-                run_x = x;
-                run_fg = fg;
-                run_underline = underline;
-            }
-            const cell = row.cells[x];
-            // Stage the whole cluster; the break above guaranteed it
-            // fits, and the min is a defensive floor that can only cut
-            // where the preflight already stopped the row.
-            const take = @min(cell.cluster.len, text_scratch.len - text_len);
-            @memcpy(text_scratch[text_len..][0..take], cell.cluster[0..take]);
-            text_len += take;
-            run_len += if (cell.wide == .wide) 2 else 1;
-            break_after_cluster = multi_cluster;
-        }
-        // A torn row is not painted content: roll the builder back to the
-        // row's start so no partial row reaches the glass, then stop (the
-        // suppressed cursor/caret rely on `painted_rows` not advancing).
-        if (row_torn) {
-            builder.len = row_start_len;
-            builder.path_element_len = row_start_paths;
-            builder.text_byte_len = row_start_text;
-            report.stopped_by = .torn;
-            break;
-        }
-        // Advance the view-global running totals by exactly what this row
-        // added (the builder-owned deltas): the terminal's own text/path
-        // emissions all flow through `allocTextBytes`/`allocPathElements`,
-        // so the counter deltas are its contribution to the per-view
-        // budgets the next row's preflight checks.
-        text_total += builder.text_byte_len - row_start_text;
-        path_total += builder.path_element_len - row_start_paths;
-        painted_rows = row_index + 1;
     }
     report.rows_painted = painted_rows;
     noteTerminalDegradation(builder, options.id_base, report);
@@ -1058,12 +1060,19 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
             grid.cursor_color.b,
             if (grid.running) 0.45 else 0.22,
         );
+        // A cursor on a wide cell covers both of its columns.
+        const cursor_w = if (cursor.wide) cell_w * 2 else cell_w;
         const rect = switch (cursor.shape) {
             .bar => geometry.RectF.init(cursor_x, cursor_y, 2, cell_h),
-            .underline => geometry.RectF.init(cursor_x, cursor_y + cell_h - 2, cell_w, 2),
-            .block => geometry.RectF.init(cursor_x, cursor_y, cell_w, cell_h),
+            .underline => geometry.RectF.init(cursor_x, cursor_y + cell_h - 2, cursor_w, 2),
+            .block, .block_hollow => geometry.RectF.init(cursor_x, cursor_y, cursor_w, cell_h),
         };
-        if (options.focused and grid.running) {
+        // Two independent reasons to paint hollow, kept independent: the
+        // emulator ASKED for a hollow block, or the window does not own
+        // the keyboard. Either one outlines; only a focused, live,
+        // solid-shape cursor fills.
+        const shape_is_hollow = cursor.shape == .block_hollow;
+        if (options.focused and grid.running and !shape_is_hollow) {
             try builder.fillRect(.{
                 .id = ids.at(0x61_0002),
                 .rect = rect,

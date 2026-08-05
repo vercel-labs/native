@@ -718,6 +718,9 @@ fn renderPipelineKind(command: CanvasCommand) RenderPipelineKind {
         .fill_path, .stroke_path => .path,
         .draw_image => .image,
         .draw_text => .glyph_run,
+        // A grid is glyphs plus solid cell rects. It batches with text
+        // because glyphs are the part a pipeline switch would cost.
+        .cell_grid => .glyph_run,
         .shadow => .shadow,
         .blur => .blur,
     };

@@ -90,6 +90,17 @@ test "the canvas-tier command mirror matches the per-view command budget" {
     );
 }
 
+test "the canvas-tier cell mirror matches the per-view cell budget" {
+    // A terminal screen's cost is CELLS now, and the painter degrades
+    // against the frame ceiling from inside the canvas module. Drift
+    // would let a grid claim cells the runtime's retained copy cannot
+    // hold, which fails the frame instead of dropping rows.
+    try std.testing.expectEqual(
+        @import("canvas_limits.zig").max_canvas_cells_per_view,
+        canvas.max_display_list_cells,
+    );
+}
+
 test "closing an earlier view transfers a later view's expanded text storage" {
     const TestApp = struct {
         fn app(self: *@This()) App {

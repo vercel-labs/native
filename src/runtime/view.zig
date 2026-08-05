@@ -17,6 +17,7 @@ const max_canvas_gradient_stops_per_view = canvas_limits.max_canvas_gradient_sto
 const max_canvas_path_elements_per_view = canvas_limits.max_canvas_path_elements_per_view;
 const max_canvas_glyphs_per_view = canvas_limits.max_canvas_glyphs_per_view;
 const max_canvas_text_bytes_per_view = canvas_limits.max_canvas_text_bytes_per_view;
+const max_canvas_cells_per_view = canvas_limits.max_canvas_cells_per_view;
 const max_canvas_render_animations_per_view = canvas_limits.max_canvas_render_animations_per_view;
 const max_canvas_render_animation_dirty_bounds_per_view = canvas_limits.max_canvas_render_animation_dirty_bounds_per_view;
 const max_canvas_render_overrides_per_view = canvas_limits.max_canvas_render_overrides_per_view;
@@ -322,6 +323,12 @@ pub const RuntimeView = struct {
     canvas_glyph_count: usize = 0,
     canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     canvas_text_len: usize = 0,
+    /// The retained copy of every `cell_grid` command's cells. One
+    /// terminal screen is one command but 30,000 cells, so this is the
+    /// view's largest single array — and the reason a terminal's cost is
+    /// now linear in AREA instead of quadratic in styling.
+    canvas_cells: [max_canvas_cells_per_view]canvas.Cell = undefined,
+    canvas_cell_count: usize = 0,
     canvas_display_list_widget_owned: bool = false,
     /// What the last widget emit could NOT place (see
     /// `canvas.DisplayListDegradation`): the terminal grid painter's
@@ -931,6 +938,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasGradientStops = CanvasFrameMethods.copyCanvasGradientStops;
     pub const copyCanvasPathElements = CanvasFrameMethods.copyCanvasPathElements;
     pub const copyCanvasGlyphs = CanvasFrameMethods.copyCanvasGlyphs;
+    pub const copyCanvasCells = CanvasFrameMethods.copyCanvasCells;
     pub const copyCanvasText = CanvasFrameMethods.copyCanvasText;
 
     const CanvasWidgetTreeMethods = view_widget_tree.RuntimeViewCanvasWidgetTree(RuntimeView);

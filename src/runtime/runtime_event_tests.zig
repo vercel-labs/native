@@ -497,7 +497,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expectEqual(@as(usize, 2), frame.widget_node_count);
     try std.testing.expectEqual(@as(usize, 1), frame.widget_semantics_count);
     var view_json_buffer: [8192]u8 = undefined;
-    const view_json = try writeViewJson(runtimeViewInfo(harness.runtime.views[0]), &view_json_buffer);
+    const view_json = try writeViewJson(runtimeViewInfo(&harness.runtime.views[0]), &view_json_buffer);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuWidth\":640") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuHeight\":360") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuScale\":2") != null);

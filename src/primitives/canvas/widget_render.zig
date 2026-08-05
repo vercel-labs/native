@@ -2529,6 +2529,7 @@ fn emitTerminalWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, f
             .text_reserve = canvas.terminal_grid.widget_text_reserve,
             .path_reserve = canvas.terminal_grid.widget_path_reserve,
             .glyph_budget = canvas.terminal_grid.widget_glyph_budget,
+            .cell_reserve = canvas.terminal_grid.widget_cell_reserve,
         });
     } else {
         try builder.fillRect(.{

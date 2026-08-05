@@ -215,6 +215,19 @@ pub const DiffChange = command_model.DiffChange;
 pub const Builder = command_model.Builder;
 pub const max_display_list_text_bytes = command_model.max_display_list_text_bytes;
 pub const max_display_list_commands = command_model.max_display_list_commands;
+pub const max_display_list_cells = command_model.max_display_list_cells;
+
+// The packed terminal cell grid (cell_grid.zig): one command for a
+// whole screen, expanded by every renderer.
+pub const cell_grid = @import("cell_grid.zig");
+pub const CellGrid = cell_grid.CellGrid;
+pub const Cell = cell_grid.Cell;
+pub const CellColor = cell_grid.CellColor;
+pub const CellFlags = cell_grid.CellFlags;
+pub const CellUnderline = cell_grid.CellUnderline;
+pub const CellWidth = cell_grid.CellWidth;
+pub const CellDecoration = cell_grid.CellDecoration;
+pub const cellGridFingerprint = @import("render_fingerprints.zig").cellGridFingerprint;
 pub const DisplayListStore = command_model.DisplayListStore;
 pub const DisplayListDegradation = command_model.DisplayListDegradation;
 
