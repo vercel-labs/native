@@ -1424,6 +1424,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-audio-capture", "Run audio capture example tests", "examples/audio-capture", .managed),
     };
     for (native_example_shard_steps) |shard_step| {
         native_examples_step.dependOn(shard_step);

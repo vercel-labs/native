@@ -1703,6 +1703,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
         \\                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/appkit_host.m"), .flags = flags });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/audio_capture.m"), .flags = flags });
         \\                app_mod.linkFramework("WebKit", .{});
         \\            },
         \\            .chromium => {
@@ -1731,6 +1732,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        }
         \\        app_mod.linkFramework("AppKit", .{});
         \\        app_mod.linkFramework("AVFoundation", .{});
+        \\        app_mod.linkFramework("ScreenCaptureKit", .{});
+        \\        app_mod.linkFramework("AudioToolbox", .{});
+        \\        app_mod.linkFramework("CoreMedia", .{});
         \\        app_mod.linkFramework("CoreVideo", .{});
         \\        app_mod.linkFramework("MediaToolbox", .{});
         \\        app_mod.linkFramework("Accelerate", .{});
@@ -2231,6 +2235,7 @@ fn runnerZig() []const u8 {
     \\            .app_name = self.app_name,
     \\            .has_web_content = manifestHasWebContent(),
     \\            .declares_tray = manifestDeclaresTrayCapability(),
+    \\            .permissions = self.security.permissions,
     \\            .window_title = self.window_title,
     \\            .bundle_id = self.bundle_id,
     \\            .icon_path = self.icon_path,

@@ -1520,6 +1520,34 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // the record precedes the event whose dispatch
                     // issues the load (see `pushReplayVideoSource`).
                     .video_load => self.effects.pushReplayVideoSource(record.key, record.video_token, record.video_source, record.video_kind == .failed),
+                    .audio_capture_read => {
+                        const system_len: usize = @intCast(record.audio_capture_system_len);
+                        if (system_len > record.payload.len) return error.ReplayDamagedRecord;
+                        try self.effects.feedAudioCaptureRead(.{
+                            .key = record.key,
+                            .state = record.audio_capture_read_state,
+                            .reason = record.audio_capture_read_reason,
+                            .sequence = record.audio_capture_sequence,
+                            .frame_offset = record.audio_capture_frame_offset,
+                            .frames = record.audio_capture_frames,
+                            .system_pcm = record.payload[0..system_len],
+                            .microphone_pcm = record.payload[system_len..],
+                            .system_gap_frames = record.audio_capture_system_gap_frames,
+                            .microphone_gap_frames = record.audio_capture_microphone_gap_frames,
+                            .remaining_frames = record.audio_capture_remaining_frames,
+                            .end_of_stream = record.audio_capture_end_of_stream,
+                        });
+                    },
+                    .audio_capture => try self.effects.feedAudioCaptureEvent(.{
+                        .key = record.key,
+                        .state = record.audio_capture_state,
+                        .reason = record.audio_capture_reason,
+                        .sample_rate_hz = record.audio_capture_sample_rate_hz,
+                        .channel_count = record.audio_capture_channel_count,
+                        .available_frames = record.audio_capture_available_frames,
+                        .capacity_frames = record.audio_capture_capacity_frames,
+                        .frames_produced = record.audio_capture_frames_produced,
+                    }),
                     .timer => {},
                 },
                 .finish => {
@@ -3966,6 +3994,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // channel into the app's `on_event` Msg (and journal on
                 // the way — the recorded boundary).
                 .audio => |audio_event| if (self.effects.takeAudioMsg(audio_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                .audio_capture => |capture_event| if (self.effects.takeAudioCaptureMsg(capture_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                .microphone_device => |device_event| if (self.effects.takeMicrophoneDeviceMsg(device_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                .capture_access => |access_event| if (self.effects.takeCaptureAccessMsg(access_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                .microphone_devices_changed => if (self.effects.takeMicrophoneDevicesChangedMsg()) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 },
                 // Platform video reports route the same way: through

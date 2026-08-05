@@ -2651,6 +2651,18 @@ int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double vo
     return 0;
 }
 
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int system_audio, int microphone_kind, const char *microphone_id, size_t microphone_id_len, uint32_t sample_rate_hz, uint8_t channel_count, int exclude_current_process_audio, native_sdk_appkit_audio_capture_frame_push_t frame_push, void *frame_context, uint64_t frame_token) {
+    (void)host; (void)system_audio; (void)microphone_kind;
+    (void)microphone_id; (void)microphone_id_len; (void)sample_rate_hz; (void)channel_count;
+    (void)exclude_current_process_audio; (void)frame_push; (void)frame_context; (void)frame_token;
+    return 6;
+}
+
+void native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host) { (void)host; }
+void native_sdk_appkit_microphone_devices(native_sdk_appkit_host_t *host) { (void)host; }
+void native_sdk_appkit_capture_access(native_sdk_appkit_host_t *host, int source, int action) { (void)host; (void)source; (void)action; }
+void native_sdk_appkit_observe_microphone_devices(native_sdk_appkit_host_t *host, int enabled) { (void)host; (void)enabled; }
+
 /* Video playback lives in the system-engine AppKit host (AVFoundation).
  * The Chromium host reports the feature unsupported and the Zig side
  * refuses before calling, so these exist only to satisfy the shared C

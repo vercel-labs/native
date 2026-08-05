@@ -1,0 +1,172 @@
+# Audio Capture
+
+Native SDK exposes system audio and microphone input as a reliable, pull-based PCM stream on macOS 15 and later. System-only and combined capture use ScreenCaptureKit; microphone-only capture uses AVFoundation and does not require Screen Recording access.
+
+The SDK does not mix the sources or create a file. Combined capture returns separate, timestamp-aligned system and microphone bytes so the app can meter, transcribe, encode, mix, route, or store them itself.
+
+Treat an `unavailable` access result or an `unsupported` capture rejection as a host capability boundary. The canonical TypeScript example declares macOS as its only platform and surfaces those results in its permission and capture status UI.
+
+<table>
+  <thead>
+    <tr><th>Host</th><th>System audio</th><th>Microphone</th><th>Device enumeration</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>macOS 15+ system engine</td><td>Supported</td><td>Supported</td><td>Supported</td></tr>
+    <tr><td>macOS 11–14 system engine</td><td>Unsupported</td><td>Unsupported</td><td>Unsupported</td></tr>
+    <tr><td>macOS Chromium</td><td>Unsupported</td><td>Unsupported</td><td>Unsupported</td></tr>
+    <tr><td>Linux, Windows, iOS, Android</td><td>Unsupported</td><td>Unsupported</td><td>Unsupported</td></tr>
+  </tbody>
+</table>
+
+## Manifest and privacy strings
+
+Declare exactly the source permissions the app uses. Nonempty privacy strings are mandatory when their matching permission is present:
+
+```zig:app.zon
+.{
+    .permissions = .{ "microphone", "system_audio" },
+    .privacy = .{
+        .microphone_usage = "Capture the microphone selected for a meeting.",
+        .system_audio_usage = "Capture meeting audio played by other apps.",
+    },
+}
+```
+
+Packaging maps `microphone_usage` to `NSMicrophoneUsageDescription`. It maps `system_audio_usage` to both `NSScreenCaptureUsageDescription` and `NSAudioCaptureUsageDescription`.
+
+App Sandbox remains opt-in. A sandboxed app that captures microphone input must add `com.apple.security.device.audio-input` to its own entitlement file. Native SDK does not rewrite custom entitlements.
+
+## Permission flow
+
+Starting capture never opens a system prompt. Query or request access explicitly first:
+
+```ts
+Cmd.captureAccess("mic-access", "microphone", "status", { event: "capture_access" });
+Cmd.captureAccess("system-access", "system_audio", "request", { event: "capture_access" });
+```
+
+System audio reports the coarse ScreenCaptureKit truth: `authorized`, `not_authorized`, or `unavailable`. Microphone access additionally reports `not_determined`, `denied`, and `restricted`. A system-audio request can return `restartRequired: true`; tell the user to restart instead of assuming the running process can already capture.
+
+The manifest is an independent gate. Missing `system_audio` or `microphone` permission rejects a start even when macOS has granted the corresponding TCC access.
+
+## Stream contract
+
+Start options select at least one source and define the normalized output format:
+
+- `system_audio` / `systemAudio`: include system output.
+- Microphone: `none`, `default`, or an enumerated device ID.
+- Sample rate: 16, 24, 44.1, or 48 kHz; default 48 kHz.
+- Channels: mono or stereo; default stereo.
+- `exclude_current_process_audio` / `excludeCurrentProcessAudio`: default `true`.
+- Buffer duration: 1–30 seconds; default 5 seconds.
+
+The runtime owns a bounded ring. A `readable` lifecycle event is a coalesced hint that at least one paired block is ready; it is not one notification per chunk. Read until `remainingFrames` reaches zero. Each read returns whole internal 20 ms blocks and must allow at least one block and at most 100 ms. At 48 kHz, `maxFrames: 4800` requests up to 100 ms.
+
+Each `chunk` contains:
+
+- `frameOffset` and `frames`, identifying one shared timeline interval.
+- Interleaved signed 16-bit little-endian `systemPcm` and `microphonePcm` in the requested channel count.
+- An empty byte slice for a source that was not enabled.
+- `systemGapFrames` and `microphoneGapFrames`, counting timestamp frames the SDK had to zero-fill for that source.
+
+Gap frames are not the same as acoustic silence. Real silence arrives normally as zero-valued samples and leaves the gap counter at zero. A gap means the capture source supplied no sample buffer for part of the timeline, so the SDK inserted zeros to preserve alignment and counted those frame positions separately. The PCM is already padded; the counters are diagnostics, not instructions to insert more samples.
+
+Bytes are borrowed only for the Msg/update call. Consume them immediately or copy them before retaining them in the model.
+
+Reliability means accepted frames are never overwritten or silently dropped. The app owns backpressure by reading promptly. If the ring fills, capture seals with `failed` / `consumer_too_slow`; every previously accepted frame remains available to drain. There is no separate `mode` option.
+
+`stopAudioCapture` / `Cmd.audioCaptureStop` stops producers but retains buffered PCM. Continue reading until `endOfStream` is true; the final delivery releases the stream. `discardAudioCapture` / `Cmd.audioCaptureDiscard` stops and releases immediately. Stopping an idle key and discarding an unknown key are no-ops.
+
+Consumed chunks and runtime-generated readiness events participate in session journal/replay. Recording PCM-heavy sessions therefore grows the session journal in proportion to the audio the app reads.
+
+## TypeScript app flow
+
+The TypeScript bytecode ABI uses fixed event records and byte slices:
+
+```ts
+const start = Cmd.audioCaptureStart(
+  "meeting",
+  {
+    systemAudio: true,
+    microphone: "default",
+    sampleRate: 48000,
+    channels: 2,
+    excludeCurrentProcessAudio: true,
+    bufferDurationMs: 5000,
+  },
+  { event: "capture_event" },
+);
+
+const read = Cmd.audioCaptureRead("meeting", 4800, { event: "capture_read" });
+const stop = Cmd.audioCaptureStop("meeting");
+const discard = Cmd.audioCaptureDiscard("meeting");
+```
+
+The lifecycle arm contains `key`, `state`, `reason`, `sampleRate`, `channels`, `availableFrames`, `capacityFrames`, and `framesProduced`. The read arm contains `key`, `state`, `reason`, `sequence`, `frameOffset`, `frames`, `systemPcm`, `microphonePcm`, `systemGapFrames`, `microphoneGapFrames`, `remainingFrames`, and `endOfStream`. Commands take string keys, while keyed event records expose `key: Uint8Array` at the native bytecode boundary.
+
+Query both permissions and enumerate microphones from the boot command returned by `initialModel`. The canonical [`examples/audio-capture`](https://github.com/vercel-labs/native/tree/main/examples/audio-capture) app also demonstrates system-only, microphone-only, and combined starts; immediate s16le peak calculation; coalesced reads; stop-and-drain; and visible restart guidance.
+
+Keep at most one read outstanding. A second returns `rejected` / `read_in_progress`; a wrong or retired key returns `not_recording`. After a `stopped` or `failed` lifecycle event, continue reading until `endOfStream` is true.
+
+## Microphone devices
+
+```ts
+const devices = Cmd.microphoneDevices("microphones", { event: "microphone_device" });
+const changes = Sub.microphoneDevicesChanged("microphones_changed");
+```
+
+Listing emits zero or more `device` records with `id`, `name`, `isDefault`, `index`, and `total`, followed by exactly one `completed`, `failed`, or `rejected` record. The change subscription is invalidation only: list again to obtain a fresh snapshot.
+
+`default` resolves when capture starts and remains pinned for that session. A byte ID selects that exact `AVCaptureDevice.uniqueID`. A missing or disconnected selected device fails instead of silently switching.
+
+## Zig extension API
+
+TypeScript is the default for apps. The underlying Zig effects remain available for Native SDK implementation work, toolkit extensions, and existing Zig-core apps:
+
+```zig
+pub const Msg = union(enum) {
+    start_capture,
+    stop_capture,
+    capture: native_sdk.EffectAudioCapture,
+    capture_read: native_sdk.EffectAudioCaptureRead,
+};
+
+const App = native_sdk.UiApp(Model, Msg);
+const Fx = App.Effects;
+
+fn read(fx: *Fx) void {
+    fx.readAudioCapture(.{
+        .key = 1,
+        .max_frames = 4_800,
+        .on_read = Fx.audioCaptureReadMsg(.capture_read),
+    });
+}
+
+pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
+    switch (msg) {
+        .start_capture => fx.startAudioCapture(.{
+            .key = 1,
+            .system_audio = true,
+            .microphone = .default,
+            .sample_rate_hz = 48_000,
+            .channel_count = 2,
+            .buffer_duration_ms = 5_000,
+            .on_event = Fx.audioCaptureMsg(.capture),
+        }),
+        .stop_capture => fx.stopAudioCapture(),
+        .capture => |event| switch (event.state) {
+            .readable, .stopped, .failed => read(fx),
+            .started, .rejected => {},
+        },
+        .capture_read => |event| {
+            if (event.state == .chunk) {
+                consumeAlignedPcm(event.system_pcm, event.microphone_pcm, event.frames);
+            }
+            if (!event.end_of_stream and event.remaining_frames > 0) read(fx);
+            model.buffered_frames = event.remaining_frames;
+        },
+    }
+}
+```
+
+Only one capture can be active per app. A duplicate start is rejected with `already_recording` without disturbing the live stream. File containers, WAV headers, mixing policy, encoders, level smoothing, source gains, video capture, and per-application filtering belong in application code or follow-up extensions. A first-party file-writer extension is tracked separately in [vercel-labs/native#263](https://github.com/vercel-labs/native/issues/263).

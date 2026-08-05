@@ -8,6 +8,7 @@ pub const ValidationError = error{
     InvalidDimension,
     DuplicateIcon,
     DuplicatePermission,
+    InvalidPrivacyUsage,
     DuplicateCapability,
     DuplicateBridgeCommand,
     DuplicateCommand,
@@ -61,6 +62,7 @@ pub const max_file_association_mime_types: usize = 32;
 pub const max_url_schemes: usize = 32;
 /// Cap for the identity `description` — one sentence, not a README.
 pub const max_description_bytes: usize = 256;
+pub const max_privacy_usage_bytes: usize = 1024;
 
 pub const Platform = enum {
     macos,
@@ -113,6 +115,7 @@ pub const PermissionKind = enum {
     filesystem,
     camera,
     microphone,
+    system_audio,
     location,
     notifications,
     clipboard,
@@ -129,6 +132,7 @@ pub const Permission = union(PermissionKind) {
     filesystem: void,
     camera: void,
     microphone: void,
+    system_audio: void,
     location: void,
     notifications: void,
     clipboard: void,
@@ -207,6 +211,15 @@ pub const AppIdentity = struct {
     description: ?[]const u8 = null,
     organization: ?[]const u8 = null,
     homepage: ?[]const u8 = null,
+};
+
+/// Human-facing purpose strings copied into platform privacy metadata.
+/// They are separate from permission declarations: permissions say what an
+/// app may use, while these strings explain that use to the person granting
+/// operating-system access.
+pub const PrivacyUsage = struct {
+    microphone_usage: ?[]const u8 = null,
+    system_audio_usage: ?[]const u8 = null,
 };
 
 pub const Version = struct {
@@ -630,6 +643,7 @@ pub const Manifest = struct {
     version: Version,
     icons: []const Icon = &.{},
     permissions: []const Permission = &.{},
+    privacy: PrivacyUsage = .{},
     capabilities: []const Capability = &.{},
     bridge: BridgeConfig = .{},
     frontend: ?FrontendConfig = null,

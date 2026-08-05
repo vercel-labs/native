@@ -195,6 +195,7 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/appkit_host.m"), .flags = flags });
+                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/audio_capture.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
             .chromium => {
@@ -224,6 +225,9 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        app_mod.linkFramework("ScreenCaptureKit", .{});
+        app_mod.linkFramework("AudioToolbox", .{});
+        app_mod.linkFramework("CoreMedia", .{});
         // CVPixelBuffer for the video frame path (the AppKit host's
         // AVPlayerItemVideoOutput frames are real CoreVideo symbols).
         app_mod.linkFramework("CoreVideo", .{});

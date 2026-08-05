@@ -1127,6 +1127,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/audio_capture.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
             .chromium => {
@@ -1156,6 +1157,9 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        app_mod.linkFramework("ScreenCaptureKit", .{});
+        app_mod.linkFramework("AudioToolbox", .{});
+        app_mod.linkFramework("CoreMedia", .{});
         // CVPixelBuffer for the video frame path (the video player's
         // AVPlayerItemVideoOutput frames). CoreMedia's CMTime use stays
         // header-only, but the pixel-buffer calls are real symbols.

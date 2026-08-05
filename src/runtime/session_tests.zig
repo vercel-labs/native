@@ -633,6 +633,234 @@ test "a native-only session records and replays like a web-layer one" {
     try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
 }
 
+const AudioCaptureSessionModel = struct {
+    capture_events: u32 = 0,
+    capture_state: u8 = 0,
+    capture_reason: u8 = 0,
+    sample_rate_hz: u32 = 0,
+    channel_count: u8 = 0,
+    capture_available_frames: u32 = 0,
+    capture_capacity_frames: u32 = 0,
+    capture_frames_produced: u64 = 0,
+    read_events: u32 = 0,
+    read_frames: u32 = 0,
+    system_pcm_hash: u64 = 0,
+    microphone_pcm_hash: u64 = 0,
+    system_gap_frames: u32 = 0,
+    microphone_gap_frames: u32 = 0,
+    end_of_stream: bool = false,
+    microphone_records: u32 = 0,
+    microphone_listing_completed: bool = false,
+    microphone_access: effects_mod.EffectCaptureAccessStatus = .unavailable,
+    restart_required: bool = false,
+    device_changes: u32 = 0,
+};
+
+const AudioCaptureSessionMsg = union(enum) {
+    start,
+    read,
+    stop,
+    list_microphones,
+    check_access,
+    capture: effects_mod.EffectAudioCapture,
+    capture_read: effects_mod.EffectAudioCaptureRead,
+    microphone: effects_mod.EffectMicrophoneDevice,
+    access: effects_mod.EffectCaptureAccess,
+    microphones_changed,
+};
+
+const AudioCaptureSessionApp = ui_app_mod.UiApp(AudioCaptureSessionModel, AudioCaptureSessionMsg);
+
+fn audioCaptureSessionBoot(_: *AudioCaptureSessionModel, fx: *AudioCaptureSessionApp.Effects) void {
+    fx.observeMicrophoneDevices(AudioCaptureSessionApp.Effects.microphoneDevicesChangedMsg(.microphones_changed));
+}
+
+fn audioCaptureSessionUpdate(model: *AudioCaptureSessionModel, msg: AudioCaptureSessionMsg, fx: *AudioCaptureSessionApp.Effects) void {
+    switch (msg) {
+        .start => fx.startAudioCapture(.{
+            .key = 41,
+            .system_audio = true,
+            .microphone = .default,
+            .on_event = AudioCaptureSessionApp.Effects.audioCaptureMsg(.capture),
+        }),
+        .stop => fx.stopAudioCapture(),
+        .read => fx.readAudioCapture(.{
+            .key = 41,
+            .max_frames = 4_800,
+            .on_read = AudioCaptureSessionApp.Effects.audioCaptureReadMsg(.capture_read),
+        }),
+        .list_microphones => fx.listMicrophoneDevices(.{
+            .key = 42,
+            .on_event = AudioCaptureSessionApp.Effects.microphoneDeviceMsg(.microphone),
+        }),
+        .check_access => fx.captureAccess(.{
+            .key = 43,
+            .source = .microphone,
+            .on_event = AudioCaptureSessionApp.Effects.captureAccessMsg(.access),
+        }),
+        .capture => |event| {
+            model.capture_events += 1;
+            model.capture_state = @intFromEnum(event.state) + 1;
+            model.capture_reason = @intFromEnum(event.reason);
+            model.sample_rate_hz = event.sample_rate_hz;
+            model.channel_count = event.channel_count;
+            model.capture_available_frames = event.available_frames;
+            model.capture_capacity_frames = event.capacity_frames;
+            model.capture_frames_produced = event.frames_produced;
+        },
+        .capture_read => |event| {
+            model.read_events += 1;
+            model.read_frames += event.frames;
+            if (event.frames > 0) {
+                model.system_pcm_hash = std.hash.Wyhash.hash(0, event.system_pcm);
+                model.microphone_pcm_hash = std.hash.Wyhash.hash(0, event.microphone_pcm);
+            }
+            model.system_gap_frames += event.system_gap_frames;
+            model.microphone_gap_frames += event.microphone_gap_frames;
+            model.end_of_stream = event.end_of_stream;
+        },
+        .microphone => |event| switch (event.state) {
+            .device => model.microphone_records += 1,
+            .completed => model.microphone_listing_completed = true,
+            .failed, .rejected => {},
+        },
+        .access => |event| {
+            model.microphone_access = event.status;
+            model.restart_required = event.restart_required;
+        },
+        .microphones_changed => model.device_changes += 1,
+    }
+}
+
+fn audioCaptureSessionView(ui: *AudioCaptureSessionApp.Ui, model: *const AudioCaptureSessionModel) AudioCaptureSessionApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("capture {d} · microphones {d}", .{ model.capture_events, model.microphone_records }));
+}
+
+fn audioCaptureSessionCommand(name: []const u8) ?AudioCaptureSessionMsg {
+    if (std.mem.eql(u8, name, "capture.start")) return .start;
+    if (std.mem.eql(u8, name, "capture.read")) return .read;
+    if (std.mem.eql(u8, name, "capture.stop")) return .stop;
+    if (std.mem.eql(u8, name, "capture.microphones")) return .list_microphones;
+    if (std.mem.eql(u8, name, "capture.access")) return .check_access;
+    return null;
+}
+
+fn audioCaptureSessionOptions() AudioCaptureSessionApp.Options {
+    return .{
+        .name = "audio-capture-session",
+        .scene = session_scene,
+        .canvas_label = canvas_label,
+        .init_fx = audioCaptureSessionBoot,
+        .update_fx = audioCaptureSessionUpdate,
+        .view = audioCaptureSessionView,
+        .on_command = audioCaptureSessionCommand,
+    };
+}
+
+test "audio capture device and access platform events replay without hardware side effects" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "audio-capture-session", .window_width = 400, .window_height = 300 });
+
+    const record_harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer record_harness.destroy(gpa);
+    record_harness.null_platform.gpu_surfaces = true;
+    record_harness.runtime.options.session_recorder = recorder;
+
+    const recorded_app = try gpa.create(AudioCaptureSessionApp);
+    defer gpa.destroy(recorded_app);
+    recorded_app.* = AudioCaptureSessionApp.init(std.heap.page_allocator, .{}, audioCaptureSessionOptions());
+    defer recorded_app.deinit();
+    const app = recorded_app.app();
+
+    try record_harness.start(app);
+    try record_harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try record_harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try record_harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.start", .window_id = 1 } });
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.takeAudioCaptureStarted().?);
+    const system_pcm: [3_840]u8 = @splat(0x21);
+    const microphone_pcm: [3_840]u8 = @splat(0x42);
+    try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, record_harness.null_platform.pushCapturedAudioChunk(.{
+        .frame_offset = 0,
+        .frame_count = 960,
+        .system_pcm = &system_pcm,
+        .microphone_pcm = &microphone_pcm,
+        .system_gap_frames = 7,
+        .microphone_gap_frames = 11,
+    }));
+    try record_harness.runtime.dispatchPlatformEvent(app, .wake);
+    try record_harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.read", .window_id = 1 } });
+    try record_harness.runtime.dispatchPlatformEvent(app, .wake);
+    try record_harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.stop", .window_id = 1 } });
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.completeAudioCapture().?);
+    try record_harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.read", .window_id = 1 } });
+    try record_harness.runtime.dispatchPlatformEvent(app, .wake);
+
+    try record_harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.microphones", .window_id = 1 } });
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.microphoneDeviceEvent(0));
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.microphoneDeviceEvent(1));
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.microphoneDeviceEvent(2));
+
+    try record_harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.access", .window_id = 1 } });
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.takeCaptureAccess().?);
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.microphoneDevicesChanged().?);
+    try record_harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    const recorded_model = recorded_app.model;
+    const recorded_fingerprint = record_harness.runtime.sessionStateFingerprint();
+    try std.testing.expectEqual(@as(u32, 3), recorded_model.capture_events);
+    try std.testing.expectEqual(@as(u32, 48_000), recorded_model.sample_rate_hz);
+    try std.testing.expectEqual(@as(u8, 2), recorded_model.channel_count);
+    try std.testing.expectEqual(@as(u32, 0), recorded_model.capture_available_frames);
+    try std.testing.expectEqual(@as(u32, 240_000), recorded_model.capture_capacity_frames);
+    try std.testing.expectEqual(@as(u64, 960), recorded_model.capture_frames_produced);
+    try std.testing.expectEqual(@as(u32, 2), recorded_model.read_events);
+    try std.testing.expectEqual(@as(u32, 960), recorded_model.read_frames);
+    try std.testing.expectEqual(std.hash.Wyhash.hash(0, &system_pcm), recorded_model.system_pcm_hash);
+    try std.testing.expectEqual(std.hash.Wyhash.hash(0, &microphone_pcm), recorded_model.microphone_pcm_hash);
+    try std.testing.expectEqual(@as(u32, 7), recorded_model.system_gap_frames);
+    try std.testing.expectEqual(@as(u32, 11), recorded_model.microphone_gap_frames);
+    try std.testing.expect(recorded_model.end_of_stream);
+    try std.testing.expectEqual(@as(u32, 2), recorded_model.microphone_records);
+    try std.testing.expect(recorded_model.microphone_listing_completed);
+    try std.testing.expectEqual(effects_mod.EffectCaptureAccessStatus.authorized, recorded_model.microphone_access);
+    try std.testing.expectEqual(@as(u32, 1), recorded_model.device_changes);
+
+    const replay_harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer replay_harness.destroy(gpa);
+    replay_harness.null_platform.gpu_surfaces = true;
+    const replayed_app = try gpa.create(AudioCaptureSessionApp);
+    defer gpa.destroy(replayed_app);
+    replayed_app.* = AudioCaptureSessionApp.init(std.heap.page_allocator, .{}, audioCaptureSessionOptions());
+    defer replayed_app.deinit();
+
+    const report = try session_replay.replaySession(&replay_harness.runtime, replayed_app.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(usize, 0), replay_harness.null_platform.audio_capture_start_count);
+    try std.testing.expectEqual(@as(usize, 0), replay_harness.null_platform.audio_capture_stop_count);
+    try std.testing.expectEqual(@as(usize, 0), replay_harness.null_platform.microphone_devices_count);
+    try std.testing.expectEqualDeep(recorded_model, replayed_app.model);
+    try std.testing.expectEqual(recorded_fingerprint, replay_harness.runtime.sessionStateFingerprint());
+}
+
 test "accessibility actions journal once and replay without double-dispatch" {
     // A journaled `widget_accessibility_action` re-runs its verb on
     // replay, and the verb synthesizes REAL platform events (press its
@@ -2900,10 +3128,11 @@ test "a journal referencing blobs refuses to replay without its blob store" {
 /// fields — video_kind (1), position (8), duration (8), playing (1),
 /// buffering (1), width (8), height (8), token (8), source (1),
 /// handled (1) — then the pty fields — pty_kind (1), pty_signal (4),
-/// pty_dropped_writes (4), pty_blob_hash (16), pty_blob_len (8). The
-/// image fields the damage helpers below patch sit immediately before
-/// it.
-const effect_post_image_trailer_len: usize = 83;
+/// pty_dropped_writes (4), pty_blob_hash (16), pty_blob_len (8) — then
+/// the reliable audio-read fields (39) and the runtime-generated audio
+/// readiness fields (23). The image fields the damage
+/// helpers below patch sit immediately before it.
+const effect_post_image_trailer_len: usize = 83 + 39 + 23;
 
 /// Zero the `image_blob_len` field — the last eight bytes before the
 /// post-image trailer of the effect payload, see `journal.encodeEffect`

@@ -186,6 +186,9 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
+            "audio_capture=" ++ layout_fingerprint.describe(platform.AudioCaptureEvent) ++ "\n" ++
+            "microphone_device=" ++ layout_fingerprint.describe(platform.MicrophoneDeviceEvent) ++ "\n" ++
+            "capture_access=" ++ layout_fingerprint.describe(platform.CaptureAccessEvent) ++ "\n" ++
             "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
             "files_dropped=" ++ layout_fingerprint.describe(platform.FileDropEvent) ++ "\n" ++
             // gpu_surface_frame journals a deliberate SUBSET of a
@@ -464,6 +467,10 @@ const EventTag = enum(u8) {
     audio = 24,
     video = 25,
     view_focused = 26,
+    audio_capture = 27,
+    microphone_device = 28,
+    microphone_devices_changed = 29,
+    capture_access = 30,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -621,6 +628,32 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(audio.playing);
             try cursor.writeBool(audio.buffering);
             try cursor.writeBytes(&audio.bands);
+        },
+        .audio_capture => |capture| {
+            try cursor.writeEnum(EventTag.audio_capture);
+            try cursor.writeEnum(capture.state);
+            try cursor.writeEnum(capture.reason);
+            try cursor.writeInt(u32, capture.sample_rate_hz);
+            try cursor.writeInt(u8, capture.channel_count);
+            try cursor.writeInt(u32, capture.available_frames);
+            try cursor.writeInt(u32, capture.capacity_frames);
+            try cursor.writeInt(u64, capture.frames_produced);
+        },
+        .microphone_device => |device| {
+            try cursor.writeEnum(EventTag.microphone_device);
+            try cursor.writeEnum(device.state);
+            try cursor.writeStr(device.id);
+            try cursor.writeStr(device.name);
+            try cursor.writeBool(device.is_default);
+            try cursor.writeInt(u32, device.index);
+            try cursor.writeInt(u32, device.total);
+        },
+        .microphone_devices_changed => try cursor.writeEnum(EventTag.microphone_devices_changed),
+        .capture_access => |access| {
+            try cursor.writeEnum(EventTag.capture_access);
+            try cursor.writeEnum(access.source);
+            try cursor.writeEnum(access.status);
+            try cursor.writeBool(access.restart_required);
         },
         // Recorded for stream fidelity like `.audio`. On replay the
         // journaled video EFFECT records are the Msg source; the
@@ -849,6 +882,29 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
             break :blk .{ .audio = decoded };
         },
+        .audio_capture => .{ .audio_capture = .{
+            .state = try cursor.readEnum(platform.AudioCaptureEventState),
+            .reason = try cursor.readEnum(platform.AudioCaptureEventReason),
+            .sample_rate_hz = try cursor.readInt(u32),
+            .channel_count = try cursor.readInt(u8),
+            .available_frames = try cursor.readInt(u32),
+            .capacity_frames = try cursor.readInt(u32),
+            .frames_produced = try cursor.readInt(u64),
+        } },
+        .microphone_device => .{ .microphone_device = .{
+            .state = try cursor.readEnum(platform.MicrophoneDeviceEventState),
+            .id = try cursor.readStr(),
+            .name = try cursor.readStr(),
+            .is_default = try cursor.readBool(),
+            .index = try cursor.readInt(u32),
+            .total = try cursor.readInt(u32),
+        } },
+        .microphone_devices_changed => .microphone_devices_changed,
+        .capture_access => .{ .capture_access = .{
+            .source = try cursor.readEnum(platform.CaptureAccessSource),
+            .status = try cursor.readEnum(platform.CaptureAccessStatus),
+            .restart_required = try cursor.readBool(),
+        } },
         .video => blk: {
             const kind = try cursor.readEnum(platform.VideoEventKind);
             break :blk .{ .video = .{
@@ -1068,6 +1124,27 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u32, record.pty_dropped_writes);
     try cursor.writeBytes(&record.pty_blob_hash);
     try cursor.writeInt(u64, record.pty_blob_len);
+    // Reliable paired audio-capture reads. PCM rides `payload` inline;
+    // the system length splits it from the microphone bytes.
+    try cursor.writeEnum(record.audio_capture_read_state);
+    try cursor.writeEnum(record.audio_capture_read_reason);
+    try cursor.writeInt(u64, record.audio_capture_sequence);
+    try cursor.writeInt(u64, record.audio_capture_frame_offset);
+    try cursor.writeInt(u32, record.audio_capture_frames);
+    try cursor.writeInt(u32, record.audio_capture_system_len);
+    try cursor.writeInt(u32, record.audio_capture_system_gap_frames);
+    try cursor.writeInt(u32, record.audio_capture_microphone_gap_frames);
+    try cursor.writeInt(u32, record.audio_capture_remaining_frames);
+    try cursor.writeBool(record.audio_capture_end_of_stream);
+    // Runtime-generated audio-capture readiness. Platform start and
+    // terminal lifecycle events already use the platform-event codec.
+    try cursor.writeEnum(record.audio_capture_state);
+    try cursor.writeEnum(record.audio_capture_reason);
+    try cursor.writeInt(u32, record.audio_capture_sample_rate_hz);
+    try cursor.writeByte(record.audio_capture_channel_count);
+    try cursor.writeInt(u32, record.audio_capture_available_frames);
+    try cursor.writeInt(u32, record.audio_capture_capacity_frames);
+    try cursor.writeInt(u64, record.audio_capture_frames_produced);
     return buffer[0..cursor.len];
 }
 
@@ -1126,6 +1203,23 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     record.pty_dropped_writes = try cursor.readInt(u32);
     @memcpy(&record.pty_blob_hash, try cursor.readBytes(record.pty_blob_hash.len));
     record.pty_blob_len = try cursor.readInt(u64);
+    record.audio_capture_read_state = try cursor.readEnum(runtime_effects.EffectAudioCaptureReadState);
+    record.audio_capture_read_reason = try cursor.readEnum(runtime_effects.EffectAudioCaptureReadReason);
+    record.audio_capture_sequence = try cursor.readInt(u64);
+    record.audio_capture_frame_offset = try cursor.readInt(u64);
+    record.audio_capture_frames = try cursor.readInt(u32);
+    record.audio_capture_system_len = try cursor.readInt(u32);
+    record.audio_capture_system_gap_frames = try cursor.readInt(u32);
+    record.audio_capture_microphone_gap_frames = try cursor.readInt(u32);
+    record.audio_capture_remaining_frames = try cursor.readInt(u32);
+    record.audio_capture_end_of_stream = try cursor.readBool();
+    record.audio_capture_state = try cursor.readEnum(runtime_effects.EffectAudioCaptureState);
+    record.audio_capture_reason = try cursor.readEnum(runtime_effects.EffectAudioCaptureReason);
+    record.audio_capture_sample_rate_hz = try cursor.readInt(u32);
+    record.audio_capture_channel_count = try cursor.readByte();
+    record.audio_capture_available_frames = try cursor.readInt(u32);
+    record.audio_capture_capacity_frames = try cursor.readInt(u32);
+    record.audio_capture_frames_produced = try cursor.readInt(u64);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -1484,6 +1578,51 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqual(@as(u64, 720), decoded.video.height);
     }
     {
+        const decoded = try roundTripEvent(.{ .audio_capture = .{
+            .state = .failed,
+            .reason = .device_disconnected,
+            .sample_rate_hz = 48_000,
+            .channel_count = 2,
+            .available_frames = 960,
+            .capacity_frames = 240_000,
+            .frames_produced = 4_800,
+        } });
+        try testing.expectEqual(platform.AudioCaptureEventState.failed, decoded.audio_capture.state);
+        try testing.expectEqual(platform.AudioCaptureEventReason.device_disconnected, decoded.audio_capture.reason);
+        try testing.expectEqual(@as(u32, 48_000), decoded.audio_capture.sample_rate_hz);
+        try testing.expectEqual(@as(u8, 2), decoded.audio_capture.channel_count);
+        try testing.expectEqual(@as(u32, 960), decoded.audio_capture.available_frames);
+        try testing.expectEqual(@as(u32, 240_000), decoded.audio_capture.capacity_frames);
+        try testing.expectEqual(@as(u64, 4_800), decoded.audio_capture.frames_produced);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .microphone_device = .{
+            .state = .device,
+            .id = "usb-mic",
+            .name = "USB Microphone",
+            .is_default = true,
+            .index = 1,
+            .total = 2,
+        } });
+        try testing.expectEqual(platform.MicrophoneDeviceEventState.device, decoded.microphone_device.state);
+        try testing.expectEqualStrings("usb-mic", decoded.microphone_device.id);
+        try testing.expectEqualStrings("USB Microphone", decoded.microphone_device.name);
+        try testing.expect(decoded.microphone_device.is_default);
+        try testing.expectEqual(@as(u32, 2), decoded.microphone_device.total);
+    }
+    {
+        const changed = try roundTripEvent(.microphone_devices_changed);
+        try testing.expect(changed == .microphone_devices_changed);
+        const decoded = try roundTripEvent(.{ .capture_access = .{
+            .source = .system_audio,
+            .status = .authorized,
+            .restart_required = true,
+        } });
+        try testing.expectEqual(platform.CaptureAccessSource.system_audio, decoded.capture_access.source);
+        try testing.expectEqual(platform.CaptureAccessStatus.authorized, decoded.capture_access.status);
+        try testing.expect(decoded.capture_access.restart_required);
+    }
+    {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };
         const decoded = try roundTripEvent(.{ .files_dropped = .{
             .window_id = 1,
@@ -1724,6 +1863,67 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expect(video_decoded.video_buffering);
     try testing.expectEqual(@as(u64, 1280), video_decoded.video_width);
     try testing.expectEqual(@as(u64, 720), video_decoded.video_height);
+
+    const capture_encoded = try encodeEffect(.{
+        .kind = .audio_capture_read,
+        .key = 73,
+        .payload = "sys\x00mic\x00",
+        .audio_capture_read_state = .chunk,
+        .audio_capture_sequence = 4,
+        .audio_capture_frame_offset = 960,
+        .audio_capture_frames = 2,
+        .audio_capture_system_len = 4,
+        .audio_capture_system_gap_frames = 1,
+        .audio_capture_microphone_gap_frames = 0,
+        .audio_capture_remaining_frames = 958,
+        .audio_capture_end_of_stream = false,
+    }, &buffer);
+    const capture_decoded = try decodeEffect(capture_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.audio_capture_read, capture_decoded.kind);
+    try testing.expectEqual(@as(u64, 73), capture_decoded.key);
+    try testing.expectEqualStrings("sys\x00mic\x00", capture_decoded.payload);
+    try testing.expectEqual(runtime_effects.EffectAudioCaptureReadState.chunk, capture_decoded.audio_capture_read_state);
+    try testing.expectEqual(@as(u64, 4), capture_decoded.audio_capture_sequence);
+    try testing.expectEqual(@as(u64, 960), capture_decoded.audio_capture_frame_offset);
+    try testing.expectEqual(@as(u32, 2), capture_decoded.audio_capture_frames);
+    try testing.expectEqual(@as(u32, 4), capture_decoded.audio_capture_system_len);
+    try testing.expectEqual(@as(u32, 1), capture_decoded.audio_capture_system_gap_frames);
+    try testing.expectEqual(@as(u32, 958), capture_decoded.audio_capture_remaining_frames);
+
+    const readable_encoded = try encodeEffect(.{
+        .kind = .audio_capture,
+        .key = 73,
+        .audio_capture_state = .readable,
+        .audio_capture_sample_rate_hz = 48_000,
+        .audio_capture_channel_count = 2,
+        .audio_capture_available_frames = 960,
+        .audio_capture_capacity_frames = 240_000,
+        .audio_capture_frames_produced = 960,
+    }, &buffer);
+    const readable_decoded = try decodeEffect(readable_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.audio_capture, readable_decoded.kind);
+    try testing.expectEqual(runtime_effects.EffectAudioCaptureState.readable, readable_decoded.audio_capture_state);
+    try testing.expectEqual(@as(u32, 48_000), readable_decoded.audio_capture_sample_rate_hz);
+    try testing.expectEqual(@as(u8, 2), readable_decoded.audio_capture_channel_count);
+    try testing.expectEqual(@as(u32, 960), readable_decoded.audio_capture_available_frames);
+    try testing.expectEqual(@as(u32, 240_000), readable_decoded.audio_capture_capacity_frames);
+    try testing.expectEqual(@as(u64, 960), readable_decoded.audio_capture_frames_produced);
+
+    const terminal_encoded = try encodeEffect(.{
+        .kind = .audio_capture,
+        .key = 73,
+        .audio_capture_state = .failed,
+        .audio_capture_reason = .consumer_too_slow,
+        .audio_capture_sample_rate_hz = 48_000,
+        .audio_capture_channel_count = 2,
+        .audio_capture_available_frames = 240_000,
+        .audio_capture_capacity_frames = 240_000,
+        .audio_capture_frames_produced = 240_000,
+    }, &buffer);
+    const terminal_decoded = try decodeEffect(terminal_encoded);
+    try testing.expectEqual(runtime_effects.EffectAudioCaptureState.failed, terminal_decoded.audio_capture_state);
+    try testing.expectEqual(runtime_effects.EffectAudioCaptureReason.consumer_too_slow, terminal_decoded.audio_capture_reason);
+    try testing.expectEqual(@as(u32, 240_000), terminal_decoded.audio_capture_available_frames);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {

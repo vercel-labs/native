@@ -456,6 +456,7 @@ pub const LinuxPlatform = struct {
             // a host whose plugin set lacks it answers false and the
             // deck's glass rests honestly instead of dancing on fakes.
             .audio_spectrum => self.web_engine == .system and audioSpectrumAvailable(self.host),
+            .system_audio_capture, .microphone_capture, .microphone_device_enumeration => false,
             .tray => false,
             // No tray means no affordance to bring a policy-hidden
             // window back — reporting support would strand windows, so

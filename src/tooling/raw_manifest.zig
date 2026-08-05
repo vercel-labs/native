@@ -9,6 +9,7 @@ pub const RawManifest = struct {
     icons: []const []const u8 = &.{},
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
+    privacy: RawPrivacy = .{},
     capabilities: []const []const u8 = &.{},
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
@@ -30,6 +31,11 @@ pub const RawManifest = struct {
     shortcuts: []const RawShortcut = &.{},
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
+};
+
+pub const RawPrivacy = struct {
+    microphone_usage: ?[]const u8 = null,
+    system_audio_usage: ?[]const u8 = null,
 };
 
 pub const RawCef = struct {

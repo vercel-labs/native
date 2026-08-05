@@ -298,12 +298,22 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td>Unsupported</td>
       <td>Supported on Windows 10 2004+ (process-scoped WASAPI loopback of this app only, probed live)</td>
     </tr>
+    <tr>
+      <td>System audio / microphone capture</td>
+      <td>Supported on macOS 15+ (ScreenCaptureKit + AVFoundation)</td>
+      <td>Unsupported</td>
+      <td>Unsupported</td>
+      <td>Unsupported</td>
+      <td>Unsupported</td>
+    </tr>
   </tbody>
 </table>
 
 "Anchored fallback" for native context menus means the declared menu still presents — as an anchored canvas surface at the click point — because that host has no native menu presenter. All three desktop system engines present natively (`NSMenu` on macOS, `TrackPopupMenu` on Windows, `GtkPopoverMenu` on Linux). Authors declare one menu either way; the platform decides presentation.
 
 Audio spectrum analysis reads the app's OWN playback and nothing else: macOS taps the app's single player pre-effects, Windows captures the app's own audio session through process-scoped loopback (never system-wide — other apps' audio can never appear in the bands), and Linux analyzes inside the app's own playbin. Hosts that cannot analyze report `audio_spectrum` unsupported and simply never deliver `.spectrum` events; see the capabilities page for the band shape and cadence contract.
+
+Audio capture is intentionally narrower than playback: only the macOS 15+ system-engine host exposes `system_audio_capture`, `microphone_capture`, and `microphone_device_enumeration`. The feature flags stay false on older macOS and every Chromium, Linux, Windows, iOS, and Android host. See [Audio Capture](/docs/audio-capture) for permissions, source selection, device identity, and the reliable stream contract.
 
 ## How Support Is Verified
 

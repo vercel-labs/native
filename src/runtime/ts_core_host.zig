@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 3) onto the real effect engine
+//! emits (`cmd_format_version` 5) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -393,6 +393,10 @@ pub const spawn_key_base: u64 = 0x5453_5350_0000_0000;
 /// ("TSAU"). Audio keys are their own engine namespace and one player
 /// is the whole surface, so one constant key is the honest shape.
 pub const audio_key_base: u64 = 0x5453_4155_0000_0000;
+pub const audio_capture_key_base: u64 = 0x5453_4143_0000_0000;
+pub const audio_capture_read_key_base: u64 = 0x5453_4152_0000_0000;
+pub const microphone_devices_key_base: u64 = 0x5453_4D44_0000_0000;
+pub const capture_access_key_base: u64 = 0x5453_4141_0000_0000;
 
 /// The engine-key namespace of the bridge's single video playback
 /// channel ("TSVI") — the audio key's twin, except the low byte
@@ -547,6 +551,20 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        const RoutedStreamEntry = AudioEntry;
+
+        const AudioCaptureReadEntry = struct {
+            used: bool = false,
+            key_len: usize = 0,
+            key: [max_wire_key_bytes]u8 = undefined,
+            event_tag: u8 = 0,
+            effect_key: u64 = 0,
+
+            fn wireKey(entry: *const AudioCaptureReadEntry) []const u8 {
+                return entry.key[0..entry.key_len];
+            }
+        };
+
         /// The single video stream entry — the audio entry's exact
         /// shape (one player is the whole engine surface). Non-retiring:
         /// video_ctl `stop` closes it, a new video_load re-keys and
@@ -624,6 +642,11 @@ pub fn TsCoreHost(comptime core: type) type {
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
         var streams: [runtime_effects.max_effects]StreamEntry = @splat(.{});
         var audio_entry: AudioEntry = .{};
+        var audio_capture_entries: [runtime_effects.max_effects]RoutedStreamEntry = @splat(.{});
+        var audio_capture_read_entries: [runtime_effects.max_effects]AudioCaptureReadEntry = @splat(.{});
+        var microphone_device_entries: [runtime_effects.max_effects]RoutedStreamEntry = @splat(.{});
+        var capture_access_entries: [runtime_effects.max_effects]RoutedStreamEntry = @splat(.{});
+        var microphone_devices_changed_tag: ?u8 = null;
         var video_entry: VideoEntry = .{};
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
@@ -698,6 +721,11 @@ pub fn TsCoreHost(comptime core: type) type {
             delays = @splat(.{});
             streams = @splat(.{});
             audio_entry = .{};
+            audio_capture_entries = @splat(.{});
+            audio_capture_read_entries = @splat(.{});
+            microphone_device_entries = @splat(.{});
+            capture_access_entries = @splat(.{});
+            microphone_devices_changed_tag = null;
             video_entry = .{};
             images = @splat(.{});
             channels = @splat(.{});
@@ -851,7 +879,7 @@ pub fn TsCoreHost(comptime core: type) type {
 
         // ------------------------------------------------- command walk
 
-        /// Walk one command value (v3 wire format; batch is plain
+        /// Walk one command value (v5 wire format; batch is plain
         /// concatenation, the empty slice is `Cmd.none`).
         fn runCmd(
             fx: *Fx,
@@ -1233,6 +1261,103 @@ pub fn TsCoreHost(comptime core: type) type {
                             .body = body,
                         });
                     },
+                    // audio_capture_start [op][key][event][flags][mic kind]
+                    // [sample rate u32][channels][buffer duration u32][device id long]
+                    0x1E => {
+                        const key = takeShortBytes(cmd, &at);
+                        const event_tag = takeByte(cmd, &at);
+                        const flags = takeByte(cmd, &at);
+                        const microphone_kind = takeByte(cmd, &at);
+                        const rate_bytes = takeBytes(cmd, &at, 4);
+                        const sample_rate = std.mem.readInt(u32, rate_bytes[0..4], .little);
+                        const channels_count = takeByte(cmd, &at);
+                        const buffer_bytes = takeBytes(cmd, &at, 4);
+                        const buffer_duration_ms = std.mem.readInt(u32, buffer_bytes[0..4], .little);
+                        const device_id = takeLongBytes(cmd, &at);
+                        const index = allocRoutedStreamEntry(&audio_capture_entries, key, event_tag) orelse
+                            @panic("ts core host: more pending audio capture starts than the effects table can route");
+                        const microphone: runtime_effects.MicrophoneSelection = switch (microphone_kind) {
+                            0 => .none,
+                            1 => .default,
+                            2 => .{ .device_id = device_id },
+                            else => @panic("ts core host: invalid microphone selection wire value"),
+                        };
+                        fx.startAudioCapture(.{
+                            .key = audio_capture_key_base + index,
+                            .system_audio = (flags & 1) != 0,
+                            .microphone = microphone,
+                            .sample_rate_hz = sample_rate,
+                            .channel_count = channels_count,
+                            .exclude_current_process_audio = (flags & 2) != 0,
+                            .buffer_duration_ms = buffer_duration_ms,
+                            .on_event = audioCaptureEventMsg,
+                        });
+                    },
+                    // audio_capture_stop [op][key]
+                    0x1F => {
+                        const key = takeShortBytes(cmd, &at);
+                        for (&audio_capture_entries) |*entry| {
+                            if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) {
+                                fx.stopAudioCapture();
+                                break;
+                            }
+                        }
+                    },
+                    // microphone_devices [op][key][event]
+                    0x20 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const event_tag = takeByte(cmd, &at);
+                        const index = allocRoutedStreamEntry(&microphone_device_entries, key, event_tag) orelse
+                            @panic("ts core host: more pending microphone device queries than the effects table can route");
+                        fx.listMicrophoneDevices(.{ .key = microphone_devices_key_base + index, .on_event = microphoneDeviceEventMsg });
+                    },
+                    // capture_access [op][key][event][source][action]
+                    0x21 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const event_tag = takeByte(cmd, &at);
+                        const source_byte = takeByte(cmd, &at);
+                        const action_byte = takeByte(cmd, &at);
+                        const index = allocRoutedStreamEntry(&capture_access_entries, key, event_tag) orelse
+                            @panic("ts core host: more pending capture access queries than the effects table can route");
+                        fx.captureAccess(.{
+                            .key = capture_access_key_base + index,
+                            .source = if (source_byte == 1) .microphone else .system_audio,
+                            .action = if (action_byte == 1) .request else .status,
+                            .on_event = captureAccessEventMsg,
+                        });
+                    },
+                    // audio_capture_read [op][key][event][max frames u32]
+                    0x22 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const event_tag = takeByte(cmd, &at);
+                        const frame_bytes = takeBytes(cmd, &at, 4);
+                        const max_frames = std.mem.readInt(u32, frame_bytes[0..4], .little);
+                        var effect_key: ?u64 = null;
+                        for (&audio_capture_entries, 0..) |*entry, index| {
+                            if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) {
+                                effect_key = audio_capture_key_base + index;
+                                break;
+                            }
+                        }
+                        const read_index = allocAudioCaptureReadEntry(key, event_tag, effect_key orelse audio_capture_read_key_base) orelse
+                            @panic("ts core host: more pending audio capture reads than the effects table can route");
+                        if (effect_key == null) audio_capture_read_entries[read_index].effect_key = audio_capture_read_key_base + read_index;
+                        fx.readAudioCapture(.{
+                            .key = audio_capture_read_entries[read_index].effect_key,
+                            .max_frames = max_frames,
+                            .on_read = audioCaptureReadEventMsg,
+                        });
+                    },
+                    // audio_capture_discard [op][key]
+                    0x23 => {
+                        const key = takeShortBytes(cmd, &at);
+                        for (&audio_capture_entries) |*entry| {
+                            if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) {
+                                fx.discardAudioCapture();
+                                break;
+                            }
+                        }
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1240,6 +1365,31 @@ pub fn TsCoreHost(comptime core: type) type {
 
         /// The shared routed-op head: [key_len][key][ok_tag][err_tag].
         const RoutedHead = struct { key: []const u8, ok_tag: u8, err_tag: u8 };
+
+        fn allocRoutedStreamEntry(entries: []RoutedStreamEntry, key: []const u8, event_tag: u8) ?usize {
+            for (entries, 0..) |*entry, index| {
+                if (entry.used) continue;
+                entry.used = true;
+                entry.key_len = key.len;
+                @memcpy(entry.key[0..key.len], key);
+                entry.event_tag = event_tag;
+                return index;
+            }
+            return null;
+        }
+
+        fn allocAudioCaptureReadEntry(key: []const u8, event_tag: u8, effect_key: u64) ?usize {
+            for (&audio_capture_read_entries, 0..) |*entry, index| {
+                if (entry.used) continue;
+                entry.used = true;
+                entry.key_len = key.len;
+                @memcpy(entry.key[0..key.len], key);
+                entry.event_tag = event_tag;
+                entry.effect_key = effect_key;
+                return index;
+            }
+            return null;
+        }
 
         fn takeRoutedHead(cmd: []const u8, at: *usize) RoutedHead {
             const key = takeShortBytes(cmd, at);
@@ -1487,6 +1637,73 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: an audio event arrived with no open bridge stream");
             }
             return msgFromTagAudio(audio_entry.event_tag, event);
+        }
+
+        fn audioCaptureEventMsg(event: runtime_effects.EffectAudioCapture) Msg {
+            if (event.key < audio_capture_key_base) @panic("ts core host: audio capture event outside bridge namespace");
+            const index = event.key - audio_capture_key_base;
+            if (index >= audio_capture_entries.len or !audio_capture_entries[index].used) @panic("ts core host: audio capture event has no routed command");
+            const entry = &audio_capture_entries[index];
+            const tag = entry.event_tag;
+            const key = entry.wireKey();
+            const msg = msgFromTagAudioCapture(tag, key, event);
+            // A rejected start never opened a drainable stream, so its one
+            // terminal retires the route immediately. Discard queues its
+            // synthetic stopped/discarded lifecycle event after releasing an
+            // opened stream; keep that route alive until the terminal is
+            // delivered so an earlier queued started/readable event cannot
+            // arrive against a prematurely retired entry.
+            if (event.state == .rejected or
+                (event.state == .stopped and event.reason == .discarded))
+            {
+                entry.used = false;
+            }
+            return msg;
+        }
+
+        fn audioCaptureReadEventMsg(event: runtime_effects.EffectAudioCaptureRead) Msg {
+            for (&audio_capture_read_entries) |*entry| {
+                if (!entry.used or entry.effect_key != event.key) continue;
+                const msg = msgFromTagAudioCaptureRead(entry.event_tag, entry.wireKey(), event);
+                entry.used = false;
+                if (event.end_of_stream) {
+                    for (&audio_capture_entries, 0..) |*capture, index| {
+                        if (capture.used and audio_capture_key_base + index == event.key) {
+                            capture.used = false;
+                            break;
+                        }
+                    }
+                }
+                return msg;
+            }
+            @panic("ts core host: audio capture read event has no routed command");
+        }
+
+        fn microphoneDeviceEventMsg(event: runtime_effects.EffectMicrophoneDevice) Msg {
+            if (event.key < microphone_devices_key_base) @panic("ts core host: microphone event outside bridge namespace");
+            const index = event.key - microphone_devices_key_base;
+            if (index >= microphone_device_entries.len or !microphone_device_entries[index].used) @panic("ts core host: microphone event has no routed command");
+            const entry = &microphone_device_entries[index];
+            const tag = entry.event_tag;
+            const key = entry.wireKey();
+            const msg = msgFromTagMicrophoneDevice(tag, key, event);
+            if (event.state != .device) entry.used = false;
+            return msg;
+        }
+
+        fn captureAccessEventMsg(event: runtime_effects.EffectCaptureAccess) Msg {
+            if (event.key < capture_access_key_base) @panic("ts core host: capture access event outside bridge namespace");
+            const index = event.key - capture_access_key_base;
+            if (index >= capture_access_entries.len or !capture_access_entries[index].used) @panic("ts core host: capture access event has no routed command");
+            const entry = &capture_access_entries[index];
+            const msg = msgFromTagCaptureAccess(entry.event_tag, entry.wireKey(), event);
+            entry.used = false;
+            return msg;
+        }
+
+        fn microphoneDevicesChangedMsg() Msg {
+            return msgFromTagVoid(microphone_devices_changed_tag orelse
+                @panic("ts core host: microphone device invalidation arrived without a subscription"));
         }
 
         // ------------------------------------------------- video stream
@@ -2135,9 +2352,17 @@ pub fn TsCoreHost(comptime core: type) type {
             if (comptime !has_subscriptions) return;
             const subs = core.subscriptions(model_root);
             var seen = [_]bool{false} ** timers.len;
+            var microphone_devices_seen = false;
+            var next_microphone_devices_tag: u8 = 0;
             var at: usize = 0;
             while (at < subs.len) {
                 const op = takeByte(subs, &at);
+                if (op == 0x02) {
+                    if (microphone_devices_seen) @panic("ts core host: duplicate Sub.microphoneDevicesChanged descriptor");
+                    microphone_devices_seen = true;
+                    next_microphone_devices_tag = takeByte(subs, &at);
+                    continue;
+                }
                 if (op != 0x01) {
                     @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version");
                 }
@@ -2195,6 +2420,14 @@ pub fn TsCoreHost(comptime core: type) type {
                     entry.used = false;
                     fx.cancelTimer(timer_key_base + index);
                 }
+            }
+            const microphone_devices_was_active = microphone_devices_changed_tag != null;
+            if (microphone_devices_seen) {
+                microphone_devices_changed_tag = next_microphone_devices_tag;
+                if (!microphone_devices_was_active) fx.observeMicrophoneDevices(microphoneDevicesChangedMsg);
+            } else if (microphone_devices_was_active) {
+                microphone_devices_changed_tag = null;
+                fx.observeMicrophoneDevices(null);
             }
         }
 
@@ -2411,6 +2644,212 @@ pub fn TsCoreHost(comptime core: type) type {
                 }
             }
             @panic("ts core host: an audio event names a Msg tag outside the union");
+        }
+
+        fn enumValueNamed(comptime E: type, name: []const u8) E {
+            inline for (@typeInfo(E).@"enum".fields) |field| {
+                if (std.mem.eql(u8, field.name, name)) return @enumFromInt(field.value);
+            }
+            @panic("ts core host: event enum member missing from routed Msg arm");
+        }
+
+        fn copyFrameBytes(bytes: []const u8) []const u8 {
+            if (bytes.len == 0) return "";
+            const copy = core.rt.frameAlloc(u8, bytes.len);
+            @memcpy(copy, bytes);
+            return copy;
+        }
+
+        fn audioCaptureArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct" or info.@"struct".fields.len != 8) return false;
+            var ok = true;
+            for (info.@"struct".fields) |field| {
+                if (std.mem.eql(u8, field.name, "key")) {
+                    if (field.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, field.name, "state") or std.mem.eql(u8, field.name, "reason")) {
+                    if (@typeInfo(field.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, field.name, "sampleRate") or std.mem.eql(u8, field.name, "channels") or
+                    std.mem.eql(u8, field.name, "availableFrames") or std.mem.eql(u8, field.name, "capacityFrames") or
+                    std.mem.eql(u8, field.name, "framesProduced"))
+                {
+                    if (field.type != i64 and field.type != u64 and field.type != f64) ok = false;
+                } else ok = false;
+            }
+            return ok;
+        }
+
+        fn msgFromTagAudioCapture(tag: u8, wire_key: []const u8, event: runtime_effects.EffectAudioCapture) Msg {
+            inline for (msg_arms, 0..) |arm, index| if (tag == index) {
+                if (comptime audioCaptureArmShape(arm.type)) {
+                    var payload: arm.type = undefined;
+                    inline for (@typeInfo(arm.type).@"struct".fields) |field| {
+                        if (comptime std.mem.eql(u8, field.name, "key")) {
+                            @field(payload, field.name) = copyFrameBytes(wire_key);
+                        } else if (comptime std.mem.eql(u8, field.name, "state")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.state));
+                        } else if (comptime std.mem.eql(u8, field.name, "reason")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.reason));
+                        } else if (comptime std.mem.eql(u8, field.name, "sampleRate")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.sample_rate_hz) else @intCast(event.sample_rate_hz);
+                        } else if (comptime std.mem.eql(u8, field.name, "channels")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.channel_count) else @intCast(event.channel_count);
+                        } else if (comptime std.mem.eql(u8, field.name, "availableFrames")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.available_frames) else @intCast(event.available_frames);
+                        } else if (comptime std.mem.eql(u8, field.name, "capacityFrames")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.capacity_frames) else @intCast(event.capacity_frames);
+                        } else if (comptime std.mem.eql(u8, field.name, "framesProduced")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.frames_produced) else @intCast(event.frames_produced);
+                        } else unreachable;
+                    }
+                    return @unionInit(Msg, arm.name, payload);
+                }
+                @panic("ts core host: invalid audio capture event arm shape");
+            };
+            @panic("ts core host: audio capture event tag outside Msg union");
+        }
+
+        fn audioCaptureReadArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct" or info.@"struct".fields.len != 12) return false;
+            var ok = true;
+            for (info.@"struct".fields) |field| {
+                if (std.mem.eql(u8, field.name, "key") or std.mem.eql(u8, field.name, "systemPcm") or std.mem.eql(u8, field.name, "microphonePcm")) {
+                    if (field.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, field.name, "state") or std.mem.eql(u8, field.name, "reason")) {
+                    if (@typeInfo(field.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, field.name, "endOfStream")) {
+                    if (field.type != bool) ok = false;
+                } else if (std.mem.eql(u8, field.name, "sequence") or std.mem.eql(u8, field.name, "frameOffset") or
+                    std.mem.eql(u8, field.name, "frames") or std.mem.eql(u8, field.name, "systemGapFrames") or
+                    std.mem.eql(u8, field.name, "microphoneGapFrames") or std.mem.eql(u8, field.name, "remainingFrames"))
+                {
+                    if (field.type != i64 and field.type != u64 and field.type != f64) ok = false;
+                } else ok = false;
+            }
+            return ok;
+        }
+
+        fn msgFromTagAudioCaptureRead(tag: u8, wire_key: []const u8, event: runtime_effects.EffectAudioCaptureRead) Msg {
+            inline for (msg_arms, 0..) |arm, index| if (tag == index) {
+                if (comptime audioCaptureReadArmShape(arm.type)) {
+                    var payload: arm.type = undefined;
+                    inline for (@typeInfo(arm.type).@"struct".fields) |field| {
+                        if (comptime std.mem.eql(u8, field.name, "key")) {
+                            @field(payload, field.name) = copyFrameBytes(wire_key);
+                        } else if (comptime std.mem.eql(u8, field.name, "state")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.state));
+                        } else if (comptime std.mem.eql(u8, field.name, "reason")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.reason));
+                        } else if (comptime std.mem.eql(u8, field.name, "systemPcm")) {
+                            @field(payload, field.name) = copyFrameBytes(event.system_pcm);
+                        } else if (comptime std.mem.eql(u8, field.name, "microphonePcm")) {
+                            @field(payload, field.name) = copyFrameBytes(event.microphone_pcm);
+                        } else if (comptime std.mem.eql(u8, field.name, "endOfStream")) {
+                            @field(payload, field.name) = event.end_of_stream;
+                        } else if (comptime std.mem.eql(u8, field.name, "sequence")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.sequence) else @intCast(event.sequence);
+                        } else if (comptime std.mem.eql(u8, field.name, "frameOffset")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.frame_offset) else @intCast(event.frame_offset);
+                        } else if (comptime std.mem.eql(u8, field.name, "frames")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.frames) else @intCast(event.frames);
+                        } else if (comptime std.mem.eql(u8, field.name, "systemGapFrames")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.system_gap_frames) else @intCast(event.system_gap_frames);
+                        } else if (comptime std.mem.eql(u8, field.name, "microphoneGapFrames")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.microphone_gap_frames) else @intCast(event.microphone_gap_frames);
+                        } else if (comptime std.mem.eql(u8, field.name, "remainingFrames")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.remaining_frames) else @intCast(event.remaining_frames);
+                        } else unreachable;
+                    }
+                    return @unionInit(Msg, arm.name, payload);
+                }
+                @panic("ts core host: invalid audio capture read event arm shape");
+            };
+            @panic("ts core host: audio capture read event tag outside Msg union");
+        }
+
+        fn microphoneDeviceArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct" or info.@"struct".fields.len != 7) return false;
+            var ok = true;
+            for (info.@"struct".fields) |field| {
+                if (std.mem.eql(u8, field.name, "key") or std.mem.eql(u8, field.name, "id") or std.mem.eql(u8, field.name, "name")) {
+                    if (field.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, field.name, "state")) {
+                    if (@typeInfo(field.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, field.name, "isDefault")) {
+                    if (field.type != bool) ok = false;
+                } else if (std.mem.eql(u8, field.name, "index") or std.mem.eql(u8, field.name, "total")) {
+                    if (field.type != i64 and field.type != u64 and field.type != f64) ok = false;
+                } else ok = false;
+            }
+            return ok;
+        }
+
+        fn msgFromTagMicrophoneDevice(tag: u8, wire_key: []const u8, event: runtime_effects.EffectMicrophoneDevice) Msg {
+            inline for (msg_arms, 0..) |arm, index| if (tag == index) {
+                if (comptime microphoneDeviceArmShape(arm.type)) {
+                    var payload: arm.type = undefined;
+                    inline for (@typeInfo(arm.type).@"struct".fields) |field| {
+                        if (comptime std.mem.eql(u8, field.name, "key")) {
+                            @field(payload, field.name) = copyFrameBytes(wire_key);
+                        } else if (comptime std.mem.eql(u8, field.name, "state")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.state));
+                        } else if (comptime std.mem.eql(u8, field.name, "id")) {
+                            @field(payload, field.name) = copyFrameBytes(event.id);
+                        } else if (comptime std.mem.eql(u8, field.name, "name")) {
+                            @field(payload, field.name) = copyFrameBytes(event.name);
+                        } else if (comptime std.mem.eql(u8, field.name, "isDefault")) {
+                            @field(payload, field.name) = event.is_default;
+                        } else if (comptime std.mem.eql(u8, field.name, "index")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.index) else @intCast(event.index);
+                        } else {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.total) else @intCast(event.total);
+                        }
+                    }
+                    return @unionInit(Msg, arm.name, payload);
+                }
+                @panic("ts core host: invalid microphone device event arm shape");
+            };
+            @panic("ts core host: microphone device event tag outside Msg union");
+        }
+
+        fn captureAccessArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct" or info.@"struct".fields.len != 4) return false;
+            var ok = true;
+            for (info.@"struct".fields) |field| {
+                if (std.mem.eql(u8, field.name, "key")) {
+                    if (field.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, field.name, "source") or std.mem.eql(u8, field.name, "status")) {
+                    if (@typeInfo(field.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, field.name, "restartRequired")) {
+                    if (field.type != bool) ok = false;
+                } else ok = false;
+            }
+            return ok;
+        }
+
+        fn msgFromTagCaptureAccess(tag: u8, wire_key: []const u8, event: runtime_effects.EffectCaptureAccess) Msg {
+            inline for (msg_arms, 0..) |arm, index| if (tag == index) {
+                if (comptime captureAccessArmShape(arm.type)) {
+                    var payload: arm.type = undefined;
+                    inline for (@typeInfo(arm.type).@"struct".fields) |field| {
+                        if (comptime std.mem.eql(u8, field.name, "key")) {
+                            @field(payload, field.name) = copyFrameBytes(wire_key);
+                        } else if (comptime std.mem.eql(u8, field.name, "source")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.source));
+                        } else if (comptime std.mem.eql(u8, field.name, "status")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.status));
+                        } else {
+                            @field(payload, field.name) = event.restart_required;
+                        }
+                    }
+                    return @unionInit(Msg, arm.name, payload);
+                }
+                @panic("ts core host: invalid capture access event arm shape");
+            };
+            @panic("ts core host: capture access event tag outside Msg union");
         }
 
         /// Whether an arm payload struct is the video event record: the

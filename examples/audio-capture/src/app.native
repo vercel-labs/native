@@ -1,0 +1,54 @@
+<column padding="20" gap="14" background="background">
+  <text size="heading">Reliable audio stream</text>
+  <text foreground="text_muted">macOS 15+; aligned s16le PCM; bounded five-second buffer</text>
+
+  <if test="{restartRequired}">
+    <text foreground="warning">System audio access changed. Quit and relaunch the app before capturing.</text>
+  </if>
+
+  <panel padding="14" background="surface" radius="md" border-color="border">
+    <column gap="8">
+      <text><span weight="bold">Permissions and devices</span></text>
+      <row gap="8">
+        <button disabled="{captureAccessActionDisabled}" on-press="request_microphone">Request microphone</button>
+        <button disabled="{captureAccessActionDisabled}" on-press="request_system_audio">Request system audio</button>
+        <button on-press="list_microphones">Refresh microphones</button>
+      </row>
+      <text>Microphone: {microphoneAccess}</text>
+      <text>System audio: {systemAccess}</text>
+      <text>{deviceCount} microphone(s); list state: {deviceListState}</text>
+      <for each="microphones" key="id" as="device">
+        <text foreground="text_muted">{device.index}. {device.name} (default: {device.isDefault})</text>
+      </for>
+    </column>
+  </panel>
+
+  <row gap="8">
+    <button variant="primary" disabled="{combinedStartDisabled}" on-press="start_combined">Combined</button>
+    <button disabled="{systemStartDisabled}" on-press="start_system_audio">System only</button>
+    <button disabled="{microphoneStartDisabled}" on-press="start_microphone">Microphone only</button>
+    <button variant="destructive" disabled="{stopDisabled}" on-press="stop_capture">Stop and drain</button>
+    <button disabled="{discardDisabled}" on-press="discard_capture">Discard</button>
+  </row>
+
+  <panel padding="14" background="surface" radius="md" border-color="border">
+    <column gap="8">
+      <text><span weight="bold">Capture: {captureMode}</span></text>
+      <text>Status: {captureState}; reason: {captureReason}</text>
+      <text>{availableFrames}/{capacityFrames} buffered frames; {framesConsumed} consumed</text>
+      <text>Inserted gaps: {systemGapFrames} system frames; {microphoneGapFrames} microphone frames</text>
+      <text>Format: {sampleRate} Hz; {channels} channel(s)</text>
+      <row gap="8">
+        <text width="170">System peak: {systemPeak}</text>
+        <progress grow="1" value="{systemLevel}" />
+      </row>
+      <row gap="8">
+        <text width="170">Microphone peak: {microphonePeak}</text>
+        <progress grow="1" value="{microphoneLevel}" />
+      </row>
+    </column>
+  </panel>
+
+  <spacer grow="1" />
+  <status-bar>PCM is consumed during update; Native SDK does not create an audio file.</status-bar>
+</column>

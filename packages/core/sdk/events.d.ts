@@ -63,3 +63,52 @@ export interface AudioEvent {
     readonly buffering: boolean;
     readonly bands: Uint8Array;
 }
+export type AudioCaptureState = "started" | "readable" | "stopped" | "failed" | "rejected";
+export type AudioCaptureReason = "none" | "invalid_options" | "permission_missing" | "permission_required" | "already_recording" | "device_not_found" | "device_disconnected" | "capture_failed" | "no_audio" | "consumer_too_slow" | "discarded" | "unsupported";
+export interface AudioCaptureEvent {
+    readonly key: Uint8Array;
+    readonly state: AudioCaptureState;
+    readonly reason: AudioCaptureReason;
+    readonly sampleRate: number;
+    readonly channels: number;
+    readonly availableFrames: number;
+    readonly capacityFrames: number;
+    readonly framesProduced: number;
+}
+export type AudioCaptureReadState = "chunk" | "empty" | "ended" | "rejected";
+export type AudioCaptureReadReason = "none" | "invalid_options" | "not_recording" | "read_in_progress";
+export interface AudioCaptureReadEvent {
+    readonly key: Uint8Array;
+    readonly state: AudioCaptureReadState;
+    readonly reason: AudioCaptureReadReason;
+    readonly sequence: number;
+    readonly frameOffset: number;
+    readonly frames: number;
+    /** Borrowed interleaved signed 16-bit little-endian bytes. Consume or
+     * copy them before update returns. Empty when the source is disabled. */
+    readonly systemPcm: Uint8Array;
+    /** Same frame interval and lifetime as `systemPcm`. */
+    readonly microphonePcm: Uint8Array;
+    readonly systemGapFrames: number;
+    readonly microphoneGapFrames: number;
+    readonly remainingFrames: number;
+    readonly endOfStream: boolean;
+}
+export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
+export interface MicrophoneDeviceEvent {
+    readonly key: Uint8Array;
+    readonly state: MicrophoneDeviceState;
+    readonly id: Uint8Array;
+    readonly name: Uint8Array;
+    readonly isDefault: boolean;
+    readonly index: number;
+    readonly total: number;
+}
+export type CaptureAccessSource = "system_audio" | "microphone";
+export type CaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+export interface CaptureAccessEvent {
+    readonly key: Uint8Array;
+    readonly source: CaptureAccessSource;
+    readonly status: CaptureAccessStatus;
+    readonly restartRequired: boolean;
+}

@@ -51,6 +51,7 @@ const unprefixedNavSections: NavSection[] = [
     title: "Native Platform",
     items: [
       { name: "Windows", href: "/windows" },
+      { name: "Audio Capture", href: "/audio-capture" },
       { name: "Native Surfaces", href: "/native-surfaces" },
       { name: "Menus", href: "/menus" },
       { name: "Dialogs", href: "/dialogs" },

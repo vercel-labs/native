@@ -2103,7 +2103,7 @@ const FacadeEmitter = struct {
             \\
             \\// -------------------------------------------------- the wire codec
             \\// The canonical value encoding (little-endian, headerless,
-            \\// schema-driven) plus the v3 command/subscription wire format the
+            \\// schema-driven) plus the v5 command/subscription wire format the
             \\// host consumes — byte-identical to what the transpiler lane emits,
             \\// proven by the paired e2e batteries.
             \\
@@ -2430,7 +2430,7 @@ const FacadeEmitter = struct {
         }
     }
 
-    /// The v3 command wire encoder — byte-for-byte the layouts the
+    /// The v5 command wire encoder — byte-for-byte the layouts the
     /// host's rt builds (wire.ts's encodeCmd, per-module).
     fn cmdEncoder(self: *FacadeEmitter) Error!void {
         const msg = self.sidecar.msg.name;
@@ -2439,7 +2439,7 @@ const FacadeEmitter = struct {
             \\// ---------------------------------------------------- the cmd wire
             \\// Encoder for the inert Cmd data the author's update returns —
             \\// byte-for-byte the layouts the host's command decoder expects
-            \\// (cmd_format_version 3). nscfTagOf maps a Msg arm name onto its
+            \\// (cmd_format_version 5). nscfTagOf maps a Msg arm name onto its
             \\// declaration-order wire tag.
             \\
             \\const nscfFetchMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
@@ -2664,6 +2664,74 @@ const FacadeEmitter = struct {
             \\      nscfWBytes(sink, cmd.subtitle);
             \\      nscfWBytes(sink, cmd.body);
             \\      return;
+            \\    case "audio_capture_start": {
+            \\      nscfWU8(sink, 0x1e);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      const options = cmd.options;
+            \\      const systemAudio = options.systemAudio ?? false;
+            \\      const microphone = options.microphone ?? "none";
+            \\      let flags = systemAudio ? 1 : 0;
+            \\      if (options.excludeCurrentProcessAudio ?? true) flags = flags + 2;
+            \\      nscfWU8(sink, flags);
+            \\      let microphoneKind = 0;
+            \\      let microphoneId: Uint8Array = new Uint8Array(0);
+            \\      if (microphone === "default") microphoneKind = 1;
+            \\      else if (microphone !== "none") {
+            \\        microphoneKind = 2;
+            \\        microphoneId = microphone;
+            \\      }
+            \\      if (!systemAudio && microphoneKind === 0) {
+            \\        nscfTrap("Cmd.audioCaptureStart must enable systemAudio and/or microphone");
+            \\      }
+            \\      nscfWU8(sink, microphoneKind);
+            \\      const sampleRate = options.sampleRate ?? 48000;
+            \\      if (sampleRate !== 16000 && sampleRate !== 24000 && sampleRate !== 44100 && sampleRate !== 48000) {
+            \\        nscfTrap("Cmd.audioCaptureStart sampleRate must be 16000, 24000, 44100, or 48000");
+            \\      }
+            \\      nscfWU32(sink, sampleRate);
+            \\      const channels = options.channels ?? 2;
+            \\      if (channels !== 1 && channels !== 2) {
+            \\        nscfTrap("Cmd.audioCaptureStart channels must be 1 or 2");
+            \\      }
+            \\      nscfWU8(sink, channels);
+            \\      const bufferDurationMs = options.bufferDurationMs ?? 5000;
+            \\      if (!Number.isInteger(bufferDurationMs) || bufferDurationMs < 1000 || bufferDurationMs > 30000) {
+            \\        nscfTrap("Cmd.audioCaptureStart bufferDurationMs must be an integer from 1000 through 30000");
+            \\      }
+            \\      nscfWU32(sink, bufferDurationMs);
+            \\      nscfWBytes(sink, microphoneId);
+            \\      return;
+            \\    }
+            \\    case "audio_capture_stop":
+            \\      nscfWU8(sink, 0x1f);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      return;
+            \\    case "microphone_devices":
+            \\      nscfWU8(sink, 0x20);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      return;
+            \\    case "capture_access":
+            \\      nscfWU8(sink, 0x21);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      nscfWU8(sink, cmd.source === "microphone" ? 1 : 0);
+            \\      nscfWU8(sink, cmd.action === "request" ? 1 : 0);
+            \\      return;
+            \\    case "audio_capture_read":
+            \\      nscfWU8(sink, 0x22);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      if (!Number.isInteger(cmd.maxFrames) || cmd.maxFrames < 1 || cmd.maxFrames > 4800) {
+            \\        nscfTrap("Cmd.audioCaptureRead maxFrames must be an integer from 1 through 4800");
+            \\      }
+            \\      nscfWU32(sink, cmd.maxFrames);
+            \\      return;
+            \\    case "audio_capture_discard":
+            \\      nscfWU8(sink, 0x23);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      return;
             \\    case "batch":
             \\      for (let i = 0; i < cmd.cmds.length; i++) {
             \\        nscfEncodeCmd(sink, cmd.cmds[i]!);
@@ -2688,7 +2756,7 @@ const FacadeEmitter = struct {
         const msg = self.sidecar.msg.name;
         try self.print(
             \\
-            \\// The v3 subscription wire (timer subscriptions).
+            \\// The v5 subscription wire.
             \\function nscfEncodeSub(sink: nscfSink, sub: nscfSub<{s}>): void {{
             \\  switch (sub.op) {{
             \\    case "none":
@@ -2697,6 +2765,10 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, 0x01);
             \\      nscfWShortText(sink, sub.key);
             \\      nscfWF64(sink, sub.everyMs);
+            \\      nscfWU8(sink, nscfTagOf(sub.msgKind));
+            \\      return;
+            \\    case "microphone_devices_changed":
+            \\      nscfWU8(sink, 0x02);
             \\      nscfWU8(sink, nscfTagOf(sub.msgKind));
             \\      return;
             \\    case "batch":
@@ -3349,6 +3421,12 @@ test "facade emission is deterministic and carries the adapter surface" {
     try testing.expect(std.mem.indexOf(u8, first, "export function init(): Model {") != null);
     try testing.expect(std.mem.indexOf(u8, first, "export function coreUpdate(model: Model, msg: Msg): [Model, Uint8Array] {") != null);
     try testing.expect(std.mem.indexOf(u8, first, "coreSubscriptions") == null);
+    // Wire generation 5 keeps notification's upstream opcode and places
+    // capture commands after it, including the bounded pull operation.
+    try testing.expect(std.mem.indexOf(u8, first, "case \"show_notification\":\n      nscfWU8(sink, 0x1d);") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "case \"audio_capture_start\": {\n      nscfWU8(sink, 0x1e);") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "case \"audio_capture_read\":\n      nscfWU8(sink, 0x22);") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "case \"audio_capture_discard\":\n      nscfWU8(sink, 0x23);") != null);
     // The dispatch surface: committed state, tag table, arm routing.
     try testing.expect(std.mem.indexOf(u8, first, "let nscfCommitted: Model = nscfInitialModel();") != null);
     try testing.expect(std.mem.indexOf(u8, first, "const nscfTag_bump = 0;") != null);
@@ -3372,6 +3450,15 @@ test "facade emission is deterministic and carries the adapter surface" {
     try testing.expect(std.mem.indexOf(u8, first, "import type { Cmd as nscfCmd }") != null);
     try testing.expect(std.mem.indexOf(u8, first, "NscfSink") == null);
     try testing.expect(std.mem.indexOf(u8, first, "NSCF_TAG_") == null);
+}
+
+test "microphone device invalidation uses the v5 subscription opcode" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"has_subscriptions\": false", "\"has_subscriptions\": true");
+    const generated = try facadeFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "case \"microphone_devices_changed\":\n      nscfWU8(sink, 0x02);") != null);
 }
 
 test "member facts spell the author's payload property names" {

@@ -23,6 +23,7 @@ const max_file_associations = types.max_file_associations;
 const max_file_association_extensions = types.max_file_association_extensions;
 const max_file_association_mime_types = types.max_file_association_mime_types;
 const max_url_schemes = types.max_url_schemes;
+const max_privacy_usage_bytes = types.max_privacy_usage_bytes;
 const Platform = types.Platform;
 const PackageKind = types.PackageKind;
 const WebEngine = types.WebEngine;
@@ -30,6 +31,7 @@ const CefConfig = types.CefConfig;
 const IconPurpose = types.IconPurpose;
 const PermissionKind = types.PermissionKind;
 const Permission = types.Permission;
+const PrivacyUsage = types.PrivacyUsage;
 const CapabilityKind = types.CapabilityKind;
 const Capability = types.Capability;
 const AppIdentity = types.AppIdentity;
@@ -73,6 +75,7 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateVersion(manifest.version);
     try validateIcons(manifest.icons);
     try validatePermissions(manifest.permissions);
+    try validatePrivacy(manifest.privacy, manifest.permissions);
     try validateCapabilities(manifest.capabilities);
     try validateBridge(manifest.bridge);
     if (manifest.frontend) |frontend| try validateFrontend(frontend);
@@ -529,6 +532,24 @@ pub fn validatePermissions(permissions: []const Permission) ValidationError!void
         for (permissions[0..i]) |previous| {
             if (permissionEql(previous, permission)) return error.DuplicatePermission;
         }
+    }
+}
+
+pub fn validatePrivacy(privacy: PrivacyUsage, permissions: []const Permission) ValidationError!void {
+    if (privacy.microphone_usage) |usage| try validatePrivacyUsage(usage);
+    if (privacy.system_audio_usage) |usage| try validatePrivacyUsage(usage);
+
+    for (permissions) |permission| switch (permission) {
+        .microphone => if (privacy.microphone_usage == null) return error.InvalidPrivacyUsage,
+        .system_audio => if (privacy.system_audio_usage == null) return error.InvalidPrivacyUsage,
+        else => {},
+    };
+}
+
+fn validatePrivacyUsage(usage: []const u8) ValidationError!void {
+    if (usage.len == 0 or usage.len > max_privacy_usage_bytes or std.mem.trim(u8, usage, " ").len == 0) return error.InvalidPrivacyUsage;
+    for (usage) |ch| {
+        if (ch < 0x20 or ch == 0x7f) return error.InvalidPrivacyUsage;
     }
 }
 

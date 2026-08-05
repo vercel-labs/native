@@ -16,11 +16,12 @@ TypeScript is the primary app-authoring language. A new `native init my_app` pro
 
 | Example | Shows |
 | --- | --- |
+| `audio-capture` | macOS 15+ system/microphone permissions, device enumeration, aligned PCM draining, and live peaks. |
 | `ai-chat-ts` | Multi-module TypeScript core, text editing, `Cmd.fetch`, environment messages, and deterministic replay. |
 | `soundboard-ts` | Full music player: audio effects, timers, search, assets, native context menus, and adaptive markup. |
 | `system-monitor-ts` | Subprocess effects, timers, parsing, tables, charts, controlled scroll, and confirmation flows. |
 
-The `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` distinguish ports from older Zig originals in the same catalog, while `ai-chat-ts` was introduced as a TypeScript-only example. It is not a template convention: new TypeScript apps need no suffix because TypeScript is the default. Many unsuffixed showcase apps predate that default and still use `src/main.zig`; use them for their feature or visual patterns, not as evidence that new app logic should be Zig.
+The `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` distinguish ports from older Zig originals in the same catalog, while `ai-chat-ts` predates the unsuffixed convention. It is not a template convention: new TypeScript apps such as `audio-capture` need no suffix because TypeScript is the default. Many unsuffixed showcase apps predate that default and still use `src/main.zig`; use them for their feature or visual patterns, not as evidence that new app logic should be Zig.
 
 ## Earlier native-rendered showcase apps (Zig cores)
 
@@ -60,4 +61,4 @@ The `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` distingu
 
 `mobile-shell`, `ios`, and `android` are mobile host projects (Xcode/Gradle shells plus shared `app.zon` metadata) rather than desktop app directories.
 
-Start with `native init` for a small TypeScript + Native markup app, then use `ai-chat-ts`, `soundboard-ts`, or `system-monitor-ts` according to the feature you need. Use `habits` when you specifically want the smallest Zig-core equivalent, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and the GPU trio for custom-rendered or retained-canvas panes.
+Start with `native init` for a small TypeScript + Native markup app, then use `audio-capture`, `ai-chat-ts`, `soundboard-ts`, or `system-monitor-ts` according to the feature you need. Use `habits` when you specifically want the smallest Zig-core equivalent, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and the GPU trio for custom-rendered or retained-canvas panes.

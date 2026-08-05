@@ -30,6 +30,7 @@ const std = @import("std");
 const canvas = @import("canvas");
 const canvas_limits = @import("canvas_limits.zig");
 const automation_protocol = @import("../automation/protocol.zig");
+const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const journal = @import("session_journal.zig");
 const runtime_effects = @import("effects.zig");
@@ -264,6 +265,20 @@ pub fn replaySession(
                 if (effect.kind == .audio and audioScalarsDamaged(effect)) {
                     std.debug.print(
                         "replay refused after event {d}: audio record for key {d} carries a millisecond value at or past 2^53 - recorded playback scalars ride the exact-integer window every delivery tier can carry, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
+                if (effect.kind == .audio_capture_read and audioCaptureReadRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: audio capture read for key {d} has an impossible state, PCM split, frame count, or gap count - a live reliable stream only records bounded paired s16le chunks and canonical empty/ended/rejected records; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
+                if (effect.kind == .audio_capture and audioCaptureRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: audio capture lifecycle for key {d} has a state, reason, format, or buffer counters the runtime ring cannot emit; re-record the session\n",
                         .{ report.events_replayed, effect.key },
                     );
                     return error.ReplayDamagedRecord;
@@ -595,6 +610,61 @@ fn audioScalarsDamaged(record: journal.EffectResultRecord) bool {
         record.audio_duration_ms >= max_exact;
 }
 
+fn audioCaptureReadRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.audio_capture_system_len > record.payload.len) return true;
+    const system_len: usize = record.audio_capture_system_len;
+    const microphone_len = record.payload.len - system_len;
+    const frames: usize = record.audio_capture_frames;
+    const max_frames = @as(usize, 48_000) * platform.audio_capture_max_read_duration_ms / 1_000;
+    const max_remaining = @as(usize, 48_000) * platform.max_audio_capture_buffer_duration_ms / 1_000;
+    if (frames > max_frames or @as(usize, record.audio_capture_remaining_frames) > max_remaining) return true;
+    if (record.audio_capture_system_gap_frames > frames or record.audio_capture_microphone_gap_frames > frames) return true;
+    if (record.audio_capture_sequence >= runtime_effects.max_effect_video_scalar_exclusive or
+        record.audio_capture_frame_offset >= runtime_effects.max_effect_video_scalar_exclusive or
+        record.audio_capture_frame_offset +| record.audio_capture_frames >= runtime_effects.max_effect_video_scalar_exclusive) return true;
+    const valid_source_len = struct {
+        fn check(len: usize, frame_count: usize) bool {
+            return len == 0 or len == frame_count * 2 or len == frame_count * 4;
+        }
+    }.check;
+    return switch (record.audio_capture_read_state) {
+        .chunk => record.audio_capture_read_reason != .none or frames == 0 or
+            (!valid_source_len(system_len, frames) or !valid_source_len(microphone_len, frames)) or
+            (system_len == 0 and microphone_len == 0) or
+            (record.audio_capture_end_of_stream and record.audio_capture_remaining_frames != 0),
+        .empty => record.audio_capture_read_reason != .none or frames != 0 or record.payload.len != 0 or
+            record.audio_capture_system_gap_frames != 0 or record.audio_capture_microphone_gap_frames != 0 or
+            record.audio_capture_end_of_stream,
+        .ended => record.audio_capture_read_reason != .none or frames != 0 or record.payload.len != 0 or
+            record.audio_capture_system_gap_frames != 0 or record.audio_capture_microphone_gap_frames != 0 or
+            record.audio_capture_remaining_frames != 0 or !record.audio_capture_end_of_stream,
+        .rejected => record.audio_capture_read_reason == .none or frames != 0 or record.payload.len != 0 or
+            record.audio_capture_system_gap_frames != 0 or record.audio_capture_microphone_gap_frames != 0 or
+            record.audio_capture_remaining_frames != 0 or record.audio_capture_end_of_stream,
+    };
+}
+
+fn audioCaptureRecordDamaged(record: journal.EffectResultRecord) bool {
+    const valid_rate = record.audio_capture_sample_rate_hz == 16_000 or
+        record.audio_capture_sample_rate_hz == 24_000 or
+        record.audio_capture_sample_rate_hz == 44_100 or
+        record.audio_capture_sample_rate_hz == 48_000;
+    if (!valid_rate or (record.audio_capture_channel_count != 1 and record.audio_capture_channel_count != 2)) return true;
+    const min_capacity = @as(u64, record.audio_capture_sample_rate_hz) * platform.min_audio_capture_buffer_duration_ms / 1_000;
+    const max_capacity = @as(u64, record.audio_capture_sample_rate_hz) * platform.max_audio_capture_buffer_duration_ms / 1_000;
+    if (record.audio_capture_available_frames > record.audio_capture_capacity_frames or
+        record.audio_capture_capacity_frames < min_capacity or
+        record.audio_capture_capacity_frames > max_capacity or
+        record.audio_capture_frames_produced < record.audio_capture_available_frames or
+        record.audio_capture_frames_produced >= runtime_effects.max_effect_video_scalar_exclusive) return true;
+    return switch (record.audio_capture_state) {
+        .started => record.audio_capture_reason != .none,
+        .readable => record.audio_capture_reason != .none or record.audio_capture_available_frames == 0,
+        .stopped => record.audio_capture_reason != .none,
+        .failed, .rejected => record.audio_capture_reason == .none,
+    };
+}
+
 /// A `.video_load` record's `video_kind` is the load's OUTCOME, and the
 /// recorder writes exactly two values: `.loaded` on a resolved cascade
 /// and `.failed` on a synchronous refusal. Any other kind steers
@@ -707,7 +777,8 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // Launch-env deliveries are exactly what must NOT regenerate:
         // the recorded values feed the replayed envMsgs dispatch so the
         // replay launch's environment is never consulted.
-        .line, .clock, .env => false,
+        .audio_capture_read => record.audio_capture_read_state == .rejected,
+        .line, .clock, .env, .audio_capture => false,
     };
 }
 

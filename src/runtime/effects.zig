@@ -657,6 +657,81 @@ pub const EffectAudioSource = enum(u8) {
     stream,
 };
 
+pub const EffectAudioCaptureState = platform.AudioCaptureEventState;
+pub const EffectAudioCaptureReason = platform.AudioCaptureEventReason;
+pub const EffectMicrophoneDeviceState = platform.MicrophoneDeviceEventState;
+pub const EffectCaptureAccessSource = platform.CaptureAccessSource;
+pub const EffectCaptureAccessAction = platform.CaptureAccessAction;
+pub const EffectCaptureAccessStatus = platform.CaptureAccessStatus;
+
+pub const EffectAudioCapture = struct {
+    key: u64,
+    state: EffectAudioCaptureState,
+    reason: EffectAudioCaptureReason = .none,
+    sample_rate_hz: u32 = 0,
+    channel_count: u8 = 0,
+    available_frames: u32 = 0,
+    capacity_frames: u32 = 0,
+    frames_produced: u64 = 0,
+};
+
+pub const EffectAudioCaptureReadState = enum(u8) {
+    chunk,
+    empty,
+    ended,
+    rejected,
+};
+
+pub const EffectAudioCaptureReadReason = enum(u8) {
+    none,
+    invalid_options,
+    not_recording,
+    read_in_progress,
+};
+
+/// One borrowed, timestamp-aligned read from the reliable capture stream.
+/// Both PCM slices are signed 16-bit little-endian and cover the same frame
+/// interval. Copy a slice during update only when retaining it in the model.
+pub const EffectAudioCaptureRead = struct {
+    key: u64,
+    state: EffectAudioCaptureReadState,
+    reason: EffectAudioCaptureReadReason = .none,
+    sequence: u64 = 0,
+    frame_offset: u64 = 0,
+    frames: u32 = 0,
+    system_pcm: []const u8 = &.{},
+    microphone_pcm: []const u8 = &.{},
+    system_gap_frames: u32 = 0,
+    microphone_gap_frames: u32 = 0,
+    remaining_frames: u32 = 0,
+    end_of_stream: bool = false,
+};
+
+/// Strings borrow platform event storage and must be copied before the
+/// update callback returns when an app wants to retain them in its model.
+pub const EffectMicrophoneDevice = struct {
+    key: u64,
+    state: EffectMicrophoneDeviceState,
+    id: []const u8 = &.{},
+    name: []const u8 = &.{},
+    is_default: bool = false,
+    index: u32 = 0,
+    total: u32 = 0,
+};
+
+pub const EffectCaptureAccess = struct {
+    key: u64,
+    source: EffectCaptureAccessSource,
+    status: EffectCaptureAccessStatus,
+    restart_required: bool = false,
+};
+
+pub const MicrophoneSelection = union(enum) {
+    none,
+    default,
+    device_id: []const u8,
+};
+
 /// Longest video source string (path or url) `loadVideo` accepts,
 /// mirroring the platform bound. Longer strings deliver exactly one
 /// `.rejected` video event Msg.
@@ -1749,6 +1824,15 @@ pub const EffectResultKind = enum(u8) {
     /// opposite of the channel records' inline argument. Exit records
     /// ride `code`/`exit_reason` plus the pty fields.
     pty = 15,
+    /// One application-consumed paired audio-capture read. The two PCM
+    /// fields are concatenated in `payload`; `audio_capture_system_len`
+    /// splits them without introducing a dynamic object-array ABI.
+    audio_capture_read = 16,
+    /// The runtime-generated coalesced `.readable` lifecycle event. Native
+    /// start/terminal events already ride the platform-event journal, but
+    /// readiness is produced by the runtime ring and therefore needs this
+    /// effect record to recreate the pull trigger during replay.
+    audio_capture = 17,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -1893,6 +1977,23 @@ pub const EffectResultRecord = struct {
     /// when it moves `payload` out of line (the image convention).
     pty_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
     pty_blob_len: u64 = 0,
+    audio_capture_read_state: EffectAudioCaptureReadState = .empty,
+    audio_capture_read_reason: EffectAudioCaptureReadReason = .none,
+    audio_capture_sequence: u64 = 0,
+    audio_capture_frame_offset: u64 = 0,
+    audio_capture_frames: u32 = 0,
+    audio_capture_system_len: u32 = 0,
+    audio_capture_system_gap_frames: u32 = 0,
+    audio_capture_microphone_gap_frames: u32 = 0,
+    audio_capture_remaining_frames: u32 = 0,
+    audio_capture_end_of_stream: bool = false,
+    audio_capture_state: EffectAudioCaptureState = .readable,
+    audio_capture_reason: EffectAudioCaptureReason = .none,
+    audio_capture_sample_rate_hz: u32 = 0,
+    audio_capture_channel_count: u8 = 0,
+    audio_capture_available_frames: u32 = 0,
+    audio_capture_capacity_frames: u32 = 0,
+    audio_capture_frames_produced: u64 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -2259,6 +2360,193 @@ const WorkerThread = if (io_threaded_supported) std.Thread else void;
 /// context and its buffer, `deinit` releases the executor io.
 const process_allocator: std.mem.Allocator = std.heap.page_allocator;
 
+const max_audio_capture_read_frames: usize = 48_000 * platform.audio_capture_max_read_duration_ms / 1_000;
+const max_audio_capture_read_pcm_bytes: usize = max_audio_capture_read_frames * 2 * 2;
+
+const AudioCaptureBlock = struct {
+    frame_offset: u64 = 0,
+    frame_count: u32 = 0,
+    system_gap_frames: u32 = 0,
+    microphone_gap_frames: u32 = 0,
+};
+
+const AudioCaptureReadBatch = struct {
+    frame_offset: u64 = 0,
+    frames: u32 = 0,
+    system_gap_frames: u32 = 0,
+    microphone_gap_frames: u32 = 0,
+};
+
+const AudioCaptureOccupancy = struct {
+    available_frames: u32 = 0,
+    capacity_frames: u32 = 0,
+    frames_produced: u64 = 0,
+};
+
+const AudioCaptureRing = struct {
+    blocks: []AudioCaptureBlock,
+    system_pcm: []u8,
+    microphone_pcm: []u8,
+    block_head: usize = 0,
+    block_len: usize = 0,
+    frame_head: usize = 0,
+    available_frames: usize = 0,
+    capacity_frames: usize,
+    bytes_per_frame: usize,
+    system_audio: bool,
+    microphone_audio: bool,
+    frames_produced: u64 = 0,
+
+    fn init(allocator: std.mem.Allocator, config: platform.AudioCaptureConfig) !*AudioCaptureRing {
+        const block_frames = @as(usize, config.sample_rate_hz) * platform.audio_capture_block_duration_ms / 1_000;
+        const capacity_frames = @as(usize, config.sample_rate_hz) * config.buffer_duration_ms / 1_000;
+        const block_capacity = (capacity_frames + block_frames - 1) / block_frames;
+        const bytes_per_frame = @as(usize, config.channel_count) * 2;
+        const ring = try allocator.create(AudioCaptureRing);
+        errdefer allocator.destroy(ring);
+        const blocks = try allocator.alloc(AudioCaptureBlock, block_capacity);
+        errdefer allocator.free(blocks);
+        const system_pcm: []u8 = if (config.system_audio)
+            try allocator.alloc(u8, capacity_frames * bytes_per_frame)
+        else
+            @constCast(&.{});
+        errdefer if (system_pcm.len > 0) allocator.free(system_pcm);
+        const microphone_pcm: []u8 = if (config.microphone != .none)
+            try allocator.alloc(u8, capacity_frames * bytes_per_frame)
+        else
+            @constCast(&.{});
+        errdefer if (microphone_pcm.len > 0) allocator.free(microphone_pcm);
+        ring.* = .{
+            .blocks = blocks,
+            .system_pcm = system_pcm,
+            .microphone_pcm = microphone_pcm,
+            .capacity_frames = capacity_frames,
+            .bytes_per_frame = bytes_per_frame,
+            .system_audio = config.system_audio,
+            .microphone_audio = config.microphone != .none,
+        };
+        return ring;
+    }
+
+    fn deinit(ring: *AudioCaptureRing, allocator: std.mem.Allocator) void {
+        allocator.free(ring.blocks);
+        if (ring.system_pcm.len > 0) allocator.free(ring.system_pcm);
+        if (ring.microphone_pcm.len > 0) allocator.free(ring.microphone_pcm);
+        allocator.destroy(ring);
+    }
+
+    fn copyInto(storage: []u8, frame_index: usize, bytes_per_frame: usize, source: []const u8) void {
+        if (storage.len == 0 or source.len == 0) return;
+        const byte_index = frame_index * bytes_per_frame;
+        const first = @min(source.len, storage.len - byte_index);
+        @memcpy(storage[byte_index .. byte_index + first], source[0..first]);
+        if (first < source.len) @memcpy(storage[0 .. source.len - first], source[first..]);
+    }
+
+    fn copyOut(storage: []const u8, frame_index: usize, bytes_per_frame: usize, frame_count: usize, destination: []u8) void {
+        if (storage.len == 0 or destination.len == 0) return;
+        const byte_index = frame_index * bytes_per_frame;
+        const byte_count = frame_count * bytes_per_frame;
+        const first = @min(byte_count, storage.len - byte_index);
+        @memcpy(destination[0..first], storage[byte_index .. byte_index + first]);
+        if (first < byte_count) @memcpy(destination[first..byte_count], storage[0 .. byte_count - first]);
+    }
+
+    fn push(ring: *AudioCaptureRing, chunk: platform.CapturedAudioChunk) platform.AudioCapturePushResult {
+        const frames: usize = chunk.frame_count;
+        if (frames == 0 or chunk.system_gap_frames > chunk.frame_count or chunk.microphone_gap_frames > chunk.frame_count) return .closed;
+        if (chunk.frame_offset != ring.frames_produced) return .closed;
+        const expected_bytes = frames * ring.bytes_per_frame;
+        if ((ring.system_audio and chunk.system_pcm.len != expected_bytes) or
+            (!ring.system_audio and chunk.system_pcm.len != 0) or
+            (ring.microphone_audio and chunk.microphone_pcm.len != expected_bytes) or
+            (!ring.microphone_audio and chunk.microphone_pcm.len != 0)) return .closed;
+        if (frames > ring.capacity_frames - ring.available_frames or ring.block_len == ring.blocks.len) return .full;
+        const tail_frame = (ring.frame_head + ring.available_frames) % ring.capacity_frames;
+        copyInto(ring.system_pcm, tail_frame, ring.bytes_per_frame, chunk.system_pcm);
+        copyInto(ring.microphone_pcm, tail_frame, ring.bytes_per_frame, chunk.microphone_pcm);
+        const block_index = (ring.block_head + ring.block_len) % ring.blocks.len;
+        ring.blocks[block_index] = .{
+            .frame_offset = chunk.frame_offset,
+            .frame_count = chunk.frame_count,
+            .system_gap_frames = chunk.system_gap_frames,
+            .microphone_gap_frames = chunk.microphone_gap_frames,
+        };
+        ring.block_len += 1;
+        ring.available_frames += frames;
+        ring.frames_produced = @max(ring.frames_produced, chunk.frame_offset + chunk.frame_count);
+        return .accepted;
+    }
+
+    fn read(ring: *AudioCaptureRing, max_frames: usize, system_destination: []u8, microphone_destination: []u8) AudioCaptureReadBatch {
+        var batch: AudioCaptureReadBatch = .{};
+        while (ring.block_len > 0) {
+            const block = ring.blocks[ring.block_head];
+            if (batch.frames > 0 and @as(usize, batch.frames) + block.frame_count > max_frames) break;
+            if (batch.frames == 0 and block.frame_count > max_frames) break;
+            if (batch.frames == 0) batch.frame_offset = block.frame_offset;
+            const output_byte_offset = @as(usize, batch.frames) * ring.bytes_per_frame;
+            const block_bytes = @as(usize, block.frame_count) * ring.bytes_per_frame;
+            copyOut(ring.system_pcm, ring.frame_head, ring.bytes_per_frame, block.frame_count, system_destination[output_byte_offset .. output_byte_offset + if (ring.system_audio) block_bytes else 0]);
+            copyOut(ring.microphone_pcm, ring.frame_head, ring.bytes_per_frame, block.frame_count, microphone_destination[output_byte_offset .. output_byte_offset + if (ring.microphone_audio) block_bytes else 0]);
+            batch.frames += block.frame_count;
+            batch.system_gap_frames += block.system_gap_frames;
+            batch.microphone_gap_frames += block.microphone_gap_frames;
+            ring.frame_head = (ring.frame_head + block.frame_count) % ring.capacity_frames;
+            ring.available_frames -= block.frame_count;
+            ring.block_head = (ring.block_head + 1) % ring.blocks.len;
+            ring.block_len -= 1;
+        }
+        return batch;
+    }
+};
+
+const AudioCaptureOwnerRefs = struct {
+    seq: *std.atomic.Value(u64),
+    pending: *std.atomic.Value(usize),
+};
+
+/// Process-lifetime producer header. The platform may finish an in-flight
+/// callback after stop or teardown, so its sink never points at allocator-
+/// owned ring storage directly. The generation/open gate is checked while
+/// holding the same mutex used to detach and free that ring.
+const AudioCaptureShared = struct {
+    mutex: SpinMutex = .{},
+    open: bool = false,
+    accepting: bool = false,
+    generation: u64 = 0,
+    ring: ?*AudioCaptureRing = null,
+    owner: ?AudioCaptureOwnerRefs = null,
+    readable_pending: bool = false,
+    readable_seq: u64 = 0,
+    wake: ChannelWake = .{},
+};
+
+fn audioCapturePush(context: *anyopaque, generation: u64, chunk: platform.CapturedAudioChunk) platform.AudioCapturePushResult {
+    const shared: *AudioCaptureShared = @ptrCast(@alignCast(context));
+    var wake = false;
+    shared.mutex.lock();
+    if (!shared.open or !shared.accepting or shared.generation != generation) {
+        shared.mutex.unlock();
+        return .closed;
+    }
+    const ring = shared.ring.?;
+    const was_empty = ring.available_frames == 0;
+    const result = ring.push(chunk);
+    if (result == .full) shared.accepting = false;
+    if (result == .accepted and was_empty and !shared.readable_pending) {
+        if (shared.owner) |owner| {
+            shared.readable_seq = owner.seq.fetchAdd(1, .seq_cst);
+            _ = owner.pending.fetchAdd(1, .seq_cst);
+            shared.readable_pending = true;
+            wake = true;
+        }
+    }
+    shared.mutex.unlock();
+    if (wake) ChannelHandle.requestHostWake(&shared.wake, generation);
+    return result;
+}
+
 /// Everything a real file worker's BLOCKING phase may touch, held
 /// out-of-line from the channel on its own heap block. File I/O is the
 /// one effect teardown cannot always interrupt (a write to a FIFO with
@@ -2409,6 +2697,11 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
+        pub const AudioCaptureMsgFn = *const fn (event: EffectAudioCapture) Msg;
+        pub const AudioCaptureReadMsgFn = *const fn (event: EffectAudioCaptureRead) Msg;
+        pub const MicrophoneDeviceMsgFn = *const fn (event: EffectMicrophoneDevice) Msg;
+        pub const CaptureAccessMsgFn = *const fn (event: EffectCaptureAccess) Msg;
+        pub const MicrophoneDevicesChangedMsgFn = *const fn () Msg;
         pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
@@ -2494,6 +2787,46 @@ pub fn Effects(comptime Msg: type) type {
             return struct {
                 fn make(event: EffectAudio) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn audioCaptureMsg(comptime tag: std.meta.Tag(Msg)) AudioCaptureMsgFn {
+            return struct {
+                fn make(event: EffectAudioCapture) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn audioCaptureReadMsg(comptime tag: std.meta.Tag(Msg)) AudioCaptureReadMsgFn {
+            return struct {
+                fn make(event: EffectAudioCaptureRead) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn microphoneDeviceMsg(comptime tag: std.meta.Tag(Msg)) MicrophoneDeviceMsgFn {
+            return struct {
+                fn make(event: EffectMicrophoneDevice) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn captureAccessMsg(comptime tag: std.meta.Tag(Msg)) CaptureAccessMsgFn {
+            return struct {
+                fn make(event: EffectCaptureAccess) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn microphoneDevicesChangedMsg(comptime tag: std.meta.Tag(Msg)) MicrophoneDevicesChangedMsgFn {
+            return struct {
+                fn make() Msg {
+                    return @unionInit(Msg, @tagName(tag), {});
                 }
             }.make;
         }
@@ -2798,6 +3131,40 @@ pub fn Effects(comptime Msg: type) type {
             /// `audioMsg`). Without one, playback still runs; the app
             /// just hears nothing back.
             on_event: ?AudioMsgFn = null,
+        };
+
+        pub const StartAudioCaptureOptions = struct {
+            /// App-owned route key. Only one capture may be active.
+            key: u64,
+            system_audio: bool = false,
+            microphone: MicrophoneSelection = .none,
+            sample_rate_hz: u32 = 48_000,
+            channel_count: u8 = 2,
+            exclude_current_process_audio: bool = true,
+            /// Runtime ring duration. Accepted PCM is never overwritten;
+            /// a full ring terminates capture with `consumer_too_slow`.
+            buffer_duration_ms: u32 = platform.default_audio_capture_buffer_duration_ms,
+            on_event: ?AudioCaptureMsgFn = null,
+        };
+
+        pub const ReadAudioCaptureOptions = struct {
+            key: u64,
+            /// Must hold at least one 20 ms block and at most 100 ms at
+            /// the capture's configured sample rate.
+            max_frames: u32,
+            on_read: ?AudioCaptureReadMsgFn = null,
+        };
+
+        pub const ListMicrophoneDevicesOptions = struct {
+            key: u64,
+            on_event: ?MicrophoneDeviceMsgFn = null,
+        };
+
+        pub const CaptureAccessOptions = struct {
+            key: u64,
+            source: EffectCaptureAccessSource,
+            action: EffectCaptureAccessAction = .status,
+            on_event: ?CaptureAccessMsgFn = null,
         };
 
         pub const LoadImageOptions = struct {
@@ -3138,6 +3505,38 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        const AudioCaptureChannel = struct {
+            active: bool = false,
+            accepting: bool = false,
+            sealed: bool = false,
+            fake: bool = false,
+            key: u64 = 0,
+            generation: u64 = 0,
+            sample_rate_hz: u32 = 0,
+            channel_count: u8 = 0,
+            system_audio: bool = false,
+            microphone_audio: bool = false,
+            read_pending: bool = false,
+            pending_read_fn: ?AudioCaptureReadMsgFn = null,
+            release_after_delivery: bool = false,
+            read_sequence: u64 = 0,
+            on_event: ?AudioCaptureMsgFn = null,
+            system_scratch: [max_audio_capture_read_pcm_bytes]u8 = undefined,
+            microphone_scratch: [max_audio_capture_read_pcm_bytes]u8 = undefined,
+        };
+
+        const MicrophoneDeviceQuery = struct {
+            active: bool = false,
+            key: u64 = 0,
+            on_event: ?MicrophoneDeviceMsgFn = null,
+        };
+
+        const CaptureAccessQuery = struct {
+            active: bool = false,
+            key: u64 = 0,
+            on_event: ?CaptureAccessMsgFn = null,
+        };
+
         /// Playback state the automation snapshot exposes: honest — it
         /// reports what the platform has told us, not what the UI wishes.
         pub const AudioSnapshot = struct {
@@ -3442,6 +3841,11 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
+            audio_capture: struct { event: EffectAudioCapture, capture_fn: ?AudioCaptureMsgFn },
+            audio_capture_read: struct { event: EffectAudioCaptureRead, read_fn: ?AudioCaptureReadMsgFn },
+            microphone_device: struct { event: EffectMicrophoneDevice, device_fn: ?MicrophoneDeviceMsgFn },
+            capture_access: struct { event: EffectCaptureAccess, access_fn: ?CaptureAccessMsgFn },
+            microphone_devices_changed: struct { changed_fn: ?MicrophoneDevicesChangedMsgFn },
             /// The audio entry's shape for the video channel, staged
             /// in the non-lossy `pending_videos` (see `PendingVideo`)
             /// and taking this union shape only at drain time.
@@ -3499,6 +3903,7 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
+                    .audio_capture, .audio_capture_read, .microphone_device, .capture_access, .microphone_devices_changed => {},
                     // Video events never enter the ring (they stage in
                     // the non-lossy `pending_videos`): a loop-side
                     // `.rejected`/`.failed` is its load's only
@@ -3538,6 +3943,7 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
+                    .audio_capture, .audio_capture_read, .microphone_device, .capture_access, .microphone_devices_changed => 0,
                     .pty => 0,
                     .host => 0,
                     // Never in the ring; see `addDropped`.
@@ -4260,6 +4666,16 @@ pub fn Effects(comptime Msg: type) type {
         /// The single audio playback channel (see `AudioChannel`).
         /// Loop-thread only, like the timer table.
         audio: AudioChannel = .{},
+        audio_capture: AudioCaptureChannel = .{},
+        /// Process-lifetime producer header reused across capture generations.
+        audio_capture_shared: ?*AudioCaptureShared = null,
+        audio_capture_generation: u64 = 0,
+        audio_capture_seq: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+        audio_capture_pending_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+        audio_capture_journal_scratch: [max_audio_capture_read_pcm_bytes * 2]u8 = undefined,
+        microphone_device_query: MicrophoneDeviceQuery = .{},
+        capture_access_query: CaptureAccessQuery = .{},
+        microphone_devices_changed_fn: ?MicrophoneDevicesChangedMsgFn = null,
         /// The single video playback channel (see `VideoChannel`).
         video: VideoChannel = .{},
         /// Monotonic per-load video token mint (see
@@ -4491,6 +4907,26 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.services) |services| services.audioStop() catch {};
             }
             self.audio = .{};
+            if (self.audio_capture.active and !self.audio_capture.fake) {
+                if (self.services) |services| services.audioCaptureStop() catch {};
+            }
+            if (self.microphone_devices_changed_fn != null) {
+                if (self.services) |services| services.observeMicrophoneDevices(false) catch {};
+            }
+            self.releaseAudioCaptureStream();
+            // `releaseAudioCaptureStream` performs the non-blocking revoke
+            // needed by ordinary mid-life closes. Teardown additionally
+            // fences an already-running host wake before the services and
+            // platform it captured can be destroyed.
+            if (self.audio_capture_shared) |shared| {
+                if (!quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
+                    self.abandoned_channel_wakes += 1;
+                    if (self.services) |services| services.noteChannelWakeAbandoned();
+                }
+            }
+            self.microphone_device_query = .{};
+            self.capture_access_query = .{};
+            self.microphone_devices_changed_fn = null;
             // Stop the platform video player (best effort), release the
             // media-surface claim, and clear the channel.
             if (self.video.active and !self.video.fake) {
@@ -7850,6 +8286,474 @@ pub fn Effects(comptime Msg: type) type {
             services.audioSetVolume(clamped) catch {};
         }
 
+        pub fn startAudioCapture(self: *Self, options: StartAudioCaptureOptions) void {
+            var microphone_kind: platform.MicrophoneSelectionKind = .none;
+            var microphone_id: []const u8 = &.{};
+            switch (options.microphone) {
+                .none => {},
+                .default => microphone_kind = .default,
+                .device_id => |id| {
+                    microphone_kind = .device_id;
+                    microphone_id = id;
+                },
+            }
+            const valid_rate = options.sample_rate_hz == 16_000 or options.sample_rate_hz == 24_000 or
+                options.sample_rate_hz == 44_100 or options.sample_rate_hz == 48_000;
+            const rejected = (!options.system_audio and microphone_kind == .none) or
+                (microphone_kind == .device_id and (microphone_id.len == 0 or microphone_id.len > platform.max_microphone_device_id_bytes)) or
+                !valid_rate or (options.channel_count != 1 and options.channel_count != 2) or
+                options.buffer_duration_ms < platform.min_audio_capture_buffer_duration_ms or
+                options.buffer_duration_ms > platform.max_audio_capture_buffer_duration_ms;
+            if (rejected) {
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .invalid_options,
+                }, .capture_fn = options.on_event } });
+                return;
+            }
+            if (self.audio_capture.active) {
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .already_recording,
+                }, .capture_fn = options.on_event } });
+                return;
+            }
+            const config: platform.AudioCaptureConfig = .{
+                .system_audio = options.system_audio,
+                .microphone = microphone_kind,
+                .microphone_device_id = microphone_id,
+                .sample_rate_hz = options.sample_rate_hz,
+                .channel_count = options.channel_count,
+                .exclude_current_process_audio = options.exclude_current_process_audio,
+                .buffer_duration_ms = options.buffer_duration_ms,
+            };
+            const ring = AudioCaptureRing.init(self.allocator, config) catch {
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .capture_failed,
+                }, .capture_fn = options.on_event } });
+                return;
+            };
+            const shared = self.audio_capture_shared orelse create: {
+                const allocated = process_allocator.create(AudioCaptureShared) catch {
+                    ring.deinit(self.allocator);
+                    self.deliverPending(.{ .audio_capture = .{ .event = .{
+                        .key = options.key,
+                        .state = .rejected,
+                        .reason = .capture_failed,
+                    }, .capture_fn = options.on_event } });
+                    return;
+                };
+                allocated.* = .{};
+                self.audio_capture_shared = allocated;
+                break :create allocated;
+            };
+            self.audio_capture_generation +%= 1;
+            if (self.audio_capture_generation == 0) self.audio_capture_generation = 1;
+            const generation = self.audio_capture_generation;
+            shared.mutex.lock();
+            shared.open = true;
+            shared.accepting = true;
+            shared.generation = generation;
+            shared.ring = ring;
+            shared.owner = .{ .seq = &self.audio_capture_seq, .pending = &self.audio_capture_pending_count };
+            shared.readable_pending = false;
+            shared.mutex.unlock();
+            shared.wake.mutex.lock();
+            shared.wake.generation = generation;
+            shared.wake.services = &self.wake_services;
+            shared.wake.pending.store(false, .seq_cst);
+            shared.wake.mutex.unlock();
+            self.audio_capture = .{
+                .active = true,
+                .accepting = true,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .generation = generation,
+                .sample_rate_hz = options.sample_rate_hz,
+                .channel_count = options.channel_count,
+                .system_audio = options.system_audio,
+                .microphone_audio = microphone_kind != .none,
+                .on_event = options.on_event,
+            };
+            if (self.audio_capture.fake) {
+                // Session replay parks the request until the recorded
+                // platform events arrive. Ordinary fake-executor tests
+                // keep their deterministic synthetic lifecycle.
+                if (self.replay) return;
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = options.key,
+                    .state = .started,
+                    .sample_rate_hz = options.sample_rate_hz,
+                    .channel_count = options.channel_count,
+                    .capacity_frames = @intCast(ring.capacity_frames),
+                }, .capture_fn = options.on_event } });
+                return;
+            }
+            const services = self.services orelse return self.rejectAudioCapture(.unsupported);
+            services.audioCaptureStart(config, .{
+                .context = shared,
+                .generation = generation,
+                .push_fn = audioCapturePush,
+            }) catch |err| return self.rejectAudioCapture(switch (err) {
+                error.UnsupportedService => .unsupported,
+                error.PermissionMissing => .permission_missing,
+                error.AudioCapturePermissionRequired => .permission_required,
+                error.AudioCaptureAlreadyActive => .already_recording,
+                error.MicrophoneDeviceNotFound => .device_not_found,
+                error.InvalidAudioCaptureOptions => .invalid_options,
+                else => .capture_failed,
+            });
+        }
+
+        pub fn stopAudioCapture(self: *Self) void {
+            if (!self.audio_capture.active or self.audio_capture.sealed) return;
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            self.audio_capture.accepting = false;
+            self.closeAudioCaptureProducer();
+            if (self.audio_capture.fake) {
+                // The recorded terminal event is authoritative during
+                // replay; keep the parked route alive until it arrives.
+                if (self.replay) return;
+                self.audio_capture.sealed = true;
+                const occupancy = self.audioCaptureOccupancy();
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = key,
+                    .state = .stopped,
+                    .sample_rate_hz = self.audio_capture.sample_rate_hz,
+                    .channel_count = self.audio_capture.channel_count,
+                    .available_frames = occupancy.available_frames,
+                    .capacity_frames = occupancy.capacity_frames,
+                    .frames_produced = occupancy.frames_produced,
+                }, .capture_fn = on_event } });
+                return;
+            }
+            const services = self.services orelse return self.failAudioCapture(.unsupported);
+            services.audioCaptureStop() catch return self.failAudioCapture(.capture_failed);
+        }
+
+        pub fn readAudioCapture(self: *Self, options: ReadAudioCaptureOptions) void {
+            if (!self.audio_capture.active or self.audio_capture.key != options.key) {
+                self.deliverPending(.{ .audio_capture_read = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .not_recording,
+                }, .read_fn = options.on_read } });
+                return;
+            }
+            if (self.audio_capture.read_pending) {
+                self.deliverPending(.{ .audio_capture_read = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .read_in_progress,
+                }, .read_fn = options.on_read } });
+                return;
+            }
+            const block_frames = self.audio_capture.sample_rate_hz * platform.audio_capture_block_duration_ms / 1_000;
+            const max_frames = self.audio_capture.sample_rate_hz * platform.audio_capture_max_read_duration_ms / 1_000;
+            if (options.max_frames < block_frames or options.max_frames > max_frames) {
+                self.deliverPending(.{ .audio_capture_read = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .invalid_options,
+                }, .read_fn = options.on_read } });
+                return;
+            }
+            if (self.replay) {
+                self.audio_capture.read_pending = true;
+                self.audio_capture.pending_read_fn = options.on_read;
+                return;
+            }
+            const shared = self.audio_capture_shared.?;
+            shared.mutex.lock();
+            const ring = shared.ring.?;
+            const batch = ring.read(options.max_frames, &self.audio_capture.system_scratch, &self.audio_capture.microphone_scratch);
+            const remaining: u32 = @intCast(ring.available_frames);
+            if (ring.available_frames == 0 and shared.readable_pending) {
+                shared.readable_pending = false;
+                if (shared.owner) |owner| _ = owner.pending.fetchSub(1, .seq_cst);
+            }
+            const sealed = self.audio_capture.sealed;
+            const system_bytes = @as(usize, batch.frames) * @as(usize, self.audio_capture.channel_count) * 2;
+            const microphone_bytes = system_bytes;
+            const event: EffectAudioCaptureRead = .{
+                .key = options.key,
+                .state = if (batch.frames > 0) .chunk else if (sealed) .ended else .empty,
+                .sequence = self.audio_capture.read_sequence,
+                .frame_offset = batch.frame_offset,
+                .frames = batch.frames,
+                .system_pcm = if (self.audio_capture.system_audio) self.audio_capture.system_scratch[0..system_bytes] else &.{},
+                .microphone_pcm = if (self.audio_capture.microphone_audio) self.audio_capture.microphone_scratch[0..microphone_bytes] else &.{},
+                .system_gap_frames = batch.system_gap_frames,
+                .microphone_gap_frames = batch.microphone_gap_frames,
+                .remaining_frames = remaining,
+                .end_of_stream = sealed and remaining == 0,
+            };
+            shared.mutex.unlock();
+            self.audio_capture.read_sequence +%= 1;
+            self.audio_capture.read_pending = true;
+            self.audio_capture.pending_read_fn = options.on_read;
+            self.deliverPending(.{ .audio_capture_read = .{ .event = event, .read_fn = options.on_read } });
+        }
+
+        pub fn discardAudioCapture(self: *Self) void {
+            if (!self.audio_capture.active) return;
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            if (!self.audio_capture.fake and !self.audio_capture.sealed) {
+                if (self.services) |services| services.audioCaptureStop() catch {};
+            }
+            self.releaseAudioCaptureStream();
+            self.deliverPending(.{ .audio_capture = .{ .event = .{
+                .key = key,
+                .state = .stopped,
+                .reason = .discarded,
+            }, .capture_fn = on_event } });
+        }
+
+        pub fn listMicrophoneDevices(self: *Self, options: ListMicrophoneDevicesOptions) void {
+            if (self.microphone_device_query.active) {
+                self.deliverPending(.{ .microphone_device = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                }, .device_fn = options.on_event } });
+                return;
+            }
+            self.microphone_device_query = .{ .active = true, .key = options.key, .on_event = options.on_event };
+            if (self.executor == .fake) {
+                if (self.replay) return;
+                self.deliverPending(.{ .microphone_device = .{ .event = .{ .key = options.key, .state = .device, .id = "default-mic", .name = "Default Microphone", .is_default = true, .index = 0, .total = 2 }, .device_fn = options.on_event } });
+                self.deliverPending(.{ .microphone_device = .{ .event = .{ .key = options.key, .state = .device, .id = "usb-mic", .name = "USB Microphone", .index = 1, .total = 2 }, .device_fn = options.on_event } });
+                self.deliverPending(.{ .microphone_device = .{ .event = .{ .key = options.key, .state = .completed, .index = 2, .total = 2 }, .device_fn = options.on_event } });
+                self.microphone_device_query = .{};
+                return;
+            }
+            const services = self.services orelse return self.finishMicrophoneDevices(.rejected);
+            services.microphoneDevices() catch |err| return self.finishMicrophoneDevices(if (err == error.UnsupportedService or err == error.PermissionMissing) .rejected else .failed);
+        }
+
+        pub fn captureAccess(self: *Self, options: CaptureAccessOptions) void {
+            if (self.capture_access_query.active) {
+                self.deliverPending(.{ .capture_access = .{ .event = .{
+                    .key = options.key,
+                    .source = options.source,
+                    .status = .unavailable,
+                }, .access_fn = options.on_event } });
+                return;
+            }
+            self.capture_access_query = .{ .active = true, .key = options.key, .on_event = options.on_event };
+            if (self.executor == .fake) {
+                if (self.replay) return;
+                self.deliverPending(.{ .capture_access = .{ .event = .{
+                    .key = options.key,
+                    .source = options.source,
+                    .status = .authorized,
+                }, .access_fn = options.on_event } });
+                self.capture_access_query = .{};
+                return;
+            }
+            const services = self.services orelse return self.failCaptureAccess(options.source);
+            services.captureAccess(options.source, options.action) catch return self.failCaptureAccess(options.source);
+        }
+
+        pub fn observeMicrophoneDevices(self: *Self, on_change: ?MicrophoneDevicesChangedMsgFn) void {
+            self.microphone_devices_changed_fn = on_change;
+            if (self.executor == .fake) return;
+            const services = self.services orelse return;
+            services.observeMicrophoneDevices(on_change != null) catch {};
+        }
+
+        pub fn takeAudioCaptureMsg(self: *Self, event: platform.AudioCaptureEvent) ?Msg {
+            if (!self.audio_capture.active) return null;
+            // As with audio/video playback, the journaled effect record is
+            // the app-visible truth during replay. The raw platform record
+            // lacks runtime-ring occupancy after reads and would otherwise
+            // double-deliver with different counters.
+            if (self.replay) return null;
+            const key = self.audio_capture.key;
+            const event_fn = self.audio_capture.on_event;
+            var available_frames: u32 = event.available_frames;
+            var capacity_frames: u32 = event.capacity_frames;
+            var frames_produced: u64 = event.frames_produced;
+            if (self.audio_capture_shared) |shared| {
+                shared.mutex.lock();
+                if (shared.generation == self.audio_capture.generation) {
+                    if (shared.ring) |ring| {
+                        available_frames = @intCast(ring.available_frames);
+                        capacity_frames = @intCast(ring.capacity_frames);
+                        frames_produced = ring.frames_produced;
+                    }
+                    if (event.state == .stopped or event.state == .failed or event.state == .rejected) {
+                        shared.accepting = false;
+                        // The terminal lifecycle event carries the final
+                        // occupancy. It supersedes a coalesced readable
+                        // wake so no lifecycle event follows a terminal.
+                        if (shared.readable_pending) {
+                            shared.readable_pending = false;
+                            if (shared.owner) |owner| _ = owner.pending.fetchSub(1, .seq_cst);
+                        }
+                    }
+                }
+                shared.mutex.unlock();
+            }
+            if (event.state == .stopped or event.state == .failed or event.state == .rejected) {
+                self.audio_capture.accepting = false;
+                self.audio_capture.sealed = true;
+            }
+            const map = event_fn orelse return null;
+            const resolved: EffectAudioCapture = .{
+                .key = key,
+                .state = event.state,
+                .reason = event.reason,
+                .sample_rate_hz = if (event.sample_rate_hz != 0) event.sample_rate_hz else self.audio_capture.sample_rate_hz,
+                .channel_count = if (event.channel_count != 0) event.channel_count else self.audio_capture.channel_count,
+                .available_frames = available_frames,
+                .capacity_frames = capacity_frames,
+                .frames_produced = frames_produced,
+            };
+            self.journalNote(.{
+                .kind = .audio_capture,
+                .key = resolved.key,
+                .audio_capture_state = resolved.state,
+                .audio_capture_reason = resolved.reason,
+                .audio_capture_sample_rate_hz = resolved.sample_rate_hz,
+                .audio_capture_channel_count = resolved.channel_count,
+                .audio_capture_available_frames = resolved.available_frames,
+                .audio_capture_capacity_frames = resolved.capacity_frames,
+                .audio_capture_frames_produced = resolved.frames_produced,
+            });
+            return map(resolved);
+        }
+
+        /// Deterministic fake-executor producer seam used by tests. Replay
+        /// never calls it: journaled read records are the only PCM source.
+        pub fn feedAudioCaptureFrames(self: *Self, chunk: platform.CapturedAudioChunk) platform.AudioCapturePushResult {
+            if (!self.audio_capture.active or self.replay) return .closed;
+            const shared = self.audio_capture_shared orelse return .closed;
+            const result = audioCapturePush(shared, self.audio_capture.generation, chunk);
+            if (result == .full) {
+                self.audio_capture.accepting = false;
+                self.audio_capture.sealed = true;
+                self.closeAudioCaptureProducer();
+                const occupancy = self.audioCaptureOccupancy();
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = self.audio_capture.key,
+                    .state = .failed,
+                    .reason = .consumer_too_slow,
+                    .sample_rate_hz = self.audio_capture.sample_rate_hz,
+                    .channel_count = self.audio_capture.channel_count,
+                    .available_frames = occupancy.available_frames,
+                    .capacity_frames = occupancy.capacity_frames,
+                    .frames_produced = occupancy.frames_produced,
+                }, .capture_fn = self.audio_capture.on_event } });
+            }
+            return result;
+        }
+
+        pub fn feedAudioCaptureRead(self: *Self, event: EffectAudioCaptureRead) !void {
+            if (!self.replay or !self.audio_capture.active or !self.audio_capture.read_pending or event.key != self.audio_capture.key) return error.EffectNotFound;
+            if (event.system_pcm.len > self.audio_capture.system_scratch.len or event.microphone_pcm.len > self.audio_capture.microphone_scratch.len) return error.EffectNotFound;
+            if (event.sequence != self.audio_capture.read_sequence) return error.EffectNotFound;
+            const bytes_per_frame = @as(usize, self.audio_capture.channel_count) * 2;
+            const expected_bytes = @as(usize, event.frames) * bytes_per_frame;
+            if ((self.audio_capture.system_audio and event.system_pcm.len != expected_bytes) or
+                (!self.audio_capture.system_audio and event.system_pcm.len != 0) or
+                (self.audio_capture.microphone_audio and event.microphone_pcm.len != expected_bytes) or
+                (!self.audio_capture.microphone_audio and event.microphone_pcm.len != 0)) return error.EffectNotFound;
+            if ((event.state == .chunk) != (event.frames > 0)) return error.EffectNotFound;
+            if (event.end_of_stream and !self.audio_capture.sealed) return error.EffectNotFound;
+            @memcpy(self.audio_capture.system_scratch[0..event.system_pcm.len], event.system_pcm);
+            @memcpy(self.audio_capture.microphone_scratch[0..event.microphone_pcm.len], event.microphone_pcm);
+            var copied = event;
+            copied.system_pcm = self.audio_capture.system_scratch[0..event.system_pcm.len];
+            copied.microphone_pcm = self.audio_capture.microphone_scratch[0..event.microphone_pcm.len];
+            self.audio_capture.read_sequence +%= 1;
+            self.deliverPending(.{ .audio_capture_read = .{ .event = copied, .read_fn = self.audio_capture.pending_read_fn } });
+        }
+
+        pub fn feedAudioCaptureEvent(self: *Self, event: EffectAudioCapture) !void {
+            if (!self.replay or !self.audio_capture.active or event.key != self.audio_capture.key) return error.EffectNotFound;
+            if (event.state == .stopped or event.state == .failed or event.state == .rejected) {
+                self.audio_capture.accepting = false;
+                self.audio_capture.sealed = true;
+                self.closeAudioCaptureProducer();
+            }
+            self.deliverPending(.{ .audio_capture = .{ .event = event, .capture_fn = self.audio_capture.on_event } });
+        }
+
+        fn takeAudioCaptureReadableMsg(self: *Self, before: u64) ?Msg {
+            if (!self.audio_capture.active) return null;
+            const shared = self.audio_capture_shared orelse return null;
+            shared.mutex.lock();
+            if (!shared.open or shared.generation != self.audio_capture.generation or
+                !shared.readable_pending or shared.readable_seq >= before)
+            {
+                shared.mutex.unlock();
+                return null;
+            }
+            shared.readable_pending = false;
+            if (shared.owner) |owner| _ = owner.pending.fetchSub(1, .seq_cst);
+            const ring = shared.ring.?;
+            const event: EffectAudioCapture = .{
+                .key = self.audio_capture.key,
+                .state = .readable,
+                .sample_rate_hz = self.audio_capture.sample_rate_hz,
+                .channel_count = self.audio_capture.channel_count,
+                .available_frames = @intCast(ring.available_frames),
+                .capacity_frames = @intCast(ring.capacity_frames),
+                .frames_produced = ring.frames_produced,
+            };
+            shared.mutex.unlock();
+            const map = self.audio_capture.on_event orelse return null;
+            self.journalNote(.{
+                .kind = .audio_capture,
+                .key = event.key,
+                .audio_capture_state = event.state,
+                .audio_capture_reason = event.reason,
+                .audio_capture_sample_rate_hz = event.sample_rate_hz,
+                .audio_capture_channel_count = event.channel_count,
+                .audio_capture_available_frames = event.available_frames,
+                .audio_capture_capacity_frames = event.capacity_frames,
+                .audio_capture_frames_produced = event.frames_produced,
+            });
+            return map(event);
+        }
+
+        pub fn takeMicrophoneDeviceMsg(self: *Self, event: platform.MicrophoneDeviceEvent) ?Msg {
+            if (!self.microphone_device_query.active) return null;
+            const key = self.microphone_device_query.key;
+            const event_fn = self.microphone_device_query.on_event;
+            if (event.state != .device) self.microphone_device_query = .{};
+            const map = event_fn orelse return null;
+            return map(.{
+                .key = key,
+                .state = event.state,
+                .id = event.id,
+                .name = event.name,
+                .is_default = event.is_default,
+                .index = event.index,
+                .total = event.total,
+            });
+        }
+
+        pub fn takeCaptureAccessMsg(self: *Self, event: platform.CaptureAccessEvent) ?Msg {
+            if (!self.capture_access_query.active) return null;
+            const key = self.capture_access_query.key;
+            const event_fn = self.capture_access_query.on_event;
+            self.capture_access_query = .{};
+            const map = event_fn orelse return null;
+            return map(.{ .key = key, .source = event.source, .status = event.status, .restart_required = event.restart_required });
+        }
+
+        pub fn takeMicrophoneDevicesChangedMsg(self: *Self) ?Msg {
+            const map = self.microphone_devices_changed_fn orelse return null;
+            return map();
+        }
+
         /// Route a platform audio event back into an `on_event` Msg for
         /// the active channel, updating the playback mirrors on the way.
         /// Null when the channel is idle (a straggler after `stopAudio`)
@@ -8784,6 +9688,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.pending_video_len > 0 or
                 self.pending_pty_len > 0 or
                 self.pending_staged_len > 0 or
+                self.audio_capture_pending_count.load(.seq_cst) > 0 or
                 self.channel_pending_count.load(.seq_cst) > 0 or
                 self.pty_pending_count.load(.seq_cst) > 0 or
                 self.queue_count.load(.seq_cst) > 0;
@@ -8828,6 +9733,9 @@ pub fn Effects(comptime Msg: type) type {
             /// the journal records exactly what delivered, so the
             /// causality cut only needs the stamp, not the bytes.
             pty_before: u64,
+            /// Coalesced audio-capture readable notices stamped before the
+            /// pass. PCM itself remains in the reliable ring until read.
+            audio_capture_before: u64,
         };
 
         /// Snapshot the completion backlog at the start of one drain
@@ -8861,6 +9769,11 @@ pub fn Effects(comptime Msg: type) type {
                 shared.wake.pending.store(false, .seq_cst);
                 shared.wake.mutex.unlock();
             }
+            if (self.audio_capture_shared) |shared| {
+                shared.wake.mutex.lock();
+                shared.wake.pending.store(false, .seq_cst);
+                shared.wake.mutex.unlock();
+            }
             return .{
                 .pending_before = self.pending_seq,
                 .queue_budget = self.queue_count.load(.acquire),
@@ -8869,6 +9782,7 @@ pub fn Effects(comptime Msg: type) type {
                 // before the clear above is inside this snapshot.
                 .channel_before = self.channel_seq.load(.seq_cst),
                 .pty_before = self.pty_seq.load(.seq_cst),
+                .audio_capture_before = self.audio_capture_seq.load(.seq_cst),
             };
         }
 
@@ -8886,6 +9800,7 @@ pub fn Effects(comptime Msg: type) type {
                 .queue_budget = std.math.maxInt(usize),
                 .channel_before = std.math.maxInt(u64),
                 .pty_before = std.math.maxInt(u64),
+                .audio_capture_before = std.math.maxInt(u64),
             };
             return self.takeMsgWithin(&unbounded);
         }
@@ -8894,6 +9809,7 @@ pub fn Effects(comptime Msg: type) type {
         /// `boundary` deliver; anything produced after the snapshot
         /// waits for the wake its producer already nudged.
         pub fn takeMsgWithin(self: *Self, boundary: *DrainBoundary) ?Msg {
+            if (self.audio_capture.release_after_delivery) self.releaseAudioCaptureStream();
             self.reclaimSlots();
             while (true) {
                 if (self.takePendingMsg(boundary.pending_before)) |pending| {
@@ -8999,6 +9915,48 @@ pub fn Effects(comptime Msg: type) type {
                                 .audio_bands = event.bands,
                             });
                             return event_fn(event);
+                        },
+                        .audio_capture => |entry| {
+                            const event_fn = entry.capture_fn orelse continue;
+                            return event_fn(entry.event);
+                        },
+                        .audio_capture_read => |entry| {
+                            self.audio_capture.read_pending = false;
+                            self.audio_capture.pending_read_fn = null;
+                            if (entry.event.end_of_stream) self.audio_capture.release_after_delivery = true;
+                            const system_len = entry.event.system_pcm.len;
+                            const microphone_len = entry.event.microphone_pcm.len;
+                            @memcpy(self.audio_capture_journal_scratch[0..system_len], entry.event.system_pcm);
+                            @memcpy(self.audio_capture_journal_scratch[system_len .. system_len + microphone_len], entry.event.microphone_pcm);
+                            self.journalNote(.{
+                                .kind = .audio_capture_read,
+                                .key = entry.event.key,
+                                .payload = self.audio_capture_journal_scratch[0 .. system_len + microphone_len],
+                                .audio_capture_read_state = entry.event.state,
+                                .audio_capture_read_reason = entry.event.reason,
+                                .audio_capture_sequence = entry.event.sequence,
+                                .audio_capture_frame_offset = entry.event.frame_offset,
+                                .audio_capture_frames = entry.event.frames,
+                                .audio_capture_system_len = @intCast(system_len),
+                                .audio_capture_system_gap_frames = entry.event.system_gap_frames,
+                                .audio_capture_microphone_gap_frames = entry.event.microphone_gap_frames,
+                                .audio_capture_remaining_frames = entry.event.remaining_frames,
+                                .audio_capture_end_of_stream = entry.event.end_of_stream,
+                            });
+                            const event_fn = entry.read_fn orelse continue;
+                            return event_fn(entry.event);
+                        },
+                        .microphone_device => |entry| {
+                            const event_fn = entry.device_fn orelse continue;
+                            return event_fn(entry.event);
+                        },
+                        .capture_access => |entry| {
+                            const event_fn = entry.access_fn orelse continue;
+                            return event_fn(entry.event);
+                        },
+                        .microphone_devices_changed => |entry| {
+                            const event_fn = entry.changed_fn orelse continue;
+                            return event_fn();
                         },
                         .video => |entry| {
                             var event = entry.event;
@@ -9172,6 +10130,7 @@ pub fn Effects(comptime Msg: type) type {
                         },
                     }
                 }
+                if (self.takeAudioCaptureReadableMsg(boundary.audio_capture_before)) |msg| return msg;
                 if (self.takeChannelStagedMsg(boundary.channel_before)) |msg| return msg;
                 if (self.takePtyStagedMsg(boundary.pty_before)) |msg| return msg;
                 if (boundary.queue_budget == 0) return null;
@@ -11274,6 +12233,110 @@ pub fn Effects(comptime Msg: type) type {
             const on_event = self.audio.on_event;
             self.audio = .{ .volume = self.audio.volume };
             self.deliverLoopAudio(.{ .key = key, .kind = .failed }, on_event);
+        }
+
+        fn failAudioCapture(self: *Self, reason: EffectAudioCaptureReason) void {
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            self.audio_capture.accepting = false;
+            self.audio_capture.sealed = true;
+            self.closeAudioCaptureProducer();
+            const occupancy = self.audioCaptureOccupancy();
+            self.deliverPending(.{ .audio_capture = .{ .event = .{
+                .key = key,
+                .state = .failed,
+                .reason = reason,
+                .sample_rate_hz = self.audio_capture.sample_rate_hz,
+                .channel_count = self.audio_capture.channel_count,
+                .available_frames = occupancy.available_frames,
+                .capacity_frames = occupancy.capacity_frames,
+                .frames_produced = occupancy.frames_produced,
+            }, .capture_fn = on_event } });
+        }
+
+        fn audioCaptureOccupancy(self: *Self) AudioCaptureOccupancy {
+            const shared = self.audio_capture_shared orelse return .{};
+            shared.mutex.lock();
+            defer shared.mutex.unlock();
+            if (shared.generation != self.audio_capture.generation) return .{};
+            const ring = shared.ring orelse return .{};
+            return .{
+                .available_frames = @intCast(ring.available_frames),
+                .capacity_frames = @intCast(ring.capacity_frames),
+                .frames_produced = ring.frames_produced,
+            };
+        }
+
+        /// Stop producer admission and retire a redundant coalesced
+        /// readability wake. A stop/failure lifecycle event reports the
+        /// final occupancy and remains the last event on that route.
+        fn closeAudioCaptureProducer(self: *Self) void {
+            if (self.audio_capture_shared) |shared| {
+                shared.mutex.lock();
+                if (shared.generation == self.audio_capture.generation) {
+                    shared.accepting = false;
+                    if (shared.readable_pending) {
+                        shared.readable_pending = false;
+                        if (shared.owner) |owner| _ = owner.pending.fetchSub(1, .seq_cst);
+                    }
+                }
+                shared.mutex.unlock();
+            }
+        }
+
+        fn rejectAudioCapture(self: *Self, reason: EffectAudioCaptureReason) void {
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            self.releaseAudioCaptureStream();
+            self.deliverPending(.{ .audio_capture = .{ .event = .{
+                .key = key,
+                .state = .rejected,
+                .reason = reason,
+            }, .capture_fn = on_event } });
+        }
+
+        fn releaseAudioCaptureStream(self: *Self) void {
+            if (!self.audio_capture.active) return;
+            var ring: ?*AudioCaptureRing = null;
+            if (self.audio_capture_shared) |shared| {
+                shared.mutex.lock();
+                if (shared.generation == self.audio_capture.generation) {
+                    shared.open = false;
+                    shared.accepting = false;
+                    if (shared.readable_pending) {
+                        shared.readable_pending = false;
+                        if (shared.owner) |owner| _ = owner.pending.fetchSub(1, .seq_cst);
+                    }
+                    shared.owner = null;
+                    ring = shared.ring;
+                    shared.ring = null;
+                }
+                shared.mutex.unlock();
+                revokeChannelWake(&shared.wake);
+            }
+            if (ring) |value| value.deinit(self.allocator);
+            self.audio_capture = .{};
+        }
+
+        fn finishMicrophoneDevices(self: *Self, state: EffectMicrophoneDeviceState) void {
+            const key = self.microphone_device_query.key;
+            const on_event = self.microphone_device_query.on_event;
+            self.microphone_device_query = .{};
+            self.deliverPending(.{ .microphone_device = .{ .event = .{
+                .key = key,
+                .state = state,
+            }, .device_fn = on_event } });
+        }
+
+        fn failCaptureAccess(self: *Self, source: EffectCaptureAccessSource) void {
+            const key = self.capture_access_query.key;
+            const on_event = self.capture_access_query.on_event;
+            self.capture_access_query = .{};
+            self.deliverPending(.{ .capture_access = .{ .event = .{
+                .key = key,
+                .source = source,
+                .status = .unavailable,
+            }, .access_fn = on_event } });
         }
 
         /// Queue an audio event Msg produced on the loop thread

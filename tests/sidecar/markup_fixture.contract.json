@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "wire_version": 3,
+  "wire_version": 5,
   "abi_version": 1,
   "compiler_version": "0.0.1",
   "entry": "tests/ts-core/markup_fixture.ts",

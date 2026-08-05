@@ -299,6 +299,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>The audio player: one event stream (<code>loaded</code>, <code>position</code>, <code>completed</code>, <code>failed</code>, <code>spectrum</code>, ...) until <code>audioStop</code> closes it</td>
     </tr>
     <tr>
+      <td><code>Cmd.audioCaptureStart</code> / <code>audioCaptureRead</code> / <code>audioCaptureStop</code> / <code>audioCaptureDiscard</code> / microphone device and access commands</td>
+      <td>macOS 15+ reliable paired s16le PCM, microphone enumeration, and explicit permission status/request operations; see <a href="/docs/audio-capture">Audio Capture</a></td>
+    </tr>
+    <tr>
       <td><code>Cmd.showWindow(label)</code> / <code>Cmd.quitApp()</code></td>
       <td>The menu-bar lifecycle verbs: un-hide + activate the labeled window (the tray "Open" consequence, the counterpart to <code>close_policy = "hide"</code>), and the real graceful terminate</td>
     </tr>

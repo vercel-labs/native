@@ -30,6 +30,7 @@ const CefConfig = types.CefConfig;
 const IconPurpose = types.IconPurpose;
 const PermissionKind = types.PermissionKind;
 const Permission = types.Permission;
+const PrivacyUsage = types.PrivacyUsage;
 const CapabilityKind = types.CapabilityKind;
 const Capability = types.Capability;
 const AppIdentity = types.AppIdentity;
@@ -87,6 +88,7 @@ const validateDescription = validation.validateDescription;
 const validateUrl = validation.validateUrl;
 const validateIcons = validation.validateIcons;
 const validatePermissions = validation.validatePermissions;
+const validatePrivacy = validation.validatePrivacy;
 const validateCapabilities = validation.validateCapabilities;
 const validateBridge = validation.validateBridge;
 const validateFrontend = validation.validateFrontend;
@@ -688,6 +690,29 @@ test "permission validation catches duplicates" {
     try std.testing.expectError(error.DuplicatePermission, validatePermissions(&.{ .network, .network }));
     try std.testing.expectError(error.DuplicatePermission, validatePermissions(&.{ .{ .custom = "com.example.custom" }, .{ .custom = "com.example.custom" } }));
     try std.testing.expectError(error.InvalidName, validatePermissions(&.{.{ .custom = "bad/name" }}));
+}
+
+test "audio permissions require valid privacy purpose strings" {
+    try validatePrivacy(.{
+        .microphone_usage = "Record your voice in meeting notes.",
+        .system_audio_usage = "Record meeting audio for transcription.",
+    }, &.{ .microphone, .system_audio });
+
+    try std.testing.expectError(error.InvalidPrivacyUsage, validatePrivacy(.{}, &.{.microphone}));
+    try std.testing.expectError(error.InvalidPrivacyUsage, validatePrivacy(.{}, &.{.system_audio}));
+    try std.testing.expectError(error.InvalidPrivacyUsage, validatePrivacy(.{ .microphone_usage = "   " }, &.{.microphone}));
+    try std.testing.expectError(error.InvalidPrivacyUsage, validatePrivacy(.{ .system_audio_usage = "bad\nvalue" }, &.{.system_audio}));
+
+    const manifest: Manifest = .{
+        .identity = .{ .id = "com.example.recorder", .name = "recorder" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .permissions = &.{ .microphone, .system_audio },
+        .privacy = PrivacyUsage{
+            .microphone_usage = "Record your voice in meeting notes.",
+            .system_audio_usage = "Record meeting audio for transcription.",
+        },
+    };
+    try validateManifest(manifest);
 }
 
 test "platform validation catches duplicates and invalid overrides" {

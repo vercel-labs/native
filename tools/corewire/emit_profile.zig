@@ -390,7 +390,7 @@ test "profile emission is deterministic and carries the library-mode surface" {
     // declares the SDK's emission path, identity-getter symbols, the
     // facade's designated entries, and the integer-slot declarations.
     try testing.expect(std.mem.indexOf(u8, first, "\"path\": \"core.contract.json\"") != null);
-    try testing.expect(std.mem.indexOf(u8, first, "\"wire_version\": 3") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "\"wire_version\": 5") != null);
     try testing.expect(std.mem.indexOf(u8, first, "\"build_id_symbol\": \"nsc_core_build_id\"") != null);
     try testing.expect(std.mem.indexOf(u8, first, "\"abi_version_symbol\": \"nsc_core_abi_version\"") != null);
     try testing.expect(std.mem.indexOf(u8, first, "\"init_export\": \"init\"") != null);
@@ -434,7 +434,7 @@ test "the profile tracks the contract's prefix and generations" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"prefix\": \"nsc_core_\"", "\"prefix\": \"app2_\"");
-    source = try std.mem.replaceOwned(u8, arena, source, "\"wire_version\": 3", "\"wire_version\": 3");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"wire_version\": 5", "\"wire_version\": 5");
     const generated = try profileFromJson(arena, source, "my_facade.ts");
     try testing.expect(std.mem.indexOf(u8, generated, "\"entry\": \"my_facade.ts\"") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "\"prefix\": \"app2_\"") != null);

@@ -18,7 +18,7 @@
 // they are stamped here too (tests/ts-core/scaffold_ide_e2e_tests.zig
 // fails the build when an example pin drifts from the bundled version).
 
-import { readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -114,12 +114,17 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
   }
 }
 
-// The committed TS examples' @native-sdk/core pins (exact, like the
-// scaffold's, so a post-publish `npm install` resolves the same content
-// the CLI materializes).
-for (const example of ['examples/soundboard-ts', 'examples/system-monitor-ts']) {
-  const examplePath = join(repoRoot, ...example.split('/'), 'package.json');
+// Every committed TS example declares @native-sdk/core for stock editor
+// tooling. Discover those manifests from the dependency itself so a new
+// unsuffixed TypeScript example cannot silently miss release stamping.
+const examplesDir = join(repoRoot, 'examples');
+for (const entry of readdirSync(examplesDir, { withFileTypes: true })) {
+  if (!entry.isDirectory()) continue;
+  const example = `examples/${entry.name}`;
+  const examplePath = join(examplesDir, entry.name, 'package.json');
+  if (!existsSync(examplePath)) continue;
   const exampleJson = JSON.parse(readFileSync(examplePath, 'utf-8'));
+  if (!exampleJson.dependencies?.['@native-sdk/core']) continue;
   if (exampleJson.dependencies?.['@native-sdk/core'] !== version) {
     exampleJson.dependencies['@native-sdk/core'] = version;
     writeFileSync(examplePath, JSON.stringify(exampleJson, null, 2) + '\n');

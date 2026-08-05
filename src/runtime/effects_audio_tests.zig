@@ -621,6 +621,207 @@ fn effectsCachePathNoExt(buffer: []u8) ![]const u8 {
     return effects_mod.audioCachePath(buffer, "/tmp/caches/app", "https://music.example.test/stream?id=42");
 }
 
+const CaptureMsg = union(enum) {
+    capture: effects_mod.EffectAudioCapture,
+    read: effects_mod.EffectAudioCaptureRead,
+    device: effects_mod.EffectMicrophoneDevice,
+    access: effects_mod.EffectCaptureAccess,
+    devices_changed,
+};
+const CaptureFx = effects_mod.Effects(CaptureMsg);
+
+test "audio capture fake covers source combinations validation and duplicate starts" {
+    var fx = CaptureFx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.startAudioCapture(.{ .key = 1, .system_audio = true, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.started, fx.takeMsg().?.capture.state);
+    fx.startAudioCapture(.{ .key = 2, .microphone = .default, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    const duplicate = fx.takeMsg().?.capture;
+    try std.testing.expectEqual(@as(u64, 2), duplicate.key);
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.rejected, duplicate.state);
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReason.already_recording, duplicate.reason);
+    const system_pcm: [3_840]u8 = @splat(7);
+    try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, fx.feedAudioCaptureFrames(.{
+        .frame_offset = 0,
+        .frame_count = 960,
+        .system_pcm = &system_pcm,
+        .system_gap_frames = 12,
+    }));
+    const readable = fx.takeMsg().?.capture;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.readable, readable.state);
+    try std.testing.expectEqual(@as(u32, 960), readable.available_frames);
+    fx.readAudioCapture(.{ .key = 1, .max_frames = 4_800, .on_read = CaptureFx.audioCaptureReadMsg(.read) });
+    const chunk = fx.takeMsg().?.read;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReadState.chunk, chunk.state);
+    try std.testing.expectEqual(@as(u32, 960), chunk.frames);
+    try std.testing.expectEqual(@as(usize, 3_840), chunk.system_pcm.len);
+    try std.testing.expectEqual(@as(u32, 12), chunk.system_gap_frames);
+    try std.testing.expectEqual(@as(usize, 0), chunk.microphone_pcm.len);
+    fx.discardAudioCapture();
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReason.discarded, fx.takeMsg().?.capture.reason);
+
+    fx.startAudioCapture(.{ .key = 3, .microphone = .default, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.started, fx.takeMsg().?.capture.state);
+    fx.discardAudioCapture();
+    _ = fx.takeMsg();
+
+    fx.startAudioCapture(.{ .key = 4, .system_audio = true, .microphone = .{ .device_id = "usb-mic" }, .sample_rate_hz = 44_100, .channel_count = 1, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.started, fx.takeMsg().?.capture.state);
+    fx.discardAudioCapture();
+    _ = fx.takeMsg();
+
+    fx.startAudioCapture(.{ .key = 5, .system_audio = true, .sample_rate_hz = 12_345, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    const invalid = fx.takeMsg().?.capture;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.rejected, invalid.state);
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReason.invalid_options, invalid.reason);
+}
+
+test "audio capture fake lists fixed device records and reports access" {
+    var fx = CaptureFx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.listMicrophoneDevices(.{ .key = 7, .on_event = CaptureFx.microphoneDeviceMsg(.device) });
+    const first = fx.takeMsg().?.device;
+    const second = fx.takeMsg().?.device;
+    const completed = fx.takeMsg().?.device;
+    try std.testing.expectEqual(effects_mod.EffectMicrophoneDeviceState.device, first.state);
+    try std.testing.expectEqualStrings("default-mic", first.id);
+    try std.testing.expect(first.is_default);
+    try std.testing.expectEqualStrings("usb-mic", second.id);
+    try std.testing.expectEqual(effects_mod.EffectMicrophoneDeviceState.completed, completed.state);
+    try std.testing.expectEqual(@as(u32, 2), completed.total);
+
+    fx.captureAccess(.{ .key = 8, .source = .microphone, .action = .status, .on_event = CaptureFx.captureAccessMsg(.access) });
+    const access = fx.takeMsg().?.access;
+    try std.testing.expectEqual(effects_mod.EffectCaptureAccessStatus.authorized, access.status);
+
+    fx.observeMicrophoneDevices(CaptureFx.microphoneDevicesChangedMsg(.devices_changed));
+    try std.testing.expect(fx.takeMicrophoneDevicesChangedMsg().? == .devices_changed);
+}
+
+test "null audio capture resolves defaults rejects missing devices and preserves partial disconnects" {
+    var null_platform: platform.NullPlatform = .{};
+    var platform_value = null_platform.platform();
+    var fx = CaptureFx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindServices(&platform_value.services);
+
+    try null_platform.setDefaultMicrophone(1);
+    fx.startAudioCapture(.{ .key = 10, .microphone = .default, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    try std.testing.expectEqualStrings("usb-mic", null_platform.capture.microphoneDeviceId());
+    const started_event = null_platform.takeAudioCaptureStarted().?.audio_capture;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.started, fx.takeAudioCaptureMsg(started_event).?.capture.state);
+    const microphone_pcm: [3_840]u8 = @splat(3);
+    try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, null_platform.pushCapturedAudioChunk(.{
+        .frame_offset = 0,
+        .frame_count = 960,
+        .microphone_pcm = &microphone_pcm,
+    }));
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.readable, fx.takeMsg().?.capture.state);
+    const disconnected_event = null_platform.disconnectMicrophone("usb-mic").?.audio_capture;
+    const disconnected = fx.takeAudioCaptureMsg(disconnected_event).?.capture;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.failed, disconnected.state);
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReason.device_disconnected, disconnected.reason);
+    try std.testing.expectEqual(@as(u32, 960), disconnected.available_frames);
+    fx.readAudioCapture(.{ .key = 10, .max_frames = 4_800, .on_read = CaptureFx.audioCaptureReadMsg(.read) });
+    const retained = fx.takeMsg().?.read;
+    try std.testing.expect(retained.end_of_stream);
+    try std.testing.expectEqual(@as(u32, 960), retained.frames);
+    _ = fx.takeMsg();
+
+    fx.startAudioCapture(.{ .key = 11, .microphone = .{ .device_id = "missing" }, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    const missing = fx.takeMsg().?.capture;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.rejected, missing.state);
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReason.device_not_found, missing.reason);
+
+    null_platform.system_audio_access = .not_authorized;
+    fx.startAudioCapture(.{ .key = 13, .system_audio = true, .on_event = CaptureFx.audioCaptureMsg(.capture) });
+    const permission = fx.takeMsg().?.capture;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.rejected, permission.state);
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReason.permission_required, permission.reason);
+}
+
+test "reliable audio capture stops at capacity and preserves every accepted frame for draining" {
+    var fx = CaptureFx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.startAudioCapture(.{
+        .key = 30,
+        .system_audio = true,
+        .sample_rate_hz = 16_000,
+        .channel_count = 1,
+        .buffer_duration_ms = 1_000,
+        .on_event = CaptureFx.audioCaptureMsg(.capture),
+    });
+    _ = fx.takeMsg();
+
+    const pcm: [640]u8 = @splat(0x5a);
+    for (0..50) |index| {
+        try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, fx.feedAudioCaptureFrames(.{
+            .frame_offset = index * 320,
+            .frame_count = 320,
+            .system_pcm = &pcm,
+        }));
+    }
+    try std.testing.expectEqual(platform.AudioCapturePushResult.full, fx.feedAudioCaptureFrames(.{
+        .frame_offset = 16_000,
+        .frame_count = 320,
+        .system_pcm = &pcm,
+    }));
+    const terminal = fx.takeMsg().?.capture;
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.failed, terminal.state);
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReason.consumer_too_slow, terminal.reason);
+    try std.testing.expectEqual(@as(u32, 16_000), terminal.available_frames);
+
+    var drained: u32 = 0;
+    while (drained < 16_000) {
+        fx.readAudioCapture(.{ .key = 30, .max_frames = 1_600, .on_read = CaptureFx.audioCaptureReadMsg(.read) });
+        const read = fx.takeMsg().?.read;
+        try std.testing.expectEqual(effects_mod.EffectAudioCaptureReadState.chunk, read.state);
+        try std.testing.expectEqual(@as(usize, read.frames) * 2, read.system_pcm.len);
+        drained += read.frames;
+        if (drained < 16_000) try std.testing.expect(!read.end_of_stream);
+    }
+    try std.testing.expectEqual(@as(u32, 16_000), drained);
+    // The terminal chunk releases the retained stream on the next drain.
+    try std.testing.expect(fx.takeMsg() == null);
+    fx.readAudioCapture(.{ .key = 30, .max_frames = 1_600, .on_read = CaptureFx.audioCaptureReadMsg(.read) });
+    try std.testing.expectEqual(effects_mod.EffectAudioCaptureReadReason.not_recording, fx.takeMsg().?.read.reason);
+}
+
+test "null microphone listing access and device-change observation are deterministic" {
+    var null_platform: platform.NullPlatform = .{};
+    var platform_value = null_platform.platform();
+    var fx = CaptureFx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindServices(&platform_value.services);
+
+    try null_platform.setDefaultMicrophone(1);
+    fx.listMicrophoneDevices(.{ .key = 20, .on_event = CaptureFx.microphoneDeviceMsg(.device) });
+    try std.testing.expectEqual(@as(usize, 1), null_platform.microphone_devices_count);
+    const first = fx.takeMicrophoneDeviceMsg(null_platform.microphoneDeviceEvent(0).microphone_device).?.device;
+    const second = fx.takeMicrophoneDeviceMsg(null_platform.microphoneDeviceEvent(1).microphone_device).?.device;
+    const completed = fx.takeMicrophoneDeviceMsg(null_platform.microphoneDeviceEvent(2).microphone_device).?.device;
+    try std.testing.expect(!first.is_default);
+    try std.testing.expect(second.is_default);
+    try std.testing.expectEqual(effects_mod.EffectMicrophoneDeviceState.completed, completed.state);
+
+    null_platform.microphone_access = .denied;
+    fx.captureAccess(.{ .key = 21, .source = .microphone, .action = .status, .on_event = CaptureFx.captureAccessMsg(.access) });
+    const access_event = null_platform.takeCaptureAccess().?.capture_access;
+    try std.testing.expectEqual(effects_mod.EffectCaptureAccessStatus.denied, fx.takeCaptureAccessMsg(access_event).?.access.status);
+
+    fx.observeMicrophoneDevices(CaptureFx.microphoneDevicesChangedMsg(.devices_changed));
+    try std.testing.expect(null_platform.microphone_devices_observing);
+    try std.testing.expect(fx.takeMicrophoneDevicesChangedMsg().? == .devices_changed);
+    fx.observeMicrophoneDevices(null);
+    try std.testing.expect(!null_platform.microphone_devices_observing);
+}
+
 test "quit while playing: the stop hook silences audio on the live platform, and app deinit after platform teardown answers inert" {
     // The desktop runner's exit ordering, replayed exactly: main defers
     // app deinit FIRST and calls the runner, whose own defers destroy

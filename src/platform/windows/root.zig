@@ -520,6 +520,7 @@ pub const WindowsPlatform = struct {
             .audio_playback,
             .audio_streaming,
             => self.web_engine == .system,
+            .system_audio_capture, .microphone_capture, .microphone_device_enumeration => false,
             // close_policy .hide: WM_CLOSE hides (ShowWindow SW_HIDE),
             // the window stays in the host map, and the tray is the
             // ONLY re-show affordance — SW_HIDE removes the taskbar

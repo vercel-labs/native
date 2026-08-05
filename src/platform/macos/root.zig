@@ -2,6 +2,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 const geometry = @import("geometry");
 const platform_mod = @import("../root.zig");
+
+fn isMacOS15OrNewer() bool {
+    // This backend is imported into every desktop target's platform tests.
+    // Keep the Darwin-only sysctl out of Linux and Windows compilation.
+    if (comptime builtin.os.tag != .macos) return false;
+    var version_buf: [64]u8 = undefined;
+    var version_len: usize = version_buf.len;
+    if (std.posix.system.sysctlbyname("kern.osproductversion", &version_buf, &version_len, null, 0) != 0) return false;
+    const version = std.mem.sliceTo(version_buf[0..@min(version_len, version_buf.len)], 0);
+    const dot = std.mem.indexOfScalar(u8, version, '.') orelse version.len;
+    const major = std.fmt.parseUnsigned(u16, version[0..dot], 10) catch return false;
+    return major >= 15;
+}
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
@@ -42,6 +55,10 @@ const AppKitEventKind = enum(c_int) {
     audio = 20,
     video = 21,
     view_focused = 22,
+    audio_capture = 23,
+    microphone_device = 24,
+    microphone_devices_changed = 25,
+    capture_access = 26,
 };
 
 const AppKitEvent = extern struct {
@@ -139,6 +156,21 @@ const AppKitEvent = extern struct {
     /// sink's pixel budget. Zeros on every other kind.
     video_width: u64,
     video_height: u64,
+    audio_capture_state: c_int,
+    audio_capture_reason: c_int,
+    audio_capture_sample_rate_hz: u32,
+    audio_capture_channel_count: u8,
+    microphone_device_state: c_int,
+    microphone_device_id: [*]const u8,
+    microphone_device_id_len: usize,
+    microphone_device_name: [*]const u8,
+    microphone_device_name_len: usize,
+    microphone_device_is_default: c_int,
+    microphone_device_index: u32,
+    microphone_device_total: u32,
+    capture_access_source: c_int,
+    capture_access_status: c_int,
+    capture_access_restart_required: c_int,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -149,6 +181,7 @@ const AppKitBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, we
 /// receiving claim was released (the host stops its frame timer),
 /// anything else one dropped frame.
 const AppKitVideoSinkPush = *const fn (context: ?*anyopaque, width: usize, height: usize, pixels: [*c]const u8, len: usize) callconv(.c) c_int;
+const AppKitAudioCaptureFramePush = *const fn (context: ?*anyopaque, token: u64, frame_offset: u64, frame_count: u32, system_pcm: [*c]const u8, system_pcm_len: usize, microphone_pcm: [*c]const u8, microphone_pcm_len: usize, system_gap_frames: u32, microphone_gap_frames: u32) callconv(.c) c_int;
 
 const shortcut_modifier_primary: u32 = 1 << 0;
 const shortcut_modifier_command: u32 = 1 << 1;
@@ -205,6 +238,11 @@ extern fn native_sdk_appkit_audio_pause(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_stop(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_seek(host: *AppKitHost, position_ms: u64) c_int;
 extern fn native_sdk_appkit_audio_set_volume(host: *AppKitHost, volume: f64) c_int;
+extern fn native_sdk_appkit_audio_capture_start(host: *AppKitHost, system_audio: c_int, microphone_kind: c_int, microphone_id: [*]const u8, microphone_id_len: usize, sample_rate_hz: u32, channel_count: u8, exclude_current_process_audio: c_int, frame_push: AppKitAudioCaptureFramePush, frame_context: ?*anyopaque, frame_token: u64) c_int;
+extern fn native_sdk_appkit_audio_capture_stop(host: *AppKitHost) void;
+extern fn native_sdk_appkit_microphone_devices(host: *AppKitHost) void;
+extern fn native_sdk_appkit_capture_access(host: *AppKitHost, source: c_int, action: c_int) void;
+extern fn native_sdk_appkit_observe_microphone_devices(host: *AppKitHost, enabled: c_int) void;
 extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_play(host: *AppKitHost) c_int;
@@ -587,6 +625,8 @@ pub const MacPlatform = struct {
     /// every push happens on the main thread (the host's frame pump is
     /// a run-loop timer), so a plain field is race-free.
     video_sink: platform_mod.VideoFrameSink = .{},
+    audio_capture_sink: ?platform_mod.AudioCaptureSink = null,
+    audio_capture_token: u64 = 0,
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!MacPlatform {
         return initWithEngine(title, size, .system);
@@ -750,6 +790,11 @@ pub const MacPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                .audio_capture_start_fn = audioCaptureStart,
+                .audio_capture_stop_fn = audioCaptureStop,
+                .microphone_devices_fn = microphoneDevices,
+                .capture_access_fn = captureAccess,
+                .microphone_devices_observe_fn = observeMicrophoneDevices,
                 .video_load_fn = videoLoad,
                 .video_load_url_fn = videoLoadUrl,
                 .video_play_fn = videoPlay,
@@ -822,6 +867,10 @@ pub const MacPlatform = struct {
             .audio_streaming,
             .audio_spectrum,
             => self.web_engine == .system,
+            .system_audio_capture,
+            .microphone_capture,
+            .microphone_device_enumeration,
+            => self.web_engine == .system and isMacOS15OrNewer(),
             // AVFoundation video ships in the AppKit host only (one
             // AVPlayer whose AVPlayerItemVideoOutput frames feed the
             // media-surface sink); the CEF host stubs the C ABI and
@@ -1007,6 +1056,26 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .width = event.video_width,
             .height = event.video_height,
         } }),
+        .audio_capture => state.emit(.{ .audio_capture = .{
+            .state = audioCaptureStateFromInt(event.audio_capture_state),
+            .reason = audioCaptureReasonFromInt(event.audio_capture_reason),
+            .sample_rate_hz = event.audio_capture_sample_rate_hz,
+            .channel_count = event.audio_capture_channel_count,
+        } }),
+        .microphone_device => state.emit(.{ .microphone_device = .{
+            .state = microphoneDeviceStateFromInt(event.microphone_device_state),
+            .id = appKitEventBytes(event.microphone_device_id, event.microphone_device_id_len),
+            .name = appKitEventBytes(event.microphone_device_name, event.microphone_device_name_len),
+            .is_default = event.microphone_device_is_default != 0,
+            .index = event.microphone_device_index,
+            .total = event.microphone_device_total,
+        } }),
+        .microphone_devices_changed => state.emit(.microphone_devices_changed),
+        .capture_access => state.emit(.{ .capture_access = .{
+            .source = if (event.capture_access_source == 1) .microphone else .system_audio,
+            .status = captureAccessStatusFromInt(event.capture_access_status),
+            .restart_required = event.capture_access_restart_required != 0,
+        } }),
         .widget_accessibility_action => if (widgetAccessibilityActionFromInt(event.widget_action)) |action| {
             state.emit(.{ .widget_accessibility_action = .{
                 .window_id = event.window_id,
@@ -1059,6 +1128,53 @@ fn videoEventKindFromInt(value: c_int) platform_mod.VideoEventKind {
         1 => .position,
         2 => .completed,
         else => .failed,
+    };
+}
+
+fn audioCaptureStateFromInt(value: c_int) platform_mod.AudioCaptureEventState {
+    return switch (value) {
+        0 => .started,
+        1 => .readable,
+        2 => .stopped,
+        3 => .failed,
+        else => .rejected,
+    };
+}
+
+fn audioCaptureReasonFromInt(value: c_int) platform_mod.AudioCaptureEventReason {
+    return switch (value) {
+        0 => .none,
+        1 => .invalid_options,
+        2 => .permission_missing,
+        3 => .permission_required,
+        4 => .already_recording,
+        5 => .device_not_found,
+        6 => .device_disconnected,
+        7 => .capture_failed,
+        8 => .no_audio,
+        9 => .consumer_too_slow,
+        10 => .discarded,
+        else => .unsupported,
+    };
+}
+
+fn microphoneDeviceStateFromInt(value: c_int) platform_mod.MicrophoneDeviceEventState {
+    return switch (value) {
+        0 => .device,
+        1 => .completed,
+        2 => .failed,
+        else => .rejected,
+    };
+}
+
+fn captureAccessStatusFromInt(value: c_int) platform_mod.CaptureAccessStatus {
+    return switch (value) {
+        0 => .authorized,
+        1 => .not_authorized,
+        2 => .not_determined,
+        3 => .denied,
+        4 => .restricted,
+        else => .unavailable,
     };
 }
 
@@ -1529,6 +1645,89 @@ fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
 fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     _ = native_sdk_appkit_audio_set_volume(self.host, volume);
+}
+
+fn audioCaptureStart(context: ?*anyopaque, config: platform_mod.AudioCaptureConfig, sink: platform_mod.AudioCaptureSink) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system or !isMacOS15OrNewer()) return error.UnsupportedService;
+    if (config.system_audio and !security.hasPermission(self.app_info.permissions, security.permission_system_audio)) return error.PermissionMissing;
+    if (config.microphone != .none and !security.hasPermission(self.app_info.permissions, security.permission_microphone)) return error.PermissionMissing;
+    self.audio_capture_token +%= 1;
+    if (self.audio_capture_token == 0) self.audio_capture_token = 1;
+    self.audio_capture_sink = sink;
+    errdefer {
+        self.audio_capture_sink = null;
+        self.audio_capture_token = 0;
+    }
+    const result = native_sdk_appkit_audio_capture_start(
+        self.host,
+        @intFromBool(config.system_audio),
+        @intFromEnum(config.microphone),
+        config.microphone_device_id.ptr,
+        config.microphone_device_id.len,
+        config.sample_rate_hz,
+        config.channel_count,
+        @intFromBool(config.exclude_current_process_audio),
+        nativeSdkAudioCapturePush,
+        self,
+        self.audio_capture_token,
+    );
+    return switch (result) {
+        0 => {},
+        1 => error.InvalidAudioCaptureOptions,
+        2 => error.AudioCaptureAlreadyActive,
+        4 => error.AudioCapturePermissionRequired,
+        5 => error.MicrophoneDeviceNotFound,
+        else => error.UnsupportedService,
+    };
+}
+
+fn nativeSdkAudioCapturePush(context: ?*anyopaque, token: u64, frame_offset: u64, frame_count: u32, system_pcm: [*c]const u8, system_pcm_len: usize, microphone_pcm: [*c]const u8, microphone_pcm_len: usize, system_gap_frames: u32, microphone_gap_frames: u32) callconv(.c) c_int {
+    const self: *MacPlatform = @ptrCast(@alignCast(context orelse return 2));
+    if (token != self.audio_capture_token) return 2;
+    const sink = self.audio_capture_sink orelse return 2;
+    const system_bytes: []const u8 = if (system_pcm_len == 0 or system_pcm == null) &.{} else system_pcm[0..system_pcm_len];
+    const microphone_bytes: []const u8 = if (microphone_pcm_len == 0 or microphone_pcm == null) &.{} else microphone_pcm[0..microphone_pcm_len];
+    return switch (sink.push(.{
+        .frame_offset = frame_offset,
+        .frame_count = frame_count,
+        .system_pcm = system_bytes,
+        .microphone_pcm = microphone_bytes,
+        .system_gap_frames = system_gap_frames,
+        .microphone_gap_frames = microphone_gap_frames,
+    })) {
+        .accepted => 0,
+        .full => 1,
+        .closed => 2,
+    };
+}
+
+fn audioCaptureStop(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    native_sdk_appkit_audio_capture_stop(self.host);
+}
+
+fn microphoneDevices(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system or !isMacOS15OrNewer()) return error.UnsupportedService;
+    if (!security.hasPermission(self.app_info.permissions, security.permission_microphone)) return error.PermissionMissing;
+    native_sdk_appkit_microphone_devices(self.host);
+}
+
+fn captureAccess(context: ?*anyopaque, source: platform_mod.CaptureAccessSource, action: platform_mod.CaptureAccessAction) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system or !isMacOS15OrNewer()) return error.UnsupportedService;
+    const permission = if (source == .system_audio) security.permission_system_audio else security.permission_microphone;
+    if (!security.hasPermission(self.app_info.permissions, permission)) return error.PermissionMissing;
+    native_sdk_appkit_capture_access(self.host, @intFromEnum(source), @intFromEnum(action));
+}
+
+fn observeMicrophoneDevices(context: ?*anyopaque, enabled: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system or !isMacOS15OrNewer()) return error.UnsupportedService;
+    if (!security.hasPermission(self.app_info.permissions, security.permission_microphone)) return error.PermissionMissing;
+    native_sdk_appkit_observe_microphone_devices(self.host, @intFromBool(enabled));
 }
 
 /// The C-callable bridge for `VideoFrameSink.push`: the sink's `push_fn`

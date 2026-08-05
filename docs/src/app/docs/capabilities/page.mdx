@@ -74,6 +74,13 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
       <td>macOS system-engine host (an MTAudioProcessingTap on the app's single AVPlayer feeding a vDSP FFT — local files, cache entries, and streams alike), Windows system WebView (process-scoped WASAPI loopback capture of THIS app's audio session only — never other apps' audio — with an in-box FFT), and Linux system WebView (GStreamer's <code>spectrum</code> element as the playbin's audio-filter; requires gst-plugins-good, probed live); hosts that cannot analyze — macOS Chromium, pre-2004 Windows, spectrum-less GStreamer setups, iOS, Android — report <code>audio_spectrum</code> unsupported and simply never send the events: honest absence, never fabricated bands</td>
     </tr>
     <tr>
+      <td><a href="/docs/audio-capture">Audio capture</a></td>
+      <td><code>fx.startAudioCapture(options)</code> / <code>fx.readAudioCapture(options)</code> / <code>fx.stopAudioCapture()</code> / <code>fx.discardAudioCapture()</code> / device and access effects</td>
+      <td><code>Cmd.audioCaptureStart</code> / <code>Cmd.audioCaptureRead</code> / <code>Cmd.audioCaptureStop</code> / <code>Cmd.audioCaptureDiscard</code> / device and access commands / <code>Sub.microphoneDevicesChanged</code></td>
+      <td><code>system_audio</code> and/or <code>microphone</code>, matching the requested sources</td>
+      <td>macOS 15+ system-engine host: reliable paired s16le PCM; microphone-only through AVFoundation, system-audio-only or combined capture through ScreenCaptureKit. Older macOS, macOS Chromium, Linux, Windows, iOS, and Android report the three capture features unsupported.</td>
+    </tr>
+    <tr>
       <td>File drops</td>
       <td><code>Event.files_dropped</code></td>
       <td><code>window.zero.on("drop:files")</code></td>

@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#import "audio_capture.h"
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -25,6 +26,7 @@
 #include <string.h>
 
 @class NativeSdkAppKitHost;
+static void NativeSdkAudioCaptureCallback(void *context, const native_sdk_audio_capture_event_t *captureEvent);
 
 static const NSUInteger NativeSdkMaxChildWebViews = 16;
 static const NSUInteger NativeSdkMaxNativeViews = 32;
@@ -831,6 +833,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * installed by the load entries. Every timer callback runs on the main
  * run loop, so no locking guards the pair. */
 @property(nonatomic, assign) native_sdk_appkit_video_sink_push_t videoSinkPush;
+@property(nonatomic, assign) native_sdk_audio_capture_t *audioCapture;
 @property(nonatomic, assign) void *videoSinkContext;
 /* The reusable RGBA conversion target: malloc'd once per load to the
  * output's max frame size, freed on stop/replace. Frames are converted
@@ -1076,6 +1079,44 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (BOOL)handleShortcutEvent:(NSEvent *)event;
 - (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event;
 @end
+
+static void NativeSdkAudioCaptureCallback(void *context, const native_sdk_audio_capture_event_t *captureEvent) {
+    NativeSdkAppKitHost *host = (__bridge NativeSdkAppKitHost *)context;
+    if (!host || !captureEvent) return;
+    native_sdk_appkit_event_t event = { .timestamp_ns = NativeSdkTimestampNanoseconds() };
+    switch (captureEvent->kind) {
+        case NATIVE_SDK_AUDIO_CAPTURE_EVENT_CAPTURE:
+            event.kind = NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE;
+            event.audio_capture_state = captureEvent->state;
+            event.audio_capture_reason = captureEvent->reason;
+            event.audio_capture_sample_rate_hz = captureEvent->sample_rate_hz;
+            event.audio_capture_channel_count = captureEvent->channel_count;
+            break;
+        case NATIVE_SDK_AUDIO_CAPTURE_EVENT_DEVICE:
+            event.kind = NATIVE_SDK_APPKIT_EVENT_MICROPHONE_DEVICE;
+            event.microphone_device_state = captureEvent->state;
+            event.microphone_device_id = captureEvent->device_id;
+            event.microphone_device_id_len = captureEvent->device_id_len;
+            event.microphone_device_name = captureEvent->device_name;
+            event.microphone_device_name_len = captureEvent->device_name_len;
+            event.microphone_device_is_default = captureEvent->device_is_default;
+            event.microphone_device_index = captureEvent->device_index;
+            event.microphone_device_total = captureEvent->device_total;
+            break;
+        case NATIVE_SDK_AUDIO_CAPTURE_EVENT_DEVICES_CHANGED:
+            event.kind = NATIVE_SDK_APPKIT_EVENT_MICROPHONE_DEVICES_CHANGED;
+            break;
+        case NATIVE_SDK_AUDIO_CAPTURE_EVENT_ACCESS:
+            event.kind = NATIVE_SDK_APPKIT_EVENT_CAPTURE_ACCESS;
+            event.capture_access_source = captureEvent->access_source;
+            event.capture_access_status = captureEvent->access_status;
+            event.capture_access_restart_required = captureEvent->restart_required;
+            break;
+        default:
+            return;
+    }
+    [host emitEvent:event];
+}
 
 // Recursively re-emit the gpu-surface resize event for every metal
 // surface under `view` (the tall-titlebar chrome re-query path).
@@ -7322,6 +7363,7 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
     self.shortcuts = @[];
+    self.audioCapture = native_sdk_audio_capture_create(NativeSdkAudioCaptureCallback, (__bridge void *)self);
     [self configureApplication];
     NativeSdkLaunchLap("app_configured");
 
@@ -11644,6 +11686,11 @@ void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host) {
     if (!host) {
         return;
     }
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (object.audioCapture) {
+        native_sdk_audio_capture_destroy(object.audioCapture);
+        object.audioCapture = NULL;
+    }
     CFBridgingRelease(host);
 }
 
@@ -11755,6 +11802,32 @@ int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t positi
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     return [object audioSetVolume:volume];
+}
+
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int system_audio, int microphone_kind, const char *microphone_id, size_t microphone_id_len, uint32_t sample_rate_hz, uint8_t channel_count, int exclude_current_process_audio, native_sdk_appkit_audio_capture_frame_push_t frame_push, void *frame_context, uint64_t frame_token) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.audioCapture) return 6;
+    return native_sdk_audio_capture_start(object.audioCapture, system_audio, microphone_kind, microphone_id, microphone_id_len, sample_rate_hz, channel_count, exclude_current_process_audio, frame_push, frame_context, frame_token);
+}
+
+void native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    native_sdk_audio_capture_stop(object.audioCapture);
+}
+
+void native_sdk_appkit_microphone_devices(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    native_sdk_audio_capture_list_microphones(object.audioCapture);
+}
+
+void native_sdk_appkit_capture_access(native_sdk_appkit_host_t *host, int source, int action) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    native_sdk_capture_access(object.audioCapture, source, action);
+}
+
+void native_sdk_appkit_observe_microphone_devices(native_sdk_appkit_host_t *host, int enabled) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    native_sdk_audio_capture_observe_microphones(object.audioCapture, enabled);
 }
 
 int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
