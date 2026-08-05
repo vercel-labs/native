@@ -1145,3 +1145,349 @@ test "box drawing classifies the block and ignores neighbors" {
     try testing.expect(box.mergesHorizontally(0x2500));
     try testing.expect(!box.mergesHorizontally(0x2502));
 }
+
+// ------------------------------------------ full-screen paint coverage
+//
+// The tests above pin painter POLICY at cell scale. These pin the thing
+// a terminal host actually cares about: how much of a real screen
+// reaches the glass at the WIDGET tier — the shared per-view stores, the
+// reserves held back for the chrome around the grid — and that whatever
+// does not reach it is reported instead of silently missing.
+
+/// The widget tier's options, exactly as `emitTerminalWidget` builds
+/// them: the frame command ceiling minus the chrome reserve, plus the
+/// text, path, and glyph reserves.
+fn widgetPaintOptions(frame: geometry.RectF) grid_model.TerminalPaintOptions {
+    return .{
+        .frame = frame,
+        .tokens = .{},
+        .id_base = 1,
+        .command_budget = canvas.max_display_list_commands - grid_model.widget_command_reserve,
+        .text_reserve = grid_model.widget_text_reserve,
+        .path_reserve = grid_model.widget_path_reserve,
+        .glyph_budget = grid_model.widget_glyph_budget,
+    };
+}
+
+/// Rows with ink in the finished list, counted independently of the
+/// painter's own bookkeeping: text-run ids are
+/// `paintIdBase(id_base) + (row << 16) + 0x8000 + column`, so the row
+/// index falls straight out of the id.
+fn paintedRowsFromIds(list: canvas.DisplayList, id_base: u64) usize {
+    const base = grid_model.paintIdBase(id_base);
+    var highest: ?usize = null;
+    for (list.commands) |command| {
+        const text = switch (command) {
+            .draw_text => |value| value,
+            else => continue,
+        };
+        const offset = text.id -% base;
+        const row: usize = @intCast(offset >> 16);
+        if (highest == null or row > highest.?) highest = row;
+    }
+    return if (highest) |row| row + 1 else 0;
+}
+
+const screen_cols: usize = 200;
+const screen_rows: usize = 60;
+
+/// A cell's cluster: one byte out of a fixed alphabet, so a screen's
+/// text cost is one byte per cell (a terminal's ordinary case) and its
+/// distinct-glyph cost stays a small alphabet.
+fn screenCluster(index: usize) []const u8 {
+    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const at = index % alphabet.len;
+    return alphabet[at .. at + 1];
+}
+
+/// A colour nothing merges with: consecutive indices always differ in
+/// the red channel, so neither the background-run nor the text-run
+/// merge can join two neighbours.
+fn screenColor(index: usize, bias: f32) canvas.Color {
+    const red_channel: f32 = @floatFromInt(index % 251);
+    const green_channel: f32 = @floatFromInt((index / 251) % 241);
+    return canvas.Color.rgba(red_channel / 251.0, green_channel / 241.0, bias, 1);
+}
+
+/// Build a `screen_cols` x `screen_rows` viewport whose every cell
+/// carries its own foreground and background — the truecolor worst
+/// case, where nothing merges and every cell costs one background
+/// command plus one text command.
+fn buildTruecolorScreen(
+    cells: []grid_model.TerminalCell,
+    rows: []grid_model.TerminalRow,
+) void {
+    for (rows, 0..) |*row, row_index| {
+        const row_cells = cells[row_index * screen_cols ..][0..screen_cols];
+        for (row_cells, 0..) |*entry, column| {
+            const index = row_index * screen_cols + column;
+            entry.* = .{
+                .cp = screenCluster(index)[0],
+                .cluster = screenCluster(index),
+                .fg = screenColor(index, 0.25),
+                .bg = screenColor(index, 0.75),
+            };
+        }
+        row.* = .{ .cells = row_cells };
+    }
+}
+
+/// The same viewport with REALISTIC styling: a styled span every four
+/// columns (50 foreground runs per row) over two background bands — a
+/// heavier read of syntax-highlighted source, an htop meter row, or a
+/// colored build log, at ~52 commands per row.
+fn buildStyledScreen(
+    cells: []grid_model.TerminalCell,
+    rows: []grid_model.TerminalRow,
+) void {
+    for (rows, 0..) |*row, row_index| {
+        const row_cells = cells[row_index * screen_cols ..][0..screen_cols];
+        for (row_cells, 0..) |*entry, column| {
+            const index = row_index * screen_cols + column;
+            entry.* = .{
+                .cp = screenCluster(index)[0],
+                .cluster = screenCluster(index),
+                .fg = screenColor(column / 4, 0.25),
+                .bg = if (column < 24) screenColor(row_index, 0.75) else null,
+            };
+        }
+        row.* = .{ .cells = row_cells };
+    }
+}
+
+test "a truecolor 200x60 screen reports exactly how many rows it could paint" {
+    // The measurement this whole budget story turns on. Every cell
+    // carries its own foreground AND background, so nothing merges:
+    // 200 background runs + 200 text runs per row = ~400 commands, and
+    // 60 of those rows want ~24,000 against a 4,096-command frame. The
+    // painter's job here is NOT to fit it — it cannot, and the module
+    // header says why — but to paint whole rows from the top, stop, and
+    // SAY SO.
+    const cells = try testing.allocator.alloc(grid_model.TerminalCell, screen_cols * screen_rows);
+    defer testing.allocator.free(cells);
+    const rows = try testing.allocator.alloc(grid_model.TerminalRow, screen_rows);
+    defer testing.allocator.free(rows);
+    buildTruecolorScreen(cells, rows);
+
+    const commands = try testing.allocator.alloc(canvas.CanvasCommand, canvas.max_display_list_commands);
+    defer testing.allocator.free(commands);
+    var builder = canvas.Builder.init(commands);
+    const options = widgetPaintOptions(geometry.RectF.init(0, 0, 1600, 1200));
+    const report = try grid_model.paintReport(baseGrid(rows), &builder, options);
+
+    std.debug.print(
+        "\n[terminal] truecolor {d}x{d}: {d}/{d} rows painted, {d} commands, {d} text bytes, stopped_by={s} (budget {d} commands)\n",
+        .{
+            screen_cols,                   screen_rows,
+            report.rows_painted,           report.rows_total,
+            builder.len,                   builder.text_byte_len,
+            @tagName(report.stopped_by.?), options.command_budget,
+        },
+    );
+
+    // Whole rows only, counted from the ids rather than the painter's
+    // own counter.
+    try testing.expectEqual(report.rows_painted, paintedRowsFromIds(builder.displayList(), options.id_base));
+    // The command budget is what runs out — not text (60 rows of 200
+    // one-byte cells is 12 KB against a 64 KiB store) and not glyphs
+    // (36 distinct code points).
+    try testing.expectEqual(grid_model.TerminalPaintStop.commands, report.stopped_by.?);
+    try testing.expect(report.truncated());
+    try testing.expect(builder.len <= options.command_budget);
+    // Truncation is on the record, not just in the return value.
+    const note = builder.degradation orelse return error.TestExpectedDegradationNote;
+    try testing.expectEqual(canvas.DisplayListStore.commands, note.store);
+    try testing.expectEqual(options.id_base, note.id);
+    try testing.expectEqual(report.rows_painted, note.produced);
+    try testing.expectEqual(screen_rows, note.requested);
+    // The honest floor this raise bought: ~400 commands a row against a
+    // 3,840-command budget is nine whole rows, up from four at the old
+    // 2,048 ceiling. Pinned as a floor so a future costing regression
+    // that halves it fails here.
+    try testing.expect(report.rows_painted >= 9);
+}
+
+test "a realistically styled 200x60 screen paints every row" {
+    // The case the budget must actually carry: 50 foreground runs and a
+    // couple of background runs per row — syntax-highlighted source,
+    // htop, a colored build log. At the old 2,048-command ceiling this
+    // screen painted 34 of its 60 rows; the whole point of the raise is
+    // that it now paints all 60.
+    const cells = try testing.allocator.alloc(grid_model.TerminalCell, screen_cols * screen_rows);
+    defer testing.allocator.free(cells);
+    const rows = try testing.allocator.alloc(grid_model.TerminalRow, screen_rows);
+    defer testing.allocator.free(rows);
+    buildStyledScreen(cells, rows);
+
+    const commands = try testing.allocator.alloc(canvas.CanvasCommand, canvas.max_display_list_commands);
+    defer testing.allocator.free(commands);
+    var builder = canvas.Builder.init(commands);
+    const options = widgetPaintOptions(geometry.RectF.init(0, 0, 1600, 1200));
+    const report = try grid_model.paintReport(baseGrid(rows), &builder, options);
+
+    std.debug.print(
+        "\n[terminal] styled {d}x{d}: {d}/{d} rows painted, {d} commands, {d} text bytes\n",
+        .{ screen_cols, screen_rows, report.rows_painted, report.rows_total, builder.len, builder.text_byte_len },
+    );
+
+    try testing.expectEqual(screen_rows, report.rows_painted);
+    try testing.expectEqual(screen_rows, paintedRowsFromIds(builder.displayList(), options.id_base));
+    try testing.expect(report.stopped_by == null);
+    try testing.expect(!report.truncated());
+    // A complete paint leaves no degradation note behind.
+    try testing.expect(builder.degradation == null);
+}
+
+test "a viewport taller than its frame is clipped, not truncated" {
+    // Rows below the frame's bottom edge have nowhere to paint. That is
+    // a viewport ending, not a budget eating content, and it must not
+    // raise the degradation alarm.
+    const row_a = comptime asciiRow("first", white);
+    const row_b = comptime asciiRow("second", white);
+    const rows = [_]grid_model.TerminalRow{ .{ .cells = &row_a }, .{ .cells = &row_b } };
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const metrics = grid_model.cellMetrics(canvas.DesignTokens{});
+    const report = try grid_model.paintReport(baseGrid(&rows), &builder, .{
+        // One cell tall: the second row starts past the bottom.
+        .frame = geometry.RectF.init(0, 0, 400, metrics.height),
+        .tokens = .{},
+        .id_base = 1,
+    });
+
+    try testing.expectEqual(@as(usize, 1), report.rows_painted);
+    try testing.expectEqual(grid_model.TerminalPaintStop.viewport, report.stopped_by.?);
+    try testing.expect(!report.truncated());
+    try testing.expect(builder.degradation == null);
+}
+
+test "a text-budget stop names the text store on the builder" {
+    // The other cliff a wide screen can hit: the frame's text store,
+    // shared with every other widget's glyphs. It must report as text,
+    // not as commands — an author who reads "commands" would tune the
+    // wrong knob.
+    const row_a = comptime asciiRow("aaaa", white);
+    const row_b = comptime asciiRow("bbbb", white);
+    const rows = [_]grid_model.TerminalRow{ .{ .cells = &row_a }, .{ .cells = &row_b } };
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const report = try grid_model.paintReport(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .id_base = 7,
+        // Room for row a's four bytes and nothing more.
+        .text_reserve = canvas.max_display_list_text_bytes - 6,
+    });
+
+    try testing.expectEqual(@as(usize, 1), report.rows_painted);
+    try testing.expectEqual(grid_model.TerminalPaintStop.text_bytes, report.stopped_by.?);
+    const note = builder.degradation orelse return error.TestExpectedDegradationNote;
+    try testing.expectEqual(canvas.DisplayListStore.text_bytes, note.store);
+    try testing.expectEqual(@as(u64, 7), note.id);
+    try testing.expectEqual(@as(usize, 1), note.produced);
+    try testing.expectEqual(@as(usize, 2), note.requested);
+}
+
+test "a grid that cannot seat its prologue reports painting nothing" {
+    // The loudest degradation: a builder so full the grid cannot even
+    // lay down its background. Silence here reads as "the terminal
+    // widget is broken".
+    const row = comptime asciiRow("row", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row }};
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const report = try grid_model.paintReport(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .id_base = 3,
+        // Under the painter's own fixed prologue/epilogue overhead.
+        .command_budget = 4,
+    });
+
+    try testing.expectEqual(@as(usize, 0), report.rows_painted);
+    try testing.expectEqual(@as(usize, 0), builder.len);
+    try testing.expectEqual(grid_model.TerminalPaintStop.commands, report.stopped_by.?);
+    const note = builder.degradation orelse return error.TestExpectedDegradationNote;
+    try testing.expectEqual(@as(usize, 0), note.produced);
+    try testing.expectEqual(@as(usize, 1), note.requested);
+}
+
+test "widening a pane dirties the columns it reveals" {
+    // The stale-column bug's display-list tier: a pane painted wide,
+    // repainted narrow (a split opening), then wide again (the split
+    // collapsing). The columns the narrow frame hid must come back
+    // BLANK, which means the narrow -> wide diff has to name them dirty
+    // — a repaint bounded by the narrow pane's right edge leaves the old
+    // wide frame's glyphs standing exactly where they were.
+    //
+    // The painter itself is stateless (it rebuilds the list every
+    // frame), so what this pins is that the rebuilt list's diff covers
+    // the revealed region. The retained PACKET tier has its own hole
+    // here — it erases clips entirely — and its own regression test
+    // (runtime/canvas_frame_patch_tests.zig).
+    const wide_cells = comptime asciiRow("phalls-Mac-mini ~ %", white);
+    const narrow_cells = comptime asciiRow("phalls-Mac-min", white);
+    const wide_rows = [_]grid_model.TerminalRow{ .{ .cells = &wide_cells }, .{ .cells = &wide_cells } };
+    const narrow_rows = [_]grid_model.TerminalRow{ .{ .cells = &narrow_cells }, .{} };
+
+    const metrics = grid_model.cellMetrics(canvas.DesignTokens{});
+    const wide_frame = geometry.RectF.init(0, 0, metrics.width * 40, metrics.height * 2);
+    const narrow_frame = geometry.RectF.init(0, 0, metrics.width * 20, metrics.height * 2);
+
+    var wide_commands: [128]canvas.CanvasCommand = undefined;
+    var wide_builder = try paintInto(baseGrid(&wide_rows), &wide_commands, .{
+        .frame = wide_frame,
+        .tokens = .{},
+        .id_base = 11,
+    });
+    var narrow_commands: [128]canvas.CanvasCommand = undefined;
+    var narrow_builder = try paintInto(baseGrid(&narrow_rows), &narrow_commands, .{
+        .frame = narrow_frame,
+        .tokens = .{},
+        .id_base = 11,
+    });
+
+    // The frame that reveals the hidden columns: narrow list -> wide list.
+    var changes: [512]canvas.DiffChange = undefined;
+    const reveal = try canvas.DisplayList.diff(
+        narrow_builder.displayList(),
+        wide_builder.displayList(),
+        &changes,
+    );
+    try testing.expect(reveal.len > 0);
+    var dirty: ?geometry.RectF = null;
+    for (reveal) |change| {
+        const bounds = change.dirty_bounds orelse continue;
+        dirty = if (dirty) |current| geometry.RectF.unionWith(current, bounds) else bounds;
+    }
+    const revealed = dirty orelse return error.TestExpectedDirtyBounds;
+    // Every column the narrow pane hid is inside the repaint.
+    try testing.expect(revealed.x <= narrow_frame.width);
+    try testing.expect(revealed.x + revealed.width >= wide_frame.width);
+
+    // ...and nothing from the narrow frame survives into the wide list:
+    // both rows carry ink again, not the blank second row the narrow
+    // pane left behind.
+    try testing.expectEqual(@as(usize, 2), paintedRowsFromIds(wide_builder.displayList(), 11));
+    try testing.expectEqual(@as(usize, 1), paintedRowsFromIds(narrow_builder.displayList(), 11));
+}
+
+test "resetting a builder clears a previous frame's degradation note" {
+    const row = comptime asciiRow("row", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row }};
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try grid_model.paint(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .id_base = 3,
+        .command_budget = 4,
+    });
+    try testing.expect(builder.degradation != null);
+    builder.reset();
+    try testing.expect(builder.degradation == null);
+}

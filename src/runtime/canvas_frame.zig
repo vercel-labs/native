@@ -460,7 +460,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 var baseline_adopted = false;
                 if (self.options.pixel_present_retained_baseline) {
                     if (gatherCanvasPacketCurrentCommands(record_frame)) |current| {
-                        adoptCanvasPixelPresentBaseline(&self.views[index], current, record_frame.surface_size, record_frame.scale);
+                        adoptCanvasPixelPresentBaseline(
+                            &self.views[index],
+                            current,
+                            record_frame.surface_size,
+                            record_frame.scale,
+                            canvasPacketClipSet(record_frame.render_plan.commands),
+                        );
                         baseline_adopted = true;
                     }
                 }
@@ -585,6 +591,11 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // or carries duplicate keys — those frames present
                 // through the non-retained encoding below.
                 const current = if (view_index != null) gatherCanvasPacketCurrentCommands(canvas_frame) else null;
+                // This frame's clip rects (see `CanvasClipSet`): the
+                // render planner erases clips, so the baseline has to
+                // carry them separately for the next frame's dirty
+                // derivation to see one move.
+                const clip_set = canvasPacketClipSet(canvas_frame.render_plan.commands);
                 // Patch derivation runs eagerly with the gather (one
                 // profile stage, one scratch fill the encoder below
                 // reads); null when the view holds no usable baseline.
@@ -637,7 +648,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         else => return err,
                     };
                     self.frame_profile.end(.present, present_begin);
-                    adoptCanvasPacketBaseline(view, current_commands, packet);
+                    adoptCanvasPacketBaseline(view, current_commands, packet, clip_set);
                     view.gpu_present_packet_mode = .patch;
                     view.gpu_present_patch_bytes = base.binary.len;
                     view.gpu_present_patch_upsert_count = stats.upsert_count;
@@ -681,7 +692,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     };
                     self.frame_profile.end(.present, present_begin);
                     view.canvas_packet_generation = generation;
-                    adoptCanvasPacketBaseline(view, current_commands, packet);
+                    adoptCanvasPacketBaseline(view, current_commands, packet, clip_set);
                     view.gpu_present_packet_mode = .full;
                     view.gpu_present_patch_bytes = 0;
                     view.gpu_present_patch_upsert_count = 0;
@@ -1110,7 +1121,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     self.views[index].canvas_packet_baseline_scale == frame_options.scale)
                 {
                     if (gatherCanvasPacketCurrentCommandsFromPlan(render_plan.commands, frame_options.surface_size, render_plan.bounds)) |current| {
-                        if (canvasPacketPatchDirtyBounds(&self.views[index], current)) |patch_dirty| {
+                        if (canvasPacketPatchDirtyBounds(&self.views[index], current, canvasPacketClipSet(render_plan.commands))) |patch_dirty| {
                             var refined = patch_dirty;
                             if (overrides_dirty) |overrides_rect| refined.add(overrides_rect);
                             const clipped = bleedAlignedCanvasDirtyBounds(refined.bounds, frame_options.scale, 1, frame_options.surface_size);
@@ -1427,6 +1438,67 @@ fn gatherCanvasPacketCurrentCommandsFromPlan(render_commands: []const canvas.Ren
     return scratch.packet_current[0..count];
 }
 
+/// A frame's distinct CLIP RECTS.
+///
+/// The render planner erases `push_clip`/`pop_clip`: they never become
+/// render commands, only a `clip` field on the commands they enclose
+/// (`canvas.RenderCommand`). So the retained packet baseline — a mirror
+/// of RENDER commands — holds no key for a clip, and the refined dirty
+/// rect derived from it can only name pixels that changed commands and
+/// evicted keys cover. Pixels REVEALED by a clip that grew (or VACATED
+/// by one that shrank) belong to neither: the host scissors to a region
+/// that never reaches them and its retained backing keeps whatever it
+/// last drew there. A terminal pane widening back to full width after a
+/// split collapse is exactly that frame, and it left stale glyphs
+/// standing in the revealed columns.
+///
+/// So the refinement carries the clip set with it: rects present on one
+/// side and not the other are added to the dirty region, which covers
+/// both revealed and vacated pixels exactly. Frames whose clips did not
+/// move pay nothing, and a tween that moves a clip every frame keeps
+/// its region-scoped patch instead of resyncing.
+///
+/// The set is small by construction — one entry per clipping widget —
+/// so the fixed slot count is generous; a frame past it marks
+/// `overflow` and the refinement refuses (the caller keeps its
+/// conservative dirty bounds, which is what every frame had before this
+/// existed).
+const CanvasClipSet = struct {
+    rects: [canvas_limits.max_canvas_packet_clip_rects_per_view]geometry.RectF = undefined,
+    count: usize = 0,
+    overflow: bool = false,
+
+    fn contains(self: CanvasClipSet, rect: geometry.RectF) bool {
+        for (self.rects[0..self.count]) |entry| {
+            if (rectsEqual(entry, rect)) return true;
+        }
+        return false;
+    }
+
+    fn add(self: *CanvasClipSet, rect: geometry.RectF) void {
+        if (self.contains(rect)) return;
+        if (self.count == self.rects.len) {
+            self.overflow = true;
+            return;
+        }
+        self.rects[self.count] = rect;
+        self.count += 1;
+    }
+};
+
+fn rectsEqual(a: geometry.RectF, b: geometry.RectF) bool {
+    return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
+}
+
+fn canvasPacketClipSet(render_commands: []const canvas.RenderCommand) CanvasClipSet {
+    var set = CanvasClipSet{};
+    for (render_commands) |command| {
+        const clip = command.clip orelse continue;
+        set.add(clip);
+    }
+    return set;
+}
+
 fn canvasPacketCurrentKeyLessThan(current: []const CanvasPacketCurrentCommand, a: u32, b: u32) bool {
     return current[a].key < current[b].key;
 }
@@ -1531,7 +1603,18 @@ const CanvasPacketPatchDirty = struct {
     }
 };
 
-fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurrentCommand) ?CanvasPacketPatchDirty {
+fn canvasPacketPatchDirtyBounds(
+    view: anytype,
+    current: []const CanvasPacketCurrentCommand,
+    clips: CanvasClipSet,
+) ?CanvasPacketPatchDirty {
+    // Clip geometry first (see `CanvasClipSet`): a set too large to
+    // compare refuses the refinement outright, and any rect on one side
+    // only contributes the pixels it reveals or vacates.
+    if (clips.overflow or view.canvas_packet_baseline_clip_overflow) return null;
+    var baseline_clips = CanvasClipSet{};
+    baseline_clips.count = view.canvas_packet_baseline_clip_count;
+    for (0..baseline_clips.count) |index| baseline_clips.rects[index] = view.canvas_packet_baseline_clip_rects[index];
     const baseline_count = view.canvas_packet_baseline_count;
     const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
     const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
@@ -1547,6 +1630,12 @@ fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurr
     @memset(stable, false);
 
     var dirty = CanvasPacketPatchDirty{};
+    for (clips.rects[0..clips.count]) |rect| {
+        if (!baseline_clips.contains(rect)) dirty.add(rect);
+    }
+    for (baseline_clips.rects[0..baseline_clips.count]) |rect| {
+        if (!clips.contains(rect)) dirty.add(rect);
+    }
     for (current, 0..) |entry, index| {
         scratch.packet_upsert[index] = true;
         if (findCanvasPacketBaselineIndex(baseline_keys, baseline_sorted, entry.key)) |baseline_index| {
@@ -1663,8 +1752,13 @@ fn canvasPacketFullBinaryByteSize(
 
 /// A successful retained present (full or patch) makes `current` the
 /// view's baseline: the engine-side mirror of what the host now retains.
-fn adoptCanvasPacketBaseline(view: anytype, current: []const CanvasPacketCurrentCommand, packet: canvas.CanvasGpuPacket) void {
-    adoptCanvasBaselineEntries(view, current, packet.surface_size, packet.scale);
+fn adoptCanvasPacketBaseline(
+    view: anytype,
+    current: []const CanvasPacketCurrentCommand,
+    packet: canvas.CanvasGpuPacket,
+    clips: CanvasClipSet,
+) void {
+    adoptCanvasBaselineEntries(view, current, packet.surface_size, packet.scale, clips);
     view.canvas_packet_baseline_pixels = false;
 }
 
@@ -1673,12 +1767,24 @@ fn adoptCanvasPacketBaseline(view: anytype, current: []const CanvasPacketCurrent
 /// describes what the presented PIXEL buffer shows. Marked so the packet
 /// patch gate refuses it — only the frame planner's dirty-bounds
 /// refinement may consume a pixel-adopted baseline.
-fn adoptCanvasPixelPresentBaseline(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) void {
-    adoptCanvasBaselineEntries(view, current, surface_size, scale);
+fn adoptCanvasPixelPresentBaseline(
+    view: anytype,
+    current: []const CanvasPacketCurrentCommand,
+    surface_size: geometry.SizeF,
+    scale: f32,
+    clips: CanvasClipSet,
+) void {
+    adoptCanvasBaselineEntries(view, current, surface_size, scale, clips);
     view.canvas_packet_baseline_pixels = true;
 }
 
-fn adoptCanvasBaselineEntries(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) void {
+fn adoptCanvasBaselineEntries(
+    view: anytype,
+    current: []const CanvasPacketCurrentCommand,
+    surface_size: geometry.SizeF,
+    scale: f32,
+    clips: CanvasClipSet,
+) void {
     for (current, 0..) |entry, index| {
         view.canvas_packet_baseline_keys[index] = entry.key;
         view.canvas_packet_baseline_fingerprints[index] = entry.fingerprint;
@@ -1687,6 +1793,9 @@ fn adoptCanvasBaselineEntries(view: anytype, current: []const CanvasPacketCurren
     view.canvas_packet_baseline_count = current.len;
     view.canvas_packet_baseline_surface_size = surface_size;
     view.canvas_packet_baseline_scale = scale;
+    for (clips.rects[0..clips.count], 0..) |rect, index| view.canvas_packet_baseline_clip_rects[index] = rect;
+    view.canvas_packet_baseline_clip_count = clips.count;
+    view.canvas_packet_baseline_clip_overflow = clips.overflow;
     view.canvas_packet_baseline_valid = true;
 }
 

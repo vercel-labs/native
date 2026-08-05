@@ -375,7 +375,50 @@ fn nonNegative(value: f32) f32 {
 /// `max_canvas_text_bytes_per_view` draw-text budget — a lockstep test
 /// keeps the two from drifting — so the store can only overflow on a
 /// frame the per-view display-list copy would refuse anyway.
-pub const max_display_list_text_bytes: usize = 32768;
+///
+/// Raised 32 KiB -> 64 KiB with the terminal work: a full-width
+/// terminal viewport is ONE widget whose every visible cell is a
+/// presented byte (a 300x100 grid is ~30 KB before any chrome, and a
+/// split of two such panes doubles it), so the old store made a wide
+/// screen degrade to fewer painted rows while 96% of the command budget
+/// sat unused. See `canvas_limits.max_canvas_text_bytes_per_view` for
+/// the memory accounting.
+pub const max_display_list_text_bytes: usize = 65536;
+
+/// Commands one view's display list may hold. Mirrors the runtime's
+/// per-view `max_canvas_commands_per_view` — a lockstep test keeps the
+/// two from drifting — so canvas-tier emitters that must size their own
+/// degradation against the frame ceiling (the terminal grid painter and
+/// its tests) can read it without importing the runtime.
+pub const max_display_list_commands: usize = 4096;
+
+/// A per-view store an emitter can run out of mid-frame.
+pub const DisplayListStore = enum { commands, text_bytes, path_elements, glyphs };
+
+/// Content an emitter DROPPED because a per-view store ran out.
+///
+/// Almost every emitter fails the frame loudly instead
+/// (`error.DisplayListFull` and friends). The terminal grid painter is
+/// the deliberate exception: a screen denser than the display list can
+/// express paints fewer COMPLETE rows so the rest of the frame still
+/// reaches the glass. Degrading is the right call; degrading SILENTLY
+/// is not — a user staring at a half-blank terminal has no way to learn
+/// that a budget, not the program, ate the bottom of the screen. So the
+/// painter records what it dropped here, `Builder.reset` clears it, and
+/// the runtime turns a change in this record into one teaching log line
+/// (canvas_widget_display.zig). Direct painter callers read it off the
+/// builder, or take the richer `terminal_grid.paintReport` return.
+pub const DisplayListDegradation = struct {
+    /// The emitter's identity — the terminal widget's id (the value
+    /// handed to `terminal_grid.paintIdBase`), 0 for anonymous paints.
+    id: ObjectId = 0,
+    /// The store that ran out.
+    store: DisplayListStore,
+    /// Units the emitter placed and units it was handed, in the
+    /// emitter's own terms (a terminal grid counts ROWS).
+    produced: usize = 0,
+    requested: usize = 0,
+};
 
 pub const Builder = struct {
     commands: []CanvasCommand,
@@ -412,6 +455,12 @@ pub const Builder = struct {
     /// its forced clip contains the fallback.
     text_bytes: [max_display_list_text_bytes]u8 = undefined,
     text_byte_len: usize = 0,
+    /// What this frame's emitters could NOT place (see
+    /// `DisplayListDegradation`). Null is the healthy frame; the last
+    /// emitter to run short wins, which is the one an author must fix
+    /// first. Never an error channel — the frame it describes is a
+    /// complete, presentable frame that is missing content.
+    degradation: ?DisplayListDegradation = null,
 
     pub fn init(commands: []CanvasCommand) Builder {
         return .{ .commands = commands };
@@ -422,6 +471,14 @@ pub const Builder = struct {
         self.path_element_len = 0;
         self.label_byte_len = 0;
         self.text_byte_len = 0;
+        self.degradation = null;
+    }
+
+    /// Record dropped content on the frame being built (see
+    /// `DisplayListDegradation`). Emitters call this INSTEAD of failing
+    /// when their contract is to degrade.
+    pub fn noteDegradation(self: *Builder, value: DisplayListDegradation) void {
+        self.degradation = value;
     }
 
     /// Reserve `count` path elements in the builder-owned store. The

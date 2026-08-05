@@ -23,7 +23,7 @@ namespace {
  * version or layout disagreement is a refused present, which makes the
  * runtime resynchronize/fall back instead of drawing corrupt content. */
 constexpr uint8_t kPacketVersion = 5;
-constexpr size_t kRetainedCommandCap = 2048;
+constexpr size_t kRetainedCommandCap = 4096;
 constexpr size_t kDirtyRectCap = kWindowsGpuDirtyRectCap;
 constexpr uint32_t kMaxSurfacePixels = 8192;
 constexpr float kBezierCircle = 0.5522847498307936f;

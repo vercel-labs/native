@@ -16,7 +16,36 @@ const canvas = @import("canvas");
 // in the Runtime (in-place constructed, large fields left uninitialized),
 // measured at 61.3 MiB -> 119.3 MiB (RuntimeView 1.12 MiB -> 2.65 MiB x 32
 // view slots); pages are only touched as views use their capacity.
-pub const max_canvas_commands_per_view: usize = 2048;
+//
+// Raised again (2048 -> 4096) for the TERMINAL surface, which is the
+// densest widget the toolkit hosts: a terminal row costs one background
+// command per contiguous same-colour run plus one text command per
+// contiguous same-foreground run, so a styled 200-column row runs 30-60
+// commands where a whole three-pane desktop view runs a few hundred. At
+// 2048 a 60-row viewport had ~30 commands per row to spend and a
+// realistically colored screen (syntax highlighting, htop meters, a
+// colored build log) truncated from the bottom; 4096 doubles that to
+// ~64. Measured cost: each command slot carries ~696 B across the
+// view's retained mirrors (the display list 120 B, the presented mirror
+// 40 B, the packet baseline key/fingerprint/bounds 32 B, render
+// animations 136 B, render overrides 48 B, and the path-geometry,
+// image, layer, resource, visual-effect and text-layout caches 320 B),
+// so RuntimeView measures 3.44 MiB -> 4.83 MiB and the 32-slot Runtime
+// 110.0 MiB -> 154.5 MiB of fixed-capacity address space.
+//
+// This budget deliberately stops short of a MAXIMALLY dense terminal.
+// A viewport with a distinct foreground AND background per cell merges
+// nothing and wants two commands per cell: ~24,000 for 200x60, ~60,000
+// for 300x100. At ~696 B per slot that is 16 MiB and 40 MiB per view —
+// 500 MiB and 1.3 GiB across the 32 slots — and a trial raise to 8192
+// alone (255 MiB) already crashed runtime construction. Terminal
+// fidelity past realistic styling is not a number in this file; it
+// needs a packed cell-grid command the host renderers expand
+// themselves (see the header of primitives/canvas/terminal_grid.zig).
+// What this file guarantees instead is that the ceiling is never hit
+// SILENTLY: the grid painter reports the rows it dropped and the
+// runtime logs the budget by name.
+pub const max_canvas_commands_per_view: usize = 4096;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
 // icons are path commands, and a curated stroke icon lowers to ~10-25
@@ -32,7 +61,19 @@ pub const max_canvas_gradient_stops_per_view: usize = 64;
 // draw paths.
 pub const max_canvas_path_elements_per_view: usize = 2048;
 pub const max_canvas_glyphs_per_view: usize = 8192;
-pub const max_canvas_text_bytes_per_view: usize = 32768;
+// Frame TEXT bytes: every `draw_text` in the finished display list,
+// builder-owned and referenced alike. Raised 32 KiB -> 64 KiB with the
+// terminal work: a terminal viewport is one widget whose every visible
+// cell is a presented byte, so a 200x60 screen is ~12 KB and a 300x100
+// one ~30 KB before any chrome — and a split of two panes doubles that
+// while each pane must also hold back a share for the other. The old
+// 32 KiB made a wide screen degrade on TEXT with 96% of the command
+// budget unspent, which is the wrong cliff in the wrong place. Memory
+// is cheap here compared with the command budget: one byte array per
+// view (32 KiB -> 64 KiB x 32 view slots = 1 MiB -> 2 MiB), plus the
+// matching builder-owned store (`canvas.max_display_list_text_bytes`,
+// which a lockstep test keeps equal) and the display-list copy scratch.
+pub const max_canvas_text_bytes_per_view: usize = 65536;
 // Retained packet commands per gpu-surface view: the host-side command
 // dictionary that incremental (`patch`) presents edit, and the engine's
 // per-view key+fingerprint mirror that derives those patches. Derived
@@ -41,11 +82,21 @@ pub const max_canvas_text_bytes_per_view: usize = 32768;
 // loudly, before this one can. The AppKit host pins the same value
 // (NATIVE_SDK_PACKET_RETAINED_COMMAND_CAP in appkit_host.m); a frame past
 // either side's cap presents FULL (and the host drops its retained
-// state), never a partial dictionary. Engine memory is two u64 arrays:
-// 16 B x 2048 = 32 KiB per view x 32 view slots = 1 MiB fixed address
-// space; host memory is the decoded command dictionaries, realistically
-// a few hundred KB for a dense view.
+// state), never a partial dictionary. Engine memory is two u64 arrays
+// plus the per-key bounds: 32 B x 4096 = 128 KiB per view x 32 view
+// slots = 4 MiB fixed address space; host memory is the decoded command
+// dictionaries, realistically a few hundred KB for a dense view.
 pub const max_canvas_retained_packet_commands_per_view: usize = max_canvas_commands_per_view;
+// Distinct CLIP RECTS a frame's retained baseline can carry. The render
+// planner erases `push_clip`/`pop_clip` into a per-command `clip` field,
+// so no retained key names a clip and the patch-derived dirty rect
+// cannot see one move on its own — the baseline keeps the rects beside
+// the keys and the next frame adds the difference (revealed and vacated
+// pixels both). One entry per clipping widget, so 32 covers a scroll
+// pane per split plus chrome; a frame past it refuses the refinement and
+// keeps the conservative dirty bounds. Memory is 16 B x 32 = 512 B per
+// view x 32 view slots = 16 KiB.
+pub const max_canvas_packet_clip_rects_per_view: usize = 32;
 pub const max_canvas_diff_changes_per_view: usize = max_canvas_commands_per_view * 2 + 1;
 pub const max_canvas_render_animations_per_view: usize = max_canvas_commands_per_view;
 // Sized to the widget loop-animation budget below plus caret headroom:
@@ -76,12 +127,12 @@ pub const max_canvas_visual_effect_cache_actions_per_view: usize = max_canvas_vi
 // deriving this from `max_canvas_commands_per_view` makes plan-list
 // overflow structurally unreachable — the command budget fails first,
 // loudly, at build time. Memory is scratch + per-view cache: the
-// per-frame planning arrays are threadlocal (TextLayoutPlan 96 B x 2048 =
-// 192 KiB, cache entries 96 B x 2048 = 192 KiB, cache actions 96 B x
-// 4096 = 384 KiB — ~0.8 MiB once per thread, was ~0.2 MiB), and each
-// RuntimeView retains one cache-entry array (96 B x 2048 = 192 KiB x 32
-// view slots = 6 MiB fixed address space, was 1.5 MiB; pages touch only
-// as views lay out text).
+// per-frame planning arrays are threadlocal (TextLayoutPlan 96 B x 4096 =
+// 384 KiB, cache entries 96 B x 4096 = 384 KiB, cache actions 96 B x
+// 8192 = 768 KiB — ~1.5 MiB once per thread), and each RuntimeView
+// retains one cache-entry array (96 B x 4096 = 384 KiB x 32 view slots
+// = 12 MiB fixed address space; pages touch only as views lay out
+// text).
 pub const max_canvas_text_layouts_per_view: usize = max_canvas_commands_per_view;
 // Wrapped text lines across all of a frame's layout plans (the plan
 // arrays above index into one shared line pool). Sized with the

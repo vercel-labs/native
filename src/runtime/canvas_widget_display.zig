@@ -26,6 +26,67 @@ const platformWidgetAccessibilityTextRange = widget_bridge.platformWidgetAccessi
 const platformWidgetAccessibilityActions = widget_bridge.platformWidgetAccessibilityActions;
 const canvasWidgetSelectedState = widget_bridge.canvasWidgetSelectedState;
 
+const widget_display_log = std.log.scoped(.zero_canvas_widget_display);
+
+/// Per-thread emit scratch for `refreshCanvasWidgetDisplayList`.
+///
+/// These three buffers are sized from the per-view frame budgets, and at
+/// the terminal-scale command budget they no longer fit a stack frame:
+/// the display list alone is `max_canvas_commands_per_view` x 120 B, the
+/// chrome copy store carries the frame's glyph and text pools, and the
+/// diff output is twice the command budget. Together with the widget
+/// emit recursion that runs ON TOP of them, stack instances overflowed
+/// the thread (a measured segfault inside the button emitter, one budget
+/// raise after they last fit). Threadlocal, allocated once per thread,
+/// pointer stable for its lifetime — the same treatment the frame
+/// planner's scratch already gets. The refresh is a leaf frame builder
+/// and never re-enters itself, so one instance per thread is enough.
+const WidgetDisplayScratch = struct {
+    commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
+    chrome: CanvasDisplayListScratch = .{},
+    builder: canvas.Builder = undefined,
+};
+const widget_display_scratch = canvas.lazy_tls.LazyTls(WidgetDisplayScratch);
+
+/// Teach a degraded frame once, at the edge.
+///
+/// Emitters that DEGRADE instead of failing (today: the terminal grid
+/// painter, which drops whole rows rather than take the frame down)
+/// leave a `canvas.DisplayListDegradation` on the builder. A per-frame
+/// log line would drown a terminal that stays too dense for a minute,
+/// so this only speaks when the record CHANGES — the moment the screen
+/// starts losing rows, each time the loss deepens or shifts budget, and
+/// once more when it recovers. The alternative is what this replaces:
+/// a user staring at a half-blank terminal with nothing in any log.
+fn reportCanvasWidgetDisplayListDegradation(
+    view: anytype,
+    label: []const u8,
+    current: ?canvas.DisplayListDegradation,
+) void {
+    const previous = view.canvas_widget_display_list_degradation;
+    if (degradationsEqual(previous, current)) return;
+    view.canvas_widget_display_list_degradation = current;
+    if (current) |note| {
+        widget_display_log.warn(
+            "view \"{s}\": widget @{d} painted {d} of {d} rows — the frame's canvas_limits.max_canvas_{s}_per_view budget ran out. The rest of the surface is bare background; reduce the widget's size or its styling density, or raise the budget.",
+            .{ label, note.id, note.produced, note.requested, @tagName(note.store) },
+        );
+    } else if (previous) |note| {
+        widget_display_log.info(
+            "view \"{s}\": widget @{d} paints all {d} rows again (the {s} budget recovered)",
+            .{ label, note.id, note.requested, @tagName(note.store) },
+        );
+    }
+}
+
+fn degradationsEqual(a: ?canvas.DisplayListDegradation, b: ?canvas.DisplayListDegradation) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return left.id == right.id and left.store == right.store and
+        left.produced == right.produced and left.requested == right.requested;
+}
+
 pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
     return struct {
         pub fn emitCanvasWidgetDisplayList(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
@@ -336,24 +397,33 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // so `first_view_built` -> this = reconcile + emit.
             defer launch_timing.lapOnce("first_display_list_emitted");
 
-            var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var chrome_storage = CanvasDisplayListScratch{};
-            var builder = canvas.Builder.init(&commands);
+            const scratch = widget_display_scratch.get();
+            scratch.chrome = .{};
+            scratch.builder = canvas.Builder.init(&scratch.commands);
+            const builder = &scratch.builder;
+            const chrome_storage = &scratch.chrome;
             const current = self.views[view_index].canvasDisplayList();
             const prefix_count = self.views[view_index].canvas_widget_display_list_prefix_count;
             const suffix_count = self.views[view_index].canvas_widget_display_list_suffix_count;
             if (prefix_count > current.commands.len or suffix_count > current.commands.len - prefix_count) return error.InvalidCommand;
-            for (current.commands[0..prefix_count]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
-            try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[view_index].widget_tokens, self.views[view_index].canvasWidgetRenderState());
+            for (current.commands[0..prefix_count]) |command| try chrome_storage.appendCopiedCommand(builder, command);
+            try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(builder, self.views[view_index].widget_tokens, self.views[view_index].canvasWidgetRenderState());
             const suffix_start = current.commands.len - suffix_count;
-            for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
+            for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(builder, command);
 
             const display_list = builder.displayList();
+            // Content an emitter DROPPED rather than fail the frame (the
+            // terminal grid's row-atomic degradation). The frame below is
+            // valid and presentable; what it is missing must not be.
+            reportCanvasWidgetDisplayListDegradation(
+                &self.views[view_index],
+                self.views[view_index].label,
+                builder.degradation,
+            );
             if (display_list.commands.len + self.views[view_index].canvas_widget_display_list_reserved_count > max_canvas_commands_per_view) {
                 return error.CanvasCommandLimitReached;
             }
-            var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
-            const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
+            const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &scratch.changes);
             try self.views[view_index].copyCanvasDisplayList(display_list);
             reconcileCanvasWidgetCaretBlink(self, view_index);
             reconcileCanvasWidgetLoopAnimations(self, view_index);

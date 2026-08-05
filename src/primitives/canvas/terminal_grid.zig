@@ -22,6 +22,24 @@
 //! rows instead of failing the whole frame. Each ceiling's preflight
 //! mirrors the paint loop's emissions exactly; counting bytes the loop
 //! would suppress would silently blank every row after a paintable one.
+//! Degrading is never SILENT: `paintReport` returns the rows that
+//! reached the list and the store that stopped it, and every paint —
+//! including the void-returning `paint` — records the same fact on the
+//! builder (`canvas.DisplayListDegradation`) for the runtime and the
+//! host app to surface. A user looking at a half-blank terminal must be
+//! able to learn that a budget, not their program, ate the bottom of
+//! the screen.
+//!
+//! What the budgets CANNOT do: a screen whose every cell carries its
+//! own foreground and background costs two commands per cell (one
+//! background run, one text run — nothing merges), so a 200x60
+//! truecolor viewport wants ~24,000 display-list commands and a 300x100
+//! one ~60,000. The per-view command budget is 4,096, and each slot
+//! costs ~700 B across the view's retained mirrors, so that density is
+//! not reachable by raising a number: it needs a PACKED CELL-GRID
+//! COMMAND the host renderers expand themselves. Until then the budgets
+//! carry realistic styling (a syntax-highlighted editor, htop, a
+//! colored build log) and say so out loud when they cannot.
 
 const std = @import("std");
 const canvas = @import("root.zig");
@@ -286,6 +304,62 @@ pub const TerminalPaintOptions = struct {
     glyph_budget: usize = 0,
 };
 
+/// What stopped a paint short of the grid's last row.
+///
+/// The four store values are BUDGET losses — content the frame could
+/// not hold. `.viewport` is not a loss at all: rows starting below the
+/// frame's bottom edge have nowhere to paint, which is what a viewport
+/// taller than its widget honestly looks like. `.torn` is the
+/// defensive case: a builder store hit its floor mid-row despite the
+/// preflights, and the partial row was rolled back whole.
+pub const TerminalPaintStop = enum {
+    commands,
+    text_bytes,
+    path_elements,
+    glyphs,
+    viewport,
+    torn,
+
+    /// Whether this stop means content was LOST to a budget (as opposed
+    /// to a viewport that simply ends).
+    pub fn isBudget(self: TerminalPaintStop) bool {
+        return self != .viewport;
+    }
+};
+
+/// What one paint actually put on the glass.
+///
+/// `rows_painted < rows_total` with a budget `stopped_by` is
+/// TRUNCATION: the rows past `rows_painted` are not on the glass and
+/// the surface below them is bare grid background. Callers surface it
+/// (a status line, a log line, a smaller requested grid); the painter
+/// additionally records budget stops on the builder, so callers of the
+/// void-returning `paint` are never left guessing.
+pub const TerminalPaintReport = struct {
+    /// Rows the producer handed over.
+    rows_total: usize = 0,
+    /// Rows painted COMPLETE, counted from the top (the painter never
+    /// skips a row and resumes: it stops).
+    rows_painted: usize = 0,
+    stopped_by: ?TerminalPaintStop = null,
+
+    /// Content was lost to a budget (not merely clipped by the frame).
+    pub fn truncated(self: TerminalPaintReport) bool {
+        const stop = self.stopped_by orelse return false;
+        return stop.isBudget();
+    }
+
+    fn store(stop: TerminalPaintStop) ?canvas.DisplayListStore {
+        return switch (stop) {
+            .commands, .torn => .commands,
+            .text_bytes => .text_bytes,
+            .path_elements => .path_elements,
+            .glyphs => .glyphs,
+            .viewport => null,
+        };
+    }
+};
+
 /// The painter's command-id base for a caller's `id_base` (typically a
 /// widget id): the widget part-id convention scaled up. `widgetPartId`
 /// reserves the low 4 bits for a widget's part slots (`id *% 16 + slot`,
@@ -533,7 +607,23 @@ fn colorEql(a: canvas.Color, b: canvas.Color) bool {
 /// caret, and the scrollback indicator. Row commands carry stable ids
 /// derived from `options.id_base` so the retained renderer's diff keeps
 /// damage row-shaped.
+///
+/// The historical signature, kept for every existing caller: it paints
+/// exactly what `paintReport` paints and drops the report. Budget
+/// truncation still reaches the caller — the report's facts are
+/// recorded on `builder.degradation` either way — but a caller that
+/// wants the row counts in hand should call `paintReport` directly.
 pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPaintOptions) !void {
+    _ = try paintReport(grid, builder, options);
+}
+
+/// `paint`, returning what it managed to place: the rows painted, the
+/// rows the producer handed over, and the store that stopped it (see
+/// `TerminalPaintReport`). Budget stops are also recorded on the
+/// builder so the runtime and the host app can surface them without
+/// threading a return value through every emitter.
+pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPaintOptions) !TerminalPaintReport {
+    var report = TerminalPaintReport{ .rows_total = grid.rows.len };
     const tokens = options.tokens;
     const metrics = cellMetrics(tokens);
     // The command-id namespace (see `paintIdBase`): the widget part-id
@@ -550,7 +640,14 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // ABSOLUTE ceiling, not a per-paint one. 0 stays the unbounded
     // (test) mode.
     const fixed_overhead: usize = 8;
-    if (options.command_budget > 0 and builder.len + fixed_overhead > options.command_budget) return;
+    if (options.command_budget > 0 and builder.len + fixed_overhead > options.command_budget) {
+        // Not one row, not even the surface: the loudest degradation
+        // there is, and the one most likely to read as "the terminal
+        // widget is broken" if it stayed silent.
+        if (report.rows_total > 0) report.stopped_by = .commands;
+        noteTerminalDegradation(builder, options.id_base, report);
+        return report;
+    }
 
     // The terminal surface: full-bleed background under the grid.
     try builder.fillRect(.{
@@ -630,7 +727,11 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // cheap wide row paints while a genuinely too-dense row (and
         // everything after it) is skipped whole — never started and torn.
         if (options.command_budget > 0 and
-            builder.len + rowCommandCost(row) + epilogue_reserve > options.command_budget) break;
+            builder.len + rowCommandCost(row) + epilogue_reserve > options.command_budget)
+        {
+            report.stopped_by = .commands;
+            break;
+        }
         // Text stop, ATOMIC per row, against the view-global running
         // total (all draw_text already in the list plus this row's
         // bytes) — stop BEFORE a row that would cross the per-view text
@@ -640,20 +741,29 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // past the grid's reserved share — the ceiling bounds what the
         // grid adds, not what its siblings spent.
         const row_text = rowTextBytes(row);
-        if (row_text > 0 and text_total + row_text > text_ceiling) break;
+        if (row_text > 0 and text_total + row_text > text_ceiling) {
+            report.stopped_by = .text_bytes;
+            break;
+        }
         // Path-element stop, ATOMIC per row, against the view-global
         // running total (static sibling paths included): a row of rounded
         // corners is skipped BEFORE it would cross the per-view
         // path-element budget; a row adding none paints regardless.
         const row_paths = rowPathElements(row);
-        if (row_paths > 0 and path_total + row_paths > path_ceiling) break;
+        if (row_paths > 0 and path_total + row_paths > path_ceiling) {
+            report.stopped_by = .path_elements;
+            break;
+        }
         // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
         // whose new DISTINCT code points would cross the atlas proxy —
         // the frame degrades to fewer rows instead of failing whole on
         // `GlyphAtlasListFull`.
         if (glyph_budget > 0) {
             glyphs_counted += rowNewGlyphs(row, &glyph_seen) * atlas_variants_per_glyph;
-            if (glyphs_counted > glyph_budget) break;
+            if (glyphs_counted > glyph_budget) {
+                report.stopped_by = .glyphs;
+                break;
+            }
         }
         // Row-atomic rollback snapshot: the preflights above make a tear
         // unreachable, but if a builder store is ever exhausted mid-row
@@ -667,7 +777,10 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // Rows STARTING at or past the frame's bottom paint nothing
         // visible; a row straddling the edge still paints and the clip
         // crops it, so content reaches the very edge without spilling.
-        if (row_y >= options.frame.y + options.frame.height) break;
+        if (row_y >= options.frame.y + options.frame.height) {
+            report.stopped_by = .viewport;
+            break;
+        }
         const row_id = @as(u64, @intCast(row_index)) << 16;
 
         // Background runs: contiguous cells sharing a non-default bg
@@ -917,6 +1030,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             builder.len = row_start_len;
             builder.path_element_len = row_start_paths;
             builder.text_byte_len = row_start_text;
+            report.stopped_by = .torn;
             break;
         }
         // Advance the view-global running totals by exactly what this row
@@ -928,6 +1042,8 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         path_total += builder.path_element_len - row_start_paths;
         painted_rows = row_index + 1;
     }
+    report.rows_painted = painted_rows;
+    noteTerminalDegradation(builder, options.id_base, report);
 
     // The cursor, over the ink: solid only while this live terminal owns
     // keyboard focus. Blur leaves the conventional hollow terminal
@@ -1004,4 +1120,22 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         }
     }
     try builder.popClip();
+    return report;
+}
+
+/// Stamp a budget stop on the frame being built (see
+/// `canvas.DisplayListDegradation`). A viewport stop is not a loss and
+/// records nothing; a healthy paint clears nothing either — the record
+/// belongs to whichever emitter last ran short, and `Builder.reset`
+/// starts every frame clean.
+fn noteTerminalDegradation(builder: *canvas.Builder, id: u64, report: TerminalPaintReport) void {
+    if (!report.truncated()) return;
+    const stop = report.stopped_by orelse return;
+    const store = TerminalPaintReport.store(stop) orelse return;
+    builder.noteDegradation(.{
+        .id = id,
+        .store = store,
+        .produced = report.rows_painted,
+        .requested = report.rows_total,
+    });
 }

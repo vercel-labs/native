@@ -3004,7 +3004,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * that would grow the dictionary past this refuses (and drops the
  * retained state) so the engine resyncs with a full present — never a
  * partially applied edit script. */
-enum { NativeSdkPacketRetainedCommandCap = 2048 };
+enum { NativeSdkPacketRetainedCommandCap = 4096 };
 
 typedef struct {
     const uint8_t *bytes;

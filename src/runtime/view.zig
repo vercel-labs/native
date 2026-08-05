@@ -285,6 +285,17 @@ pub const RuntimeView = struct {
     canvas_packet_baseline_count: usize = 0,
     canvas_packet_baseline_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     canvas_packet_baseline_scale: f32 = 1,
+    /// The baseline frame's distinct CLIP RECTS (see
+    /// `canvas_frame.CanvasClipSet`). Clips are erased by the render
+    /// planner — they never become render commands — so no retained key
+    /// names one, and a clip that moved reveals (or vacates) pixels the
+    /// key+fingerprint edit script cannot describe. The next frame's
+    /// dirty derivation compares its clip set against this one and adds
+    /// the difference; `overflow` marks a set too large to compare, and
+    /// refuses the refinement rather than guess.
+    canvas_packet_baseline_clip_rects: [canvas_limits.max_canvas_packet_clip_rects_per_view]geometry.RectF = undefined,
+    canvas_packet_baseline_clip_count: usize = 0,
+    canvas_packet_baseline_clip_overflow: bool = false,
     canvas_packet_baseline_keys: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
     canvas_packet_baseline_fingerprints: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
     /// Draw-order-parallel bounds of the retained baseline commands: the
@@ -312,6 +323,12 @@ pub const RuntimeView = struct {
     canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     canvas_text_len: usize = 0,
     canvas_display_list_widget_owned: bool = false,
+    /// What the last widget emit could NOT place (see
+    /// `canvas.DisplayListDegradation`): the terminal grid painter's
+    /// row-atomic degradation, retained so the runtime logs the cliff on
+    /// its EDGES rather than once per frame, and so an app or a test can
+    /// ask a view whether its content is complete.
+    canvas_widget_display_list_degradation: ?canvas.DisplayListDegradation = null,
     canvas_widget_display_list_prefix_count: usize = 0,
     canvas_widget_display_list_suffix_count: usize = 0,
     canvas_widget_display_list_reserved_count: usize = 0,

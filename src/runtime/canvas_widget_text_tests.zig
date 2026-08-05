@@ -78,6 +78,18 @@ test "the builder's presented-text store mirrors the per-view draw-text budget" 
     );
 }
 
+test "the canvas-tier command mirror matches the per-view command budget" {
+    // The terminal grid painter degrades against the FRAME command
+    // ceiling, and it lives in the canvas module — below the runtime
+    // that owns the budget. `canvas.max_display_list_commands` is its
+    // read of that number; drift would make the painter reserve rows
+    // against a budget nobody enforces.
+    try std.testing.expectEqual(
+        @import("canvas_limits.zig").max_canvas_commands_per_view,
+        canvas.max_display_list_commands,
+    );
+}
+
 test "closing an earlier view transfers a later view's expanded text storage" {
     const TestApp = struct {
         fn app(self: *@This()) App {
