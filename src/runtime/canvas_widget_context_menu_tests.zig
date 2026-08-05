@@ -21,6 +21,10 @@ const canvas_limits = @import("canvas_limits.zig");
 const MenuTestApp = struct {
     pointer_count: u32 = 0,
     raw_input_count: u32 = 0,
+    context_press_count: u32 = 0,
+    last_pointer_target: canvas.ObjectId = 0,
+    last_pointer_captured: canvas.ObjectId = 0,
+    last_pointer_phase: canvas.WidgetPointerPhase = .hover,
     menu_count: u32 = 0,
     last_menu_target: canvas.ObjectId = 0,
     last_menu_item_index: usize = 0,
@@ -64,8 +68,14 @@ const MenuTestApp = struct {
     fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
         switch (event_value) {
-            .canvas_widget_pointer => self.pointer_count += 1,
+            .canvas_widget_pointer => |pointer_event| {
+                self.pointer_count += 1;
+                self.last_pointer_target = if (pointer_event.target) |target| target.id else 0;
+                self.last_pointer_captured = pointer_event.pointer.captured_id orelse 0;
+                self.last_pointer_phase = pointer_event.pointer.phase;
+            },
             .gpu_surface_input => self.raw_input_count += 1,
+            .canvas_widget_context_press => self.context_press_count += 1,
             .canvas_widget_context_menu => |menu_event| {
                 self.menu_count += 1;
                 self.last_menu_target = menu_event.target_id;
@@ -161,6 +171,52 @@ fn createMenuHarness(app: App) !*TestHarness() {
     return harness;
 }
 
+fn installTerminal(
+    harness: *TestHarness(),
+    grid: *canvas.TerminalGrid,
+    policy: canvas.WidgetContextMenuPolicy,
+    pty: u64,
+    text: []const u8,
+) !void {
+    grid.screen_text = text;
+    const terminal = canvas.Widget{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(12, 16, 280, 120),
+        .text = text,
+        .terminal = .{ .pty = pty, .grid = grid },
+        .semantics = .{ .label = "Session", .context_menu_policy = policy },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{terminal} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+}
+
+fn testTerminalGrid() canvas.TerminalGrid {
+    return .{
+        .background = canvas.Color.rgba(0, 0, 0, 1),
+        .foreground = canvas.Color.rgba(1, 1, 1, 1),
+        .cursor_color = canvas.Color.rgba(1, 1, 1, 1),
+        .selection_color = canvas.Color.rgba(0, 0.5, 1, 1),
+    };
+}
+
+fn secondaryPointer(kind: platform.GpuSurfaceInputKind, pointer_id: u64, x: f32, y: f32) platform.Event {
+    return .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = kind,
+        .button = switch (kind) {
+            .pointer_down, .pointer_up, .pointer_cancel => 1,
+            else => 0,
+        },
+        .pointer_id = pointer_id,
+        .x = x,
+        .y = y,
+        .timestamp_ns = 1_000_000_000,
+    } };
+}
+
 test "right click over a widget with a declared menu presents it natively and dispatches the selection" {
     var app_state: MenuTestApp = .{};
     const app = app_state.app();
@@ -178,6 +234,7 @@ test "right click over a widget with a declared menu presents it natively and di
         .frame = geometry.RectF.init(10, 10, 200, 40),
         .text = "Task",
         .context_menu = &items,
+        .semantics = .{ .context_menu_policy = .declared_only },
     };
     var nodes: [2]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
@@ -511,6 +568,8 @@ test "right click on a terminal presents Copy and Paste wired to selection and c
     // Secondary-click focus ensures the eventual paste addresses this
     // terminal even when another editor previously owned focus.
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(canvas.WidgetContextMenuPolicy.automatic, harness.runtime.views[0].widget_layout_nodes[1].widget.semantics.context_menu_policy);
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
 
     try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 2));
     var clipboard_buffer: [64]u8 = undefined;
@@ -543,6 +602,261 @@ test "right click on a terminal presents Copy and Paste wired to selection and c
     try std.testing.expect(app_state.last_keyboard_terminal_paste);
     try std.testing.expect(!app_state.last_keyboard_standalone);
     try std.testing.expectEqualStrings(shortcut_paste, app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+}
+
+test "disabled terminal context menus bypass menu handling and retain pointer routing capture and semantics" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = canvas.TerminalGrid{
+        .background = canvas.Color.rgba(0, 0, 0, 1),
+        .foreground = canvas.Color.rgba(1, 1, 1, 1),
+        .cursor_color = canvas.Color.rgba(1, 1, 1, 1),
+        .selection_color = canvas.Color.rgba(0, 0.5, 1, 1),
+        .screen_text = "alpha beta",
+    };
+    const terminal = canvas.Widget{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(12, 16, 280, 120),
+        .text = grid.screen_text,
+        .terminal = .{ .pty = 7, .grid = &grid },
+        .semantics = .{ .label = "Session", .context_menu_policy = .disabled },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{terminal} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // The terminal remains the terminal: textbox semantics expose its live
+    // value, and hover keeps the native I-beam cursor.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_move,
+        .x = 100,
+        .y = 40,
+    } });
+    try std.testing.expectEqual(platform.Cursor.text, harness.runtime.views[0].canvas_widget_cursor);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(canvas.WidgetKind.terminal, retained.nodes[1].widget.kind);
+    try std.testing.expectEqualStrings("alpha beta", retained.nodes[1].widget.text);
+    try std.testing.expectEqual(canvas.WidgetContextMenuPolicy.disabled, retained.nodes[1].widget.semantics.context_menu_policy);
+
+    const snapshot = harness.runtime.automationSnapshot("Terminal policy");
+    var terminal_snapshot: ?automation.snapshot.Widget = null;
+    for (snapshot.widgets) |widget| {
+        if (widget.id == 2) terminal_snapshot = widget;
+    }
+    try std.testing.expectEqualStrings("textbox", terminal_snapshot.?.role);
+    try std.testing.expectEqualStrings("alpha beta", terminal_snapshot.?.text_value);
+    try std.testing.expectEqualStrings("disabled", terminal_snapshot.?.context_menu_policy);
+    var snapshot_buffer: [16384]u8 = undefined;
+    var snapshot_writer = std.Io.Writer.fixed(&snapshot_buffer);
+    try automation.snapshot.writeText(snapshot, &snapshot_writer);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot_writer.buffered(), "context_menu_policy=disabled") != null);
+
+    app_state.pointer_count = 0;
+    app_state.raw_input_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 40));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.request_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.context_press_count);
+    try std.testing.expectEqual(@as(u32, 1), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_target);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+
+    // Ordinary routing owns the gesture lifetime: movement and release
+    // outside the terminal remain captured by the terminal target.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_drag,
+        .x = 310,
+        .y = 180,
+        .delta_x = 210,
+        .delta_y = 140,
+    } });
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.move, app_state.last_pointer_phase);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_target);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_captured);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .button = 1,
+        .x = 310,
+        .y = 180,
+    } });
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.up, app_state.last_pointer_phase);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_target);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_captured);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(@as(u32, 3), app_state.pointer_count);
+    try std.testing.expectEqual(@as(u32, 3), app_state.raw_input_count);
+}
+
+test "disabled ancestor policy blocks child menus across pointer automation and snapshots" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const items = [_]canvas.WidgetContextMenuItem{.{ .label = "Open" }};
+    const child = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "Task",
+        .context_menu = &items,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{
+        .id = 1,
+        .kind = .stack,
+        .children = &.{child},
+        .semantics = .{ .context_menu_policy = .disabled },
+    }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const snapshot = harness.runtime.automationSnapshot("Inherited policy");
+    var child_snapshot: ?automation.snapshot.Widget = null;
+    for (snapshot.widgets) |widget| {
+        if (widget.id == 2) child_snapshot = widget;
+    }
+    try std.testing.expectEqualStrings("disabled", child_snapshot.?.context_menu_policy);
+    try std.testing.expectError(error.ContextMenuDisabled, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 0"));
+
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 0, 50, 20));
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_up, 0, 50, 20));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 2), app_state.pointer_count);
+}
+
+test "disabled secondary down retains ordinary capture through automatic terminal rebuild" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = testTerminalGrid();
+    try installTerminal(harness, &grid, .disabled, 7, "shell: idle");
+
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 41, 100, 40));
+    try std.testing.expectEqual(@as(u32, 1), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.ordinary, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+
+    // The model switches terminal process/mode while the gesture stands:
+    // same semantic terminal identity, new pty/text, automatic menu policy.
+    // Retained capture and gesture ownership must survive the adoption.
+    try installTerminal(harness, &grid, .automatic, 8, "agent: running");
+    const rebuilt = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(u64, 8), rebuilt.nodes[1].widget.terminal.pty);
+    try std.testing.expectEqualStrings("agent: running", rebuilt.nodes[1].widget.text);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+
+    // A different pointer's buttonless release is consumed but cannot
+    // terminate pointer 41's ordinary gesture or clear its shared capture.
+    var other_pointer_up = secondaryPointer(.pointer_up, 42, 100, 40);
+    other_pointer_up.gpu_surface_input.button = 0;
+    try harness.runtime.dispatchPlatformEvent(app, other_pointer_up);
+    try std.testing.expectEqual(@as(u32, 1), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.ordinary, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+
+    // The matching up follows the down-time ordinary decision despite the
+    // live widget now requesting automatic menus, and releases capture.
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_up, 41, 100, 40));
+    try std.testing.expectEqual(@as(u32, 2), app_state.pointer_count);
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.up, app_state.last_pointer_phase);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_target);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_captured);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.none, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+}
+
+test "disabled secondary owner survives a chorded primary release with desktop pointer id" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = testTerminalGrid();
+    try installTerminal(harness, &grid, .disabled, 7, "shell: idle");
+
+    var primary_down = secondaryPointer(.pointer_down, 0, 100, 40);
+    primary_down.gpu_surface_input.button = 0;
+    try harness.runtime.dispatchPlatformEvent(app, primary_down);
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 0, 100, 40));
+    try std.testing.expectEqual(.ordinary, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+
+    var primary_up = secondaryPointer(.pointer_up, 0, 100, 40);
+    primary_up.gpu_surface_input.button = 0;
+    try harness.runtime.dispatchPlatformEvent(app, primary_up);
+    try std.testing.expectEqual(.ordinary, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(u32, 3), app_state.pointer_count);
+
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_up, 0, 100, 40));
+    try std.testing.expectEqual(.none, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(u32, 4), app_state.pointer_count);
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.up, app_state.last_pointer_phase);
+}
+
+test "disabled secondary down retains ordinary cancel through declared policy rebuild" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = testTerminalGrid();
+    try installTerminal(harness, &grid, .disabled, 7, "shell: idle");
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 51, 100, 40));
+    try installTerminal(harness, &grid, .declared_only, 9, "shell: command mode");
+
+    // A secondary-labelled cancel still follows the down-time ordinary
+    // owner after policy changes, clearing pressed capture.
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_cancel, 51, 100, 40));
+    try std.testing.expectEqual(@as(u32, 2), app_state.pointer_count);
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.cancel, app_state.last_pointer_phase);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_target);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_captured);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.none, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+}
+
+test "automatic terminal menu gesture stays consumed after disabled rebuild" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = testTerminalGrid();
+    try installTerminal(harness, &grid, .automatic, 7, "shell: idle");
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 61, 100, 40));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.context_menu, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+
+    try installTerminal(harness, &grid, .disabled, 8, "agent: running");
+    // Motion commonly carries button=0. The menu-owned decision still
+    // consumes it, so no ordinary press/capture appears after the rebuild.
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_drag, 61, 140, 70));
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_up, 61, 140, 70));
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.none, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+
+    // Default behavior remains repeatable after the gesture retires.
+    try installTerminal(harness, &grid, .automatic, 8, "agent: running");
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 62, 100, 40));
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
 }
 
 test "terminal Paste disables after exit and a pending live menu revalidates before dispatch" {
@@ -725,8 +1039,16 @@ test "the widget-context-menu verb dispatches selections through context_menu_ac
         .frame = geometry.RectF.init(10, 60, 200, 40),
         .text = "Bare",
     };
-    var nodes: [3]canvas.WidgetLayoutNode = undefined;
-    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ row, plain } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    const disabled = canvas.Widget{
+        .id = 4,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 110, 200, 40),
+        .text = "Disabled menu",
+        .context_menu = &items,
+        .semantics = .{ .context_menu_policy = .disabled },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ row, plain, disabled } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
     // Invoking "Delete" (index 2) takes the same dispatch a real pick
@@ -745,6 +1067,7 @@ test "the widget-context-menu verb dispatches selections through context_menu_ac
     try std.testing.expectError(error.ContextMenuItemOutOfRange, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 4"));
     try std.testing.expectError(error.ContextMenuItemSeparator, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 1"));
     try std.testing.expectError(error.ContextMenuItemDisabled, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 3"));
+    try std.testing.expectError(error.ContextMenuDisabled, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 4 0"));
     try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
 }
 
@@ -1064,6 +1387,7 @@ test "automation snapshots list each widget's declared context-menu items in inv
         .frame = geometry.RectF.init(10, 10, 200, 40),
         .text = "Task",
         .context_menu = &items,
+        .semantics = .{ .context_menu_policy = .declared_only },
     };
     var nodes: [2]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
@@ -1075,6 +1399,7 @@ test "automation snapshots list each widget's declared context-menu items in inv
     // List position = the widget-context-menu item index; separators
     // keep their slots and disabled items say so.
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "context_menu=[\"Complete\",separator,\"Archive\"(disabled)]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "context_menu_policy=declared_only") != null);
 }
 
 test "automation snapshots report per-view context-menu item headroom" {

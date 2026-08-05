@@ -750,6 +750,9 @@ pub const WidgetSemantics = struct {
     actions: WidgetActions = .{},
     hidden: bool = false,
     focusable: bool = false,
+    /// Context-menu selection policy. This is retained action metadata and
+    /// occupies existing struct padding, keeping every `Widget` compact.
+    context_menu_policy: WidgetContextMenuPolicy = .automatic,
 };
 
 /// One declared context-menu entry carried on a widget (label/enabled/
@@ -759,6 +762,17 @@ pub const WidgetContextMenuItem = struct {
     label: []const u8 = "",
     enabled: bool = true,
     separator: bool = false,
+};
+
+/// Which context menus a widget permits. `.automatic` preserves the
+/// platform defaults (declared items first, then SDK text/terminal menus),
+/// `.declared_only` suppresses those SDK defaults while retaining an
+/// app-declared menu, and `.disabled` bypasses context-menu handling so the
+/// secondary-button stream follows ordinary widget routing and capture.
+pub const WidgetContextMenuPolicy = enum {
+    automatic,
+    declared_only,
+    disabled,
 };
 
 /// Per-region edge behavior of a scroll container. `.default` follows

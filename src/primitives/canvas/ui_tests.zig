@@ -1539,6 +1539,20 @@ test "virtualWindow without a source falls back to the request viewport" {
     try testing.expect(ui.virtualWindow(options).isEmpty());
 }
 
+test "terminal context menu policy flows from ElementOptions into the widget tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    const tree = try ui.finalize(ui.terminal(.{
+        .pty = 7,
+        .context_menu_policy = .disabled,
+    }));
+
+    try testing.expectEqual(canvas.WidgetKind.terminal, tree.root.kind);
+    try testing.expectEqual(canvas.WidgetContextMenuPolicy.disabled, tree.root.semantics.context_menu_policy);
+}
+
 test "widget kind codes are pinned: assigned at birth, declaration-order-independent" {
     // The FULL golden table. `structuralId` hashes `widgetKindCode`, so
     // this table IS the id vocabulary persisted state references:

@@ -28,14 +28,14 @@ const canvas = @import("root.zig");
 const geometry = @import("geometry");
 const box = @import("terminal_box.zig");
 
-/// Grid ceilings, derived from the per-view canvas budgets: the glyph
-/// budget bounds how many cells can hold ink at once, and the command
-/// budget bounds per-row style runs. A viewport is clamped to these
-/// before it reaches an emulator, so a huge window degrades to a
-/// bounded grid instead of a budget error.
+/// Grid ceilings bound allocation and command-id geometry. Cell count is not a
+/// glyph-atlas proxy: the atlas charges distinct glyph/subpixel keys, while a
+/// terminal commonly repeats a small alphabet across tens of thousands of
+/// cells. The painter's own distinct-glyph, text, path, and command preflights
+/// remain the resource fences.
 pub const max_cols: usize = 320;
 pub const max_rows: usize = 96;
-pub const max_cells: usize = 7168;
+pub const max_cells: usize = max_cols * max_rows;
 
 /// Painter budgets when the grid rides the WIDGET tree, where it shares
 /// the per-view stores with every other widget. The command reserve is
@@ -225,15 +225,14 @@ pub fn cellMetrics(tokens: canvas.DesignTokens) TerminalCellMetrics {
     return .{ .width = width, .height = height, .font_size = font_size };
 }
 
-/// Clamp a proposed grid to the canvas budgets: the glyph budget bounds
-/// total cells, so a very wide viewport trades rows for columns to stay
-/// under the cell ceiling instead of overflowing the frame.
+/// Clamp a proposed grid to the allocation and command-id geometry bounds.
+/// Painter resources are content-dependent and are fenced during paint; they
+/// must not shrink the PTY to a fraction of its visible pane.
 pub fn clampGrid(proposed_cols: usize, proposed_rows: usize) TerminalCellPos {
-    var c = std.math.clamp(proposed_cols, 2, max_cols);
-    var r = std.math.clamp(proposed_rows, 2, max_rows);
-    if (c * r > max_cells) r = @max(2, max_cells / c);
-    if (c * r > max_cells) c = @max(2, max_cells / r);
-    return .{ .x = @intCast(c), .y = @intCast(r) };
+    return .{
+        .x = @intCast(std.math.clamp(proposed_cols, 2, max_cols)),
+        .y = @intCast(std.math.clamp(proposed_rows, 2, max_rows)),
+    };
 }
 
 // ------------------------------------------------------------- painting
@@ -444,53 +443,83 @@ fn displayListPathElements(list: canvas.DisplayList) usize {
     return total;
 }
 
-/// An UPPER BOUND on the display-list commands one row emits, assuming
-/// no runs merge (the pathological worst case): a background run per
-/// cell that carries one, plus the cell's ink — eight commands for a
-/// pure-double box joint, two (text run + underline) for a styled
-/// character, none for an empty cell — plus one selection wash. Real
-/// rows merge runs and cost far less; this bound is what the per-row
-/// preflight checks so a row is only started when it can finish whole,
-/// and it is content-accurate (a cheap ASCII row costs ~2/column, not a
-/// flat worst-case-per-column reserve that would starve wide grids).
+fn multiCodepointCluster(cell: TerminalCell) bool {
+    if (cell.cp == 0 or cell.cluster.len == 0) return false;
+    const primary_len = std.unicode.utf8CodepointSequenceLength(cell.cp) catch 1;
+    return cell.cluster.len > primary_len;
+}
+
+/// Exact upper bound on the commands emitted for one row. This mirrors the
+/// painter's background and ink run boundaries instead of pricing every cell
+/// as an independent background + text command. Full-screen TUIs often carry
+/// hundreds of sparse colored cells per row; pessimistically charging their
+/// empty spans was truncating otherwise representable screens halfway down.
 fn rowCommandCost(row: TerminalRow) usize {
-    var total: usize = 1; // the selection wash
+    var total: usize = if (row.selection != null) 1 else 0;
+
+    // Backgrounds emit one command per contiguous same-color run.
+    var run_color: ?canvas.Color = null;
+    var background_index: usize = 0;
+    while (background_index <= row.cells.len) : (background_index += 1) {
+        const bg: ?canvas.Color = if (background_index < row.cells.len)
+            row.cells[background_index].bg
+        else
+            null;
+        if (run_color) |color| {
+            const same = if (bg) |next| colorEql(color, next) else false;
+            if (!same) {
+                total += 1;
+                run_color = bg;
+            }
+        } else if (bg != null) {
+            run_color = bg;
+        }
+    }
+
+    // Ink emits merged text or box runs plus an underline only when present.
     var i: usize = 0;
-    while (i < row.cells.len) : (i += 1) {
+    while (i < row.cells.len) {
         const cell = row.cells[i];
-        if (cell.wide == .spacer) continue;
-        if (cell.bg != null) total += 1;
-        if (cell.cp == 0) continue;
+        if (cell.wide == .spacer or cell.cp == 0) {
+            i += 1;
+            continue;
+        }
         if (box.isBoxDrawing(cell.cp)) {
+            var span: usize = 1;
             if (box.mergesHorizontally(cell.cp)) {
-                // A horizontally-merged run (a long `─` border) paints
-                // ONE geometry command plus a possible underline, no
-                // matter how wide — mirror the paint loop's merge (same
-                // code point, foreground, and underline) so the estimate
-                // does not charge nine per column for what collapses to
-                // two commands. Backgrounds still count per cell (their
-                // own run pass is separate).
-                var span: usize = 1;
                 while (i + span < row.cells.len) : (span += 1) {
                     const next = row.cells[i + span];
                     if (next.cp != cell.cp or !colorEql(next.fg, cell.fg) or next.underline != cell.underline) break;
-                    if (next.bg != null) total += 1;
                 }
-                // A merged run's worst-case ink: a double piece (═)
-                // paints TWO parallel bars, plus a possible underline.
-                total += 3;
-                i += span - 1;
-            } else {
-                // The glyph's own worst case (kept lockstep with the
-                // paint switch by `box.maxCommands`) plus a possible
-                // underline — a row of one-bar pieces costs what it
-                // paints, never a flat joint-worst-case that starves
-                // wide grids.
-                total += box.maxCommands(cell.cp) + 1;
             }
-        } else {
-            total += 2; // the text run plus its underline
+            total += box.maxCommands(cell.cp) + @intFromBool(cell.underline);
+            i += span;
+            continue;
         }
+
+        // Combining clusters deliberately paint alone. Plain cells merge while
+        // foreground, decoration, and scratch capacity agree.
+        if (multiCodepointCluster(cell)) {
+            total += 1 + @as(usize, @intFromBool(cell.underline));
+            i += 1;
+            continue;
+        }
+        const fg = cell.fg;
+        const underline = cell.underline;
+        var text_bytes = cell.cluster.len;
+        var span: usize = 1;
+        while (i + span < row.cells.len) : (span += 1) {
+            const next = row.cells[i + span];
+            if (next.wide == .spacer or next.cp == 0 or box.isBoxDrawing(next.cp) or
+                multiCodepointCluster(next) or !colorEql(next.fg, fg) or
+                next.underline != underline or text_bytes + next.cluster.len > text_scratch_bytes)
+            {
+                break;
+            }
+            text_bytes += next.cluster.len;
+        }
+        total += 1 + @as(usize, @intFromBool(underline));
+        i += span;
     }
     return total;
 }

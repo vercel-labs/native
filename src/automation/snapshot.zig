@@ -211,6 +211,8 @@ pub const Widget = struct {
     /// fallback surface) and what `widget-context-menu` invokes by
     /// index.
     context_menu: []const WidgetContextMenuItem = &.{},
+    /// Non-default context-menu policy name. Empty means `automatic`.
+    context_menu_policy: []const u8 = "",
 };
 
 /// One status-item dropdown row as the runtime last applied it. Slices
@@ -585,6 +587,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
         try writeWidgetContextMenu(widget, writer);
+        try writeWidgetContextMenuPolicy(widget, writer);
         try writer.writeByte('\n');
     }
     if (input.tray) |tray| {
@@ -706,6 +709,7 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
         try writeWidgetActions(widget.actions, writer);
         try writeWidgetTextRanges(widget, writer);
         try writeWidgetContextMenu(widget, writer);
+        try writeWidgetContextMenuPolicy(widget, writer);
         try writer.writeByte('\n');
     }
 }
@@ -851,6 +855,11 @@ fn writeWidgetContextMenu(widget: Widget, writer: anytype) !void {
         if (!item.enabled) try writer.writeAll("(disabled)");
     }
     try writer.writeByte(']');
+}
+
+fn writeWidgetContextMenuPolicy(widget: Widget, writer: anytype) !void {
+    if (widget.context_menu_policy.len == 0) return;
+    try writer.print(" context_menu_policy={s}", .{widget.context_menu_policy});
 }
 
 test "snapshot emits window and source" {

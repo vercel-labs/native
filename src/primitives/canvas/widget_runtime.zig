@@ -23,6 +23,7 @@ const WidgetKind = widget_model.WidgetKind;
 const WidgetCursor = widget_model.WidgetCursor;
 const WidgetState = widget_model.WidgetState;
 const WidgetRenderState = widget_model.WidgetRenderState;
+const WidgetContextMenuPolicy = widget_model.WidgetContextMenuPolicy;
 const Widget = widget_model.Widget;
 const WidgetLayoutNode = event_model.WidgetLayoutNode;
 const WidgetHit = event_model.WidgetHit;
@@ -71,6 +72,30 @@ pub const WidgetLayoutTree = struct {
             if (node.widget.id == id) return node;
         }
         return null;
+    }
+
+    /// The nearest explicit context-menu policy from `node_index` toward
+    /// the root. `.automatic` inherits; an invalid node fails open to the
+    /// compatibility default.
+    pub fn contextMenuPolicyAt(self: WidgetLayoutTree, node_index: usize) WidgetContextMenuPolicy {
+        var current: ?usize = node_index;
+        while (current) |index| {
+            if (index >= self.nodes.len) return .automatic;
+            const node = self.nodes[index];
+            if (node.widget.semantics.context_menu_policy != .automatic) {
+                return node.widget.semantics.context_menu_policy;
+            }
+            current = node.parent_index;
+        }
+        return .automatic;
+    }
+
+    pub fn contextMenuPolicyById(self: WidgetLayoutTree, id: ObjectId) WidgetContextMenuPolicy {
+        if (id == 0) return .automatic;
+        for (self.nodes, 0..) |node, index| {
+            if (node.widget.id == id) return self.contextMenuPolicyAt(index);
+        }
+        return .automatic;
     }
 
     pub fn virtualRangeById(self: WidgetLayoutTree, id: ObjectId) ?VirtualListRange {

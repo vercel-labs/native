@@ -198,14 +198,15 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// replays, and resolves through `dispatchContextMenuAction`
         /// into the widget's `.context_menu` handler. Named errors say
         /// why an invocation cannot happen: no declared menu, an index
-        /// past the declared items, a separator slot, a disabled item —
-        /// the same items the snapshot lists per widget — or a dismissal
-        /// handler that presented a superseding menu, or closed the
-        /// target's view, mid-verb.
+        /// past the declared items, a separator slot, a disabled item or
+        /// widget policy — the same items and policy the snapshot lists —
+        /// or a dismissal handler that presented a superseding menu, or
+        /// closed the target's view, mid-verb.
         pub fn dispatchAutomationWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: automation_commands.AutomationWidgetContextMenuItem) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, item.target);
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.target.id) orelse return error.InvalidCommand;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            if (self.views[view_index].widgetLayoutTree().contextMenuPolicyAt(node_index) == .disabled) return error.ContextMenuDisabled;
             if (widget.context_menu.len == 0) return error.ContextMenuUndeclared;
             if (item.item_index >= widget.context_menu.len) return error.ContextMenuItemOutOfRange;
             const declared = widget.context_menu[item.item_index];

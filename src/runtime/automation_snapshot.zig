@@ -234,6 +234,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                         .text_selection = canvasTextRange(node.text_selection),
                         .text_composition = canvasTextRange(node.text_composition),
                         .context_menu = automationWidgetContextMenu(self, layout, node.id, menu_item_count),
+                        .context_menu_policy = automationWidgetContextMenuPolicy(layout, node.id),
                     };
                     widget_count.* += 1;
                 }
@@ -261,6 +262,12 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             }
             menu_item_count.* = start + count;
             return self.automation_widget_menu_items[start .. start + count];
+        }
+
+        fn automationWidgetContextMenuPolicy(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) []const u8 {
+            const policy = layout.contextMenuPolicyById(id);
+            if (policy == .automatic) return "";
+            return @tagName(policy);
         }
 
         pub fn frameDiagnostics(self: *Runtime) FrameDiagnostics {

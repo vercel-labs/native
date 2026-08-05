@@ -20,6 +20,8 @@
 //! native menu they present no synthesized surface (there are no
 //! app-declared items to mount), while their available keyboard paths
 //! remain unchanged.
+//! `ElementOptions.context_menu_policy` can keep only tier 1 or bypass
+//! this menu path entirely; its `.automatic` default preserves the order.
 //!
 //! Presentation is asynchronous (macOS `popUpMenuPositioningItem` runs a
 //! nested tracking loop): the platform emits a `context_menu_action`
@@ -89,16 +91,75 @@ pub const PendingCanvasWidgetContextMenu = struct {
 
 pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
     return struct {
-        /// True when the input event belongs to the secondary button and
-        /// must be consumed by the context-menu path instead of the
-        /// primary pointer pipeline (a right-click must never act as a
-        /// press).
-        pub fn canvasWidgetContextPointerInput(input_event: platform.GpuSurfaceInputEvent) bool {
-            if (input_event.button != 1) return false;
-            return switch (input_event.kind) {
+        /// Choose context-menu versus ordinary routing on secondary down,
+        /// then retain that owner through the matching pointer's later
+        /// phases. Widget-tree rebuilds may change policy but never an
+        /// in-flight gesture. Returns true for the consumed menu owner.
+        pub fn canvasWidgetContextPointerInput(self: *Runtime, input_event: platform.GpuSurfaceInputEvent) bool {
+            const pointer_phase = switch (input_event.kind) {
                 .pointer_down, .pointer_up, .pointer_drag, .pointer_move, .pointer_cancel => true,
                 else => false,
             };
+            if (!pointer_phase) return false;
+            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return input_event.button == 1;
+            const view = &self.views[index];
+
+            if (input_event.kind == .pointer_down) {
+                if (input_event.button != 1) return false;
+                // A new secondary down supersedes any stale owner on this
+                // view, matching the existing one-pressed-widget capacity.
+                const routed = CanvasWidgetEventMethods().routeCanvasWidgetPointerInput(self, input_event, &self.widget_event_route_entries) catch {
+                    view.canvas_widget_secondary_gesture_owner = .context_menu;
+                    view.canvas_widget_secondary_gesture_pointer_id = input_event.pointer_id;
+                    return true;
+                };
+                const owner: @TypeOf(view.canvas_widget_secondary_gesture_owner) = if (routed) |pointer_event|
+                    if (contextMenuPolicyForTarget(self, index, pointer_event.target) == .disabled) .ordinary else .context_menu
+                else
+                    .context_menu;
+                view.canvas_widget_secondary_gesture_owner = owner;
+                view.canvas_widget_secondary_gesture_pointer_id = input_event.pointer_id;
+                return owner == .context_menu;
+            }
+
+            const owner = view.canvas_widget_secondary_gesture_owner;
+            if (owner == .none) {
+                // A labelled secondary phase with no matching down stays
+                // consumed, preserving the pre-policy fail-closed behavior.
+                return input_event.button == 1;
+            }
+            if (owner == .context_menu and input_event.button != 1 and view.canvas_widget_pressed_id != 0) {
+                // Async presenters (GTK) can leave the menu open while an
+                // ordinary primary press rebuilds the underlying app. That
+                // press owns the shared pressed-widget slot; route its
+                // buttonless drag/up/cancel ordinarily without retiring the
+                // still-open menu gesture (the menu action or secondary
+                // terminal phase does that).
+                return false;
+            }
+            if (view.canvas_widget_secondary_gesture_pointer_id != input_event.pointer_id) {
+                // One view has one pressed-widget slot. Until the owning
+                // pointer ends, no other pointer phase may enter that shared
+                // pipeline and release or replace its capture, even when the
+                // host leaves button=0 on the later phase.
+                return true;
+            }
+
+            // Desktop mouse streams share pointer_id=0 across every button.
+            // Only the secondary up that matches the initiating action may
+            // retire this owner; a chorded primary release remains ordinary
+            // and leaves the later secondary release live. Pointer cancel is
+            // whole-pointer termination and remains valid without a button.
+            if (input_event.kind == .pointer_up and input_event.button != 1) {
+                return false;
+            }
+
+            const consume = owner == .context_menu;
+            if (input_event.kind == .pointer_up or input_event.kind == .pointer_cancel) {
+                view.canvas_widget_secondary_gesture_owner = .none;
+                view.canvas_widget_secondary_gesture_pointer_id = 0;
+            }
+            return consume;
         }
 
         /// Present the context menu for a secondary-button press: hit-test
@@ -120,6 +181,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             const pointer_event = routed orelse return;
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return;
             const point = geometry.PointF.init(input_event.x, input_event.y);
+            const policy = contextMenuPolicyForTarget(self, index, pointer_event.target);
 
             var items: [platform.max_context_menu_items]platform.ContextMenuItem = undefined;
             const has_presenter = self.options.platform.services.show_context_menu_fn != null;
@@ -186,6 +248,18 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     .view_label = self.views[index].label,
                     .target_id = widget.id,
                     .point = point,
+                } });
+                return;
+            }
+
+            // `.declared_only` stops after the declared-menu tier. Keep the
+            // existing context-press fallback (the on-hold alternative),
+            // but never synthesize an SDK text/terminal menu.
+            if (policy == .declared_only) {
+                try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
+                    .window_id = input_event.window_id,
+                    .view_label = self.views[index].label,
+                    .press_target = pointer_event.press_target,
                 } });
                 return;
             }
@@ -372,6 +446,12 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             // the main queue); GTK popovers are asynchronous and CAN.
             if (pending.window_id != event.window_id or pending.token != event.token) return;
             self.canvas_widget_context_menu_pending = null;
+            // Native presenters may resolve selection/dismissal without
+            // forwarding the physical secondary up (the platform menu owns
+            // that tracking loop). The action is therefore a second valid
+            // terminal for a menu-owned gesture. Never clear `.ordinary`:
+            // policy-disabled capture still requires its matching up/cancel.
+            clearCanvasWidgetContextGesture(self, pending.window_id, pending.viewLabel());
             if (event.item_id == 0) {
                 // Dismissed without a selection. App menus tell the app:
                 // UiApp disarms the token's presented-items snapshot and
@@ -555,6 +635,19 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 }
             }
             return result;
+        }
+
+        fn contextMenuPolicyForTarget(self: *const Runtime, view_index: usize, target: ?canvas.WidgetHit) canvas.WidgetContextMenuPolicy {
+            const hit = target orelse return .automatic;
+            return self.views[view_index].widgetLayoutTree().contextMenuPolicyAt(hit.index);
+        }
+
+        fn clearCanvasWidgetContextGesture(self: *Runtime, window_id: platform.WindowId, label: []const u8) void {
+            const index = runtimeFindViewIndex(self, window_id, label) orelse return;
+            const view = &self.views[index];
+            if (view.canvas_widget_secondary_gesture_owner != .context_menu) return;
+            view.canvas_widget_secondary_gesture_owner = .none;
+            view.canvas_widget_secondary_gesture_pointer_id = 0;
         }
 
         fn CanvasWidgetEventMethods() type {

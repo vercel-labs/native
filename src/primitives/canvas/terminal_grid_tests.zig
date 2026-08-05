@@ -534,6 +534,23 @@ test "an underlined merged double run stays within the command budget" {
     try testing.expect(builder.displayList().commands.len <= 1000);
 }
 
+test "ordinary underlined text is costed without integer overflow" {
+    var cells: [320]grid_model.TerminalCell = undefined;
+    for (&cells, 0..) |*c, i| {
+        c.* = cell('x', "x", if (i % 2 == 0) white else red);
+        c.underline = true;
+    }
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [1024]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 2600, 40),
+        .tokens = .{},
+        .command_budget = 700,
+    });
+    try testing.expect(builder.displayList().commands.len <= 700);
+}
+
 test "an anonymous grid keeps the unkeyed convention: every command id 0" {
     const cells = [_]grid_model.TerminalCell{
         cell('x', "x", white),
@@ -750,10 +767,11 @@ test "the widget diff reports paint damage for a changed bound grid" {
     try testing.expect(saw_paint_dirty);
 }
 
-test "clampGrid trades rows for columns under the cell ceiling" {
+test "clampGrid preserves full bounded viewport geometry" {
     const clamped = grid_model.clampGrid(400, 100);
     try testing.expectEqual(@as(u16, grid_model.max_cols), clamped.x);
-    try testing.expect(@as(usize, clamped.x) * @as(usize, clamped.y) <= grid_model.max_cells);
+    try testing.expectEqual(@as(u16, grid_model.max_rows), clamped.y);
+    try testing.expectEqual(grid_model.max_cols * grid_model.max_rows, grid_model.max_cells);
     const tiny = grid_model.clampGrid(0, 0);
     try testing.expectEqual(@as(u16, 2), tiny.x);
     try testing.expectEqual(@as(u16, 2), tiny.y);
@@ -920,6 +938,42 @@ test "a wide cheap terminal paints its rows under the widget command budget" {
     }
     // Every row's run merges to one draw_text; all six must paint.
     try testing.expectEqual(@as(usize, 6), text_rows);
+}
+
+test "a tall sparse colored terminal paints every representable row" {
+    // cmatrix-like content: a tall viewport with sparse colored streaks. The
+    // old per-cell upper bound charged every empty span and stopped around the
+    // middle even though actual merged runs fit comfortably in the envelope.
+    const row_count = 60;
+    const col_count = 200;
+    var storage: [row_count][col_count]grid_model.TerminalCell = @splat(@splat(.{}));
+    var rows: [row_count]grid_model.TerminalRow = undefined;
+    for (&storage, 0..) |*row_cells, row_index| {
+        for (0..10) |streak| {
+            const col = (streak * 19 + row_index * 3) % col_count;
+            row_cells[col] = cell('x', "x", if (streak % 3 == 0) white else red);
+        }
+        rows[row_index] = .{ .cells = row_cells };
+    }
+
+    var commands: [2048]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 1600, 1200),
+        .tokens = .{},
+        .command_budget = 1792,
+    });
+    var painted_rows: usize = 0;
+    var last_y: ?f32 = null;
+    for (builder.displayList().commands) |command| {
+        if (command != .draw_text) continue;
+        const y = command.draw_text.origin.y;
+        if (last_y == null or last_y.? != y) {
+            painted_rows += 1;
+            last_y = y;
+        }
+    }
+    try testing.expectEqual(@as(usize, row_count), painted_rows);
+    try testing.expect(builder.displayList().commands.len <= 1792);
 }
 
 test "a focused bound terminal's ring id never collides with a grid command" {

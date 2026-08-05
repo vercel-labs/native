@@ -279,7 +279,7 @@ test "out of range glyph ids error instead of reading wild" {
 
 /// Fixed-buffer big-endian byte builder for synthetic tables.
 const ByteBuilder = struct {
-    bytes: [32768]u8 = undefined,
+    bytes: [131072]u8 = undefined,
     len: usize = 0,
 
     fn appendU8(self: *ByteBuilder, value: u8) void {
@@ -532,7 +532,11 @@ test "synthetic dense glyphs beyond the old Latin-sized budgets parse and outlin
     // The dense glyph outlines completely: every on-curve ring is
     // moveTo + 12 lineTo (the walk returns to the start point) + close,
     // so 84 * 14 elements, starting at the first ring's origin.
-    var builder = vector.PathBuilder(2048){};
+    const path_capacity = @max(
+        font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours,
+        font_ttf.max_composite_points + 3 * font_ttf.max_composite_contours,
+    );
+    var builder = vector.PathBuilder(path_capacity){};
     try face.glyphOutline(1, Affine.identity(), &builder);
     try std.testing.expectEqual(@as(usize, 84 * 14), builder.slice().len);
     const first = builder.slice()[0];

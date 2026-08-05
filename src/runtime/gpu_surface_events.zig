@@ -198,10 +198,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // pacing no-op.
             self.options.platform.services.noteGpuSurfaceInput(input_event.window_id, input_event.label) catch {};
             // Secondary-button (right/ctrl-click, touch long-press) input
-            // is the context-menu gesture: the press presents the
-            // native menu and the whole button-1 stream is consumed so a
-            // right-click never acts as a primary press.
-            if (ContextMenuMethods().canvasWidgetContextPointerInput(input_event)) {
+            // is normally the context-menu gesture: the press presents the
+            // native menu and the whole button-1 stream is consumed. A
+            // widget with context-menu policy `.disabled` deliberately
+            // keeps the stream on the ordinary routed/captured path.
+            if (ContextMenuMethods().canvasWidgetContextPointerInput(self, input_event)) {
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                     self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
                     // A consumed cancel is still the pointer leaving the
@@ -209,13 +210,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // the proven pointer's departure retires hover-Msg
                     // containment too, so a window exit mid-secondary
                     // stream never strands an entered element. Honesty
-                    // about scope: only the secondary DOWN/UP/CANCEL
-                    // stream is consumed here — hosts report drag
-                    // MOTION without a button, so it rides the primary
-                    // path and containment follows the pointer through
-                    // a right-drag (the mouseenter/mouseleave
-                    // convention), exactly as the wash does for the
-                    // same journaled moves.
+                    // Gesture ownership was fixed on down: a menu-owned
+                    // drag stays consumed even on hosts whose motion leaves
+                    // button=0, while a policy-disabled down keeps every
+                    // matching phase on ordinary routing/capture.
                     if (input_event.kind == .pointer_cancel and
                         self.views[index].canvas_widget_hover_pointer_live and
                         self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id)

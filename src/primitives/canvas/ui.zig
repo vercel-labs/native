@@ -894,6 +894,13 @@ pub fn Ui(comptime Msg: type) type {
             /// authored menu, platform-appropriate presentation. Markup
             /// authors declare this with a `<context-menu>` child element.
             context_menu: []const ContextMenuItem = &.{},
+            /// Which context menus this widget permits. `.automatic` keeps
+            /// the backward-compatible declared-menu-then-SDK-default
+            /// behavior. `.declared_only` suppresses SDK-provided defaults
+            /// while preserving `context_menu`; `.disabled` suppresses all
+            /// menu handling and leaves secondary-button input on the
+            /// ordinary routed/captured pointer path.
+            context_menu_policy: canvas.WidgetContextMenuPolicy = .automatic,
         };
 
         /// One `ElementOptions.context_menu` entry: the chrome-menu item
@@ -3686,7 +3693,11 @@ pub fn Ui(comptime Msg: type) type {
                     .max_size = if (kind == .resizable) .{} else .{ .width = options.width, .height = options.height },
                 },
                 .style = options.style,
-                .semantics = options.semantics,
+                .semantics = semantics: {
+                    var semantics = options.semantics;
+                    semantics.context_menu_policy = options.context_menu_policy;
+                    break :semantics semantics;
+                },
                 .window_drag = options.window_drag,
                 .overscroll = options.overscroll,
                 .resize_duration_ms = options.resize_duration,

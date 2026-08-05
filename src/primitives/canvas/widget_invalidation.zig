@@ -819,7 +819,8 @@ fn widgetSemanticsEqual(a: WidgetSemantics, b: WidgetSemantics) bool {
         a.list_item_count == b.list_item_count and
         widgetActionsEqual(a.actions, b.actions) and
         a.hidden == b.hidden and
-        a.focusable == b.focusable;
+        a.focusable == b.focusable and
+        a.context_menu_policy == b.context_menu_policy;
 }
 
 fn widgetActionsEqual(a: WidgetActions, b: WidgetActions) bool {

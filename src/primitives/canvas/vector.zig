@@ -92,18 +92,18 @@ const max_piece_points: usize = 4 * max_curve_segments + 4;
 // so the arithmetic is written out and lockstep-pinned by a test in
 // font_ttf_tests.zig against the source constants).
 //
-// Worst admitted glyph (1024 points / 128 contours, simple and
+// Worst admitted glyph (4096 points / 256 contours, simple and
 // flattened-composite maxima are gated equal; glyph outlines emit only
 // move/line/quad/close):
 //
-//   quads <= points + contours          = 1024 + 128 = 1152
+//   quads <= points + contours          = 4096 + 256 = 4352
 //     (each point emits at most one line or quad; each contour adds at
 //     most one closing quad — the same walk the glyph path capacity in
 //     reference.zig is derived from)
-//   edges <= quads * segments + contours = 1152 * 16 + 128 = 18,560
+//   edges <= quads * segments + contours = 4352 * 16 + 256 = 69,888
 //     (each quad flattens to at most `max_glyph_curve_segments` line
 //     segments, lines and the per-contour close edge are one each)
-//   scanline crossings <= edges          = 18,560
+//   scanline crossings <= edges          = 69,888
 //     (an edge crosses a scanline at most once — the half-open span
 //     test in `sweep` — so the edge bound is also the airtight crossing
 //     bound, with no reliance on curve monotonicity under float
@@ -115,8 +115,7 @@ const max_piece_points: usize = 4 * max_curve_segments + 4;
 // flattening has no finite bound at all — a full-em quad at an
 // S-pixel em wants ceil(sqrt((S/2) / 0.25)) segments (128 at S = 8192)
 // — and even the generic `max_curve_segments` cap of 48 would put the
-// worst case at 1152 * 48 + 128 = 55,424 edges = 1.06 MiB of edge
-// storage plus 433 KiB of crossings per rasterizer: memory-unreasonable
+// worst case at 4352 * 48 + 256 = 209,152 edges, which is memory-unreasonable
 // for a per-thread buffer. Flattening tolerance is a quality knob, not
 // correctness, so glyph fills clamp subdivision instead: at 16 segments
 // the clamp only binds when a curve's flatness deviation exceeds
@@ -127,13 +126,13 @@ const max_piece_points: usize = 4 * max_curve_segments + 4;
 // span fractions of the em, so everything the golden suite renders
 // stays below the clamp and byte-identical.
 //
-// Storage: 18,560 edges * 20 B = 362.5 KiB plus 18,560 crossings * 8 B
-// = 145 KiB, ~508 KiB per `GlyphRasterizer`. The glyph raster caller
+// Storage: 69,888 edges * 20 B plus 69,888 crossings * 8 B is ~1.9 MiB per
+// `GlyphRasterizer`. The glyph raster caller
 // (reference.zig) keeps ONE per render thread behind a lazily
 // heap-allocated pointer (`canvas.lazy_tls`), so it costs neither stack
 // nor static TLS, and threads that never ink a glyph never allocate it.
 pub const max_glyph_curve_segments: usize = 16;
-pub const max_glyph_fill_edges: usize = 18_560;
+pub const max_glyph_fill_edges: usize = 69_888;
 pub const max_glyph_scanline_crossings: usize = max_glyph_fill_edges;
 
 /// Half-open device-pixel clip window: pixels with `x0 <= x < x1` and
@@ -542,7 +541,7 @@ pub fn RasterizerType(comptime edge_capacity: usize, comptime crossing_capacity:
         max_x: f32 = 0,
         max_y: f32 = 0,
         /// Scanline scratch for `sweep`, in the struct rather than its
-        /// stack frame so the glyph instantiation's 145 KiB rides the
+        /// stack frame so the glyph instantiation's ~546 KiB rides the
         /// same per-thread heap slot as its edges.
         crossings: [crossing_capacity]Crossing = undefined,
 
@@ -671,7 +670,7 @@ pub fn RasterizerType(comptime edge_capacity: usize, comptime crossing_capacity:
 pub const Rasterizer = RasterizerType(max_edges, max_scanline_crossings);
 
 /// The glyph-fill instantiation, sized by the derived budgets above so
-/// any outline the font registration gate admits rasterizes (~508 KiB —
+/// any outline the font registration gate admits rasterizes (~1.9 MiB —
 /// callers keep one per thread on the heap, never on the stack; see
 /// `fillGlyphPath`).
 pub const GlyphRasterizer = RasterizerType(max_glyph_fill_edges, max_glyph_scanline_crossings);
@@ -743,7 +742,7 @@ pub fn fillPath(
 /// budget-admitted glyph NEVER fails with `VectorPathTooComplex` — the
 /// registration promise ("a registered face always resolves at render
 /// time") holds at the raster layer too. `raster` is caller-owned
-/// storage (~508 KiB: keep one per thread on the heap, e.g. behind
+/// storage (~1.9 MiB: keep one per thread on the heap, e.g. behind
 /// `canvas.lazy_tls`, never on the stack); it is reset here, so it needs
 /// no initialization beyond existing.
 pub fn fillGlyphPath(

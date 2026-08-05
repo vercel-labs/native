@@ -134,6 +134,17 @@ pub const CanvasWidgetClaimedKeyGrace = enum {
     }
 };
 
+/// Owner chosen by a secondary-button down for that gesture's full
+/// lifetime. The SDK currently retains one pressed widget per view, so one
+/// secondary gesture per view is the matching honest capacity; pointer_id
+/// prevents a different pointer from terminating that standing gesture on
+/// hosts that distinguish identities (desktop mouse hosts use id 0).
+pub const CanvasWidgetSecondaryGestureOwner = enum {
+    none,
+    context_menu,
+    ordinary,
+};
+
 /// Blur-side IME hygiene, shared by EVERY focus-mutation entry point —
 /// the pointer-driven focus move, the programmatic `focusView`, and the
 /// window-level `clearFocusedView` blur all route here so the class is
@@ -567,6 +578,12 @@ pub const RuntimeView = struct {
     canvas_widget_focus_visible_keyboard: bool = false,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
+    /// Context-menu versus ordinary routing is chosen exactly once on a
+    /// secondary down and survives widget-tree rebuilds until the matching
+    /// pointer's up/cancel. This prevents a policy change from leaking a
+    /// consumed menu gesture into capture, or stranding ordinary capture.
+    canvas_widget_secondary_gesture_owner: CanvasWidgetSecondaryGestureOwner = .none,
+    canvas_widget_secondary_gesture_pointer_id: u64 = 0,
     /// The STANDING hover-Msg containment chain: every widget on the
     /// last resolved raw hover hit's ancestor path that listens for
     /// hover Msgs (`Widget.hover_msgs`), outermost first

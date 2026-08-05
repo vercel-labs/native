@@ -811,6 +811,38 @@ test "widget layout diff separates paint and semantics dirtiness" {
     try expectRect(geometry.RectF.init(8, 12, 80, 48), image_invalidations[0].dirty_bounds);
 }
 
+test "context menu policy-only changes publish semantics invalidation" {
+    const previous_child = [_]Widget{.{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+    }};
+    const disabled_child = [_]Widget{.{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+        .semantics = .{ .context_menu_policy = .disabled },
+    }};
+    var previous_nodes: [2]WidgetLayoutNode = undefined;
+    var disabled_nodes: [2]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(.{ .kind = .stack, .children = &previous_child }, geometry.RectF.init(0, 0, 140, 80), &previous_nodes);
+    const disabled = try layoutWidgetTree(.{ .kind = .stack, .children = &disabled_child }, geometry.RectF.init(0, 0, 140, 80), &disabled_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, disabled, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+    try std.testing.expect(!invalidations[0].paint_dirty);
+    try std.testing.expect(invalidations[0].semantics_dirty);
+    try std.testing.expect(invalidations[0].dirty_bounds == null);
+}
+
+test "context menu policy storage stays within the v0.8.1 Widget size budget" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expect(@sizeOf(Widget) <= 776);
+    }
+}
+
 test "widget layout diff marks style changes as paint dirty" {
     const previous_child = [_]Widget{.{
         .id = 2,

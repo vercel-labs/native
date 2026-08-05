@@ -51,30 +51,29 @@ const font_ttf = @import("font_ttf.zig");
 /// admits — a simple glyph's maxima and a composite's flattened maxima
 /// (`maxp.maxCompositePoints`/`maxCompositeContours`, which is what
 /// this builder actually receives when a composite renders). The
-/// budgets are currently equal, so the max is 1408 either way; the
-/// derivation keeps capacity honest if they ever diverge. Stack shape:
-/// at 28 B per element this is ~39 KiB in `drawGlyphOutline`; the edge
-/// accumulator below it is the per-thread heap-resident
-/// `vector.GlyphRasterizer` (see `reference_glyph_raster_scratch`), so
-/// the builder is the only glyph raster state on the stack.
+/// budgets are currently equal, so the max is 4864 either way; the
+/// derivation keeps capacity honest if they ever diverge. At 28 B per
+/// element the builder is ~133 KiB, so it lives beside the rasterizer in
+/// per-thread heap scratch rather than in `drawGlyphOutline`'s stack.
 const reference_glyph_path_capacity: usize = @max(
     font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours,
     font_ttf.max_composite_points + 3 * font_ttf.max_composite_contours,
 );
 
-/// Per-thread rasterizer for glyph fills: `vector.GlyphRasterizer`'s
+const ReferenceGlyphPathBuilder = vector.PathBuilder(reference_glyph_path_capacity);
+
+/// Per-thread path and raster scratch for glyph fills: the path builder is
+/// ~133 KiB and `vector.GlyphRasterizer` is ~1.9 MiB. The latter's
 /// derived budgets guarantee every outline the font registration gate
-/// admits rasterizes (never a block fallback), which sizes it at
-/// ~508 KiB — a per-thread heap slot behind one TLS pointer (the
-/// lazy_tls pattern), not a stack temporary and not static TLS. Only
-/// threads that ink a glyph through the reference renderer allocate it.
-/// The array carries no default and stays uninitialized, exactly like
-/// the stack `Rasterizer` it replaces; `vector.fillGlyphPath` resets it
-/// per glyph.
-const ReferenceGlyphRasterScratch = struct {
+/// admits rasterizes (never a block fallback). Together they occupy ~2.0
+/// MiB behind one lazy TLS pointer, not the render-thread stack or static
+/// TLS, and only threads that ink a glyph allocate them. The arrays carry
+/// no defaults and stay uninitialized; each operation resets their lengths.
+const ReferenceGlyphScratch = struct {
+    path: ReferenceGlyphPathBuilder,
     raster: vector.GlyphRasterizer,
 };
-const reference_glyph_raster_scratch = @import("lazy_tls.zig").LazyTls(ReferenceGlyphRasterScratch);
+const reference_glyph_scratch = @import("lazy_tls.zig").LazyTls(ReferenceGlyphScratch);
 
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
 const referenceBlurSampleWithKernel = reference_blur.referenceBlurSampleWithKernel;
@@ -866,9 +865,10 @@ pub const ReferenceRenderSurface = struct {
         const local = Affine{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = pen_x + cell_inset, .ty = baseline };
         const total = command.transform.multiply(local);
 
-        var builder = vector.PathBuilder(reference_glyph_path_capacity){};
-        face.glyphOutline(glyph, total, &builder) catch return false;
-        if (builder.slice().len == 0) return true; // Space: nothing to ink.
+        const scratch = reference_glyph_scratch.get();
+        scratch.path.reset();
+        face.glyphOutline(glyph, total, &scratch.path) catch return false;
+        if (scratch.path.slice().len == 0) return true; // Space: nothing to ink.
 
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return true;
         // Glyph coverage blends in sRGB, not linear light (see
@@ -890,8 +890,8 @@ pub const ReferenceRenderSurface = struct {
         // `max_raster_width` (surface-shaped, not font-shaped) and
         // nothing else.
         vector.fillGlyphPath(
-            &reference_glyph_raster_scratch.get().raster,
-            builder.slice(),
+            &scratch.raster,
+            scratch.path.slice(),
             Affine.identity(),
             .nonzero,
             vector.default_tolerance,
@@ -1123,7 +1123,6 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
 fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
-
 
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
