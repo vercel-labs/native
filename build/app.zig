@@ -770,6 +770,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // in this graph already forces LLVM on x86_64; the app exe —
         // the one binary users actually run — must too.
         .use_llvm = useLlvmWorkaround(target),
+        .use_lld = useLldWorkaround(target),
     });
     // Windows subsystem posture: release-shaped exes (`native build`,
     // and therefore everything `native package --target windows` wraps)
@@ -946,10 +947,19 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
 /// against zig 0.16.0 on x86_64-linux with a standalone caller/callee
 /// pair: self-hosted Debug corrupts, `-fllvm` is correct.
 ///
+/// GCC 15 also emits `.sframe` sections in Linux startup objects whose
+/// R_X86_64_PC64 relocations crash Zig's self-hosted x86_64 linker (Native
+/// issue #37). App executables use LLD on x86_64 Linux so Debug links avoid
+/// the self-hosted linker crash.
+///
 /// Force the LLVM backend on x86_64 until the upstream backend is fixed;
 /// Release modes already default to LLVM, so this only changes Debug.
 pub fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
     return if (target.result.cpu.arch == .x86_64) true else null;
+}
+
+pub fn useLldWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) true else null;
 }
 
 fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {

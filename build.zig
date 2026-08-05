@@ -259,6 +259,8 @@ pub fn build(b: *std.Build) void {
     const cli_exe = b.addExecutable(.{
         .name = "native",
         .root_module = cli_mod,
+        .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+        .use_lld = @import("build/app.zig").useLldWorkaround(target),
     });
     b.installArtifact(cli_exe);
 
@@ -308,6 +310,8 @@ pub fn build(b: *std.Build) void {
     const host_cli_exe = b.addExecutable(.{
         .name = "native",
         .root_module = host_cli_mod,
+        .use_llvm = @import("build/app.zig").useLlvmWorkaround(host_target),
+        .use_lld = @import("build/app.zig").useLldWorkaround(host_target),
     });
     // Docs component-preview generator: renders the built-in component
     // catalog offscreen through the deterministic reference renderer and
@@ -528,6 +532,9 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
     test_step.dependOn(&b.addRunArtifact(automation_cli_tests).step);
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-executable-llvm-workaround", "Verify x86_64 app executables use LLVM and x86_64 Linux app executables use LLD", &.{
+        .{ .path = "build/app.zig", .pattern = ".use_llvm = useLlvmWorkaround(target),\n        .use_lld = useLldWorkaround(target)," },
+    });
     test_step.dependOn(&b.addRunArtifact(markup_cli_tests).step);
     test_step.dependOn(&b.addRunArtifact(evals_cmdview_tests).step);
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-package-types", "Verify package TypeScript platform feature names", &.{

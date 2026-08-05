@@ -95,6 +95,7 @@ pub fn build(b: *std.Build) void {
         // mirroring the Native SDK build graph; Release modes already
         // use LLVM, so only Debug changes.
         .use_llvm = useLlvmWorkaround(target),
+        .use_lld = useLldWorkaround(target),
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
@@ -475,4 +476,10 @@ fn boolField(source: []const u8, field: []const u8) ?bool {
 // modes already default to LLVM, so this only changes Debug builds.
 fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
     return if (target.result.cpu.arch == .x86_64) true else null;
+}
+
+// GCC 15 emits `.sframe` relocations that Zig's self-hosted x86_64 Linux
+// linker cannot handle (Native issue #37), so app executables use LLD there.
+fn useLldWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) true else null;
 }
