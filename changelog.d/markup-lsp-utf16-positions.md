@@ -1,0 +1,1 @@
+fix: **Unicode-aware markup editor positions**: the `.native` markup language server now maps LSP UTF-16 positions to the parser's UTF-8 byte offsets for completion and hover, and maps diagnostic byte columns back to UTF-16 ranges, so CJK text and emoji earlier on a line no longer shift editor results or underlines.
