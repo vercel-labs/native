@@ -9573,14 +9573,22 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     NSString *label = self.windowLabels[@(windowId)] ?: (windowId == 1 ? self.windowLabel : @"");
+    // The CONTENT size, not the frame's. The runtime lays its shell views out
+    // into this rectangle (`shellBoundsForWindow`), and it creates and restores
+    // windows through `initWithContentRect:`, so width and height are a content
+    // size on every other path. Reporting the frame here made them disagree by
+    // the height of the titlebar: the shell was laid out 32 points taller than
+    // the view it lives in, and whatever sat on its bottom edge was placed
+    // below the window.
     NSRect frame = window.frame;
+    NSRect content = [window contentRectForFrameRect:frame];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_WINDOW_FRAME,
         .window_id = windowId,
         .x = frame.origin.x,
         .y = frame.origin.y,
-        .width = frame.size.width,
-        .height = frame.size.height,
+        .width = content.size.width,
+        .height = content.size.height,
         .scale = window.backingScaleFactor,
         .open = open ? 1 : 0,
         .focused = window.isKeyWindow ? 1 : 0,
