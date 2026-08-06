@@ -8011,6 +8011,24 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     [window miniaturize:nil];
 }
 
+/* SET fullscreen, not toggle. AppKit only offers `toggleFullScreen:`,
+ * so the state is compared first and the verb only fires when it
+ * differs — that is what makes the engine-side call idempotent, and
+ * what stops an app restoring a remembered layout from flipping OUT of
+ * fullscreen because it was already in.
+ *
+ * The confirmation arrives through the window's own delegate callbacks
+ * (the same ones that keep `WindowInfo.fullscreen` current), so a
+ * transition the USER started from the green button and one the app
+ * asked for are reported identically. */
+- (void)setWindowWithId:(uint64_t)windowId fullscreen:(BOOL)fullscreen {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    const BOOL isFullscreen = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    if (isFullscreen == fullscreen) return;
+    [window toggleFullScreen:nil];
+}
+
 // The window-drag region channel. Called synchronously while the runtime
 // dispatches the pointer-down that started the gesture, so
 // NSApp.currentEvent IS that mouse-down NSEvent (the host forwards input
@@ -9935,6 +9953,10 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         // frame emit while a window sits in the policy-hidden set
         // carries it, and hide/show flip the set before they emit.
         .hidden = [self.policyHiddenWindows containsObject:@(windowId)] ? 1 : 0,
+        // Host truth, same as `hidden`: the style mask is what AppKit
+        // flips on both sides of a fullscreen transition, whoever
+        // started it.
+        .fullscreen = (window.styleMask & NSWindowStyleMaskFullScreen) != 0 ? 1 : 0,
         .label = label.UTF8String,
         .label_len = [label lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
     }];
@@ -12318,6 +12340,13 @@ int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t w
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object miniaturizeWindowWithId:window_id];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_fullscreen(native_sdk_appkit_host_t *host, uint64_t window_id, int fullscreen) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object setWindowWithId:window_id fullscreen:fullscreen != 0];
     return 1;
 }
 

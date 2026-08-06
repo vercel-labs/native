@@ -332,6 +332,9 @@ pub const NullPlatform = struct {
     window_always_on_top: [max_windows]bool = [_]bool{false} ** max_windows,
     window_click_through: [max_windows]bool = [_]bool{false} ** max_windows,
     window_activate_on_show: [max_windows]bool = [_]bool{true} ** max_windows,
+    /// Fullscreen set calls per window (`set_window_fullscreen_fn`),
+    /// indexed like the windows array.
+    window_fullscreen_calls: [max_windows]u32 = @splat(0),
     /// Minimize calls per window (`minimize_window_fn`), indexed like
     /// `windows`: the observable seam for app-drawn minimize controls —
     /// the null platform has no Dock to genie into, so the count IS the
@@ -805,6 +808,7 @@ pub const NullPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .set_window_fullscreen_fn = setWindowFullscreen,
                 .show_window_fn = showWindow,
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
@@ -1164,6 +1168,16 @@ pub const NullPlatform = struct {
         self.windows[index].hidden = false;
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
+    }
+
+    fn setWindowFullscreen(context: ?*anyopaque, window_id: WindowId, fullscreen: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        // The modeled host answers the request immediately; a real one
+        // confirms through its own window event, which is why the
+        // runtime keeps no fullscreen bookkeeping of its own.
+        self.windows[index].fullscreen = fullscreen;
+        self.window_fullscreen_calls[index] += 1;
     }
 
     fn minimizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
@@ -2576,6 +2590,18 @@ pub const NullPlatform = struct {
 
     /// Test seam: show calls observed for a window (the un-hide verb's
     /// pinned observable, like `minimizeCountForWindow`).
+    /// Fullscreen SET calls the modeled host received for a window.
+    pub fn fullscreenCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
+        const index = self.findWindowIndex(window_id) orelse return 0;
+        return self.window_fullscreen_calls[index];
+    }
+
+    /// The modeled host's current fullscreen state for a window.
+    pub fn windowIsFullscreen(self: *const NullPlatform, window_id: WindowId) bool {
+        const index = self.findWindowIndex(window_id) orelse return false;
+        return self.windows[index].fullscreen;
+    }
+
     pub fn showCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
         const index = self.findWindowIndex(window_id) orelse return 0;
         return self.window_show_count[index];

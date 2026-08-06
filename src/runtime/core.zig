@@ -669,6 +669,7 @@ pub const Runtime = struct {
     pub const focusWindow = WindowViewMethods.focusWindow;
     pub const closeWindow = WindowViewMethods.closeWindow;
     pub const minimizeWindow = WindowViewMethods.minimizeWindow;
+    pub const setWindowFullscreen = WindowViewMethods.setWindowFullscreen;
     pub const showWindow = WindowViewMethods.showWindow;
     pub const quitApp = WindowViewMethods.quitApp;
     pub const createShellWindow = WindowViewMethods.createShellWindow;

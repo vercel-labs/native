@@ -194,6 +194,10 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             self.windows[index].info.scale_factor = state.scale_factor;
             self.windows[index].info.open = state.open;
             self.windows[index].info.hidden = state.hidden;
+            // The read half of the fullscreen capability: whoever caused
+            // the transition — the app's `setWindowFullscreen`, the
+            // green button, or a Space gesture — reports it the same way.
+            self.windows[index].info.fullscreen = state.fullscreen;
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, state.frame.width, state.frame.height);
             }

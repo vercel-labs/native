@@ -146,6 +146,18 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             try self.options.platform.services.minimizeWindow(window_id);
         }
 
+        /// Enter or leave fullscreen for a tracked window. SET, not
+        /// toggle, so an app can drive it from state it already owns;
+        /// the runtime keeps no fullscreen bookkeeping of its own —
+        /// `WindowInfo.fullscreen` is refreshed by the platform's own
+        /// window event, which is the single source of truth for a
+        /// transition the user can also start from the OS.
+        pub fn setWindowFullscreen(self: *Runtime, window_id: platform.WindowId, fullscreen: bool) anyerror!void {
+            const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            if (!self.windows[index].info.open) return error.WindowNotFound;
+            try self.options.platform.services.setWindowFullscreen(window_id, fullscreen);
+        }
+
         /// The real OS show verb: unhide and order front — the counterpart
         /// to a `close_policy = .hide` hide, and what a tray "Open"
         /// action resolves to. Like `closeWindow`, the runtime flag

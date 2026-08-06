@@ -204,7 +204,46 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// `prefix_commands` commands followed by `suffix_commands`
             /// commands (up to `prefix_commands` under
             /// `variable_prefix`).
+            ///
+            /// Called for the MAIN canvas only. A multi-window app wants
+            /// `build_window` instead — this signature cannot say which
+            /// window it is painting, so chrome built here is the main
+            /// window's by construction.
             build: *const fn (model: *const ModelT, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void,
+            /// The per-WINDOW chrome builder, and the one a multi-window
+            /// app should implement.
+            ///
+            /// When set it replaces `build` for every window, main and
+            /// secondary alike, and the context names which window is
+            /// being painted. Without it, secondary windows get their
+            /// widget tree and no chrome at all — which for an app whose
+            /// terminals ARE chrome means a window that opens, lays out
+            /// correctly, and paints nothing.
+            ///
+            /// Additive on purpose: `build` keeps working untouched, and
+            /// the migration is one line — rename `build` to
+            /// `build_window` and take `context` instead of
+            /// `size`/`tokens` (`context.size`, `context.tokens`).
+            build_window: ?*const fn (model: *const ModelT, builder: *canvas.Builder, context: ChromeContext) anyerror!void = null,
+        };
+
+        /// What a chrome build is painting into. A struct rather than
+        /// more parameters so the next thing a window needs to know
+        /// does not break every caller again.
+        pub const ChromeContext = struct {
+            /// The canvas view label of the window being painted —
+            /// `Options.canvas_label` for the main window, the
+            /// descriptor's canvas label for a secondary one. The
+            /// discriminator an app switches on to pick which of its
+            /// windows' content to draw.
+            canvas_label: []const u8,
+            /// The platform window id behind that label.
+            window_id: platform.WindowId,
+            /// This window's canvas size, not the main window's.
+            size: geometry.SizeF,
+            tokens: canvas.DesignTokens,
+            /// Whether this is the app's main scene window.
+            is_main: bool,
         };
 
         /// A live webview region hosted alongside the canvas — the "both
@@ -1359,6 +1398,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = runtime,
                 .close_fn = effectsCloseWindowByLabel,
                 .minimize_fn = effectsMinimizeWindowByLabel,
+                .fullscreen_fn = effectsSetWindowFullscreenByLabel,
+                .fullscreen_state_fn = effectsWindowIsFullscreenByLabel,
                 .show_fn = effectsShowWindowByLabel,
                 .quit_fn = effectsQuitApp,
             });
@@ -1874,7 +1915,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // so hover enters keep flowing even when an idle app
             // performs no further rebuild.
             if (self.options.chrome) |chrome| {
-                try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
+                try self.installChromeDisplayList(runtime, window_id, self.options.canvas_label, self.canvas_size, chrome, layout, tokens, &self.main_tree_current);
             } else {
                 try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
                 if (self.installed and self.rebuildEmitsTokens(runtime, window_id, self.options.canvas_label, tokens)) {
@@ -2743,6 +2784,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// model — every dispatched Msg funnels through here after the
         /// main rebuild, so all open windows always render the same
         /// model generation.
+        /// Whether secondary windows paint chrome — true exactly when
+        /// the app implements the per-window builder.
+        fn slotPaintsChrome(self: *const Self) bool {
+            const chrome = self.options.chrome orelse return false;
+            return chrome.build_window != null;
+        }
+
         fn rebuildWindowSlots(self: *Self, runtime: *Runtime) anyerror!void {
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
                 if (!slot.installed) continue;
@@ -2783,10 +2831,33 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // matching handler tree lands below, wherever the rebuild
             // was driven from (the full pass or a direct resize/install
             // site).
-            try self.publishWidgetLayoutTracked(runtime, slot.window_id, slot.canvasLabel(), layout, &slot.tree_current);
-            if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
-                _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
+            // The SAME branch the main canvas takes. A secondary window
+            // that published its widget layout and emitted with
+            // `WithChrome(.{})` got a chrome prefix of zero — so an app
+            // whose terminals are chrome commands rendered its tab strip,
+            // its dividers, and its widget bounds over an empty canvas.
+            // Gated on `build_window`, not merely on `chrome`: a chrome
+            // builder that cannot be told which window it is painting
+            // would paint the MAIN window's content into this one, which
+            // is a different wrong answer from the blank canvas it used
+            // to give. An app opts into per-window chrome by
+            // implementing `build_window`; until it does, nothing about
+            // its secondary windows changes.
+            if (self.slotPaintsChrome()) {
+                const chrome = self.options.chrome.?;
+                try self.installChromeDisplayList(runtime, slot.window_id, slot.canvasLabel(), slot.canvas_size, chrome, layout, tokens, &slot.tree_current);
+            } else {
+                try self.publishWidgetLayoutTracked(runtime, slot.window_id, slot.canvasLabel(), layout, &slot.tree_current);
+                if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
+                    _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
+                }
             }
+            // Per-window terminal sizing and web panes. Both used to run
+            // only for the main canvas, so a secondary window's ptys
+            // would have kept whatever grid they were born with even
+            // once its cells painted.
+            try self.applyTerminalLayout(runtime, slot.window_id, layout, tokens);
+            self.applyWebPanes(runtime, slot.window_id, layout);
             slot.tree = tree;
             slot.arena_index = next_index;
             live_tree_reset = false;
@@ -3031,10 +3102,37 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// runtime then regenerates the widget span on internal state
         /// changes while preserving the chrome via
         /// `emitCanvasWidgetDisplayListWithChrome`.
-        fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
+        /// Install one window's chrome + widget display list.
+        ///
+        /// Parameterized by WINDOW rather than reading the main
+        /// canvas's fields, because secondary windows take this exact
+        /// path now: the chrome prefix is what produces a terminal's
+        /// cells, so a window that skipped it rendered its tab strip and
+        /// its splits over an empty black canvas.
+        fn installChromeDisplayList(
+            self: *Self,
+            runtime: *Runtime,
+            window_id: platform.WindowId,
+            canvas_label: []const u8,
+            canvas_size: geometry.SizeF,
+            chrome: ChromeOptions,
+            layout: canvas.WidgetLayoutTree,
+            tokens: canvas.DesignTokens,
+            tree_current: *bool,
+        ) anyerror!void {
             var chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
             var chrome_builder = canvas.Builder.init(&chrome_commands);
-            try chrome.build(&self.model, &chrome_builder, self.canvas_size, tokens);
+            if (chrome.build_window) |build_window| {
+                try build_window(&self.model, &chrome_builder, .{
+                    .canvas_label = canvas_label,
+                    .window_id = window_id,
+                    .size = canvas_size,
+                    .tokens = tokens,
+                    .is_main = std.mem.eql(u8, canvas_label, self.options.canvas_label),
+                });
+            } else {
+                try chrome.build(&self.model, &chrome_builder, canvas_size, tokens);
+            }
             const chrome_list = chrome_builder.displayList();
             if (chrome.variable_prefix) {
                 if (chrome_list.commands.len < chrome.suffix_commands or
@@ -3053,13 +3151,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             try layout.emitDisplayList(&builder, tokens);
             for (chrome_list.commands[prefix_len..]) |command| try builder.append(command);
 
-            _ = try runtime.setCanvasDisplayList(window_id, self.options.canvas_label, builder.displayList());
-            // The main install window opens at the layout's true
-            // adoption inside the tracked publication (see `rebuild`)
-            // and closes when the caller adopts the matching handler
-            // tree.
-            try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
-            _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
+            _ = try runtime.setCanvasDisplayList(window_id, canvas_label, builder.displayList());
+            // The install window opens at the layout's true adoption
+            // inside the tracked publication (see `rebuild`) and closes
+            // when the caller adopts the matching handler tree.
+            try self.publishWidgetLayoutTracked(runtime, window_id, canvas_label, layout, tree_current);
+            _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, canvas_label, tokens, .{
                 .prefix_command_count = prefix_len,
                 .suffix_command_count = chrome.suffix_commands,
             });
@@ -4266,7 +4363,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 slot.canvas_size = frame_event.size;
                 slot.pixel_snap_scale = scale;
                 try self.rebuildWindowSlot(runtime, slot);
-                _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot)));
+                // Only the chrome-less path needs this: `rebuildWindowSlot`
+                // skips its own emit while `installed` is still false, but
+                // the chrome branch always emits WITH the right prefix
+                // split — and re-emitting here would overwrite it with a
+                // zero-prefix list, erasing the chrome that was just
+                // installed.
+                if (!self.slotPaintsChrome()) {
+                    _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot)));
+                }
                 slot.installed = true;
             } else if (@abs(slot.pixel_snap_scale - scale) > 0.001) {
                 // THIS window moved to a different density (the main
@@ -4304,6 +4409,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // fully once, while an idle completion for the current owner
             // is allowed to skip.
             try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing, clear_color);
+            if (installing) return;
+            // The per-frame hook, for THIS window. It used to fire only
+            // for the main canvas, which for a terminal app is the pump
+            // that sizes the viewport and the pty — so a secondary
+            // window's terminals would have kept their birth grid
+            // forever, whatever the window was resized to.
+            const on_frame = self.options.on_frame orelse return;
+            const gpu_frame = runtime.gpuSurfaceFrame(slot.window_id, slot.canvasLabel()) catch return;
+            if (on_frame(&self.model, gpu_frame)) |msg| {
+                try self.dispatch(runtime, slot.window_id, msg);
+            }
         }
 
         /// A face joined the runtime's font registry after this app's
@@ -5962,6 +6078,22 @@ fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) b
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
     runtime.minimizeWindow(window_id) catch return false;
     return true;
+}
+
+fn effectsSetWindowFullscreenByLabel(context: *anyopaque, window_label: []const u8, fullscreen: bool) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    runtime.setWindowFullscreen(window_id, fullscreen) catch return false;
+    return true;
+}
+
+fn effectsWindowIsFullscreenByLabel(context: *anyopaque, window_label: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    var buffer: [platform.max_windows]platform.WindowInfo = undefined;
+    for (runtime.listWindows(&buffer)) |info| {
+        if (info.open and std.mem.eql(u8, info.label, window_label)) return info.fullscreen;
+    }
+    return false;
 }
 
 fn effectsShowWindowByLabel(context: *anyopaque, window_label: []const u8) bool {

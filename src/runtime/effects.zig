@@ -269,6 +269,12 @@ pub const WindowActionBinding = struct {
     context: *anyopaque,
     close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    fullscreen_fn: *const fn (context: *anyopaque, window_label: []const u8, fullscreen: bool) bool,
+    /// Whether the window is fullscreen RIGHT NOW. A read, not a verb:
+    /// `toggleFullscreenWindow` needs the OS's answer rather than a
+    /// state the app has to mirror, and the runtime already tracks it
+    /// (`WindowInfo.fullscreen`) with no platform round-trip.
+    fullscreen_state_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     show_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     quit_fn: *const fn (context: *anyopaque) bool,
 };
@@ -308,6 +314,11 @@ pub const max_window_action_label = 64;
 pub const WindowActionState = struct {
     close_count: u32 = 0,
     minimize_count: u32 = 0,
+    fullscreen_count: u32 = 0,
+    /// The fullscreen state the last `setWindowFullscreen` asked for,
+    /// so a fake-executor test can assert the REQUEST and not just that
+    /// one happened.
+    fullscreen_requested: bool = false,
     show_count: u32 = 0,
     quit_count: u32 = 0,
     last_label_buffer: [max_window_action_label]u8 = @splat(0),
@@ -7799,6 +7810,51 @@ pub fn Effects(comptime Msg: type) type {
             if (self.executor == .fake) return;
             const binding = self.window_actions orelse return;
             _ = binding.minimize_fn(binding.context, window_label);
+        }
+
+        /// Enter or leave fullscreen for a window by its declared
+        /// label — the real OS verb (macOS moves the window to its own
+        /// Space).
+        ///
+        /// SET rather than toggle: an app that remembers a window was
+        /// fullscreen can restore it without first reading back the
+        /// current state and computing parity. `toggleFullscreenWindow`
+        /// is the convenience over it for a menu item or a shortcut,
+        /// which is the case that genuinely wants "the other one".
+        ///
+        /// This is the write half of a capability the platform already
+        /// REPORTED (`WindowInfo.fullscreen`): before it, an app could
+        /// be told it was fullscreen and never ask to be. Note that
+        /// supplying ANY custom menu bar replaces the stock one — the
+        /// standard View ▸ Enter Full Screen item included — so a
+        /// custom-menu app binds its own item to this.
+        ///
+        /// Fire-and-forget, same contract as `closeWindow`.
+        pub fn setWindowFullscreen(self: *Self, window_label: []const u8, fullscreen: bool) void {
+            self.window_action_state.fullscreen_count += 1;
+            self.window_action_state.fullscreen_requested = fullscreen;
+            self.window_action_state.record(window_label);
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.fullscreen_fn(binding.context, window_label, fullscreen);
+        }
+
+        /// `setWindowFullscreen` against the window's CURRENT state —
+        /// the menu-item and keyboard-shortcut shape, and the one a
+        /// custom-menu app binds its own "Enter Full Screen" item to.
+        /// An unknown label is a no-op like every other window verb.
+        pub fn toggleFullscreenWindow(self: *Self, window_label: []const u8) void {
+            self.setWindowFullscreen(window_label, !self.windowIsFullscreen(window_label));
+        }
+
+        /// Whether a declared window is fullscreen right now. Reads the
+        /// runtime's tracked `WindowInfo.fullscreen`, so it is correct
+        /// for transitions the USER started from the green button too.
+        /// False under the fake executor and for unknown labels.
+        pub fn windowIsFullscreen(self: *Self, window_label: []const u8) bool {
+            if (self.executor == .fake) return false;
+            const binding = self.window_actions orelse return false;
+            return binding.fullscreen_state_fn(binding.context, window_label);
         }
 
         /// Show a window by its declared label: unhide + order front,

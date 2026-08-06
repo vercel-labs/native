@@ -256,6 +256,11 @@ typedef struct {
     double y;
     int open;
     int focused;
+    /* WINDOW_FRAME: nonzero while the window occupies its own
+     * fullscreen Space. Read from the window's style mask on every frame
+     * emit, so a transition the USER started (green button, a Space
+     * gesture) reports exactly like one the app asked for. */
+    int fullscreen;
     /* WINDOW_FRAME: nonzero while the window is alive but hidden by
      * its close_policy (.hide intercepted a user close). open stays 1
      * for the window's whole hidden stretch. */
@@ -424,6 +429,7 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
 // window controls on chromeless windows. Returns 0 when the window id
 // is unknown.
 int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+int native_sdk_appkit_set_window_fullscreen(native_sdk_appkit_host_t *host, uint64_t window_id, int fullscreen);
 // The show verb: bring the window back to the glass and activate the
 // app (deminiaturize + makeKeyAndOrderFront) — the counterpart to a
 // close_policy .hide hide, and the tray-menu "Open" consequence.
