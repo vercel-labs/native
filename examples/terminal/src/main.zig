@@ -239,7 +239,7 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     // session that just ended. (A no-op on the first spawn.)
     model.session.reset();
     model.session.refreshScreenText();
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = shell_key,
         .argv = default_shell_argv,
         .cols = model.cols,

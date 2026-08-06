@@ -440,7 +440,7 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // only post-fork calls are login_tty/execve/_exit — execve needs a
     // resolved path (it does no PATH search).
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = resolveExecutable(options.argv[0], options.env, &path_buf) orelse
+    const resolved = resolveExecutableBounded(gpa, options.argv[0], options.env, &path_buf) orelse
         return error.PtyCommandNotFound;
 
     // Build the NUL-terminated argv/envp arrays the child hands execve.
@@ -775,14 +775,19 @@ fn decodeStatus(status: c_int) Exit {
     return .{ .code = -1, .signal = sig };
 }
 
-fn resolveExecutable(arg0: []const u8, env: ?[]const EnvVar, buf: []u8) ?[]const u8 {
+/// The synchronous walk: every `executableAt` call is a blocking libc
+/// `access()` with no timeout of its own. Never call this directly from
+/// `spawn()` — it runs unbounded on whatever thread calls it, which is
+/// exactly the hazard `resolveExecutableBounded` below exists to cap.
+/// Kept as a plain, allocation-free function so it can run standalone on
+/// a worker thread with nothing but its own two owned buffers.
+fn resolveExecutable(arg0: []const u8, path: []const u8, buf: []u8) ?[]const u8 {
     if (std.mem.indexOfScalar(u8, arg0, '/') != null) {
         if (!executableAt(buf, arg0)) return null;
         if (arg0.len >= buf.len) return null;
         @memcpy(buf[0..arg0.len], arg0);
         return buf[0..arg0.len];
     }
-    const path = lookupEnv(env, "PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
     var it = std.mem.splitScalar(u8, path, ':');
     while (it.next()) |component| {
@@ -793,6 +798,95 @@ fn resolveExecutable(arg0: []const u8, env: ?[]const EnvVar, buf: []u8) ?[]const
         return joined;
     }
     return null;
+}
+
+/// How long `resolveExecutableBounded` waits for the worker thread
+/// before abandoning it. Generous relative to the fast common case (a
+/// local filesystem resolves every PATH entry in well under a
+/// millisecond) but short enough that a stalled NFS/autofs mount costs
+/// the loop thread a bounded stall instead of an indefinite one — the
+/// same trade `execStatus`'s 500ms exec-probe deadline already makes for
+/// the exec call right after this one.
+const path_resolve_deadline_ns: u64 = 300 * std.time.ns_per_ms;
+const path_resolve_poll_interval_us: c_uint = 2_000;
+
+/// One resolution attempt's owned inputs/output, heap-allocated so it
+/// can safely outlive an abandoned worker thread. Every field the worker
+/// touches is either owned here or immutable static data — nothing
+/// borrows from the caller's stack — because on abandonment the caller
+/// returns and its stack frame is gone while the worker may still be
+/// running (see `resolveExecutableBounded`'s timeout path, the same
+/// bounded-abandon shape `effects.zig` uses for stuck file/pty workers).
+const PathResolveJob = struct {
+    arg0: []u8,
+    path: []u8,
+    result_buf: [std.fs.max_path_bytes]u8 = undefined,
+    result_len: ?usize = null,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(job: *PathResolveJob) void {
+        if (resolveExecutable(job.arg0, job.path, &job.result_buf)) |resolved| {
+            job.result_len = resolved.len;
+        }
+        // Publish the result before the completion flag so the polling
+        // thread never observes `done` before `result_len`/`result_buf`.
+        job.done.store(true, .release);
+    }
+};
+
+/// `resolveExecutable`, bounded: runs the walk on a dedicated worker
+/// thread and waits up to `path_resolve_deadline_ns` for it. Within the
+/// deadline this behaves exactly like the direct call (same result,
+/// just carried through `buf`); past the deadline it abandons the
+/// worker — detached, its job struct intentionally leaked, since the
+/// worker may still be mid-`access()` against the stalled mount and
+/// could write into it at any point — and reports not-found, so a
+/// wedged PATH entry costs the loop thread one bounded stall instead of
+/// an unbounded one. `gpa` backs only the two small owned copies the job
+/// needs (`arg0`, `path`); nothing else allocates.
+fn resolveExecutableBounded(gpa: std.mem.Allocator, arg0: []const u8, env: ?[]const EnvVar, buf: []u8) ?[]const u8 {
+    const path = lookupEnv(env, "PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
+    const job = gpa.create(PathResolveJob) catch return null;
+    const owned_arg0 = gpa.dupe(u8, arg0) catch {
+        gpa.destroy(job);
+        return null;
+    };
+    const owned_path = gpa.dupe(u8, path) catch {
+        gpa.free(owned_arg0);
+        gpa.destroy(job);
+        return null;
+    };
+    job.* = .{ .arg0 = owned_arg0, .path = owned_path };
+
+    const thread = std.Thread.spawn(.{}, PathResolveJob.run, .{job}) catch {
+        gpa.free(owned_arg0);
+        gpa.free(owned_path);
+        gpa.destroy(job);
+        return null;
+    };
+
+    const deadline = clock.monotonicNanoseconds() +| path_resolve_deadline_ns;
+    while (!job.done.load(.acquire)) {
+        // A missing monotonic clock (not expected on macOS/Linux) reports
+        // not-found rather than risk waiting forever on a job we can
+        // never confirm finished — the same unresolved-favors-safety
+        // call `execStatus` makes for its own deadline clock read.
+        const now = clock.monotonicNanoseconds();
+        if (now == 0 or now >= deadline) {
+            thread.detach();
+            return null;
+        }
+        _ = c.usleep(path_resolve_poll_interval_us);
+    }
+    thread.join();
+    defer {
+        gpa.free(owned_arg0);
+        gpa.free(owned_path);
+        gpa.destroy(job);
+    }
+    const len = job.result_len orelse return null;
+    @memcpy(buf[0..len], job.result_buf[0..len]);
+    return buf[0..len];
 }
 
 /// X_OK access check through libc; `scratch` holds the NUL-terminated copy.
