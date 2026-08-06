@@ -402,7 +402,7 @@ pub const max_display_list_text_bytes: usize = 65536;
 /// two from drifting — so canvas-tier emitters that must size their own
 /// degradation against the frame ceiling (the terminal grid painter and
 /// its tests) can read it without importing the runtime.
-pub const max_display_list_commands: usize = 4096;
+pub const max_display_list_commands: usize = 2048;
 
 /// Cells one frame's `cell_grid` commands may hold between them.
 ///

@@ -5,6 +5,7 @@ const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
 const render_model = @import("render.zig");
 const gpu_model = @import("gpu.zig");
+const cell_grid_model = @import("cell_grid.zig");
 
 const ObjectId = canvas.ObjectId;
 const CanvasCommand = canvas.CanvasCommand;
@@ -995,7 +996,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v5).
+// Compact binary gpu-surface packet encoding (wire format v6).
 //
 // The version this comment names, the `binary_packet_version` constant
 // below, and both host decoders' spec comments (appkit_host.m and the
@@ -1034,6 +1035,18 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // font override, final pen x/baseline, and advance; synthesized elision
 // markers ride as positioned UTF-8 fragments.
 //
+// v6 (from v5): a new command kind, `cell_grid` (code 14), carrying one
+// packed terminal row — the lattice geometry plus its cells. The payload
+// follows the standard command fields and is implied by the KIND, not by
+// a flag bit (the flag byte is full). Cells encode as a delta stream: a
+// per-cell tag byte whose low bit says "same style as the previous cell",
+// so a row of default-styled text costs about a byte a column while a
+// truecolor row pays its real 15. Cluster bytes ride INLINE per cell
+// rather than as offsets into a shared blob, so a row decodes without
+// the rest of the screen. Hosts that do not implement the kind refuse
+// the packet (unknown kind -> refused present -> recorded fallback),
+// which is exactly what the Direct2D host does today.
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1046,12 +1059,19 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //       image_index u32 (0xFFFFFFFF = none) }
 //   | load/clear: command_count u32 | commands { key u64, command (see
 //       writeCanvasGpuCommandBinary) }
+//   | cell_grid command payload (kind 14, after the standard fields):
+//       font_id u32 | font_size f32 | origin f32[2] | cell_w f32
+//       | cell_h f32 | baseline f32 | cols u16 | rows u16
+//       | cell_count u32 | cells { tag u8 (bit0 same-style-as-previous,
+//         bit1 has-cluster), [fg u8[4] bg u8[4] underline u8[4]
+//         flags u16 when !same-style], [len u8 + UTF-8 bytes when
+//         has-cluster] }
 //   | patch: evict_count u32 | evict keys u64[]
 //     | upsert_count u32 | upserts { key u64, command }
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 5;
+pub const binary_packet_version: u8 = 6;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1318,6 +1338,66 @@ fn writeCanvasGpuCommandBinary(command: CanvasGpuCommand, writer: anytype) !void
     if (command.image) |image| try writeBinaryImage(image, writer);
     if (command.text) |text| try writeBinaryText(text, writer);
     if (command.effect != .none) try writeBinaryEffect(command.effect, writer);
+    // Implied by the KIND rather than a flag: the flag byte is full, and
+    // a payload every `cell_grid` carries and no other kind does needs
+    // no bit to announce it.
+    if (command.kind == .cell_grid) {
+        if (command.cells) |grid| try writeBinaryCellGrid(grid, writer);
+    }
+}
+
+/// One packed cell-grid row (wire v6).
+///
+/// The cells encode as a DELTA stream because a terminal row is
+/// overwhelmingly one style: each cell leads with a tag byte whose low
+/// bit means "same colours and flags as the cell before me", so a
+/// default-styled row costs a byte a column plus its characters, and
+/// only a genuinely per-cell-styled row pays the full 15 bytes. That is
+/// what keeps an incremental present small — a keystroke re-encodes one
+/// row, and a plain row is a few hundred bytes.
+fn writeBinaryCellGrid(grid: gpu_model.CanvasGpuCellGrid, writer: anytype) !void {
+    try writer.writeInt(u32, @intCast(grid.font_id), .little);
+    try writeBinaryF32(grid.font_size, writer);
+    try writeBinaryPoint(grid.origin, writer);
+    try writeBinaryF32(grid.cell_width, writer);
+    try writeBinaryF32(grid.cell_height, writer);
+    try writeBinaryF32(grid.baseline, writer);
+    try writer.writeInt(u16, grid.cols, .little);
+    try writer.writeInt(u16, grid.rows, .little);
+    try writer.writeInt(u32, @intCast(grid.cells.len), .little);
+
+    var previous: ?cell_grid_model.Cell = null;
+    for (grid.cells) |cell| {
+        const cluster = cell.cluster(grid.text);
+        const same_style = if (previous) |prior|
+            prior.fg.eql(cell.fg) and prior.bg.eql(cell.bg) and
+                prior.underline_color.eql(cell.underline_color) and
+                prior.flags == cell.flags
+        else
+            false;
+        var tag: u8 = 0;
+        if (same_style) tag |= 1;
+        if (cluster.len > 0) tag |= 2;
+        try writer.writeByte(tag);
+        if (!same_style) {
+            try writeBinaryCellColor(cell.fg, writer);
+            try writeBinaryCellColor(cell.bg, writer);
+            try writeBinaryCellColor(cell.underline_color, writer);
+            try writer.writeInt(u16, cell.flags, .little);
+        }
+        if (cluster.len > 0) {
+            try writer.writeByte(@intCast(cluster.len));
+            try writer.writeAll(cluster);
+        }
+        previous = cell;
+    }
+}
+
+fn writeBinaryCellColor(color: cell_grid_model.CellColor, writer: anytype) !void {
+    try writer.writeByte(color.r);
+    try writer.writeByte(color.g);
+    try writer.writeByte(color.b);
+    try writer.writeByte(color.a);
 }
 
 /// Stable wire codes for the command kind — pinned independently of the
@@ -1340,6 +1420,7 @@ fn binaryCommandKindCode(kind: gpu_model.CanvasGpuCommandKind) u8 {
         .draw_text => 11,
         .shadow => 12,
         .blur => 13,
+        .cell_grid => 14,
         .unsupported => 255,
     };
 }

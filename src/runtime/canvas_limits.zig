@@ -33,14 +33,16 @@ const canvas = @import("canvas");
 // so RuntimeView measures 3.44 MiB -> 4.83 MiB and the 32-slot Runtime
 // 110.0 MiB -> 154.5 MiB of fixed-capacity address space.
 //
-// The terminal no longer spends this budget at all. A screen is one
-// `cell_grid` command (canvas/cell_grid.zig) whose cost is CELLS —
-// see `max_canvas_cells_per_view` — so a 300x100 truecolor viewport
-// costs four commands, not sixty thousand. What remains here is the
-// headroom the raise bought every OTHER surface, and it could come back
-// down to 2048 (saving ~45 MiB of address space) once no consumer needs
-// it; that is a separate change with its own measurement.
-pub const max_canvas_commands_per_view: usize = 4096;
+// Back to 2048 with the packed cell grid. The terminal was the only
+// thing that ever needed 4096: it now costs ONE command per row (a
+// 300x100 truecolor screen is 103 commands, where per-run painting
+// wanted ~60,000), and its real budget is `max_canvas_cells_per_view`.
+// Measured: the three-pane desktop shape this budget was raised for in
+// the first place peaks around 500 commands, and the framework's own
+// suite — every widget, chart, markdown, code, and terminal test —
+// passes at 2048. Taking it back returns ~45 MiB of the Runtime's
+// fixed-capacity address space (1.39 MiB per view slot x 32).
+pub const max_canvas_commands_per_view: usize = 2048;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
 // icons are path commands, and a curated stroke icon lowers to ~10-25

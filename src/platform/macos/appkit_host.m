@@ -2876,6 +2876,167 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
 
 /* Kind dispatch shared by direct draws and raster-cache fills: expects
  * clip/transform state already applied to the current graphics context. */
+
+/* ------------------------------------------------------------------
+ * Packed cell-grid rendering.
+ *
+ * The SPEC is the engine's reference renderer (canvas/reference.zig,
+ * `drawCellGrid` / `drawCellDecorations`), because that is the oracle
+ * the automation screenshots and every golden test go through. This
+ * function mirrors it deliberately:
+ *
+ *   - TWO PASSES, and the order is the contract: every background
+ *     first, then every glyph and decoration. One pass would let cell
+ *     N+1's background erase the part of cell N's glyph that overhangs
+ *     into it, which real mono faces do constantly.
+ *   - Decoration geometry matches `CellDecoration`: underline sits
+ *     2 thicknesses off the cell bottom, its second bar 4, strikethrough
+ *     at 55% of the cell, overline at the top, thickness
+ *     max(1, round(size/12)).
+ *   - Dotted/dashed underlines walk the same segment periods; curly
+ *     walks the same one-point triangle-wave ticks.
+ *
+ * KNOWN DIVERGENCE, stated rather than hidden: glyph RASTERIZATION
+ * differs. The reference renderer fills the engine's own outline
+ * through its vector core; this draws through CoreText with the host's
+ * resolved face. Both put the glyph at the same pen and the same
+ * baseline in the same cell, so layout is identical, but antialiasing
+ * and hinting are not byte-identical between the two. That is already
+ * true of every `draw_text` command in this file — the packet path has
+ * never been byte-identical to the reference rasterizer, only
+ * geometrically identical.
+ *
+ * `bold` and `italic` reach the cell but are NOT synthesised here: with
+ * a single registered mono face there is no companion to switch to, and
+ * faking them with a synthetic oblique or a stroke would put the host
+ * ahead of the reference renderer, which carries them without applying
+ * them. Same behaviour on both sides is worth more than either one
+ * being prettier. */
+
+enum {
+    NativeSdkCellFlagBold = 1 << 0,
+    NativeSdkCellFlagItalic = 1 << 1,
+    NativeSdkCellFlagStrikethrough = 1 << 2,
+    NativeSdkCellFlagOverline = 1 << 3,
+    NativeSdkCellFlagHasBackground = 1 << 4,
+    NativeSdkCellFlagHasUnderlineColor = 1 << 5,
+};
+
+/* Underline style occupies bits 6..8, cell width bits 9..10 — the
+ * engine's `CellFlags` packing (canvas/cell_grid.zig). */
+static inline uint8_t NativeSdkCellUnderlineStyle(uint16_t flags) { return (uint8_t)((flags >> 6) & 0x7); }
+static inline uint8_t NativeSdkCellWidthKind(uint16_t flags) { return (uint8_t)((flags >> 9) & 0x3); }
+
+static CGFloat NativeSdkCellStrokeWidth(CGFloat fontSize) {
+    return MAX(1, round(fontSize / 12));
+}
+
+static void NativeSdkCellFillRect(NSRect rect, NSColor *color) {
+    if (!color || NSIsEmptyRect(rect)) return;
+    [color setFill];
+    NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver);
+}
+
+static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
+    if (!grid) return NO;
+    NSArray *cells = [grid[@"cells"] isKindOfClass:[NSArray class]] ? grid[@"cells"] : nil;
+    if (!cells) return NO;
+    NSUInteger cols = (NSUInteger)NativeSdkPacketNumber(grid[@"cols"], 0);
+    if (cols == 0) return YES;
+    NSPoint origin = NativeSdkPacketPoint(grid[@"origin"]);
+    CGFloat cellWidth = NativeSdkPacketNumber(grid[@"cellWidth"], 0);
+    CGFloat cellHeight = NativeSdkPacketNumber(grid[@"cellHeight"], 0);
+    CGFloat baseline = NativeSdkPacketNumber(grid[@"baseline"], 0);
+    CGFloat size = MAX(1, NativeSdkPacketNumber(grid[@"size"], 12));
+    if (cellWidth <= 0 || cellHeight <= 0) return YES;
+    NSFont *font = NativeSdkPacketPreferredFont(grid, size);
+    if (!font) return NO;
+    const CGFloat thickness = NativeSdkCellStrokeWidth(size);
+
+    /* Pass 1: backgrounds. */
+    NSUInteger index = 0;
+    for (id cellObject in cells) {
+        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
+        NSUInteger column = index++;
+        if (!cell || column >= cols) continue;
+        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
+        if (!(flags & NativeSdkCellFlagHasBackground)) continue;
+        NSColor *background = NativeSdkPacketColor(cell[@"bg"], opacity);
+        if (!background) continue;
+        NativeSdkCellFillRect(NSMakeRect(origin.x + (CGFloat)column * cellWidth, origin.y, cellWidth, cellHeight), background);
+    }
+
+    /* Pass 2: ink and decorations. */
+    index = 0;
+    for (id cellObject in cells) {
+        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
+        NSUInteger column = index++;
+        if (!cell || column >= cols) continue;
+        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
+        if (NativeSdkCellWidthKind(flags) == 2) continue; /* spacer */
+        NSColor *foreground = NativeSdkPacketColor(cell[@"fg"], opacity);
+        if (!foreground) continue;
+        const CGFloat x = origin.x + (CGFloat)column * cellWidth;
+        /* A wide cell inks and decorates across both of its columns. */
+        const CGFloat inkWidth = NativeSdkCellWidthKind(flags) == 1 ? cellWidth * 2 : cellWidth;
+
+        NSString *cluster = [cell[@"text"] isKindOfClass:[NSString class]] ? cell[@"text"] : nil;
+        if (cluster.length > 0) {
+            [cluster drawAtPoint:NSMakePoint(x, origin.y + baseline - size)
+                  withAttributes:@{
+                      NSFontAttributeName : font,
+                      NSForegroundColorAttributeName : foreground,
+                  }];
+        }
+
+        if (flags & NativeSdkCellFlagOverline) {
+            NativeSdkCellFillRect(NSMakeRect(x, origin.y, inkWidth, thickness), foreground);
+        }
+        if (flags & NativeSdkCellFlagStrikethrough) {
+            NativeSdkCellFillRect(NSMakeRect(x, origin.y + round(cellHeight * 0.55) - thickness, inkWidth, thickness), foreground);
+        }
+        const uint8_t underlineStyle = NativeSdkCellUnderlineStyle(flags);
+        if (underlineStyle == 0) continue;
+        NSColor *underlineColor = (flags & NativeSdkCellFlagHasUnderlineColor)
+            ? NativeSdkPacketColor(cell[@"ul"], opacity)
+            : foreground;
+        if (!underlineColor) underlineColor = foreground;
+        const NSRect line = NSMakeRect(x, origin.y + cellHeight - thickness * 2, inkWidth, thickness);
+        switch (underlineStyle) {
+        case 1: /* single */
+            NativeSdkCellFillRect(line, underlineColor);
+            break;
+        case 2: /* double */
+            NativeSdkCellFillRect(line, underlineColor);
+            NativeSdkCellFillRect(NSMakeRect(x, origin.y + cellHeight - thickness * 4, inkWidth, thickness), underlineColor);
+            break;
+        case 3: { /* curly: one-point ticks tracing a triangle wave */
+            const CGFloat amplitude = thickness;
+            const CGFloat period = MAX(4, round(size / 3));
+            for (CGFloat step = 0; step < line.size.width; step += 1) {
+                CGFloat phase = fmod(step, period) / period;
+                CGFloat ramp = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+                NativeSdkCellFillRect(NSMakeRect(line.origin.x + step, line.origin.y - amplitude + ramp * amplitude * 2, 1, thickness), underlineColor);
+            }
+            break;
+        }
+        case 4:   /* dotted */
+        case 5: { /* dashed */
+            const CGFloat period = underlineStyle == 4 ? MAX(2, round(line.size.height * 2)) : MAX(4, round(line.size.height * 6));
+            const CGFloat on = underlineStyle == 4 ? MAX(1, round(period * 0.5)) : MAX(2, round(period * 0.6));
+            for (CGFloat start = 0; start < line.size.width; start += period) {
+                CGFloat width = MIN(on, line.size.width - start);
+                NativeSdkCellFillRect(NSMakeRect(line.origin.x + start, line.origin.y, width, line.size.height), underlineColor);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return YES;
+}
+
 static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind, CGFloat opacity, CGContextRef context, CGFloat scale, BOOL hasEffectiveClip, NSRect effectiveClip, NSDictionary<NSString *, NSImage *> *imageCache) {
     BOOL ok = YES;
     if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"]) {
@@ -2902,6 +3063,8 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
         ok = NativeSdkPacketDrawPaintedPath(path, NativeSdkPacketDictionary(command[@"paint"]), opacity, YES);
     } else if ([kind isEqualToString:@"draw_text"]) {
         ok = NativeSdkPacketDrawText(NativeSdkPacketDictionary(command[@"text"]), opacity);
+    } else if ([kind isEqualToString:@"cell_grid"]) {
+        ok = NativeSdkPacketDrawCellGrid(NativeSdkPacketDictionary(command[@"cellGrid"]), opacity);
     } else if ([kind isEqualToString:@"shadow"] || [kind isEqualToString:@"blur"]) {
         ok = NativeSdkPacketDrawEffect(NativeSdkPacketDictionary(command[@"effect"]), opacity, context, scale, command[@"transform"], hasEffectiveClip, effectiveClip);
     } else if ([kind isEqualToString:@"draw_image"]) {
@@ -2953,7 +3116,11 @@ static BOOL NativeSdkGpuCompositeEnabled(void) {
 static BOOL NativeSdkPacketCommandRasterCacheable(NSDictionary *command, NSString *kind) {
     if (command[@"transform"]) return NO;
     if (command[@"clip"] && !NativeSdkPacketArray(command[@"clip"], 4)) return NO;
-    if ([kind isEqualToString:@"draw_text"] || [kind isEqualToString:@"shadow"]) return YES;
+    /* A cell-grid row is a pure function of its command (its cells carry
+     * their own colours and clusters), so its raster caches like any
+     * text run — which is what makes an unchanged row a blit instead of
+     * a per-cell re-raster on every dirty update. */
+    if ([kind isEqualToString:@"draw_text"] || [kind isEqualToString:@"shadow"] || [kind isEqualToString:@"cell_grid"]) return YES;
     if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"] || [kind hasPrefix:@"stroke_rect"] || [kind hasPrefix:@"draw_line"]) return YES;
     if ([kind isEqualToString:@"fill_path"] || [kind isEqualToString:@"stroke_path"]) return YES;
     if ([kind isEqualToString:@"draw_image"]) return YES;
@@ -2978,7 +3145,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v5).
+ * Compact binary gpu-surface packet decoding (wire format v6).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -3004,7 +3171,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * that would grow the dictionary past this refuses (and drops the
  * retained state) so the engine resyncs with a full present — never a
  * partially applied edit script. */
-enum { NativeSdkPacketRetainedCommandCap = 4096 };
+enum { NativeSdkPacketRetainedCommandCap = 2048 };
 
 typedef struct {
     const uint8_t *bytes;
@@ -3098,6 +3265,7 @@ static NSString *NativeSdkBinaryCommandKindName(uint8_t code) {
     case 11: return @"draw_text";
     case 12: return @"shadow";
     case 13: return @"blur";
+    case 14: return @"cell_grid";
     default: return nil;
     }
 }
@@ -3350,6 +3518,96 @@ enum {
     NativeSdkBinaryCommandFlagEffect = 0x80,
 };
 
+/* One packed cell-grid ROW (wire v6).
+ *
+ * The engine's `cell_grid` command carries a terminal row as a lattice
+ * of cells rather than as per-run fills and text draws, so a dense
+ * screen costs one command per row instead of two per cell. Cells
+ * arrive as a DELTA stream: a tag byte per cell whose low bit means
+ * "same colours and flags as the previous cell", which is why a plain
+ * row is roughly a byte a column on the wire.
+ *
+ * Decoded into the same NSDictionary shape the rest of this file works
+ * in: cells become an NSArray of per-cell dictionaries so the draw path
+ * below reads them without a second parse. The SPEC for what these
+ * pixels must be is the engine's reference renderer
+ * (canvas/reference.zig, drawCellGrid / drawCellDecorations); this
+ * decoder mirrors it deliberately, including the two-pass order. */
+static NSDictionary *NativeSdkBinaryReadCellGrid(NativeSdkBinaryPacketReader *reader) {
+    uint32_t fontId = NativeSdkBinaryReadU32(reader);
+    NSNumber *fontSize = NativeSdkBinaryReadF32Number(reader);
+    NSArray *origin = NativeSdkBinaryReadF32Array(reader, 2);
+    NSNumber *cellWidth = NativeSdkBinaryReadF32Number(reader);
+    NSNumber *cellHeight = NativeSdkBinaryReadF32Number(reader);
+    NSNumber *baseline = NativeSdkBinaryReadF32Number(reader);
+    uint16_t cols = NativeSdkBinaryReadU16(reader);
+    uint16_t rows = NativeSdkBinaryReadU16(reader);
+    uint32_t cellCount = NativeSdkBinaryReadU32(reader);
+    if (reader->failed || !origin || !fontSize) return nil;
+    /* A row cannot be longer than the engine's own column ceiling; a
+     * count past it is a framing violation, not a big screen. */
+    if (cellCount > 4096 || cellCount > reader->length - reader->offset) {
+        reader->failed = YES;
+        return nil;
+    }
+
+    NSMutableArray *cells = [NSMutableArray arrayWithCapacity:cellCount];
+    uint8_t fg[4] = {0, 0, 0, 0};
+    uint8_t bg[4] = {0, 0, 0, 0};
+    uint8_t underline[4] = {0, 0, 0, 0};
+    uint16_t cellFlags = 0;
+    BOOL haveStyle = NO;
+    for (uint32_t index = 0; index < cellCount; index++) {
+        uint8_t tag = NativeSdkBinaryReadU8(reader);
+        if (reader->failed) return nil;
+        BOOL sameStyle = (tag & 1) != 0;
+        BOOL hasCluster = (tag & 2) != 0;
+        if (!sameStyle) {
+            for (int channel = 0; channel < 4; channel++) fg[channel] = NativeSdkBinaryReadU8(reader);
+            for (int channel = 0; channel < 4; channel++) bg[channel] = NativeSdkBinaryReadU8(reader);
+            for (int channel = 0; channel < 4; channel++) underline[channel] = NativeSdkBinaryReadU8(reader);
+            cellFlags = NativeSdkBinaryReadU16(reader);
+            haveStyle = YES;
+        } else if (!haveStyle) {
+            /* "Same as the previous cell" with no previous cell. */
+            reader->failed = YES;
+            return nil;
+        }
+        NSString *cluster = nil;
+        if (hasCluster) {
+            uint8_t length = NativeSdkBinaryReadU8(reader);
+            if (reader->failed || length > reader->length - reader->offset) {
+                reader->failed = YES;
+                return nil;
+            }
+            if (!NativeSdkBinaryHasBytes(reader, length)) return nil;
+            cluster = [[NSString alloc] initWithBytes:reader->bytes + reader->offset length:length encoding:NSUTF8StringEncoding];
+            reader->offset += length;
+            if (!cluster) cluster = @"";
+        }
+        if (reader->failed) return nil;
+        NSMutableDictionary *cell = [NSMutableDictionary dictionaryWithCapacity:6];
+        cell[@"fg"] = @[ @(fg[0] / 255.0), @(fg[1] / 255.0), @(fg[2] / 255.0), @(fg[3] / 255.0) ];
+        cell[@"bg"] = @[ @(bg[0] / 255.0), @(bg[1] / 255.0), @(bg[2] / 255.0), @(bg[3] / 255.0) ];
+        cell[@"ul"] = @[ @(underline[0] / 255.0), @(underline[1] / 255.0), @(underline[2] / 255.0), @(underline[3] / 255.0) ];
+        cell[@"flags"] = @(cellFlags);
+        if (cluster) cell[@"text"] = cluster;
+        [cells addObject:cell];
+    }
+    if (reader->failed) return nil;
+    return @{
+        @"font" : @(fontId),
+        @"size" : fontSize,
+        @"origin" : origin,
+        @"cellWidth" : cellWidth,
+        @"cellHeight" : cellHeight,
+        @"baseline" : baseline,
+        @"cols" : @(cols),
+        @"rows" : @(rows),
+        @"cells" : cells,
+    };
+}
+
 static NSDictionary *NativeSdkBinaryReadCommand(NativeSdkBinaryPacketReader *reader) {
     uint8_t kindCode = NativeSdkBinaryReadU8(reader);
     uint8_t flags = NativeSdkBinaryReadU8(reader);
@@ -3409,6 +3667,13 @@ static NSDictionary *NativeSdkBinaryReadCommand(NativeSdkBinaryPacketReader *rea
         if (!effect) return nil;
         command[@"effect"] = effect;
     }
+    /* Implied by the KIND, not by a flag bit: the flag byte is full, and
+     * every cell_grid carries this payload while no other kind does. */
+    if (kindCode == 14) {
+        NSDictionary *grid = NativeSdkBinaryReadCellGrid(reader);
+        if (!grid) return nil;
+        command[@"cellGrid"] = grid;
+    }
     return reader->failed ? nil : command;
 }
 
@@ -3426,7 +3691,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 5) return nil;
+    if (version != 6) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */

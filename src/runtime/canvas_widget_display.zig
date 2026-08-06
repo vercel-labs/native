@@ -615,6 +615,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             if (!view.focused) return null;
             const focused_id = view.canvas_widget_focused_id;
             if (focused_id == 0 or view.canvas_widget_focus_visible_id != focused_id) return null;
+            // A terminal whose emulator asked for a blinking cursor
+            // blinks through the SAME looping opacity animation a text
+            // caret uses — the painter has no clock, so the runtime owns
+            // the phase for both.
+            if (canvasWidgetTerminalBlinkTarget(view, focused_id)) |target| return target;
             if (!view.canEditCanvasWidgetText(focused_id)) return null;
             const node_index = view.canvasWidgetNodeIndexById(focused_id) orelse return null;
             const widget = view.widget_layout_nodes[node_index].widget;
@@ -627,6 +632,23 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 .bounds = view.widget_layout_nodes[node_index].frame,
             };
         }
+    };
+}
+
+/// The blink target of a focused `.terminal` widget: its cursor
+/// command, when the producer's grid says the cursor blinks and the
+/// session is live. A stopped session's cursor is already the dim
+/// hollow at-rest pose and must not pulse.
+fn canvasWidgetTerminalBlinkTarget(view: anytype, focused_id: canvas.ObjectId) ?CanvasWidgetCaretBlinkTarget {
+    const node_index = view.canvasWidgetNodeIndexById(focused_id) orelse return null;
+    const widget = view.widget_layout_nodes[node_index].widget;
+    if (widget.kind != .terminal) return null;
+    const grid = widget.terminal.grid orelse return null;
+    const cursor = grid.cursor orelse return null;
+    if (!cursor.blinking or !grid.running) return null;
+    return .{
+        .command_id = canvas.terminal_grid.cursorCommandId(widget.id),
+        .bounds = view.widget_layout_nodes[node_index].frame,
     };
 }
 

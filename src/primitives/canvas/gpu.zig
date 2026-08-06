@@ -1,6 +1,7 @@
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
+const cell_grid_model = @import("cell_grid.zig");
 const text_model = @import("text.zig");
 const render_model = @import("render.zig");
 
@@ -115,6 +116,7 @@ pub const CanvasGpuCommandKind = enum {
     stroke_path,
     draw_image,
     draw_text,
+    cell_grid,
     shadow,
     blur,
     unsupported,
@@ -173,6 +175,23 @@ pub const CanvasGpuText = struct {
     text_layout: ?TextLayoutOptions = null,
 };
 
+/// A packed cell-grid ROW on the wire. Carries the lattice geometry and
+/// the cells themselves; hosts expand it exactly as the reference
+/// renderer does (canvas/reference.zig `drawCellGrid`), which is the
+/// spec for what the pixels must be.
+pub const CanvasGpuCellGrid = struct {
+    font_id: FontId = 0,
+    font_size: f32 = 0,
+    origin: geometry.PointF = .{},
+    cell_width: f32 = 0,
+    cell_height: f32 = 0,
+    baseline: f32 = 0,
+    cols: u16 = 0,
+    rows: u16 = 0,
+    cells: []const cell_grid_model.Cell = &.{},
+    text: []const u8 = "",
+};
+
 pub const CanvasGpuShadow = struct {
     rect: geometry.RectF = .{},
     radius: Radius = .{},
@@ -210,6 +229,7 @@ pub const CanvasGpuCommand = struct {
     cap: LineCap = .butt,
     image: ?CanvasGpuImage = null,
     text: ?CanvasGpuText = null,
+    cells: ?CanvasGpuCellGrid = null,
     effect: CanvasGpuEffect = .none,
     clip: ?geometry.RectF = null,
     opacity: f32 = 1,
@@ -477,14 +497,26 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
     };
 
     switch (command.command) {
-        // The packed cell grid has no GPU-packet encoding yet: it stays
-        // `.unsupported`, which makes the frame planner refuse the
-        // retained packet and present through the CPU pixel path — the
-        // reference renderer, the same oracle the automation
-        // screenshots go through. Correct on every host from day one,
-        // and slower than it should be until each host learns to expand
-        // a lattice itself (see cell_grid.zig).
-        .cell_grid => {},
+        .cell_grid => |value| {
+            packet_command.kind = .cell_grid;
+            packet_command.pipeline = .glyph_run;
+            packet_command.cells = .{
+                .font_id = value.font_id,
+                .font_size = value.font_size,
+                .origin = value.origin,
+                .cell_width = value.cell_width,
+                .cell_height = value.cell_height,
+                .baseline = value.baseline,
+                .cols = value.cols,
+                .rows = value.rows,
+                .cells = value.cells,
+                .text = value.text,
+            };
+            // A grid inks glyphs, so it depends on the face the same way
+            // a text run does; it names no SHAPED glyph run, so it
+            // claims no atlas or layout resource.
+            packet_command.uses_resource = true;
+        },
         .fill_rect => |value| {
             packet_command.kind = canvasGpuFillRectKind(value.fill);
             packet_command.pipeline = canvasGpuFillPipeline(value.fill);

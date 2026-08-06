@@ -16,14 +16,20 @@
 
 namespace {
 
-/* Compact binary gpu-surface packet decoding (wire format v5).
+/* Compact binary gpu-surface packet decoding (wire format v6).
  *
  * This independent decoder deliberately repeats the encoder's tags and
  * bounds rather than sharing packed structs across the Zig/C++ ABI. A
  * version or layout disagreement is a refused present, which makes the
  * runtime resynchronize/fall back instead of drawing corrupt content. */
-constexpr uint8_t kPacketVersion = 5;
-constexpr size_t kRetainedCommandCap = 4096;
+/* v6 adds the `cell_grid` command kind (14), a packed terminal row.
+ * This decoder does not implement it: an unknown kind fails validation
+ * (see the `default:` arm below), which refuses the whole packet and
+ * drops the frame to the engine's pixel fallback. Every packet WITHOUT
+ * a terminal in it keeps the retained Direct2D path, which is why the
+ * version moves rather than the decoder rejecting v6 wholesale. */
+constexpr uint8_t kPacketVersion = 6;
+constexpr size_t kRetainedCommandCap = 2048;
 constexpr size_t kDirtyRectCap = kWindowsGpuDirtyRectCap;
 constexpr uint32_t kMaxSurfacePixels = 8192;
 constexpr float kBezierCircle = 0.5522847498307936f;

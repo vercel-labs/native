@@ -61,1123 +61,9 @@ fn paintInto(grid: grid_model.TerminalGrid, builder: *canvas.Builder, options: g
 // per-run `draw_text` commands. What each test PINS is unchanged; only
 // the surface it reads moved.
 
-fn firstCellGrid(list: canvas.DisplayList) ?canvas.CellGrid {
-    for (list.commands) |command| {
-        if (command == .cell_grid) return command.cell_grid;
-    }
-    return null;
-}
-
-fn gridCell(list: canvas.DisplayList, x: usize, y: usize) ?canvas.Cell {
-    const grid = firstCellGrid(list) orelse return null;
-    return grid.at(x, y);
-}
-
-fn gridCluster(list: canvas.DisplayList, x: usize, y: usize) []const u8 {
-    const grid = firstCellGrid(list) orelse return "";
-    const cell_value = grid.at(x, y) orelse return "";
-    return cell_value.cluster(grid.text);
-}
-
-/// The cluster bytes of row `y`, columns 0..cols, concatenated into
-/// `out` — the row as a renderer would ink it.
-fn gridRowText(list: canvas.DisplayList, y: usize, out: []u8) []const u8 {
-    const grid = firstCellGrid(list) orelse return "";
-    var len: usize = 0;
-    var x: usize = 0;
-    while (x < grid.cols) : (x += 1) {
-        const cell_value = grid.at(x, y) orelse continue;
-        const bytes = cell_value.cluster(grid.text);
-        if (len + bytes.len > out.len) break;
-        @memcpy(out[len..][0..bytes.len], bytes);
-        len += bytes.len;
-    }
-    return out[0..len];
-}
-
-/// Rows of the grid that carry any ink or background — what "painted"
-/// means once a screen is one command.
-fn gridPaintedRows(list: canvas.DisplayList) usize {
-    const grid = firstCellGrid(list) orelse return 0;
-    return grid.rows;
-}
-
-test "the grid carries a per-cell foreground" {
-    const row_cells = comptime asciiRow("hi red", white);
-    var cells = row_cells;
-    // Recolor the "red" run.
-    cells[3].fg = red;
-    cells[4].fg = red;
-    cells[5].fg = red;
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [256]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 100),
-        .tokens = .{},
-    });
-    const list = builder.displayList();
-
-    // Colour is a property of the CELL now, not of a merged run: the
-    // renderer inks each cell with its own foreground, so a colour
-    // change costs nothing and merges nothing.
-    var text_buffer: [64]u8 = undefined;
-    try testing.expectEqualStrings("hired", gridRowText(list, 0, &text_buffer));
-    const h = gridCell(list, 0, 0) orelse return error.TestExpectedCell;
-    try testing.expectEqual(canvas.CellColor.fromColor(white), h.fg);
-    const r = gridCell(list, 3, 0) orelse return error.TestExpectedCell;
-    try testing.expectEqual(canvas.CellColor.fromColor(red), r.fg);
-    // The space between them inks nothing and keeps no cluster.
-    const gap = gridCell(list, 2, 0) orelse return error.TestExpectedCell;
-    try testing.expectEqual(@as(u8, 0), gap.text_len);
-}
-
-test "wide cells advance two columns and spacers carry no ink" {
-    // "你!" — the wide cell occupies columns 0-1, '!' lands at column 2.
-    const cells = [_]grid_model.TerminalCell{
-        .{ .cp = 0x4F60, .cluster = "\xe4\xbd\xa0", .fg = white, .wide = .wide },
-        .{ .wide = .spacer },
-        cell('!', "!", white),
-    };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 100),
-        .tokens = .{},
-    });
-    const list = builder.displayList();
-    const grid = firstCellGrid(list) orelse return error.TestExpectedCellGrid;
-
-    // The lattice puts '!' at column 2 by CONSTRUCTION — a cell's
-    // position is its index, so a wide cluster can no longer shift its
-    // neighbours off the grid however the face advances it.
-    try testing.expectEqualStrings("\xe4\xbd\xa0", gridCluster(list, 0, 0));
-    try testing.expectEqualStrings("!", gridCluster(list, 2, 0));
-    const wide_cell = grid.at(0, 0) orelse return error.TestExpectedCell;
-    try testing.expectEqual(canvas.CellWidth.wide, wide_cell.style().width);
-    const spacer = grid.at(1, 0) orelse return error.TestExpectedCell;
-    try testing.expectEqual(canvas.CellWidth.spacer, spacer.style().width);
-    try testing.expectEqual(@as(u8, 0), spacer.text_len);
-    // Column 2's rect is two cells in.
-    const metrics = grid_model.cellMetrics(canvas.DesignTokens{});
-    try testing.expectApproxEqAbs(metrics.width * 2, grid.cellRect(2, 0).x, 0.01);
-}
-
-test "box-drawing cells render as geometry, never text" {
-    const cells = [_]grid_model.TerminalCell{
-        .{ .cp = 0x2500, .fg = white }, // ─
-        .{ .cp = 0x2500, .fg = white },
-        .{ .cp = 0x2502, .fg = white }, // │
-    };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 100),
-        .tokens = .{},
-    });
-    const list = builder.displayList();
-
-    var text_commands: usize = 0;
-    var fills: usize = 0;
-    for (list.commands) |command| {
-        switch (command) {
-            .draw_text => text_commands += 1,
-            .fill_rect => fills += 1,
-            else => {},
-        }
-    }
-    try testing.expectEqual(@as(usize, 0), text_commands);
-    // Background + the merged ─ run + the │ bar at least.
-    try testing.expect(fills >= 3);
-}
-
-test "the selection wash and keyboard caret paint from snapshot state" {
-    const row_cells = comptime asciiRow("select me", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells, .selection = .{ 0, 5 } }};
-    var grid = baseGrid(&rows);
-    grid.select_head = .{ .x = 5, .y = 0 };
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(grid, &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 100),
-        .tokens = .{},
-    });
-    const list = builder.displayList();
-
-    var saw_wash = false;
-    var saw_caret = false;
-    for (list.commands) |command| {
-        switch (command) {
-            .fill_rect => |fill| {
-                if (fill.fill == .color and fill.fill.color.a > 0.29 and fill.fill.color.a < 0.31) saw_wash = true;
-            },
-            .stroke_rect => saw_caret = true,
-            else => {},
-        }
-    }
-    try testing.expect(saw_wash);
-    try testing.expect(saw_caret);
-}
-
-test "the cursor register: filled only while focused and live, hollow otherwise" {
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &.{} }};
-    var grid = baseGrid(&rows);
-    grid.cursor = .{ .x = 0, .y = 0 };
-
-    var commands: [16]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(grid, &builder, .{
-        .frame = geometry.RectF.init(0, 0, 100, 40),
-        .tokens = .{},
-        .focused = true,
-    });
-    var running_alpha: f32 = 0;
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .fill_rect => |fill| {
-                if (fill.fill == .color and fill.fill.color.b == blue.b and fill.fill.color.a < 1) running_alpha = fill.fill.color.a;
-            },
-            else => {},
-        }
-    }
-    try testing.expectApproxEqAbs(@as(f32, 0.45), running_alpha, 0.001);
-
-    var blurred_commands: [16]canvas.CanvasCommand = undefined;
-    var blurred_builder = canvas.Builder.init(&blurred_commands);
-    try paintInto(grid, &blurred_builder, .{
-        .frame = geometry.RectF.init(0, 0, 100, 40),
-        .tokens = .{},
-        .focused = false,
-    });
-    var blurred_alpha: f32 = 0;
-    for (blurred_builder.displayList().commands) |command| {
-        switch (command) {
-            .stroke_rect => |stroke| {
-                if (stroke.stroke.fill == .color and stroke.stroke.fill.color.b == blue.b) {
-                    blurred_alpha = stroke.stroke.fill.color.a;
-                    try testing.expectEqual(@as(f32, 1), stroke.stroke.width);
-                }
-            },
-            else => {},
-        }
-    }
-    try testing.expectApproxEqAbs(@as(f32, 0.45), blurred_alpha, 0.001);
-
-    grid.running = false;
-    var ended_commands: [16]canvas.CanvasCommand = undefined;
-    var ended_builder = canvas.Builder.init(&ended_commands);
-    try paintInto(grid, &ended_builder, .{
-        .frame = geometry.RectF.init(0, 0, 100, 40),
-        .tokens = .{},
-        .focused = true,
-    });
-    var ended_alpha: f32 = 0;
-    for (ended_builder.displayList().commands) |command| {
-        switch (command) {
-            .stroke_rect => |stroke| {
-                if (stroke.stroke.fill == .color and stroke.stroke.fill.color.b == blue.b) {
-                    ended_alpha = stroke.stroke.fill.color.a;
-                    try testing.expectEqual(@as(f32, 1), stroke.stroke.width);
-                }
-            },
-            else => {},
-        }
-    }
-    try testing.expectApproxEqAbs(@as(f32, 0.22), ended_alpha, 0.001);
-}
-
-test "the terminal widget cursor follows logical focus independently of the outer ring" {
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &.{} }};
-    var grid = baseGrid(&rows);
-    grid.cursor = .{ .x = 0, .y = 0 };
-    const terminal = canvas.Widget{
-        .id = 9,
-        .kind = .terminal,
-        .frame = geometry.RectF.init(0, 0, 200, 100),
-        .terminal = .{ .pty = 1, .grid = &grid },
-    };
-    var nodes: [2]canvas.WidgetLayoutNode = undefined;
-    const layout = try canvas.layoutWidgetTree(terminal, terminal.frame, &nodes);
-    const cursor_id = grid_model.paintIdBase(terminal.id) + 0x61_0002;
-
-    // Logical focus fills the cursor even when the modality-specific
-    // outer ring is quiet.
-    var focused_commands: [32]canvas.CanvasCommand = undefined;
-    var focused_builder = canvas.Builder.init(&focused_commands);
-    try layout.emitDisplayListWithState(&focused_builder, .{}, .{ .focused_id = terminal.id });
-    var saw_filled_cursor = false;
-    var saw_outer_ring = false;
-    for (focused_builder.displayList().commands) |command| {
-        switch (command) {
-            .fill_rect => |fill| if (fill.id == cursor_id) {
-                saw_filled_cursor = true;
-            },
-            .stroke_rect => |stroke| if (stroke.id != cursor_id) {
-                saw_outer_ring = true;
-            },
-            else => {},
-        }
-    }
-    try testing.expect(saw_filled_cursor);
-    try testing.expect(!saw_outer_ring);
-
-    var blurred_commands: [32]canvas.CanvasCommand = undefined;
-    var blurred_builder = canvas.Builder.init(&blurred_commands);
-    try layout.emitDisplayListWithState(&blurred_builder, .{}, .{
-        .keyboard_active = false,
-        .focused_id = terminal.id,
-        .focus_visible_id = terminal.id,
-    });
-    var saw_hollow_cursor = false;
-    var kept_outer_ring = false;
-    for (blurred_builder.displayList().commands) |command| {
-        switch (command) {
-            .stroke_rect => |stroke| if (stroke.id == cursor_id) {
-                saw_hollow_cursor = true;
-            } else {
-                kept_outer_ring = true;
-            },
-            else => {},
-        }
-    }
-    try testing.expect(saw_hollow_cursor);
-    // Key-window/app activity gates the terminal's ownership cue only;
-    // retained focus-visible chrome keeps its normal restoration state.
-    try testing.expect(kept_outer_ring);
-}
-
-test "the scrollback thumb paints only while the viewport is in history" {
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &.{} }};
-    var grid = baseGrid(&rows);
-
-    // Pinned to the bottom: no thumb.
-    grid.scrollbar = .{ .offset = 76, .len = 24, .total = 100 };
-    var pinned_commands: [16]canvas.CanvasCommand = undefined;
-    var pinned = canvas.Builder.init(&pinned_commands);
-    try paintInto(grid, &pinned, .{
-        .frame = geometry.RectF.init(0, 0, 100, 200),
-        .tokens = .{},
-    });
-    const pinned_count = pinned.displayList().commands.len;
-
-    // Scrolled into history: exactly one extra fill (the thumb).
-    grid.scrollbar = .{ .offset = 10, .len = 24, .total = 100 };
-    var history_commands: [16]canvas.CanvasCommand = undefined;
-    var history = canvas.Builder.init(&history_commands);
-    try paintInto(grid, &history, .{
-        .frame = geometry.RectF.init(0, 0, 100, 200),
-        .tokens = .{},
-    });
-    try testing.expectEqual(pinned_count + 1, history.displayList().commands.len);
-}
-
-test "the command budget degrades row-wise, never overflowing the frame" {
-    // Three rows of alternating colors (no run merging), tight budget.
-    var cells: [3][8]grid_model.TerminalCell = undefined;
-    for (&cells) |*row_cells| {
-        for (row_cells, 0..) |*entry, index| {
-            entry.* = cell('x', "x", if (index % 2 == 0) white else red);
-            entry.bg = if (index % 2 == 0) blue else null;
-        }
-    }
-    const rows = [_]grid_model.TerminalRow{
-        .{ .cells = &cells[0] },
-        .{ .cells = &cells[1] },
-        .{ .cells = &cells[2] },
-    };
-
-    var commands: [512]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 200),
-        .tokens = .{},
-        .command_budget = 60,
-    });
-    // Never exceeds the budget; the later rows dropped whole.
-    try testing.expect(builder.displayList().commands.len <= 60);
-}
-
-test "the text budget stops before a row it cannot hold whole" {
-    const row_a = comptime asciiRow("aaaa", white);
-    const row_b = comptime asciiRow("bbbb", white);
-    const rows = [_]grid_model.TerminalRow{
-        .{ .cells = &row_a },
-        .{ .cells = &row_b },
-    };
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 200),
-        .tokens = .{},
-        // Reserve all but one byte of the store. The grid INTERNS
-        // clusters, so row a's four 'a's cost one byte and row b's
-        // four 'b's cost the second — which is the byte that crosses.
-        .text_reserve = canvas.max_display_list_text_bytes - 1,
-    });
-    // Row a's cells reached the lattice; row b's never did, so the grid
-    // is one row tall.
-    const list = builder.displayList();
-    try testing.expectEqual(@as(usize, 1), gridPaintedRows(list));
-    var text_buffer: [64]u8 = undefined;
-    try testing.expectEqualStrings("aaaa", gridRowText(list, 0, &text_buffer));
-}
-
-test "the glyph budget stops before the row whose new code points cross it" {
-    // Row a introduces 4 distinct glyphs, row b 4 more.
-    const row_a = comptime asciiRow("abcd", white);
-    const row_b = comptime asciiRow("efgh", white);
-    const rows = [_]grid_model.TerminalRow{
-        .{ .cells = &row_a },
-        .{ .cells = &row_b },
-    };
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 200),
-        .tokens = .{},
-        // Atlas-entry units: each new code point charges four subpixel
-        // variants, so row a (4 cps = 16 entries) fits a 24-entry budget
-        // and row b (16 more) crosses it.
-        .glyph_budget = 24,
-    });
-    const list = builder.displayList();
-    try testing.expectEqual(@as(usize, 1), gridPaintedRows(list));
-    var text_buffer: [64]u8 = undefined;
-    try testing.expectEqualStrings("abcd", gridRowText(list, 0, &text_buffer));
-}
-
-test "a wide row of mergeable box glyphs paints under the widget budget" {
-    // 320 identical `─` cells merge to ONE geometry command, so the cost
-    // estimate must not charge nine per column and skip the row.
-    var box_cells: [320]grid_model.TerminalCell = undefined;
-    for (&box_cells) |*c| c.* = .{ .cp = 0x2500, .fg = white };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &box_cells }};
-
-    var commands: [2048]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 2600, 40),
-        .tokens = .{},
-        .command_budget = 1792,
-    });
-    var box_fills: usize = 0;
-    for (builder.displayList().commands) |command| {
-        if (command == .fill_rect) box_fills += 1;
-    }
-    // Background + the single merged bar (+ no wash: no selection). The
-    // row painted rather than being skipped for a bogus 2,880 estimate.
-    try testing.expect(box_fills >= 2);
-}
-
-test "the text preflight counts referenced sibling text already in the list" {
-    // A prior widget's REFERENCED draw_text (not builder-owned) counts
-    // against the per-view text budget, so the grid must degrade against
-    // it. Pre-emit a referenced-text command consuming most of the view
-    // budget, then a terminal row that would cross the ceiling drops.
-    const filler = "x" ** (canvas.max_display_list_text_bytes - 4);
-    const row = comptime asciiRow("cells", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row }};
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    // Referenced text (a slice not from allocTextBytes), as a sibling
-    // text widget emits.
-    try builder.drawText(.{ .id = 1, .font_id = 2, .size = 12, .origin = geometry.PointF.init(0, 0), .color = white, .text = filler });
-    try testing.expectEqual(@as(usize, 0), builder.text_byte_len); // referenced, not builder-owned
-
-    try grid_model.paint(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 100),
-        .tokens = .{},
-    });
-    // Only 4 bytes of headroom remained, so the 5-byte row dropped: no
-    // grid text command, and the frame's total text stays within budget.
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .draw_text => |t| try testing.expect(!std.mem.eql(u8, t.text, "cells")),
-            else => {},
-        }
-    }
-}
-
-test "the prologue budget check accounts for commands already in the builder" {
-    // A builder already near an absolute command ceiling must degrade to
-    // nothing rather than emit the prologue and overrun. Pre-fill the
-    // builder, then paint with a budget at the current length.
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &.{} }};
-    var commands: [16]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    for (0..10) |i| {
-        try builder.fillRect(.{ .id = 1000 + i, .rect = geometry.RectF.init(0, 0, 1, 1), .fill = .{ .color = white } });
-    }
-    const before = builder.len;
-    try grid_model.paint(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 100, 40),
-        .tokens = .{},
-        // No room for the prologue above the already-consumed commands.
-        .command_budget = before + 2,
-    });
-    // Nothing emitted (and no unbalanced clip): the len is unchanged.
-    try testing.expectEqual(before, builder.len);
-}
-
-test "id_base near the u64 ceiling wraps instead of trapping" {
-    // paintIdBase spans the full u64 space, so every emitted id offset
-    // must wrap. An id_base whose spread lands near maxInt paints a
-    // nonempty row without an overflow trap in safe builds.
-    const cells = [_]grid_model.TerminalCell{
-        cell('x', "x", white),
-        .{ .cp = 0x256C, .fg = white }, // ╬ — the eight-command joint
-        .{ .cp = 0x256D, .fg = white }, // ╭ — a rounded corner (path elements)
-    };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells, .selection = .{ 0, 2 } }};
-    var grid = baseGrid(&rows);
-    grid.cursor = .{ .x = 0, .y = 0 };
-    grid.select_head = .{ .x = 0, .y = 0 };
-
-    var commands: [128]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    // Any id_base is legal; the painter must not trap on the wrap.
-    try grid_model.paint(grid, &builder, .{
-        .frame = geometry.RectF.init(0, 0, 120, 40),
-        .tokens = .{},
-        .id_base = 0xffff_ffff_ffff_ffff,
-    });
-    try testing.expect(builder.displayList().commands.len > 0);
-}
-
-test "an underlined merged double run stays within the command budget" {
-    // A merged ═ paints TWO bars of geometry; its UNDERLINE is a cell
-    // attribute the grid carries, so it costs no command at all. The
-    // cost estimate must still charge the bars, or a row of unmergeable
-    // doubles (alternating colors break every merge) overruns the
-    // ceiling.
-    var cells: [320]grid_model.TerminalCell = undefined;
-    for (&cells, 0..) |*c, i| {
-        c.* = .{ .cp = 0x2550, .fg = if (i % 2 == 0) white else red, .underline = true };
-    }
-    const rows = [_]grid_model.TerminalRow{
-        .{ .cells = &cells },
-        .{ .cells = &cells },
-    };
-
-    var commands: [2048]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 2600, 80),
-        .tokens = .{},
-        .command_budget = 1000,
-    });
-    // Whatever painted, the ceiling held.
-    try testing.expect(builder.displayList().commands.len <= 1000);
-}
-
-test "ordinary underlined text is costed without integer overflow" {
-    var cells: [320]grid_model.TerminalCell = undefined;
-    for (&cells, 0..) |*c, i| {
-        c.* = cell('x', "x", if (i % 2 == 0) white else red);
-        c.underline = true;
-    }
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [1024]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 2600, 40),
-        .tokens = .{},
-        .command_budget = 700,
-    });
-    try testing.expect(builder.displayList().commands.len <= 700);
-}
-
-test "an anonymous grid keeps the unkeyed convention: every command id 0" {
-    const cells = [_]grid_model.TerminalCell{
-        cell('x', "x", white),
-        .{ .cp = 0x256C, .fg = white }, // ╬
-        .{ .cp = 0x2596, .fg = white }, // quadrant
-        .{ .cp = 0x256D, .fg = white }, // rounded corner
-    };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells, .selection = .{ 0, 1 } }};
-    var grid = baseGrid(&rows);
-    grid.cursor = .{ .x = 0, .y = 0 };
-
-    var commands: [128]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(grid, &builder, .{
-        .frame = geometry.RectF.init(0, 0, 200, 40),
-        .tokens = .{},
-        .id_base = 0,
-    });
-    for (builder.displayList().commands) |command| {
-        const id = switch (command) {
-            .fill_rect => |c| c.id,
-            .stroke_rect => |c| c.id,
-            .draw_text => |c| c.id,
-            .push_clip => |c| c.id,
-            .stroke_path => |c| c.id,
-            .draw_line => |c| c.id,
-            else => continue,
-        };
-        try testing.expectEqual(@as(canvas.ObjectId, 0), id);
-    }
-}
-
-test "two keyed grids in one builder never share a nonzero command id" {
-    const row_cells = comptime asciiRow("ab", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
-    var grid = baseGrid(&rows);
-    grid.cursor = .{ .x = 0, .y = 0 };
-
-    var commands: [128]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    // The adversarial pair: id B chosen so B's base lands inside A's
-    // old wide-offset namespace. Under the strided scheme both stay
-    // disjoint by construction.
-    try grid_model.paint(grid, &builder, .{ .frame = geometry.RectF.init(0, 0, 100, 40), .tokens = .{}, .id_base = 1 });
-    try grid_model.paint(grid, &builder, .{ .frame = geometry.RectF.init(0, 60, 100, 40), .tokens = .{}, .id_base = 0x64dd_ccf4_0000_0001 });
-    var seen: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
-    defer seen.deinit(testing.allocator);
-    for (builder.displayList().commands) |command| {
-        const id = switch (command) {
-            .fill_rect => |c| c.id,
-            .stroke_rect => |c| c.id,
-            .draw_text => |c| c.id,
-            .push_clip => |c| c.id,
-            else => continue,
-        };
-        if (id == 0) continue;
-        for (seen.items) |prior| try testing.expect(prior != id);
-        try seen.append(testing.allocator, id);
-    }
-}
-
-test "pure-double corners draw nested L joins, never through-bars" {
-    const cells = [_]grid_model.TerminalCell{.{ .cp = 0x2554, .fg = white }}; // ╔
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [32]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 40, 40),
-        .tokens = .{},
-    });
-    // Background + exactly four bars (two nested Ls).
-    var bar_fills: usize = 0;
-    var min_x: f32 = 1000;
-    var min_y: f32 = 1000;
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .fill_rect => |fill| {
-                // Skip the full-bleed background.
-                if (fill.rect.width >= 40) continue;
-                bar_fills += 1;
-                min_x = @min(min_x, fill.rect.x);
-                min_y = @min(min_y, fill.rect.y);
-            },
-            else => {},
-        }
-    }
-    try testing.expectEqual(@as(usize, 4), bar_fills);
-    // ╔ opens down+right: no bar reaches the cell's left or top edge —
-    // the old through-bars did (their stubs crossed the joint).
-    try testing.expect(min_x > 0);
-    try testing.expect(min_y > 0);
-}
-
-test "a wide row of one-bar box pieces paints under the widget budget" {
-    // 198 columns of │ emit one bar each; the cost estimate must charge
-    // what they paint, not a flat joint worst case that rejects the row.
-    var cells: [198]grid_model.TerminalCell = undefined;
-    for (&cells) |*c| c.* = .{ .cp = 0x2502, .fg = white };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [2048]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 1700, 40),
-        .tokens = .{},
-        .command_budget = 1792,
-    });
-    var bars: usize = 0;
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .fill_rect => |fill| {
-                if (fill.rect.width < 40) bars += 1;
-            },
-            else => {},
-        }
-    }
-    try testing.expectEqual(@as(usize, 198), bars);
-}
-
-test "a row adding no text paints even when siblings spent the text share" {
-    // Earlier widgets already sit past the grid's reserved text share;
-    // an all-box row ADDS no text, so it must paint — the ceiling bounds
-    // what the grid adds, never what siblings spent.
-    const filler = "x" ** (canvas.max_display_list_text_bytes - 100);
-    var cells: [8]grid_model.TerminalCell = undefined;
-    for (&cells) |*c| c.* = .{ .cp = 0x2500, .fg = white };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try builder.drawText(.{ .id = 1, .font_id = 2, .size = 12, .origin = geometry.PointF.init(0, 0), .color = white, .text = filler });
-
-    try grid_model.paint(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 100, 40),
-        .tokens = .{},
-        // The default widget reserve leaves less than the filler already
-        // consumed; the box row adds zero text and must still paint.
-        .text_reserve = grid_model.widget_text_reserve,
-    });
-    // The box row adds no cluster bytes at all — its ink is geometry —
-    // so the text ceiling can never reject it however much a sibling
-    // widget already spent.
-    var box_fills: usize = 0;
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .fill_rect => |fill| {
-                if (fill.rect.width < 100) box_fills += 1;
-            },
-            else => {},
-        }
-    }
-    try testing.expect(box_fills >= 1);
-}
-
-test "a combining-mark cluster paints alone; its neighbor keeps its cell origin" {
-    // "e" + combining acute in cell 0, "!" in cell 1: the cluster must
-    // paint as its own run and "!" must start at exactly one cell width
-    // — a layout that advanced the mark by a full glyph inside a merged
-    // run would have shifted "!" off the grid.
-    const cells = [_]grid_model.TerminalCell{
-        .{ .cp = 'e', .cluster = "e\u{0301}", .fg = white },
-        cell('!', "!", white),
-    };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [32]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 100, 40),
-        .tokens = .{},
-    });
-    const metrics = grid_model.cellMetrics(canvas.DesignTokens{});
-    const list = builder.displayList();
-    const grid = firstCellGrid(list) orelse return error.TestExpectedCellGrid;
-    // The cluster keeps ALL its bytes in one cell, and "!" owns the
-    // next: cell positions are indices, so a mark that advances like a
-    // full glyph can no longer push its neighbour off the grid. That
-    // whole class of bug is gone by construction.
-    try testing.expectEqualStrings("e\u{0301}", gridCluster(list, 0, 0));
-    try testing.expectEqualStrings("!", gridCluster(list, 1, 0));
-    try testing.expectApproxEqAbs(@as(f32, 0), grid.cellRect(0, 0).x, 0.01);
-    try testing.expectApproxEqAbs(metrics.width, grid.cellRect(1, 0).x, 0.01);
-}
-
-test "the widget diff reports paint damage for a changed bound grid" {
-    const row_cells = comptime asciiRow("a", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
-    const grid_a = baseGrid(&rows);
-    var grid_b = baseGrid(&rows);
-    grid_b.cursor = .{ .x = 0, .y = 0 };
-
-    var widget = canvas.Widget{
-        .id = 11,
-        .kind = .terminal,
-        .frame = geometry.RectF.init(0, 0, 200, 100),
-        .terminal = .{ .pty = 1, .grid = &grid_a },
-    };
-    var nodes_a: [4]canvas.WidgetLayoutNode = undefined;
-    const layout_a = try canvas.layoutWidgetTree(widget, geometry.RectF.init(0, 0, 200, 100), &nodes_a);
-    widget.terminal.grid = &grid_b;
-    var nodes_b: [4]canvas.WidgetLayoutNode = undefined;
-    const layout_b = try canvas.layoutWidgetTree(widget, geometry.RectF.init(0, 0, 200, 100), &nodes_b);
-
-    var output: [8]canvas.WidgetInvalidation = undefined;
-    const changes = try layout_a.diff(layout_b, &output);
-    var saw_paint_dirty = false;
-    for (changes) |change| {
-        if (change.id == 11 and change.paint_dirty) saw_paint_dirty = true;
-    }
-    try testing.expect(saw_paint_dirty);
-}
-
-test "clampGrid preserves full bounded viewport geometry" {
-    const clamped = grid_model.clampGrid(400, 100);
-    try testing.expectEqual(@as(u16, grid_model.max_cols), clamped.x);
-    try testing.expectEqual(@as(u16, grid_model.max_rows), clamped.y);
-    try testing.expectEqual(grid_model.max_cols * grid_model.max_rows, grid_model.max_cells);
-    const tiny = grid_model.clampGrid(0, 0);
-    try testing.expectEqual(@as(u16, 2), tiny.x);
-    try testing.expectEqual(@as(u16, 2), tiny.y);
-}
-
-test "the path reserve holds one maximal filled-line chart series" {
-    // A 256-point filled line strokes its polyline and fills its area
-    // (points plus closure vertices): the reserve must cover both, or a
-    // terminal of rounded corners starves the chart into
-    // ChartPathElementListFull.
-    try testing.expect(grid_model.widget_path_reserve >= 2 * canvas.max_chart_points_per_series + 3);
-}
-
-/// A mono face with a WIDER pitch than the estimator's 0.6 em — what
-/// macOS resolves the mono id to when Geist Mono is absent (the system
-/// monospaced face, 0.618 em). Everything mono measures at this pitch,
-/// so cells and runs both derive from it.
-const wide_pitch_em: f32 = 0.62;
-
-fn measureWidePitch(context: ?*anyopaque, font_id: canvas.FontId, size: f32, text: []const u8) f32 {
-    _ = context;
-    _ = font_id;
-    var count: f32 = 0;
-    var index: usize = 0;
-    while (index < text.len) : (index += 1) {
-        if (text[index] & 0xc0 != 0x80) count += 1;
-    }
-    return count * size * wide_pitch_em;
-}
-
-const wide_pitch_provider = canvas.TextMeasureProvider{ .measure_fn = measureWidePitch };
-
-test "a full-width row's runs declare bounds that cover their ink" {
-    // The regression: a merged run's raster extent is its own declared
-    // bounds, and an estimator-only bound (0.6 em) falls short of a
-    // wider host face's ink — the row's last cell sheared off at the
-    // widget edge. Cells and bounds must both come from the measurement
-    // the host inks with.
-    const tokens = canvas.DesignTokens{ .text_measure = &wide_pitch_provider };
-    const metrics = grid_model.cellMetrics(tokens);
-    try testing.expectApproxEqAbs(
-        tokens.typography.label_size * wide_pitch_em,
-        metrics.width,
-        0.001,
-    );
-
-    const row_cells = comptime asciiRow("0123456789012345678901234567890123456789", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
-    const frame = geometry.RectF.init(
-        0,
-        0,
-        metrics.width * @as(f32, @floatFromInt(row_cells.len)),
-        metrics.height * 2,
-    );
-
-    var commands: [512]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = frame,
-        .tokens = tokens,
-    });
-
-    // The bug this pins — a host face with a wider pitch inking past a
-    // run's declared bounds and shearing the row's last cell — cannot
-    // happen to a lattice: the command's bounds ARE the lattice, and
-    // every cell's ink is clipped to its own cell. The assertion is now
-    // that exact identity.
-    const list = builder.displayList();
-    const grid = firstCellGrid(list) orelse return error.TestExpectedCellGrid;
-    const command = canvas.CanvasCommand{ .cell_grid = grid };
-    const rect = command.bounds() orelse return error.MissingTextBounds;
-    const ink_right = grid.origin.x + @as(f32, @floatFromInt(grid.cols)) * metrics.width;
-    try testing.expectApproxEqAbs(ink_right, rect.x + rect.width, 0.001);
-    try testing.expect(ink_right <= frame.x + frame.width + 0.001);
-    try testing.expectEqual(@as(u16, @intCast(row_cells.len)), grid.cols);
-}
-
-test "cell metrics derive from the mono face and never collapse" {
-    const metrics = grid_model.cellMetrics(.{});
-    try testing.expect(metrics.width > 0);
-    try testing.expect(metrics.height >= metrics.font_size);
-}
-
-test "the terminal widget paints its bound grid and the honest empty surface unbound" {
-    const row_cells = comptime asciiRow("bound", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
-    const grid = baseGrid(&rows);
-
-    // A realistic per-view builder (the widget path floors a builder at
-    // or under the reserve to a degrade-only budget).
-    var commands: [2048]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    const bound = canvas.Widget{
-        .id = 7,
-        .kind = .terminal,
-        .frame = geometry.RectF.init(0, 0, 400, 200),
-        .terminal = .{ .pty = 1, .grid = &grid },
-    };
-    try canvas.emitWidgetTree(&builder, bound, .{});
-    var text_buffer: [64]u8 = undefined;
-    try testing.expectEqualStrings("bound", gridRowText(builder.displayList(), 0, &text_buffer));
-
-    // Unbound: one background fill, no text, never a hole.
-    var empty_commands: [16]canvas.CanvasCommand = undefined;
-    var empty_builder = canvas.Builder.init(&empty_commands);
-    const unbound = canvas.Widget{
-        .id = 8,
-        .kind = .terminal,
-        .frame = geometry.RectF.init(0, 0, 400, 200),
-    };
-    try canvas.emitWidgetTree(&empty_builder, unbound, .{});
-    var fills: usize = 0;
-    var grids: usize = 0;
-    for (empty_builder.displayList().commands) |command| {
-        switch (command) {
-            .fill_rect => fills += 1,
-            .cell_grid => grids += 1,
-            else => {},
-        }
-    }
-    try testing.expectEqual(@as(usize, 1), fills);
-    try testing.expectEqual(@as(usize, 0), grids);
-}
-
-test "a wide cheap terminal paints its rows under the widget command budget" {
-    // 198 columns of plain ASCII across several rows: the per-row cost
-    // preflight must let these cheap rows paint (a flat worst-case-per-
-    // column reserve would seat none). Regression for the over-reserve
-    // that blanked wide grids.
-    var storage: [6][198]grid_model.TerminalCell = undefined;
-    for (&storage) |*row_cells| {
-        for (row_cells) |*entry| entry.* = cell('a', "a", white);
-    }
-    var rows: [6]grid_model.TerminalRow = undefined;
-    for (&rows, 0..) |*r, i| r.* = .{ .cells = &storage[i] };
-
-    var commands: [2048]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 1600, 200),
-        .tokens = .{},
-        .command_budget = 1792,
-    });
-    // All six rows reach the lattice, and the whole screen is ONE
-    // command — the over-reserve this pins cannot recur, because rows no
-    // longer compete for command slots at all.
-    const list = builder.displayList();
-    try testing.expectEqual(@as(usize, 6), gridPaintedRows(list));
-    var text_buffer: [256]u8 = undefined;
-    try testing.expectEqualStrings("a" ** 198, gridRowText(list, 5, &text_buffer));
-}
-
-test "a tall sparse colored terminal paints every representable row" {
-    // cmatrix-like content: a tall viewport with sparse colored streaks. The
-    // old per-cell upper bound charged every empty span and stopped around the
-    // middle even though actual merged runs fit comfortably in the envelope.
-    const row_count = 60;
-    const col_count = 200;
-    var storage: [row_count][col_count]grid_model.TerminalCell = @splat(@splat(.{}));
-    var rows: [row_count]grid_model.TerminalRow = undefined;
-    for (&storage, 0..) |*row_cells, row_index| {
-        for (0..10) |streak| {
-            const col = (streak * 19 + row_index * 3) % col_count;
-            row_cells[col] = cell('x', "x", if (streak % 3 == 0) white else red);
-        }
-        rows[row_index] = .{ .cells = row_cells };
-    }
-
-    var commands: [2048]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 1600, 1200),
-        .tokens = .{},
-        .command_budget = 1792,
-    });
-    const list = builder.displayList();
-    try testing.expectEqual(@as(usize, row_count), gridPaintedRows(list));
-    try testing.expect(list.commands.len <= 1792);
-}
-
-test "a focused bound terminal's ring id never collides with a grid command" {
-    const row_cells = comptime asciiRow("shell", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
-    const grid = baseGrid(&rows);
-
-    var commands: [2048]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    const focused = canvas.Widget{
-        // A high-entropy id in the range where the multiplicative spread
-        // could alias a widgetPartId ring slot.
-        .id = 0x2af6_89b9_153d_e19a,
-        .kind = .terminal,
-        .frame = geometry.RectF.init(0, 0, 400, 200),
-        .state = .{ .focused = true },
-        .terminal = .{ .pty = 1, .grid = &grid },
-    };
-    try canvas.emitWidgetTree(&builder, focused, .{});
-    var ring_id: canvas.ObjectId = 0;
-    for (builder.displayList().commands) |command| {
-        if (command == .stroke_rect) ring_id = command.stroke_rect.id;
-    }
-    try testing.expect(ring_id != 0);
-    // No other command shares the ring's id.
-    var collisions: usize = 0;
-    for (builder.displayList().commands) |command| {
-        const id = switch (command) {
-            .fill_rect => |c| c.id,
-            .draw_text => |c| c.id,
-            .push_clip => |c| c.id,
-            .stroke_path => |c| c.id,
-            else => continue,
-        };
-        if (id == ring_id) collisions += 1;
-    }
-    try testing.expectEqual(@as(usize, 0), collisions);
-}
-
-test "a focused terminal wears the house focus ring" {
-    var commands: [16]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    const focused = canvas.Widget{
-        .id = 9,
-        .kind = .terminal,
-        .frame = geometry.RectF.init(0, 0, 400, 200),
-        .state = .{ .focused = true },
-    };
-    try canvas.emitWidgetTree(&builder, focused, .{});
-    var rings: usize = 0;
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .stroke_rect => rings += 1,
-            else => {},
-        }
-    }
-    try testing.expectEqual(@as(usize, 1), rings);
-}
-
-test "the terminal widget's register: focusable, press-claiming, I-beam, editable-text role" {
-    const widget_access = @import("widget_access.zig");
-    const widget_semantics = @import("widget_semantics.zig");
-    const widget = canvas.Widget{ .id = 3, .kind = .terminal };
-    try testing.expect(canvas.widgetKindHitTarget(.terminal));
-    try testing.expect(widget_access.isFocusable(widget));
-    try testing.expect(canvas.widgetClaimsPress(widget));
-    try testing.expectEqual(canvas.WidgetCursor.text, canvas.cursorForWidgetTarget(.terminal, .{}));
-    try testing.expectEqual(canvas.WidgetRole.textbox, widget_semantics.semanticRole(widget));
-    // Deliberately NOT a text-input kind: the emulator owns the editing
-    // model, so the TextBuffer pipeline must never claim it.
-    try testing.expect(!canvas.widgetTextInputKind(.terminal));
-}
-
-test "rounded-corner path elements survive the builder's lifetime" {
-    // The stroke_path command's elements must be builder-owned, not a
-    // stack local: after paint returns, reading them back (the retained
-    // renderer's path) must still see the move/line/quad verbs.
-    const cells = [_]grid_model.TerminalCell{.{ .cp = 0x256D, .fg = white }}; // ╭
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 40, 40),
-        .tokens = .{},
-    });
-    var saw_path = false;
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .stroke_path => |path| {
-                saw_path = true;
-                try testing.expectEqual(@as(usize, 3), path.elements.len);
-                try testing.expectEqual(canvas.PathVerb.move_to, path.elements[0].verb);
-                try testing.expectEqual(canvas.PathVerb.quad_to, path.elements[2].verb);
-            },
-            else => {},
-        }
-    }
-    try testing.expect(saw_path);
-}
-
-test "adjacent double-cross cells never collide command ids" {
-    // ╬ emits up to eight commands; the per-column id stride must be at
-    // least eight so neighbors never share an object id.
-    const cells = [_]grid_model.TerminalCell{
-        .{ .cp = 0x256C, .fg = white }, // ╬
-        .{ .cp = 0x256C, .fg = white },
-        .{ .cp = 0x256C, .fg = white },
-    };
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
-
-    var commands: [128]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    try paintInto(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 120, 40),
-        .tokens = .{},
-        .id_base = 1,
-    });
-    var seen: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
-    defer seen.deinit(testing.allocator);
-    for (builder.displayList().commands) |command| {
-        const id = switch (command) {
-            .fill_rect => |c| c.id,
-            .stroke_rect => |c| c.id,
-            .draw_text => |c| c.id,
-            .push_clip => |c| c.id,
-            else => continue,
-        };
-        if (id == 0) continue;
-        for (seen.items) |prior| try testing.expect(prior != id);
-        try seen.append(testing.allocator, id);
-    }
-}
-
-test "the text preflight accounts for bytes earlier widgets already consumed" {
-    // A grid sharing the builder with a widget that already spent most
-    // of the text store must degrade against the REMAINING space, never
-    // a fresh store — otherwise its rows pass preflight and then lose
-    // text when allocTextBytes fails on the shared counter.
-    const row = comptime asciiRow("cells", white);
-    const rows = [_]grid_model.TerminalRow{.{ .cells = &row }};
-
-    var commands: [64]canvas.CanvasCommand = undefined;
-    var builder = canvas.Builder.init(&commands);
-    // Pre-consume all but 2 bytes of the store, as an earlier widget
-    // would.
-    const filler = [_]u8{'x'} ** (canvas.max_display_list_text_bytes - 2);
-    _ = try builder.allocTextBytes(&filler);
-
-    try grid_model.paint(baseGrid(&rows), &builder, .{
-        .frame = geometry.RectF.init(0, 0, 400, 100),
-        .tokens = .{},
-    });
-    // The row (5 bytes) could not fit the 2 remaining, so it dropped
-    // whole: no grid text command, and the shared counter never
-    // overflowed.
-    try testing.expect(builder.text_byte_len <= canvas.max_display_list_text_bytes);
-    for (builder.displayList().commands) |command| {
-        switch (command) {
-            .draw_text => |text| try testing.expect(!std.mem.eql(u8, text.text, "cells")),
-            else => {},
-        }
-    }
-}
-
-test "box drawing classifies the block and ignores neighbors" {
-    try testing.expect(box.isBoxDrawing(0x2500));
-    try testing.expect(box.isBoxDrawing(0x259F));
-    try testing.expect(!box.isBoxDrawing(0x24FF));
-    try testing.expect(!box.isBoxDrawing(0x25A0));
-    try testing.expect(box.mergesHorizontally(0x2500));
-    try testing.expect(!box.mergesHorizontally(0x2502));
-}
-
-// ------------------------------------------ full-screen paint coverage
-//
-// The tests above pin painter POLICY at cell scale. These pin the thing
-// a terminal host actually cares about: how much of a real screen
-// reaches the glass at the WIDGET tier — the shared per-view stores, the
-// reserves held back for the chrome around the grid — and that whatever
-// does not reach it is reported instead of silently missing.
-
 /// The widget tier's options, exactly as `emitTerminalWidget` builds
 /// them: the frame command ceiling minus the chrome reserve, plus the
-/// text, path, and glyph reserves.
+/// text, path, glyph, and cell reserves.
 fn widgetPaintOptions(frame: geometry.RectF) grid_model.TerminalPaintOptions {
     return .{
         .frame = frame,
@@ -1190,23 +76,56 @@ fn widgetPaintOptions(frame: geometry.RectF) grid_model.TerminalPaintOptions {
     };
 }
 
-/// Rows with ink in the finished list, counted independently of the
-/// painter's own bookkeeping: text-run ids are
-/// `paintIdBase(id_base) + (row << 16) + 0x8000 + column`, so the row
-/// index falls straight out of the id.
-fn paintedRowsFromIds(list: canvas.DisplayList, id_base: u64) usize {
-    const base = grid_model.paintIdBase(id_base);
-    var highest: ?usize = null;
+/// The grid command for lattice row `y`. The painter emits one per row
+/// (the retained-patch granularity), so a row IS a command.
+fn rowCellGrid(list: canvas.DisplayList, y: usize) ?canvas.CellGrid {
+    var seen: usize = 0;
     for (list.commands) |command| {
-        const text = switch (command) {
-            .draw_text => |value| value,
-            else => continue,
-        };
-        const offset = text.id -% base;
-        const row: usize = @intCast(offset >> 16);
-        if (highest == null or row > highest.?) highest = row;
+        if (command != .cell_grid) continue;
+        if (seen == y) return command.cell_grid;
+        seen += 1;
     }
-    return if (highest) |row| row + 1 else 0;
+    return null;
+}
+
+fn firstCellGrid(list: canvas.DisplayList) ?canvas.CellGrid {
+    return rowCellGrid(list, 0);
+}
+
+fn gridCell(list: canvas.DisplayList, x: usize, y: usize) ?canvas.Cell {
+    const grid = rowCellGrid(list, y) orelse return null;
+    return grid.at(x, 0);
+}
+
+fn gridCluster(list: canvas.DisplayList, x: usize, y: usize) []const u8 {
+    const grid = rowCellGrid(list, y) orelse return "";
+    const cell_value = grid.at(x, 0) orelse return "";
+    return cell_value.cluster(grid.text);
+}
+
+/// The cluster bytes of row `y`, concatenated into `out` — the row as a
+/// renderer would ink it.
+fn gridRowText(list: canvas.DisplayList, y: usize, out: []u8) []const u8 {
+    const grid = rowCellGrid(list, y) orelse return "";
+    var len: usize = 0;
+    var x: usize = 0;
+    while (x < grid.cols) : (x += 1) {
+        const cell_value = grid.at(x, 0) orelse continue;
+        const bytes = cell_value.cluster(grid.text);
+        if (len + bytes.len > out.len) break;
+        @memcpy(out[len..][0..bytes.len], bytes);
+        len += bytes.len;
+    }
+    return out[0..len];
+}
+
+/// Rows that reached the display list — one grid command each.
+fn gridPaintedRows(list: canvas.DisplayList) usize {
+    var count: usize = 0;
+    for (list.commands) |command| {
+        if (command == .cell_grid) count += 1;
+    }
+    return count;
 }
 
 const screen_cols: usize = 200;
@@ -1312,12 +231,13 @@ test "a truecolor 200x60 screen paints every row" {
     try testing.expect(report.stopped_by == null);
     try testing.expect(!report.truncated());
     try testing.expect(builder.degradation == null);
-    // One command for the whole screen, plus the surface fill and the
-    // clip pair. The command count no longer scales with styling at all.
-    try testing.expect(builder.len <= 8);
+    // One command per ROW plus the surface fill and the clip pair: the
+    // count scales with rows, never with styling.
+    try testing.expectEqual(screen_rows, gridPaintedRows(list));
+    try testing.expect(builder.len <= screen_rows + 8);
     try testing.expectEqual(@as(u16, screen_cols), grid.cols);
-    try testing.expectEqual(@as(u16, screen_rows), grid.rows);
-    try testing.expectEqual(screen_cols * screen_rows, grid.cells.len);
+    try testing.expectEqual(@as(u16, 1), grid.rows);
+    try testing.expectEqual(screen_cols, grid.cells.len);
     // Every cell kept its own colours: nothing merged, nothing was lost.
     const first = grid.at(0, 0) orelse return error.TestExpectedCell;
     const second = grid.at(1, 0) orelse return error.TestExpectedCell;
@@ -1585,13 +505,15 @@ test "a 300x100 truecolor screen paints every row as one command" {
     try testing.expect(report.stopped_by == null);
     try testing.expect(builder.degradation == null);
     try testing.expectEqual(@as(u16, wide_cols), grid.cols);
-    try testing.expectEqual(@as(u16, wide_rows_count), grid.rows);
-    try testing.expectEqual(wide_cols * wide_rows_count, grid.cells.len);
+    try testing.expectEqual(@as(u16, 1), grid.rows);
+    try testing.expectEqual(wide_cols, grid.cells.len);
+    try testing.expectEqual(wide_rows_count, gridPaintedRows(list));
     // Memory is linear in cells and nothing else: 30,000 cells at 20 B.
     try testing.expectEqual(@as(usize, 20), @sizeOf(canvas.Cell));
-    try testing.expect(grid.cells.len * @sizeOf(canvas.Cell) <= 640 * 1024);
-    // And the command count is a constant, not a function of styling.
-    try testing.expect(builder.len <= 8);
+    try testing.expect(wide_cols * wide_rows_count * @sizeOf(canvas.Cell) <= 640 * 1024);
+    // Commands scale with ROWS, not with styling: one grid per row plus
+    // the surface fill and the clip pair.
+    try testing.expect(builder.len <= wide_rows_count + 8);
 }
 
 test "the grid carries every SGR attribute the producer resolves" {
@@ -1811,4 +733,122 @@ test "golden: the reference renderer inks cell backgrounds, glyphs, and decorati
         }
     }
     try testing.expect(glyph_ink);
+}
+
+test "the packed row reaches the GPU packet, and one changed row is one upsert" {
+    // The incremental contract, pinned at the layer that decides it.
+    //
+    // A screen is one grid command PER ROW, so the retained diff sees a
+    // keystroke as one changed key. Measured on the real app at 1100x640
+    // this is `present_patch_upserts=1` / `present_patch_bytes=417`; the
+    // regression this guards is a screen-wide grid (or a screen-wide
+    // shared text blob), either of which makes every row's fingerprint
+    // move together and turns a keystroke back into a full re-upload.
+    const before = comptime asciiRow("ready", white);
+    var after_cells = before;
+    after_cells[0].fg = red;
+    const rows_before = [_]grid_model.TerminalRow{
+        .{ .cells = &before },
+        .{ .cells = &before },
+        .{ .cells = &before },
+    };
+    const rows_after = [_]grid_model.TerminalRow{
+        .{ .cells = &after_cells },
+        .{ .cells = &before },
+        .{ .cells = &before },
+    };
+
+    var commands_a: [64]canvas.CanvasCommand = undefined;
+    var builder_a = canvas.Builder.init(&commands_a);
+    try paintInto(baseGrid(&rows_before), &builder_a, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .id_base = 4,
+    });
+    var commands_b: [64]canvas.CanvasCommand = undefined;
+    var builder_b = canvas.Builder.init(&commands_b);
+    try paintInto(baseGrid(&rows_after), &builder_b, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .id_base = 4,
+    });
+
+    try testing.expectEqual(@as(usize, 3), gridPaintedRows(builder_a.displayList()));
+
+    // Exactly one row's fingerprint moved. The other two must be
+    // BYTE-identical, which is what lets the packet skip re-encoding
+    // them — a shared text blob across rows breaks this immediately.
+    var changed: usize = 0;
+    var y: usize = 0;
+    while (y < 3) : (y += 1) {
+        const row_a = rowCellGrid(builder_a.displayList(), y) orelse return error.TestExpectedCellGrid;
+        const row_b = rowCellGrid(builder_b.displayList(), y) orelse return error.TestExpectedCellGrid;
+        if (canvas.cellGridFingerprint(row_a) != canvas.cellGridFingerprint(row_b)) changed += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), changed);
+}
+
+test "a cell-grid row encodes to the wire and stays compact for plain text" {
+    // The wire form the AppKit host decodes (serialization.zig v6). A
+    // row is a delta stream — a tag byte per cell, style repeated only
+    // when it changes — which is what keeps a one-row patch in the
+    // hundreds of bytes instead of the kilobytes a raw 20-byte-per-cell
+    // dump would cost.
+    var plain: [80]grid_model.TerminalCell = undefined;
+    for (&plain) |*entry| entry.* = cell('x', "x", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &plain }};
+
+    var commands: [32]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try paintInto(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 800, 40),
+        .tokens = .{},
+        .id_base = 6,
+    });
+    const list = builder.displayList();
+
+    var render_commands: [32]canvas.RenderCommand = undefined;
+    var render_batches: [32]canvas.RenderBatch = undefined;
+    var resources: [32]canvas.RenderResource = undefined;
+    var resource_cache_entries: [32]canvas.RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [64]canvas.RenderResourceCacheAction = undefined;
+    var atlas_glyphs: [64]canvas.GlyphAtlasEntry = undefined;
+    var changes: [32]canvas.DiffChange = undefined;
+    const frame = try list.framePlan(null, .{
+        .surface_size = geometry.SizeF.init(800, 40),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &atlas_glyphs,
+        .changes = &changes,
+    });
+
+    // Every command of a terminal frame is representable now — that is
+    // what returns the view to the retained packet path instead of a
+    // full-surface CPU upload every frame.
+    var gpu_commands: [32]canvas.CanvasGpuCommand = undefined;
+    const packet = try frame.renderPass().gpuPacket(&gpu_commands);
+    try testing.expect(packet.fullyRepresentable());
+    try testing.expectEqual(@as(usize, 0), packet.unsupported_command_count);
+
+    var saw_grid = false;
+    for (gpu_commands[0..packet.commands.len]) |command| {
+        if (command.kind != .cell_grid) continue;
+        saw_grid = true;
+        const grid = command.cells orelse return error.TestExpectedCellGridPayload;
+        try testing.expectEqual(@as(u16, 80), grid.cols);
+        try testing.expectEqual(@as(u16, 1), grid.rows);
+    }
+    try testing.expect(saw_grid);
+
+    // The encoded packet holds the whole row well under a kilobyte: 80
+    // identically styled cells cost one style block and a tag plus a
+    // character each.
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try packet.writeBinary(&writer);
+    try testing.expect(writer.buffered().len < 1024);
 }

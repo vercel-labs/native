@@ -28,20 +28,29 @@
 //! surface. A user looking at a half-blank terminal must be able to
 //! learn that a budget, not their program, ate the bottom of the screen.
 //!
-//! A screen is ONE COMMAND. The painter emits a packed `cell_grid`
-//! (`cell_grid.zig`) carrying every cell's background, cluster,
-//! foreground, and style, and every renderer expands the lattice
-//! itself. What that replaced: one background command per contiguous
-//! same-colour run plus one text command per contiguous same-foreground
-//! run, which merged into nothing on a styled screen and put a 200x60
-//! truecolor viewport at ~24,000 commands against a budget of 4,096 —
-//! nine rows of sixty, the rest bare background. Measured after: 60 of
-//! 60 rows in four commands, and a 300x100 truecolor screen (30,000
-//! cells, 585 KB) in four commands as well. Cost is linear in CELLS at
-//! 20 bytes each, and constant in commands.
+//! A screen is ONE COMMAND PER ROW. The painter emits packed
+//! `cell_grid` commands (`cell_grid.zig`) carrying every cell's
+//! background, cluster, foreground, and style, and every renderer
+//! expands the lattice itself. What that replaced: one background
+//! command per contiguous same-colour run plus one text command per
+//! contiguous same-foreground run, which merged into nothing on a
+//! styled screen and put a 200x60 truecolor viewport at ~24,000
+//! commands against a budget of 4,096 — nine rows of sixty, the rest
+//! bare background. Measured after: 60 of 60 rows, and a 300x100
+//! truecolor screen (30,000 cells) in 103 commands. Cost is linear in
+//! CELLS at 20 bytes each, and bounded in commands by `max_rows`.
+//!
+//! Why per ROW and not one command for the whole screen: a retained
+//! command is the unit of CHANGE. One command per screen makes a
+//! keystroke re-encode and re-upload every cell, which is the
+//! full-surface cost the packed cell exists to remove, merely moved
+//! from the CPU rasterizer to the wire. A row is the granularity a
+//! terminal actually changes at, so per-row keys keep an incremental
+//! present small without teaching every renderer and both hosts a
+//! sub-command dirty protocol.
 //!
 //! Three things fall out of that shape, and all three were bugs before:
-//!   - Reflow is safe. A screen is one retained key replaced wholesale,
+//!   - Reflow is safe. A row is one retained key replaced wholesale,
 //!     so a row that loses a run cannot orphan a per-run command whose
 //!     stale pixels then survive a resize.
 //!   - Cell geometry is exact. A cell's position is its INDEX, so a
@@ -174,11 +183,16 @@ pub const TerminalCursor = struct {
     x: u16 = 0,
     y: u16 = 0,
     shape: TerminalCursorShape = .block,
-    /// The emulator asked the cursor to blink. The painter draws the
-    /// visible phase and stamps the state on the cursor command; the
-    /// BLINKING itself is the host's animation to arm, so a producer
-    /// that sets this and a renderer that ignores it still agree about
-    /// where the cursor is.
+    /// The emulator asked the cursor to blink.
+    ///
+    /// The painter draws the cursor's visible pose and nothing else —
+    /// blinking is TIME, and a painter has none. The runtime reads this
+    /// off the focused terminal's grid and arms the same looping
+    /// opacity animation a text caret uses, keyed on
+    /// `cursorCommandId(widget_id)`. A renderer that ignores the
+    /// animation still draws the cursor in the right place, so the
+    /// degradation is a cursor that does not blink, never one that goes
+    /// missing.
     blinking: bool = false,
     /// The cursor sits on a wide cell and covers two columns.
     wide: bool = false,
@@ -456,6 +470,18 @@ pub fn paintIdBase(id: u64) u64 {
 /// claim ids at `paintIdBase(id) + reserved_id_offset + n` (n < 2^16,
 /// keeping the whole namespace under the 2^24 stride).
 pub const reserved_id_offset: u64 = 0x62_0000;
+
+/// The command id the painter gives a grid's CURSOR.
+///
+/// Public because blinking is the runtime's job, not the painter's: the
+/// painter draws the cursor's visible pose, and the runtime arms the
+/// ping-pong opacity animation that makes it blink (the same one a text
+/// caret uses). Both sides need the id, so it lives here rather than
+/// being re-derived from the painter's internal offsets.
+pub fn cursorCommandId(id: u64) u64 {
+    if (id == 0) return 0;
+    return paintIdBase(id) +% 0x61_0002;
+}
 
 /// The paint's command-id derivation: keyed grids take `base + offset`
 /// (offsets < 2^24, disjoint per widget by the `paintIdBase` stride);
@@ -847,16 +873,20 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
     for (grid.rows) |row| cols = @max(cols, row.cells.len);
     cols = @min(cols, max_cols);
 
-    // The cluster INTERN table. A screen repeats a tiny alphabet across
-    // tens of thousands of cells, so the grid's text blob holds ONE copy
-    // of each distinct cluster and cells point at it. A 300x100 ASCII
-    // screen interns to a few hundred bytes instead of 30 KB, which is
-    // what keeps a full-screen grid inside the frame's shared text
-    // budget with room for every other widget's labels.
+    // The cluster INTERN table, reset PER ROW. A row repeats a tiny
+    // alphabet across its columns, so a row's text blob holds one copy
+    // of each distinct cluster in it — a 300-column ASCII row interns to
+    // under a hundred bytes instead of 300.
+    //
+    // Per row, not per screen, because a row is a retained KEY: a blob
+    // shared across the screen would put every row's fingerprint on
+    // every other row's characters, so one keystroke that introduced a
+    // new letter would re-encode and re-upload the whole screen. That is
+    // measurable — it showed up as 31 upserts and 8.4 KB per keystroke
+    // before this was per-row, against 1 upsert and ~400 bytes after.
     var blob: [text_scratch_bytes]u8 = undefined;
     var blob_len: usize = 0;
     var intern_slots: [cluster_intern_slots]u32 = undefined;
-    @memset(&intern_slots, 0);
 
     // Rows painted so far (the loop paints 0..N contiguously from the
     // top and stops at the first row a budget rejects): the cursor and
@@ -864,10 +894,10 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
     // dropped for budget never leaves its lone cursor floating over the
     // blank background.
     var painted_rows: usize = 0;
-    // Commands this paint will emit once the second pass runs: the
-    // prologue already in the builder, plus one row's box geometry and
-    // wash at a time, plus the grid command itself.
-    var projected_commands: usize = builder.len + 1;
+    // Commands this paint will emit: the prologue already in the
+    // builder, plus per accepted row one grid command and whatever box
+    // geometry and wash that row needs.
+    var projected_commands: usize = builder.len;
     // Cells are claimed from the builder's store up front for the most
     // rows that could possibly paint, then the unused tail is handed
     // back (the store is a bump allocator, and nothing else claims cells
@@ -909,7 +939,9 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
         // below, so `builder.len` does not move while this loop runs and
         // charging against it would price every row as if it were the
         // first.
-        const row_commands = rowCommandCost(row);
+        // +1 for the row's own grid command (see the per-row emission
+        // below).
+        const row_commands = rowCommandCost(row) + 1;
         if (options.command_budget > 0 and
             projected_commands + row_commands + epilogue_reserve > options.command_budget)
         {
@@ -929,58 +961,59 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
         // Text stop, ATOMIC per row, against the interned blob. The row
         // is filled into a SNAPSHOT of the intern state so a row that
         // crosses the ceiling can be rolled back whole.
-        const blob_before = blob_len;
         if (cols > 0) {
             const row_cells = cells[row_index * cols ..][0..cols];
+            blob_len = 0;
+            @memset(&intern_slots, 0);
             fillGridRow(row, row_cells, &blob, &blob_len, &intern_slots);
-            // A row that ADDS no cluster bytes can never cross anything,
-            // so it paints even when earlier widgets already sit past
-            // the grid's reserved share — the ceiling bounds what the
-            // grid adds, not what its siblings spent. Interning makes
-            // that the common case: a row of characters the screen has
-            // already shown costs zero new bytes.
-            if (blob_len > blob_before and text_total + blob_len > text_ceiling) {
-                blob_len = blob_before;
+            // A row that adds no cluster bytes can never cross anything,
+            // so a blank or box-only row paints even when earlier widgets
+            // already sit past the grid's reserved share — the ceiling
+            // bounds what the grid adds, not what its siblings spent.
+            if (blob_len > 0 and text_total + blob_len > text_ceiling) {
                 report.stopped_by = .text_bytes;
                 break;
             }
+            const row_text = builder.allocTextBytes(blob[0..blob_len]) catch {
+                report.stopped_by = .text_bytes;
+                break;
+            };
+            text_total += blob_len;
+            // The row's grid command, emitted here rather than in a
+            // later pass so it lands BEFORE that row's box geometry and
+            // selection wash, which composite over it.
+            builder.cellGrid(.{
+                .id = ids.at(0x60_0000 + @as(u64, @intCast(row_index))),
+                .origin = geometry.PointF.init(
+                    origin_x,
+                    origin_y + @as(f32, @floatFromInt(row_index)) * cell_h,
+                ),
+                .cell_width = cell_w,
+                .cell_height = cell_h,
+                .cols = @intCast(cols),
+                .rows = 1,
+                .cells = row_cells,
+                .text = row_text,
+                .font_id = tokens.typography.mono_font_id,
+                .font_size = metrics.font_size,
+                // The baseline the canvas boxes a run at: one em of
+                // ascent above the origin and a quarter below, centred
+                // in the cell. Computed once so every renderer puts it
+                // in the same place instead of re-deriving it from
+                // metrics it may not share.
+                .baseline = (cell_h - metrics.font_size * 1.25) * 0.5 + metrics.font_size,
+                .measure = tokens.text_measure,
+            }) catch {
+                report.stopped_by = .commands;
+                break;
+            };
         }
         painted_rows = row_index + 1;
     }
 
-    // Hand back the rows that never painted, then publish the grid as
-    // ONE command. `text` is the interned blob, copied into the
-    // builder's own store so the command outlives this frame's stack.
+    // Hand back the cells of rows that never painted: the store is a
+    // bump allocator and nothing else claimed cells in between.
     if (claim_rows > painted_rows) builder.cell_len -= (claim_rows - painted_rows) * cols;
-    if (painted_rows > 0 and cols > 0) {
-        const grid_text = builder.allocTextBytes(blob[0..blob_len]) catch blk: {
-            // The preflight reserved this; the catch is a defensive
-            // floor that paints the lattice without ink rather than
-            // taking the frame down.
-            report.stopped_by = .text_bytes;
-            break :blk "";
-        };
-        try builder.cellGrid(.{
-            .id = ids.at(0x62_0000),
-            .origin = geometry.PointF.init(origin_x, origin_y),
-            .cell_width = cell_w,
-            .cell_height = cell_h,
-            .cols = @intCast(cols),
-            .rows = @intCast(painted_rows),
-            .cells = cells[0 .. painted_rows * cols],
-            .text = grid_text,
-            .font_id = tokens.typography.mono_font_id,
-            .font_size = metrics.font_size,
-            // The baseline the canvas boxes a run at: one em of ascent
-            // above the origin and a quarter below, centred in the cell.
-            // Computed once here so every renderer puts it in the same
-            // place instead of re-deriving it from metrics it may not
-            // share.
-            .baseline = (cell_h - metrics.font_size * 1.25) * 0.5 + metrics.font_size,
-            .measure = tokens.text_measure,
-        });
-        text_total += blob_len;
-    }
 
     // Over the lattice: box-drawing geometry (exact cell-bound shapes,
     // never glyphs) and the selection wash. Both composite ON TOP of the

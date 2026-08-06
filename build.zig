@@ -976,10 +976,10 @@ pub fn build(b: *std.Build) void {
     // this step until the encoder comment, the host decoder comment, and
     // the patterns below move with it.
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-wire-format-version-prose", "Verify wire-format version prose matches the packet version constant", &.{
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 5;" },
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v5)." },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v5)." },
-        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "Compact binary gpu-surface packet decoding (wire format v5)." },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 6;" },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v6)." },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v6)." },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "Compact binary gpu-surface packet decoding (wire format v6)." },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-gpu-packet-presenter", "Verify Windows uses retained Direct2D packets with recovery, bounded resources, and dirty-region pixel fallback", &.{
         .{ .path = "src/platform/windows/root.zig", .pattern = ".present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary" },
