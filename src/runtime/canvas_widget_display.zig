@@ -614,12 +614,20 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         fn canvasWidgetCaretBlinkTarget(view: anytype) ?CanvasWidgetCaretBlinkTarget {
             if (!view.focused) return null;
             const focused_id = view.canvas_widget_focused_id;
-            if (focused_id == 0 or view.canvas_widget_focus_visible_id != focused_id) return null;
+            if (focused_id == 0) return null;
             // A terminal whose emulator asked for a blinking cursor
             // blinks through the SAME looping opacity animation a text
             // caret uses — the painter has no clock, so the runtime owns
             // the phase for both.
+            //
+            // Checked BEFORE the focus-visible gate below on purpose: a
+            // text caret only blinks once focus is VISIBLE (the
+            // keyboard-driven focus ring), but a terminal cursor blinks
+            // whenever the terminal holds focus, however it got it. A
+            // terminal focused by click would otherwise sit steady while
+            // the program that asked for `\x1b[1 q` waited for it.
             if (canvasWidgetTerminalBlinkTarget(view, focused_id)) |target| return target;
+            if (view.canvas_widget_focus_visible_id != focused_id) return null;
             if (!view.canEditCanvasWidgetText(focused_id)) return null;
             const node_index = view.canvasWidgetNodeIndexById(focused_id) orelse return null;
             const widget = view.widget_layout_nodes[node_index].widget;

@@ -995,6 +995,9 @@ pub fn paintReport(grid: TerminalGrid, builder: *canvas.Builder, options: Termin
                 .cells = row_cells,
                 .text = row_text,
                 .font_id = tokens.typography.mono_font_id,
+                .bold_font_id = tokens.typography.mono_bold_font_id,
+                .italic_font_id = tokens.typography.mono_italic_font_id,
+                .bold_italic_font_id = tokens.typography.mono_bold_italic_font_id,
                 .font_size = metrics.font_size,
                 // The baseline the canvas boxes a run at: one em of
                 // ascent above the origin and a quarter below, centred

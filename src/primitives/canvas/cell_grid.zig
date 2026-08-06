@@ -211,7 +211,14 @@ pub const CellGrid = struct {
     cells: []const Cell = &.{},
     /// Cluster bytes the cells index into.
     text: []const u8 = "",
+    /// The REGULAR mono face. `bold_font_id` / `italic_font_id` /
+    /// `bold_italic_font_id` are its companions; 0 means "not
+    /// registered", and a cell asking for a variant that is not there
+    /// falls back to synthesis (see `CellFace`).
     font_id: FontId = 0,
+    bold_font_id: FontId = 0,
+    italic_font_id: FontId = 0,
+    bold_italic_font_id: FontId = 0,
     font_size: f32 = 0,
     /// Baseline offset from a row's top edge, in canvas points. The
     /// painter computes it once from the cell box and the font size so
@@ -222,6 +229,38 @@ pub const CellGrid = struct {
     /// carries one: process-local layout context, excluded from
     /// equality, hashing, and serialization.
     measure: ?*const text_metrics.TextMeasureProvider = null,
+
+    /// The face a cell's style asks for, and whether the renderer has
+    /// to synthesize the difference.
+    ///
+    /// A terminal's bold and italic are SGR attributes, not layout: the
+    /// cell they land in is fixed by its index either way. So face
+    /// selection changes ink and never geometry — a bold row covers the
+    /// same rects as a regular one, which is the invariant the whole
+    /// packed-cell model rests on.
+    pub fn face(self: CellGrid, flags: CellFlags) CellFace {
+        const want_bold = flags.bold;
+        const want_italic = flags.italic;
+        if (want_bold and want_italic and self.bold_italic_font_id != 0) {
+            return .{ .font_id = self.bold_italic_font_id };
+        }
+        if (want_bold and want_italic) {
+            // A half-family (bold but no bold-italic) still beats
+            // synthesizing both: take the real weight and shear it.
+            if (self.bold_font_id != 0) return .{ .font_id = self.bold_font_id, .synthetic_italic = true };
+            if (self.italic_font_id != 0) return .{ .font_id = self.italic_font_id, .synthetic_bold = true };
+            return .{ .font_id = self.font_id, .synthetic_bold = true, .synthetic_italic = true };
+        }
+        if (want_bold) {
+            if (self.bold_font_id != 0) return .{ .font_id = self.bold_font_id };
+            return .{ .font_id = self.font_id, .synthetic_bold = true };
+        }
+        if (want_italic) {
+            if (self.italic_font_id != 0) return .{ .font_id = self.italic_font_id };
+            return .{ .font_id = self.font_id, .synthetic_italic = true };
+        }
+        return .{ .font_id = self.font_id };
+    }
 
     pub fn cellCount(self: CellGrid) usize {
         return @as(usize, self.cols) * @as(usize, self.rows);
@@ -258,6 +297,38 @@ pub const CellGrid = struct {
             @as(f32, @floatFromInt(self.rows)) * self.cell_height,
         ).normalized();
     }
+};
+
+/// The face one cell draws with, plus what the renderer must fake.
+///
+/// Synthesis is a FALLBACK, never the plan: registering real companion
+/// faces (`DesignTokens.typography.mono_bold_font_id` and friends)
+/// switches these flags off and the ink comes from the type designer
+/// instead of from arithmetic. Both renderers apply the same synthesis
+/// rules (`CellSynthesis`) so a bold run is never bold on one path and
+/// regular on the other — a mismatch between the oracle and the host is
+/// worse than no bold at all.
+pub const CellFace = struct {
+    font_id: FontId,
+    synthetic_bold: bool = false,
+    synthetic_italic: bool = false,
+};
+
+/// The synthesis rules, in one place because two renderers implement
+/// them and they have to agree.
+pub const CellSynthesis = struct {
+    /// Faux bold draws the glyph twice, the second pass offset in x.
+    /// Deterministic, and it cannot change the advance: the pen is the
+    /// cell, so the extra pass only thickens ink inside it.
+    pub fn boldOffset(font_size: f32) f32 {
+        return @max(1, @round(font_size / 14));
+    }
+
+    /// Faux italic shears about the BASELINE by this tangent (~11
+    /// degrees, the conventional oblique). Sheared ink can overhang into
+    /// the next cell, which is exactly why every renderer paints all
+    /// backgrounds before any glyph.
+    pub const italic_tangent: f32 = 0.2;
 };
 
 /// Decoration geometry, shared by every renderer so the reference

@@ -809,6 +809,13 @@ pub const ReferenceRenderSurface = struct {
 
             const cluster = cell.cluster(value.text);
             if (cluster.len > 0) {
+                // The face this cell's SGR style asks for. Real
+                // companion faces when the app registered them,
+                // synthesis otherwise — and either way the pen and the
+                // advance below are the CELL's, so weight and slant
+                // never move the lattice.
+                const cell_face = value.face(flags);
+                run.font_id = cell_face.font_id;
                 const baseline = rect.y + value.baseline;
                 // A wide cell inks across two columns, so its fallback
                 // block and its outline centring both use the doubled
@@ -821,7 +828,11 @@ pub const ReferenceRenderSurface = struct {
                 var iterator = std.unicode.Utf8Iterator{ .bytes = cluster, .i = 0 };
                 while (iterator.nextCodepoint()) |codepoint| {
                     const glyph_rect = geometry.RectF.init(rect.x, baseline - value.font_size, advance, value.font_size);
-                    self.drawGlyphBox(command, run, draw_bounds, codepoint, rect.x, baseline, glyph_rect);
+                    if (!self.drawGlyphOutlineSynthesized(command, run, draw_bounds, codepoint, rect.x, baseline, advance, cell_face)) {
+                        // Unmapped codepoint: the documented block
+                        // fallback, at the cell's own rect.
+                        self.fillTextRect(command.transform.transformRect(glyph_rect).normalized(), draw_bounds, run.color, command.opacity);
+                    }
                 }
             }
 
@@ -974,7 +985,26 @@ pub const ReferenceRenderSurface = struct {
         baseline: f32,
         cell_advance: f32,
     ) bool {
-        const face = referenceFaceForFontId(self.fonts, value.font_id);
+        return self.drawGlyphOutlineSynthesized(command, value, draw_bounds, codepoint, pen_x, baseline, cell_advance, .{ .font_id = value.font_id });
+    }
+
+    /// `drawGlyphOutline` with an explicit face and the terminal's
+    /// synthesis flags. Real companion faces make both flags false and
+    /// this is the plain path; a missing companion falls back to
+    /// arithmetic the AppKit decoder mirrors exactly
+    /// (`cell_grid.CellSynthesis`).
+    fn drawGlyphOutlineSynthesized(
+        self: ReferenceRenderSurface,
+        command: RenderCommand,
+        value: DrawText,
+        draw_bounds: geometry.RectF,
+        codepoint: u21,
+        pen_x: f32,
+        baseline: f32,
+        cell_advance: f32,
+        cell_face: cell_grid_model.CellFace,
+    ) bool {
+        const face = referenceFaceForFontId(self.fonts, cell_face.font_id);
         const glyph = face.glyphIndex(codepoint);
         if (glyph == 0) return false;
 
@@ -990,7 +1020,16 @@ pub const ReferenceRenderSurface = struct {
         const scale = value.size / face.units_per_em;
         // Font units are y-up; bake the flip and em scaling into the pen
         // placement, then apply the command transform on top.
-        const local = Affine{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = pen_x + cell_inset, .ty = baseline };
+        //
+        // Faux italic is a SHEAR about the baseline, which is exactly
+        // what `c` does here: x' = a*x + c*y + tx, and y is measured
+        // from the baseline. It moves ink, never the pen — so a synthetic
+        // italic cell still starts and advances where its index says.
+        const shear: f32 = if (cell_face.synthetic_italic)
+            scale * cell_grid_model.CellSynthesis.italic_tangent
+        else
+            0;
+        const local = Affine{ .a = scale, .b = 0, .c = shear, .d = -scale, .tx = pen_x + cell_inset, .ty = baseline };
         const total = command.transform.multiply(local);
 
         const scratch = reference_glyph_scratch.get();
@@ -1026,6 +1065,26 @@ pub const ReferenceRenderSurface = struct {
             referenceVectorClip(pixel_rect),
             &sink,
         ) catch return false;
+
+        // Faux bold: the same outline again, offset in x. Thickening ink
+        // inside the cell cannot change the advance, which is why this
+        // is safe in a lattice where position is the index.
+        if (cell_face.synthetic_bold) {
+            const offset = cell_grid_model.CellSynthesis.boldOffset(value.size);
+            const bold_local = Affine{ .a = scale, .b = 0, .c = shear, .d = -scale, .tx = pen_x + cell_inset + offset, .ty = baseline };
+            scratch.path.reset();
+            face.glyphOutline(glyph, command.transform.multiply(bold_local), &scratch.path) catch return true;
+            if (scratch.path.slice().len == 0) return true;
+            vector.fillGlyphPath(
+                &scratch.raster,
+                scratch.path.slice(),
+                Affine.identity(),
+                .nonzero,
+                vector.default_tolerance,
+                referenceVectorClip(pixel_rect),
+                &sink,
+            ) catch return true;
+        }
         return true;
     }
 

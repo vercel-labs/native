@@ -996,7 +996,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v6).
+// Compact binary gpu-surface packet encoding (wire format v7).
 //
 // The version this comment names, the `binary_packet_version` constant
 // below, and both host decoders' spec comments (appkit_host.m and the
@@ -1047,6 +1047,15 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // the packet (unknown kind -> refused present -> recorded fallback),
 // which is exactly what the Direct2D host does today.
 //
+// v7 (from v6): a cell_grid carries its FONT FAMILY — the regular face
+// plus bold, italic, and bold-italic companion ids — so a renderer picks
+// the face a cell's SGR style asks for. A companion id of 0 means the
+// app registered none, and the renderer synthesizes instead (offset
+// double-draw for bold, baseline shear for italic; both hosts and the
+// reference renderer use the identical rules from
+// canvas/cell_grid.zig `CellSynthesis`). Face selection never moves the
+// lattice: a cell's position is its index whatever it is drawn with.
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1060,7 +1069,8 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //   | load/clear: command_count u32 | commands { key u64, command (see
 //       writeCanvasGpuCommandBinary) }
 //   | cell_grid command payload (kind 14, after the standard fields):
-//       font_id u32 | font_size f32 | origin f32[2] | cell_w f32
+//       font_id u32 | bold_font_id u32 | italic_font_id u32
+//       | bold_italic_font_id u32 | font_size f32 | origin f32[2] | cell_w f32
 //       | cell_h f32 | baseline f32 | cols u16 | rows u16
 //       | cell_count u32 | cells { tag u8 (bit0 same-style-as-previous,
 //         bit1 has-cluster), [fg u8[4] bg u8[4] underline u8[4]
@@ -1071,7 +1081,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 6;
+pub const binary_packet_version: u8 = 7;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1357,6 +1367,9 @@ fn writeCanvasGpuCommandBinary(command: CanvasGpuCommand, writer: anytype) !void
 /// row, and a plain row is a few hundred bytes.
 fn writeBinaryCellGrid(grid: gpu_model.CanvasGpuCellGrid, writer: anytype) !void {
     try writer.writeInt(u32, @intCast(grid.font_id), .little);
+    try writer.writeInt(u32, @intCast(grid.bold_font_id), .little);
+    try writer.writeInt(u32, @intCast(grid.italic_font_id), .little);
+    try writer.writeInt(u32, @intCast(grid.bold_italic_font_id), .little);
     try writeBinaryF32(grid.font_size, writer);
     try writeBinaryPoint(grid.origin, writer);
     try writeBinaryF32(grid.cell_width, writer);

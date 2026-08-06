@@ -709,3 +709,55 @@ test "focused editable selection wins copy over a stale static selection" {
     var clipboard_buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("Field", try harness.runtime.readClipboard(&clipboard_buffer));
 }
+
+test "a blinking terminal cursor arms the runtime's blink; a steady one does not" {
+    // `TerminalCursor.blinking` is the emulator's DECSCUSR answer, and
+    // blinking is TIME — a painter has none. The runtime arms the same
+    // looping opacity animation a text caret uses, keyed on the cursor
+    // command. This pins the wiring end to end; what it cannot pin is a
+    // real shell asking for it, since a default DECSCUSR is steady.
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = canvas.TerminalGrid{
+        .background = canvas.Color.rgba(0, 0, 0, 1),
+        .foreground = canvas.Color.rgba(1, 1, 1, 1),
+        .cursor_color = canvas.Color.rgba(1, 1, 1, 1),
+        .selection_color = canvas.Color.rgba(0, 0.5, 1, 1),
+        .cursor = .{ .x = 0, .y = 0, .blinking = true },
+    };
+    const terminal = canvas.Widget{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(12, 16, 200, 80),
+        .terminal = .{ .pty = 7, .grid = &grid },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{terminal} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    // Focused by CLICK — deliberately not by keyboard. A terminal cursor
+    // blinks on focus, not on focus-VISIBLE (the keyboard ring), which a
+    // caret-shaped gate would have got wrong.
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 40, 40));
+    try std.testing.expectEqual(
+        canvas.terminal_grid.cursorCommandId(2),
+        harness.runtime.views[0].canvas_widget_caret_blink_id,
+    );
+
+    // A steady cursor (DECSCUSR 2, the common default) arms nothing —
+    // an always-on blink would be a worse bug than none.
+    grid.cursor = .{ .x = 0, .y = 0, .blinking = false };
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_caret_blink_id);
+
+    // ...and neither does a cursor whose session has ended: that pose is
+    // already the dim hollow at-rest cursor.
+    grid.cursor = .{ .x = 0, .y = 0, .blinking = true };
+    grid.running = false;
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_caret_blink_id);
+}

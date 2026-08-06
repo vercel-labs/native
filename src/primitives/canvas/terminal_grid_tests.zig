@@ -852,3 +852,249 @@ test "a cell-grid row encodes to the wire and stays compact for plain text" {
     try packet.writeBinary(&writer);
     try testing.expect(writer.buffered().len < 1024);
 }
+
+// -------------------------------------------------- bold and italic
+//
+// SGR weight and slant are INK, never layout. Everything below exists
+// to keep it that way: a lattice whose cell rects moved with the face
+// would give up the guarantee the whole packed-cell model rests on.
+
+/// Paint one row of `text` with a style applied to every cell.
+fn paintStyledRow(
+    comptime text: []const u8,
+    builder: *canvas.Builder,
+    bold: bool,
+    italic: bool,
+    tokens: canvas.DesignTokens,
+) !void {
+    var cells = comptime asciiRow(text, white);
+    for (&cells) |*entry| {
+        entry.bold = bold;
+        entry.italic = italic;
+    }
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+    try paintInto(baseGrid(&rows), builder, .{
+        .frame = geometry.RectF.init(0, 0, 600, 60),
+        .tokens = tokens,
+        .id_base = 21,
+    });
+}
+
+test "a bold or italic row occupies exactly the cell rects a regular row does" {
+    // The invariant. A bold face has different advances than a regular
+    // one; in a lattice that must change nothing, because a cell's
+    // position is its INDEX.
+    var regular_commands: [32]canvas.CanvasCommand = undefined;
+    var regular = canvas.Builder.init(&regular_commands);
+    try paintStyledRow("weight", &regular, false, false, .{});
+
+    var bold_commands: [32]canvas.CanvasCommand = undefined;
+    var bold = canvas.Builder.init(&bold_commands);
+    try paintStyledRow("weight", &bold, true, false, .{});
+
+    var italic_commands: [32]canvas.CanvasCommand = undefined;
+    var italic = canvas.Builder.init(&italic_commands);
+    try paintStyledRow("weight", &italic, false, true, .{});
+
+    const regular_grid = firstCellGrid(regular.displayList()) orelse return error.TestExpectedCellGrid;
+    const bold_grid = firstCellGrid(bold.displayList()) orelse return error.TestExpectedCellGrid;
+    const italic_grid = firstCellGrid(italic.displayList()) orelse return error.TestExpectedCellGrid;
+
+    try testing.expectEqual(regular_grid.cols, bold_grid.cols);
+    try testing.expectEqual(regular_grid.cols, italic_grid.cols);
+    try testing.expectEqual(regular_grid.cell_width, bold_grid.cell_width);
+    try testing.expectEqual(regular_grid.cell_width, italic_grid.cell_width);
+    try testing.expectEqual(regular_grid.baseline, bold_grid.baseline);
+
+    // Every cell rect is identical, column by column.
+    var column: usize = 0;
+    while (column < regular_grid.cols) : (column += 1) {
+        try testing.expectEqualDeep(regular_grid.cellRect(column, 0), bold_grid.cellRect(column, 0));
+        try testing.expectEqualDeep(regular_grid.cellRect(column, 0), italic_grid.cellRect(column, 0));
+    }
+    // ...and so is the command's raster extent.
+    try testing.expectEqualDeep(regular_grid.bounds(), bold_grid.bounds());
+    try testing.expectEqualDeep(regular_grid.bounds(), italic_grid.bounds());
+
+    // The styles DID reach the cells — this is not passing because
+    // nothing was applied.
+    try testing.expect((bold_grid.at(0, 0).?).style().bold);
+    try testing.expect((italic_grid.at(0, 0).?).style().italic);
+}
+
+test "face selection prefers real companions and synthesizes only what is missing" {
+    var full = canvas.DesignTokens{};
+    full.typography.mono_bold_font_id = 64;
+    full.typography.mono_italic_font_id = 65;
+    full.typography.mono_bold_italic_font_id = 66;
+
+    var commands: [32]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try paintStyledRow("x", &builder, true, true, full);
+    const grid = firstCellGrid(builder.displayList()) orelse return error.TestExpectedCellGrid;
+
+    // A complete family: the real bold-italic face, nothing faked.
+    const chosen = grid.face(.{ .bold = true, .italic = true });
+    try testing.expectEqual(@as(canvas.FontId, 66), chosen.font_id);
+    try testing.expect(!chosen.synthetic_bold);
+    try testing.expect(!chosen.synthetic_italic);
+    try testing.expectEqual(@as(canvas.FontId, 64), grid.face(.{ .bold = true }).font_id);
+    try testing.expectEqual(@as(canvas.FontId, 65), grid.face(.{ .italic = true }).font_id);
+    try testing.expectEqual(grid.font_id, grid.face(.{}).font_id);
+
+    // A HALF family: real weight, sheared. Better than faking both.
+    var half = canvas.CellGrid{ .font_id = 2, .bold_font_id = 64 };
+    const mixed = half.face(.{ .bold = true, .italic = true });
+    try testing.expectEqual(@as(canvas.FontId, 64), mixed.font_id);
+    try testing.expect(!mixed.synthetic_bold);
+    try testing.expect(mixed.synthetic_italic);
+
+    // NO family: the regular face, both synthesized — carried and
+    // visible rather than silently dropped.
+    var bare = canvas.CellGrid{ .font_id = 2 };
+    const faked = bare.face(.{ .bold = true, .italic = true });
+    try testing.expectEqual(@as(canvas.FontId, 2), faked.font_id);
+    try testing.expect(faked.synthetic_bold);
+    try testing.expect(faked.synthetic_italic);
+}
+
+test "an italic glyph's overhang survives the next cell's background" {
+    // The two-pass order exists for exactly this: a sheared glyph leans
+    // into its neighbour, and a renderer that filled each cell's
+    // background just before its glyph would erase the lean.
+    //
+    // Rendered for real: an italic 'H' in cell 0 against a bright
+    // background in cell 1. If the passes ever collapse, the ink that
+    // crosses the boundary disappears.
+    var cells = [_]grid_model.TerminalCell{
+        .{ .cp = 'H', .cluster = "H", .fg = white, .italic = true },
+        .{ .bg = blue },
+    };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    const metrics = grid_model.cellMetrics(canvas.DesignTokens{});
+    const width: usize = @intFromFloat(@round(metrics.width * 2));
+    const height: usize = @intFromFloat(@round(metrics.height));
+
+    var commands: [32]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try paintInto(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, @floatFromInt(width), @floatFromInt(height)),
+        .tokens = .{},
+    });
+
+    var render_commands: [32]canvas.RenderCommand = undefined;
+    var render_batches: [32]canvas.RenderBatch = undefined;
+    var resources: [32]canvas.RenderResource = undefined;
+    var resource_cache_entries: [32]canvas.RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [64]canvas.RenderResourceCacheAction = undefined;
+    var atlas_glyphs: [64]canvas.GlyphAtlasEntry = undefined;
+    var changes: [32]canvas.DiffChange = undefined;
+    const frame = try builder.displayList().framePlan(null, .{
+        .surface_size = geometry.SizeF.init(@floatFromInt(width), @floatFromInt(height)),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &atlas_glyphs,
+        .changes = &changes,
+    });
+
+    const pixels = try testing.allocator.alloc(u8, width * height * 4);
+    defer testing.allocator.free(pixels);
+    const surface = try canvas.ReferenceRenderSurface.init(width, height, pixels);
+    try surface.renderPass(frame.renderPass(), canvas.Color.rgb8(0, 0, 0));
+
+    // Cell 1 is a blue field. Any pixel there that is NOT blue is the
+    // italic glyph leaning across the boundary — the ink the ordering
+    // protects.
+    const boundary: usize = @intFromFloat(metrics.width);
+    var leaned = false;
+    var y: usize = 0;
+    while (y < height) : (y += 1) {
+        var x = boundary;
+        while (x < width) : (x += 1) {
+            const index = (y * width + x) * 4;
+            const r = pixels[index];
+            const g = pixels[index + 1];
+            if (r > 90 and g > 90) leaned = true;
+        }
+    }
+    try testing.expect(leaned);
+}
+
+/// Render one styled row and return how many pixels carry ink.
+fn styledRowInk(comptime text: []const u8, bold: bool, italic: bool) !usize {
+    var cells = comptime asciiRow(text, white);
+    for (&cells) |*entry| {
+        entry.bold = bold;
+        entry.italic = italic;
+    }
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    const metrics = grid_model.cellMetrics(canvas.DesignTokens{});
+    const width: usize = @intFromFloat(@round(metrics.width * @as(f32, @floatFromInt(text.len)) + 4));
+    const height: usize = @intFromFloat(@round(metrics.height));
+
+    var commands: [32]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try paintInto(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, @floatFromInt(width), @floatFromInt(height)),
+        .tokens = .{},
+    });
+
+    var render_commands: [32]canvas.RenderCommand = undefined;
+    var render_batches: [32]canvas.RenderBatch = undefined;
+    var resources: [32]canvas.RenderResource = undefined;
+    var resource_cache_entries: [32]canvas.RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [64]canvas.RenderResourceCacheAction = undefined;
+    var atlas_glyphs: [64]canvas.GlyphAtlasEntry = undefined;
+    var changes: [32]canvas.DiffChange = undefined;
+    const frame = try builder.displayList().framePlan(null, .{
+        .surface_size = geometry.SizeF.init(@floatFromInt(width), @floatFromInt(height)),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &atlas_glyphs,
+        .changes = &changes,
+    });
+
+    const pixels = try testing.allocator.alloc(u8, width * height * 4);
+    defer testing.allocator.free(pixels);
+    const surface = try canvas.ReferenceRenderSurface.init(width, height, pixels);
+    try surface.renderPass(frame.renderPass(), canvas.Color.rgb8(0, 0, 0));
+
+    var ink: usize = 0;
+    for (0..width * height) |index| {
+        if (pixels[index * 4] > 40) ink += 1;
+    }
+    return ink;
+}
+
+test "synthetic bold inks more than regular, and italic inks differently, at the same cells" {
+    // The measurement behind "bold is visible". Faux bold is a second
+    // offset pass, so it strictly ADDS covered pixels; faux italic is a
+    // shear, so it moves them without adding a whole pass. Both draw at
+    // the same pens — the geometry test above pins that separately —
+    // so any difference here is ink and only ink.
+    const regular = try styledRowInk("mono", false, false);
+    const bold = try styledRowInk("mono", true, false);
+    const italic = try styledRowInk("mono", false, true);
+
+    std.debug.print(
+        "\n[terminal] ink coverage: regular={d} bold={d} italic={d}\n",
+        .{ regular, bold, italic },
+    );
+
+    try testing.expect(regular > 0);
+    // Bold is heavier by a real margin, not by a pixel or two.
+    try testing.expect(bold > regular);
+    try testing.expect(bold - regular > regular / 20);
+    // Italic is a different shape, not merely the same one again.
+    try testing.expect(italic != regular);
+}

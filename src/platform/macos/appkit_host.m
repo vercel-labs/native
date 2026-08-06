@@ -2931,6 +2931,55 @@ static CGFloat NativeSdkCellStrokeWidth(CGFloat fontSize) {
     return MAX(1, round(fontSize / 12));
 }
 
+/* Faux-weight rules, mirrored from the engine's
+ * canvas/cell_grid.zig `CellSynthesis`. They exist so a `\x1b[1m` run
+ * is visible on an app that registered no bold companion, and they are
+ * duplicated here rather than derived because a bold run that renders
+ * bold on the reference path and regular on this one is worse than no
+ * bold at all. */
+static CGFloat NativeSdkCellBoldOffset(CGFloat fontSize) {
+    return MAX(1, round(fontSize / 14));
+}
+static const CGFloat NativeSdkCellItalicTangent = 0.2;
+
+/* The face a cell's style asks for, and what is left to synthesize.
+ * Mirrors `CellGrid.face`: real companions win, a half-family is used
+ * for the half it covers, and only what is missing is faked. */
+typedef struct {
+    unsigned long long fontId;
+    BOOL syntheticBold;
+    BOOL syntheticItalic;
+} NativeSdkCellFace;
+
+static NativeSdkCellFace NativeSdkCellFaceFor(NSDictionary *grid, uint16_t flags) {
+    const BOOL wantBold = (flags & NativeSdkCellFlagBold) != 0;
+    const BOOL wantItalic = (flags & NativeSdkCellFlagItalic) != 0;
+    const unsigned long long regular = (unsigned long long)NativeSdkPacketNumber(grid[@"font"], 1);
+    const unsigned long long bold = (unsigned long long)NativeSdkPacketNumber(grid[@"boldFont"], 0);
+    const unsigned long long italic = (unsigned long long)NativeSdkPacketNumber(grid[@"italicFont"], 0);
+    const unsigned long long boldItalic = (unsigned long long)NativeSdkPacketNumber(grid[@"boldItalicFont"], 0);
+    NativeSdkCellFace face = {regular, NO, NO};
+    if (wantBold && wantItalic) {
+        if (boldItalic != 0) { face.fontId = boldItalic; return face; }
+        if (bold != 0) { face.fontId = bold; face.syntheticItalic = YES; return face; }
+        if (italic != 0) { face.fontId = italic; face.syntheticBold = YES; return face; }
+        face.syntheticBold = YES;
+        face.syntheticItalic = YES;
+        return face;
+    }
+    if (wantBold) {
+        if (bold != 0) { face.fontId = bold; return face; }
+        face.syntheticBold = YES;
+        return face;
+    }
+    if (wantItalic) {
+        if (italic != 0) { face.fontId = italic; return face; }
+        face.syntheticItalic = YES;
+        return face;
+    }
+    return face;
+}
+
 static void NativeSdkCellFillRect(NSRect rect, NSColor *color) {
     if (!color || NSIsEmptyRect(rect)) return;
     [color setFill];
@@ -2949,8 +2998,6 @@ static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
     CGFloat baseline = NativeSdkPacketNumber(grid[@"baseline"], 0);
     CGFloat size = MAX(1, NativeSdkPacketNumber(grid[@"size"], 12));
     if (cellWidth <= 0 || cellHeight <= 0) return YES;
-    NSFont *font = NativeSdkPacketPreferredFont(grid, size);
-    if (!font) return NO;
     const CGFloat thickness = NativeSdkCellStrokeWidth(size);
 
     /* Pass 1: backgrounds. */
@@ -2982,11 +3029,40 @@ static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
 
         NSString *cluster = [cell[@"text"] isKindOfClass:[NSString class]] ? cell[@"text"] : nil;
         if (cluster.length > 0) {
-            [cluster drawAtPoint:NSMakePoint(x, origin.y + baseline - size)
-                  withAttributes:@{
-                      NSFontAttributeName : font,
-                      NSForegroundColorAttributeName : foreground,
-                  }];
+            /* Face selection is per CELL, not per row: one row mixes
+             * regular, bold, and italic freely and every one of them
+             * inks at the same pen with the same advance. */
+            const NativeSdkCellFace face = NativeSdkCellFaceFor(grid, flags);
+            NSFont *cellFont = NativeSdkFontForFontId(face.fontId, size);
+            if (cellFont) {
+                const NSPoint pen = NSMakePoint(x, origin.y + baseline - size);
+                NSDictionary *attributes = @{
+                    NSFontAttributeName : cellFont,
+                    NSForegroundColorAttributeName : foreground,
+                };
+                if (face.syntheticItalic) {
+                    /* Shear about the BASELINE, the same axis and the
+                     * same tangent the reference renderer bakes into its
+                     * glyph affine. Saved/restored per cell so the shear
+                     * cannot leak into a neighbour's ink. */
+                    CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+                    CGContextSaveGState(context);
+                    const CGFloat baselineY = origin.y + baseline;
+                    CGContextTranslateCTM(context, 0, baselineY);
+                    CGContextConcatCTM(context, CGAffineTransformMake(1, 0, NativeSdkCellItalicTangent, 1, 0, 0));
+                    CGContextTranslateCTM(context, 0, -baselineY);
+                    [cluster drawAtPoint:pen withAttributes:attributes];
+                    if (face.syntheticBold) {
+                        [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
+                    }
+                    CGContextRestoreGState(context);
+                } else {
+                    [cluster drawAtPoint:pen withAttributes:attributes];
+                    if (face.syntheticBold) {
+                        [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
+                    }
+                }
+            }
         }
 
         if (flags & NativeSdkCellFlagOverline) {
@@ -3145,7 +3221,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v6).
+ * Compact binary gpu-surface packet decoding (wire format v7).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -3535,6 +3611,9 @@ enum {
  * decoder mirrors it deliberately, including the two-pass order. */
 static NSDictionary *NativeSdkBinaryReadCellGrid(NativeSdkBinaryPacketReader *reader) {
     uint32_t fontId = NativeSdkBinaryReadU32(reader);
+    uint32_t boldFontId = NativeSdkBinaryReadU32(reader);
+    uint32_t italicFontId = NativeSdkBinaryReadU32(reader);
+    uint32_t boldItalicFontId = NativeSdkBinaryReadU32(reader);
     NSNumber *fontSize = NativeSdkBinaryReadF32Number(reader);
     NSArray *origin = NativeSdkBinaryReadF32Array(reader, 2);
     NSNumber *cellWidth = NativeSdkBinaryReadF32Number(reader);
@@ -3597,6 +3676,9 @@ static NSDictionary *NativeSdkBinaryReadCellGrid(NativeSdkBinaryPacketReader *re
     if (reader->failed) return nil;
     return @{
         @"font" : @(fontId),
+        @"boldFont" : @(boldFontId),
+        @"italicFont" : @(italicFontId),
+        @"boldItalicFont" : @(boldItalicFontId),
         @"size" : fontSize,
         @"origin" : origin,
         @"cellWidth" : cellWidth,
@@ -3691,7 +3773,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 6) return nil;
+    if (version != 7) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */

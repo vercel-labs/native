@@ -385,6 +385,16 @@ pub const FontFamily = enum {
 pub const TypographyTokens = struct {
     font_id: FontId = default_sans_font_id,
     mono_font_id: FontId = default_mono_font_id,
+    /// Companion mono faces for SGR bold and italic, registered by the
+    /// app (`Runtime.registerCanvasFont`) and named here. 0 means "not
+    /// registered": the terminal painter still CARRIES the attribute and
+    /// the renderers synthesize it (a second offset pass for bold, a
+    /// baseline shear for italic) rather than dropping it. Real faces
+    /// are strictly better ink; synthesis is what keeps `\x1b[1m`
+    /// visible for an app that has not supplied one.
+    mono_bold_font_id: FontId = 0,
+    mono_italic_font_id: FontId = 0,
+    mono_bold_italic_font_id: FontId = 0,
     font_family: FontFamily = default_sans_font_family,
     mono_font_family: FontFamily = default_mono_font_family,
     body_size: f32 = 14,

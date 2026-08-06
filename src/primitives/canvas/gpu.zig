@@ -181,6 +181,9 @@ pub const CanvasGpuText = struct {
 /// spec for what the pixels must be.
 pub const CanvasGpuCellGrid = struct {
     font_id: FontId = 0,
+    bold_font_id: FontId = 0,
+    italic_font_id: FontId = 0,
+    bold_italic_font_id: FontId = 0,
     font_size: f32 = 0,
     origin: geometry.PointF = .{},
     cell_width: f32 = 0,
@@ -502,6 +505,9 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
             packet_command.pipeline = .glyph_run;
             packet_command.cells = .{
                 .font_id = value.font_id,
+                .bold_font_id = value.bold_font_id,
+                .italic_font_id = value.italic_font_id,
+                .bold_italic_font_id = value.bold_italic_font_id,
                 .font_size = value.font_size,
                 .origin = value.origin,
                 .cell_width = value.cell_width,
