@@ -104,11 +104,13 @@ pub fn build(b: *std.Build) void {
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
 
-    const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
+    const frontend_install = b.addSystemCommand(&.{ "npm", "install" });
+    frontend_install.setCwd(b.path("frontend"));
     const frontend_install_step = b.step("frontend-install", "Install frontend dependencies");
     frontend_install_step.dependOn(&frontend_install.step);
 
-    const frontend_build = b.addSystemCommand(&.{ "npm", "--prefix", "frontend", "run", "build" });
+    const frontend_build = b.addSystemCommand(&.{ "npm", "run", "build" });
+    frontend_build.setCwd(b.path("frontend"));
     frontend_build.step.dependOn(&frontend_install.step);
     const frontend_step = b.step("frontend-build", "Build the frontend");
     frontend_step.dependOn(&frontend_build.step);
