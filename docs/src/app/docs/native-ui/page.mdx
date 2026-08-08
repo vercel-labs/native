@@ -472,6 +472,25 @@ case "build_finished":
 
 </CodeToggle>
 
+Secrets use the same typed update-side shape without an app-specific Keychain bridge. `fx.setCredential`, `fx.getCredential`, and `fx.deleteCredential` address an OS credential by the stable `(service, account)` pair and deliver one `EffectCredentialResult`:
+
+```zig
+.load_token => fx.getCredential(.{
+    .key = credential_key,
+    .service = "com.example.notes.openai",
+    .account = "default",
+    .on_result = Effects.credentialMsg(.credential_result),
+}),
+.credential_result => |result| switch (result.outcome) {
+    .ok => model.useToken(result.secret), // valid only during this update
+    .not_found => model.askForToken(),
+    .recording_unsupported => model.explainRecordingRestriction(),
+    else => model.noteCredentialFailure(result.outcome),
+},
+```
+
+Set inputs are copied before the platform call and effect-owned secret buffers are securely wiped. A successful get's secret is drain scratch: copy only what must outlive the update. Session recording rejects gets before touching the credential store and journals only operation/outcome metadata for set and delete; it never journals a credential effect's secret bytes. Ordinary UI input events are outside that guarantee, so do not treat the effects boundary as general-purpose secret redaction.
+
 Failure and overflow are always visible: a spawn that cannot run delivers an exit Msg with reason `rejected`, a fetch that cannot run delivers a response Msg with outcome `rejected`, and a file effect that cannot run delivers a result Msg with outcome `rejected`; dropped or truncated lines carry counts and flags; `cancel` kills and reaps the process and always ends in exactly one `cancelled` exit Msg, with no further line Msgs after it. Tests use the fake executor (`effects.executor = .fake`) to assert on spawn, fetch, and file requests and feed synthetic lines, stderr (`feedStderr`, collect spawns), exits, responses, and file results back deterministically — set it before the first frame and `init_fx` boot spawns are recorded too. See `examples/effects-probe`.
 
 For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std.Io`, which `update` never sees): `native_sdk.nowMs()` / `nowNanoseconds()` read the wall clock and `monotonicMs()` / `monotonicNanoseconds()` the duration clock. Time-dependent logic stores the `native_sdk.Clock` seam in the model (`.system` by default) so tests substitute a deterministic `native_sdk.TestClock` and advance it by hand.

@@ -1023,6 +1023,8 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeEnum(record.file_outcome);
     try cursor.writeEnum(record.clipboard_op);
     try cursor.writeEnum(record.clipboard_outcome);
+    try cursor.writeEnum(record.credential_op);
+    try cursor.writeEnum(record.credential_outcome);
     try cursor.writeInt(u64, record.timer_timestamp_ns);
     try cursor.writeEnum(record.timer_outcome);
     try cursor.writeInt(i64, record.clock_wall_ms);
@@ -1090,6 +1092,8 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .file_outcome = try cursor.readEnum(runtime_effects.EffectFileOutcome),
         .clipboard_op = try cursor.readEnum(runtime_effects.EffectClipboardOp),
         .clipboard_outcome = try cursor.readEnum(runtime_effects.EffectClipboardOutcome),
+        .credential_op = try cursor.readEnum(runtime_effects.EffectCredentialOp),
+        .credential_outcome = try cursor.readEnum(runtime_effects.EffectCredentialOutcome),
         .timer_timestamp_ns = try cursor.readInt(u64),
         .timer_outcome = try cursor.readEnum(runtime_effects.EffectTimerOutcome),
         .clock_wall_ms = try cursor.readInt(i64),

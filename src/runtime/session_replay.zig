@@ -228,6 +228,17 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                // Credential journals are metadata-only by construction.
+                // A successful get is impossible while recording, and no
+                // operation ever writes secret bytes to payload. Refuse a
+                // hand-edited record instead of normalizing it silently.
+                if (effect.kind == .credential and credentialRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: credential record for key {d} claims .{s}/.{s} with {d} payload bytes - credential journals are metadata-only and recorded gets can never succeed, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.credential_op), @tagName(effect.credential_outcome), effect.payload.len },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 // Provenance consistency, gated BEFORE the regeneration
                 // skip below: a `.data` or `.closed` channel record
                 // stamped with `.rejected` provenance would be skipped
@@ -545,6 +556,24 @@ fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
     return record.channel_kind != .data and record.payload.len > 0;
 }
 
+fn credentialRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.payload.len != 0) return true;
+    return switch (record.credential_op) {
+        .set => switch (record.credential_outcome) {
+            .ok, .failed, .cancelled => false,
+            else => true,
+        },
+        .get => switch (record.credential_outcome) {
+            .recording_unsupported, .cancelled => false,
+            else => true,
+        },
+        .delete => switch (record.credential_outcome) {
+            .ok, .not_found, .failed, .cancelled => false,
+            else => true,
+        },
+    };
+}
+
 /// Whether a channel record's provenance stamp contradicts its event
 /// kind — RECORDER TRUTH: channel records journal from exactly two
 /// sites. The live drain (staged posts and the close marker) journals
@@ -663,6 +692,9 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         .response => record.fetch_outcome == .rejected,
         .file => record.file_outcome == .rejected,
         .clipboard => record.clipboard_outcome == .rejected,
+        // Admission rejections never journal. Every credential record
+        // that passes the shape gate above is executor truth and feeds.
+        .credential => false,
         // Audio rejections are loop-side validation (path bounds) that
         // refuses again; everything else — loaded acknowledgments,
         // position ticks, completions, platform failures — is an
@@ -799,6 +831,27 @@ test "audio records outside the exact-integer scalar window are damaged" {
     record.audio_position_ms = 0;
     record.audio_duration_ms = std.math.maxInt(u64);
     try std.testing.expect(audioScalarsDamaged(record));
+}
+
+test "credential replay accepts only metadata shapes the recorder can produce" {
+    var record: journal.EffectResultRecord = .{
+        .kind = .credential,
+        .key = 1,
+        .credential_op = .get,
+        .credential_outcome = .recording_unsupported,
+    };
+    try std.testing.expect(!credentialRecordDamaged(record));
+    record.payload = "secret";
+    try std.testing.expect(credentialRecordDamaged(record));
+    record.payload = "";
+    record.credential_outcome = .ok;
+    try std.testing.expect(credentialRecordDamaged(record));
+
+    record.credential_op = .set;
+    record.credential_outcome = .ok;
+    try std.testing.expect(!credentialRecordDamaged(record));
+    record.credential_outcome = .not_found;
+    try std.testing.expect(credentialRecordDamaged(record));
 }
 
 /// Debug aid: `NATIVE_SDK_SESSION_REPLAY_DUMP=<dir>` writes each

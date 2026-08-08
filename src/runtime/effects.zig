@@ -196,6 +196,13 @@ pub const default_channel_wake_join_deadline_ms: u64 = 5_000;
 /// must never pass for the whole one).
 pub const max_effect_clipboard_bytes: usize = platform.max_clipboard_data_bytes;
 
+/// Credential-effect bounds are the platform credential-store bounds.
+/// Requests over these limits are rejected before the platform service
+/// is called; secrets are never truncated.
+pub const max_effect_credential_service_bytes: usize = platform.max_credential_service_bytes;
+pub const max_effect_credential_account_bytes: usize = platform.max_credential_account_bytes;
+pub const max_effect_credential_secret_bytes: usize = platform.max_credential_secret_bytes;
+
 /// Maximum bytes of a host request's (or fire-and-forget host send's)
 /// name. Mirrors the transpiled-core command wire format, whose name
 /// field carries a one-byte length.
@@ -544,6 +551,42 @@ pub const EffectClipboardResult = struct {
     /// Loop-side terminal notices evicted from the pending ring to make
     /// room before this one (only under extreme rejection bursts).
     /// Never silently zero when something was lost.
+    dropped_before: u32 = 0,
+};
+
+/// Which secure credential-store operation a credential effect performs.
+pub const EffectCredentialOp = enum { set, get, delete };
+
+/// The terminal outcome of one credential effect.
+pub const EffectCredentialOutcome = enum {
+    /// The operation completed. A successful get returns the credential
+    /// in `EffectCredentialResult.secret` for the current update only.
+    ok,
+    /// No credential exists for the requested service/account pair.
+    not_found,
+    /// The platform credential store refused or could not complete the
+    /// operation.
+    failed,
+    /// Validation, capacity, duplicate-key, or service binding rejected
+    /// the request before it ran.
+    rejected,
+    /// Reads are deliberately unavailable while session recording is
+    /// active so secrets can never enter a journal.
+    recording_unsupported,
+    /// `cancel(key)` ended delivery. A real set/delete may already have
+    /// completed because credential services run synchronously.
+    cancelled,
+};
+
+/// Payload for credential-effect Msg constructors. Exactly one terminal
+/// result is delivered per accepted operation. `secret` is non-empty only
+/// for a successful get and is valid only during the update that receives
+/// it; copy what the model needs and avoid retaining it longer than needed.
+pub const EffectCredentialResult = struct {
+    key: u64,
+    op: EffectCredentialOp = .get,
+    outcome: EffectCredentialOutcome = .ok,
+    secret: []const u8 = "",
     dropped_before: u32 = 0,
 };
 
@@ -1749,6 +1792,10 @@ pub const EffectResultKind = enum(u8) {
     /// opposite of the channel records' inline argument. Exit records
     /// ride `code`/`exit_reason` plus the pty fields.
     pty = 15,
+    /// One secure credential-store terminal. Credential secrets never
+    /// ride `payload`: get is rejected while recording, and set/delete
+    /// records contain only operation and outcome metadata.
+    credential = 16,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -1821,6 +1868,8 @@ pub const EffectResultRecord = struct {
     file_outcome: EffectFileOutcome = .ok,
     clipboard_op: EffectClipboardOp = .write,
     clipboard_outcome: EffectClipboardOutcome = .ok,
+    credential_op: EffectCredentialOp = .get,
+    credential_outcome: EffectCredentialOutcome = .ok,
     timer_timestamp_ns: u64 = 0,
     timer_outcome: EffectTimerOutcome = .fired,
     /// `.clock` records: the wall-clock value `Effects.wallMs` returned.
@@ -2407,6 +2456,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ResponseMsgFn = *const fn (response: EffectResponse) Msg;
         pub const FileMsgFn = *const fn (result: EffectFileResult) Msg;
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
+        pub const CredentialMsgFn = *const fn (result: EffectCredentialResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
         pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
@@ -2469,6 +2519,17 @@ pub fn Effects(comptime Msg: type) type {
         pub fn clipboardMsg(comptime tag: std.meta.Tag(Msg)) ClipboardMsgFn {
             return struct {
                 fn make(result: EffectClipboardResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for credential effects:
+        /// `credentialMsg(.credential_result)` builds a Msg whose payload
+        /// is `native_sdk.EffectCredentialResult`.
+        pub fn credentialMsg(comptime tag: std.meta.Tag(Msg)) CredentialMsgFn {
+            return struct {
+                fn make(result: EffectCredentialResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
@@ -2713,6 +2774,44 @@ pub fn Effects(comptime Msg: type) type {
             op: EffectClipboardOp,
             /// The text a `writeClipboard` would write; `""` for reads.
             text: []const u8 = "",
+        };
+
+        pub const SetCredentialOptions = struct {
+            /// Caller-chosen identity in the shared keyed-effect space.
+            key: u64,
+            /// Credential-store namespace. Both fields are required,
+            /// copied at call time, and must contain no NUL bytes.
+            service: []const u8,
+            account: []const u8,
+            /// Secret bytes to store. Copied at call time and wiped from
+            /// effect-owned memory after the platform call.
+            secret: []const u8,
+            on_result: ?CredentialMsgFn = null,
+        };
+
+        pub const GetCredentialOptions = struct {
+            key: u64,
+            service: []const u8,
+            account: []const u8,
+            on_result: ?CredentialMsgFn = null,
+        };
+
+        pub const DeleteCredentialOptions = struct {
+            key: u64,
+            service: []const u8,
+            account: []const u8,
+            on_result: ?CredentialMsgFn = null,
+        };
+
+        /// A recorded credential request exposed by the fake executor.
+        /// Slices point into effect-owned slot storage until completion.
+        pub const CredentialRequest = struct {
+            key: u64,
+            op: EffectCredentialOp,
+            service: []const u8,
+            account: []const u8,
+            /// Present only for `.set`; empty for `.get` and `.delete`.
+            secret: []const u8 = "",
         };
 
         pub const HostRequestOptions = struct {
@@ -3317,9 +3416,9 @@ pub fn Effects(comptime Msg: type) type {
         /// thereby retires) it.
         const SlotState = enum(u8) { idle, running, done, draining };
 
-        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host, image };
+        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, credential, host, image };
 
-        const EntryKind = enum(u8) { line, exit, response, file, clipboard, host, image, channel, pty };
+        const EntryKind = enum(u8) { line, exit, response, file, clipboard, credential, host, image, channel, pty };
 
         const Entry = struct {
             kind: EntryKind = .line,
@@ -3354,6 +3453,11 @@ pub fn Effects(comptime Msg: type) type {
             /// `line_len`.
             clipboard_op: EffectClipboardOp = .write,
             clipboard_outcome: EffectClipboardOutcome = .ok,
+            /// `.credential` entries use the slot buffer only for a get
+            /// result. Set secrets are wiped immediately after the
+            /// synchronous platform call and never reach this entry.
+            credential_op: EffectCredentialOp = .get,
+            credential_outcome: EffectCredentialOutcome = .ok,
             /// `.host` entries: which route the result takes (true = the
             /// ok arm). The bytes stay in the slot's heap buffer (taken
             /// at drain, like a fetch body) with their length in
@@ -3404,6 +3508,7 @@ pub fn Effects(comptime Msg: type) type {
             response_fn: ?ResponseMsgFn = null,
             file_fn: ?FileMsgFn = null,
             clipboard_fn: ?ClipboardMsgFn = null,
+            credential_fn: ?CredentialMsgFn = null,
             host_fn: ?HostMsgFn = null,
             image_fn: ?ImageMsgFn = null,
             /// `.line` entries whose payload exceeds the inline buffer
@@ -3430,6 +3535,13 @@ pub fn Effects(comptime Msg: type) type {
             response: struct { response: EffectResponse, response_fn: ?ResponseMsgFn },
             file: struct { result: EffectFileResult, file_fn: ?FileMsgFn },
             clipboard: struct { result: EffectClipboardResult, clipboard_fn: ?ClipboardMsgFn },
+            credential: struct {
+                result: EffectCredentialResult,
+                credential_fn: ?CredentialMsgFn,
+                /// Deterministic validation/capacity refusals regenerate
+                /// during replay and therefore must not be journal-fed.
+                regenerates: bool,
+            },
             timer: struct { timer: EffectTimer, timer_fn: ?TimerMsgFn },
             /// `.host` terminals produced on the loop thread: rejections
             /// (`rejected = true`, static bytes, regenerated under
@@ -3493,6 +3605,7 @@ pub fn Effects(comptime Msg: type) type {
                     .response => |*entry| entry.response.dropped_before +|= count,
                     .file => |*entry| entry.result.dropped_before +|= count,
                     .clipboard => |*entry| entry.result.dropped_before +|= count,
+                    .credential => |*entry| entry.result.dropped_before +|= count,
                     // EffectTimer carries no drop counter; a repeating
                     // timer's next fire replaces the lost one anyway.
                     .timer => {},
@@ -3536,6 +3649,7 @@ pub fn Effects(comptime Msg: type) type {
                     .response => |entry| entry.response.dropped_before,
                     .file => |entry| entry.result.dropped_before,
                     .clipboard => |entry| entry.result.dropped_before,
+                    .credential => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
                     .pty => 0,
@@ -3819,6 +3933,7 @@ pub fn Effects(comptime Msg: type) type {
             on_response: ?ResponseMsgFn = null,
             on_file: ?FileMsgFn = null,
             on_clipboard: ?ClipboardMsgFn = null,
+            on_credential: ?CredentialMsgFn = null,
             on_host: ?HostMsgFn = null,
             /// Set by `cancel` before any kill attempt; read by the
             /// worker so a cancel that lands before the process spawns
@@ -3905,6 +4020,12 @@ pub fn Effects(comptime Msg: type) type {
             file_op: EffectFileOp = .read,
             // ---- clipboard-only fields (kind == .clipboard) ----
             clipboard_op: EffectClipboardOp = .write,
+            // ---- credential-only fields (kind == .credential) ----
+            credential_op: EffectCredentialOp = .get,
+            credential_service_storage: [max_effect_credential_service_bytes]u8 = undefined,
+            credential_service_len: usize = 0,
+            credential_account_storage: [max_effect_credential_account_bytes]u8 = undefined,
+            credential_account_len: usize = 0,
             // ---- image-only fields (kind == .image) ----
             on_image: ?ImageMsgFn = null,
             /// The local source path (the URL rides `url_storage`, a
@@ -3977,6 +4098,14 @@ pub fn Effects(comptime Msg: type) type {
 
             fn filePath(slot: *const Slot) []const u8 {
                 return slot.url_storage[0..slot.url_len];
+            }
+
+            fn credentialService(slot: *const Slot) []const u8 {
+                return slot.credential_service_storage[0..slot.credential_service_len];
+            }
+
+            fn credentialAccount(slot: *const Slot) []const u8 {
+                return slot.credential_account_storage[0..slot.credential_account_len];
             }
 
             /// A host request's service name (they share the fetch URL
@@ -4420,6 +4549,10 @@ pub fn Effects(comptime Msg: type) type {
         /// when the next response or file result drains, or at
         /// `deinit`).
         drain_fetch_body: ?[]u8 = null,
+        /// Most recently delivered credential-read bytes. Kept alive
+        /// through the receiving update, then securely zeroed and freed
+        /// before the next credential delivery or at deinit.
+        drain_credential_secret: ?[]u8 = null,
         /// The collect buffer of the most recently delivered collect
         /// exit, keeping `EffectExit.output` valid while `update` runs
         /// (freed when the next collect exit drains, or at `deinit`).
@@ -4887,6 +5020,7 @@ pub fn Effects(comptime Msg: type) type {
             self.clearQueue();
             for (&self.slots) |*slot| {
                 if (slot.fetch_buffer) |buffer| {
+                    if (slot.kind == .credential) std.crypto.secureZero(u8, buffer);
                     self.allocator.free(buffer);
                     slot.fetch_buffer = null;
                 }
@@ -4902,6 +5036,11 @@ pub fn Effects(comptime Msg: type) type {
             if (self.drain_fetch_body) |buffer| {
                 self.allocator.free(buffer);
                 self.drain_fetch_body = null;
+            }
+            if (self.drain_credential_secret) |buffer| {
+                std.crypto.secureZero(u8, buffer);
+                self.allocator.free(buffer);
+                self.drain_credential_secret = null;
             }
             if (self.drain_collect_output) |buffer| {
                 self.allocator.free(buffer);
@@ -7303,6 +7442,198 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Store a secret in the platform credential store. The service,
+        /// account, and secret are copied before the synchronous platform
+        /// call; the effect-owned secret copy is wiped immediately after
+        /// that call returns.
+        pub fn setCredential(self: *Self, options: SetCredentialOptions) void {
+            const credential: platform.Credential = .{
+                .service = options.service,
+                .account = options.account,
+                .secret = options.secret,
+            };
+            validation.validateCredential(credential) catch {
+                return self.rejectCredential(options.key, .set, options.on_result);
+            };
+            self.startCredential(options.key, .set, options.service, options.account, options.secret, options.on_result);
+        }
+
+        /// Read a secret from the platform credential store. Reads are
+        /// rejected while session recording is bound, before any platform
+        /// service is called, so journal files cannot capture credentials.
+        pub fn getCredential(self: *Self, options: GetCredentialOptions) void {
+            const credential_key: platform.CredentialKey = .{
+                .service = options.service,
+                .account = options.account,
+            };
+            validation.validateCredentialKey(credential_key) catch {
+                return self.rejectCredential(options.key, .get, options.on_result);
+            };
+            self.startCredential(options.key, .get, options.service, options.account, "", options.on_result);
+        }
+
+        /// Delete one service/account credential. A missing credential is
+        /// reported as `.not_found`, not collapsed into platform failure.
+        pub fn deleteCredential(self: *Self, options: DeleteCredentialOptions) void {
+            const credential_key: platform.CredentialKey = .{
+                .service = options.service,
+                .account = options.account,
+            };
+            validation.validateCredentialKey(credential_key) catch {
+                return self.rejectCredential(options.key, .delete, options.on_result);
+            };
+            self.startCredential(options.key, .delete, options.service, options.account, "", options.on_result);
+        }
+
+        fn startCredential(
+            self: *Self,
+            key: u64,
+            op: EffectCredentialOp,
+            service: []const u8,
+            account: []const u8,
+            secret: []const u8,
+            on_result: ?CredentialMsgFn,
+        ) void {
+            self.reclaimSlots();
+            const fake = self.executor == .fake;
+            if (!fake and self.services == null) return self.rejectCredential(key, op, on_result);
+            if (self.keyOccupiedUntilDelivery(key)) return self.rejectCredential(key, op, on_result);
+            const slot_index = self.findIdleSlot() orelse return self.rejectCredential(key, op, on_result);
+
+            const buffer_len: usize = switch (op) {
+                .set => @max(secret.len, 1),
+                .get => max_effect_credential_secret_bytes,
+                .delete => 1,
+            };
+            const buffer = self.allocator.alloc(u8, buffer_len) catch {
+                return self.rejectCredential(key, op, on_result);
+            };
+
+            const slot = &self.slots[slot_index];
+            slot.generation = self.next_generation;
+            self.next_generation +%= 1;
+            if (self.next_generation == 0) self.next_generation = 1;
+            slot.key = key;
+            slot.kind = .credential;
+            slot.credential_op = op;
+            slot.on_line = null;
+            slot.on_exit = null;
+            slot.on_response = null;
+            slot.on_file = null;
+            slot.on_clipboard = null;
+            slot.on_credential = on_result;
+            slot.on_host = null;
+            slot.cancel_requested.store(false, .release);
+            slot.dropped_pending = 0;
+            slot.dropped_total = 0;
+            @memcpy(slot.credential_service_storage[0..service.len], service);
+            slot.credential_service_len = service.len;
+            @memcpy(slot.credential_account_storage[0..account.len], account);
+            slot.credential_account_len = account.len;
+            if (slot.line_buffer) |old| {
+                self.allocator.free(old);
+                slot.line_buffer = null;
+            }
+            if (slot.fetch_buffer) |old| {
+                std.crypto.secureZero(u8, old);
+                self.allocator.free(old);
+            }
+            slot.fetch_buffer = buffer;
+            slot.payload_len = if (op == .set) secret.len else 0;
+            if (op == .set) @memcpy(buffer[0..secret.len], secret);
+            slot.body_len = 0;
+            slot.fake = fake;
+            slot.state.store(.running, .release);
+
+            if (fake) return;
+
+            // Preserve the same occupied-key window replay gets from
+            // its parked fake request, but never touch the OS store.
+            // The metadata-only terminal is the record that later
+            // retires replay's park.
+            if (op == .get and self.journal != null) {
+                var entry: Entry = .{
+                    .kind = .credential,
+                    .slot_index = @intCast(slot_index),
+                    .generation = slot.generation,
+                    .key = key,
+                    .credential_op = .get,
+                    .credential_outcome = .recording_unsupported,
+                    .credential_fn = on_result,
+                };
+                slot.state.store(.draining, .release);
+                if (!self.enqueue(&entry)) {
+                    self.releaseCredentialSlot(slot);
+                    self.deliverLoopCredential(.{
+                        .key = key,
+                        .op = .get,
+                        .outcome = .recording_unsupported,
+                    }, on_result, false);
+                }
+                self.wakeHost();
+                return;
+            }
+
+            const services = self.services.?;
+            const credential_key: platform.CredentialKey = .{
+                .service = slot.credentialService(),
+                .account = slot.credentialAccount(),
+            };
+            var outcome: EffectCredentialOutcome = .ok;
+            var result_len: usize = 0;
+            switch (op) {
+                .set => {
+                    services.setCredential(.{
+                        .service = credential_key.service,
+                        .account = credential_key.account,
+                        .secret = buffer[0..slot.payload_len],
+                    }) catch {
+                        outcome = .failed;
+                    };
+                    std.crypto.secureZero(u8, buffer);
+                },
+                .get => {
+                    if (services.getCredential(credential_key, buffer)) |value| {
+                        if (value.len <= buffer.len) {
+                            result_len = value.len;
+                            if (value.ptr != buffer.ptr) @memcpy(buffer[0..value.len], value);
+                        } else {
+                            outcome = .failed;
+                        }
+                    } else |err| switch (err) {
+                        error.CredentialNotFound => outcome = .not_found,
+                        else => outcome = .failed,
+                    }
+                },
+                .delete => services.deleteCredential(credential_key) catch |err| switch (err) {
+                    error.CredentialNotFound => outcome = .not_found,
+                    else => outcome = .failed,
+                },
+            }
+            slot.body_len = result_len;
+            var entry: Entry = .{
+                .kind = .credential,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = key,
+                .line_len = @intCast(result_len),
+                .credential_op = op,
+                .credential_outcome = outcome,
+                .credential_fn = on_result,
+            };
+            slot.state.store(.draining, .release);
+            if (!self.enqueue(&entry)) {
+                const fallback_outcome: EffectCredentialOutcome = if (op == .get and result_len > 0) .failed else outcome;
+                self.releaseCredentialSlot(slot);
+                self.deliverLoopCredential(.{
+                    .key = key,
+                    .op = op,
+                    .outcome = fallback_outcome,
+                }, on_result, false);
+            }
+            self.wakeHost();
+        }
+
         /// Fire-and-forget named host command: hand `name` + `payload`
         /// to the bound host services and move on — no key, no result,
         /// no Msg. This is the delivery path of a transpiled core's
@@ -7540,6 +7871,19 @@ pub fn Effects(comptime Msg: type) type {
                     const key_copy = slot.key;
                     self.releaseFetchSlot(slot);
                     self.deliverLoopClipboard(.{ .key = key_copy, .op = op, .outcome = .cancelled }, clipboard_fn);
+                    return;
+                }
+                if (slot.kind == .credential) {
+                    // No credential-store call happened in fake mode.
+                    const credential_fn = slot.on_credential;
+                    const op = slot.credential_op;
+                    const key_copy = slot.key;
+                    self.releaseCredentialSlot(slot);
+                    self.deliverLoopCredential(.{
+                        .key = key_copy,
+                        .op = op,
+                        .outcome = .cancelled,
+                    }, credential_fn, false);
                     return;
                 }
                 if (slot.kind == .image) {
@@ -8950,6 +9294,22 @@ pub fn Effects(comptime Msg: type) type {
                             });
                             return clipboard_fn(entry.result);
                         },
+                        .credential => |entry| {
+                            // Regenerating pre-executor refusals are
+                            // deliberately absent from the journal. All
+                            // executor-truth terminals journal metadata
+                            // even without a handler so replay can retire
+                            // its parked fake slot.
+                            if (!entry.regenerates) self.journalNote(.{
+                                .kind = .credential,
+                                .key = entry.result.key,
+                                .dropped = entry.result.dropped_before,
+                                .credential_op = entry.result.op,
+                                .credential_outcome = entry.result.outcome,
+                            });
+                            const credential_fn = entry.credential_fn orelse continue;
+                            return credential_fn(entry.result);
+                        },
                         .timer => |entry| {
                             const timer_fn = entry.timer_fn orelse continue;
                             self.journalNote(.{
@@ -9430,6 +9790,55 @@ pub fn Effects(comptime Msg: type) type {
                         });
                         const clipboard_fn = entry.clipboard_fn orelse continue;
                         return clipboard_fn(result);
+                    },
+                    .credential => {
+                        if (entry.generation != slot.generation) continue;
+                        // Keep a successful get alive through its update,
+                        // but wipe the previous get before replacing it.
+                        if (self.drain_credential_secret) |old| {
+                            std.crypto.secureZero(u8, old);
+                            self.allocator.free(old);
+                        }
+                        self.drain_credential_secret = slot.fetch_buffer;
+                        slot.fetch_buffer = null;
+                        var result: EffectCredentialResult = if (cancelled)
+                            .{ .key = entry.key, .op = entry.credential_op, .outcome = .cancelled }
+                        else
+                            .{
+                                .key = entry.key,
+                                .op = entry.credential_op,
+                                .outcome = entry.credential_outcome,
+                                .secret = if (entry.credential_op == .get and entry.credential_outcome == .ok)
+                                    if (self.drain_credential_secret) |buffer| buffer[0..entry.line_len] else ""
+                                else
+                                    "",
+                                .dropped_before = entry.dropped_before,
+                            };
+                        // This is defense in depth: getCredential refuses
+                        // before touching the store whenever a recorder is
+                        // bound. Even a manually fed fake result cannot
+                        // smuggle a secret into that journal.
+                        if (self.journal != null and result.secret.len != 0) {
+                            if (self.drain_credential_secret) |buffer| std.crypto.secureZero(u8, buffer);
+                            result.secret = "";
+                            result.outcome = .recording_unsupported;
+                        }
+                        self.journalNote(.{
+                            .kind = .credential,
+                            .key = result.key,
+                            .dropped = result.dropped_before,
+                            .credential_op = result.op,
+                            .credential_outcome = result.outcome,
+                        });
+                        const credential_fn = entry.credential_fn orelse {
+                            if (self.drain_credential_secret) |buffer| {
+                                std.crypto.secureZero(u8, buffer);
+                                self.allocator.free(buffer);
+                                self.drain_credential_secret = null;
+                            }
+                            continue;
+                        };
+                        return credential_fn(result);
                     },
                     .host => {
                         // One terminal per host occupancy, mirroring
@@ -10350,6 +10759,86 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Number of active credential requests parked by the fake
+        /// executor (including session replay).
+        pub fn pendingCredentialCount(self: *Self) usize {
+            var count: usize = 0;
+            for (&self.slots) |*slot| {
+                if (slot.fake and slot.kind == .credential and slot.state.load(.acquire) == .running) count += 1;
+            }
+            return count;
+        }
+
+        /// The `index`-th parked fake credential request in slot order.
+        pub fn pendingCredentialAt(self: *Self, index: usize) ?CredentialRequest {
+            var seen: usize = 0;
+            for (&self.slots) |*slot| {
+                if (!(slot.fake and slot.kind == .credential and slot.state.load(.acquire) == .running)) continue;
+                if (seen == index) return .{
+                    .key = slot.key,
+                    .op = slot.credential_op,
+                    .service = slot.credentialService(),
+                    .account = slot.credentialAccount(),
+                    .secret = if (slot.credential_op == .set) slot.fetchPayload() else "",
+                };
+                seen += 1;
+            }
+            return null;
+        }
+
+        /// Feed a fake credential terminal. `secret` is accepted only
+        /// for a successful get; over-bound data fails whole. Session
+        /// replay uses this with metadata-only recorded results, because
+        /// live recording never permits a successful credential read.
+        pub fn feedCredentialResult(
+            self: *Self,
+            key: u64,
+            outcome: EffectCredentialOutcome,
+            secret: []const u8,
+        ) error{EffectNotFound}!void {
+            const slot_index = self.findActiveFakeSlot(key, .credential) orelse return error.EffectNotFound;
+            const slot = &self.slots[slot_index];
+            const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
+            var delivered_len: usize = 0;
+            var delivered_outcome = outcome;
+            if (slot.credential_op == .get and outcome == .ok) {
+                if (secret.len > max_effect_credential_secret_bytes or secret.len > buffer.len) {
+                    delivered_outcome = .failed;
+                } else {
+                    delivered_len = secret.len;
+                    @memcpy(buffer[0..delivered_len], secret);
+                }
+            } else if (slot.credential_op == .set) {
+                // The request copy is no longer needed once its fake
+                // executor answer arrives.
+                std.crypto.secureZero(u8, buffer);
+            }
+            slot.body_len = delivered_len;
+            var entry: Entry = .{
+                .kind = .credential,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = slot.key,
+                .line_len = @intCast(delivered_len),
+                .credential_op = slot.credential_op,
+                .credential_outcome = delivered_outcome,
+                .credential_fn = slot.on_credential,
+            };
+            slot.state.store(.draining, .release);
+            if (!self.enqueue(&entry)) {
+                const credential_fn = slot.on_credential;
+                const op = slot.credential_op;
+                const fallback_outcome: EffectCredentialOutcome = if (op == .get and delivered_len > 0) .failed else delivered_outcome;
+                self.releaseCredentialSlot(slot);
+                self.deliverLoopCredential(.{
+                    .key = entry.key,
+                    .op = op,
+                    .outcome = fallback_outcome,
+                }, credential_fn, false);
+            }
+            self.wakeHost();
+        }
+
         /// Number of recorded (still-active) fake image-load requests.
         pub fn pendingImageLoadCount(self: *Self) usize {
             var count: usize = 0;
@@ -10656,6 +11145,32 @@ pub fn Effects(comptime Msg: type) type {
                 .op = op,
                 .outcome = .rejected,
             }, clipboard_fn);
+        }
+
+        fn rejectCredential(self: *Self, key: u64, op: EffectCredentialOp, credential_fn: ?CredentialMsgFn) void {
+            self.deliverLoopCredential(.{
+                .key = key,
+                .op = op,
+                .outcome = .rejected,
+            }, credential_fn, true);
+        }
+
+        /// Queue a loop-thread credential terminal. Secret bytes never
+        /// ride this path. Non-regenerating records stage even without a
+        /// Msg handler because replay needs their metadata terminal.
+        fn deliverLoopCredential(
+            self: *Self,
+            result: EffectCredentialResult,
+            credential_fn: ?CredentialMsgFn,
+            regenerates: bool,
+        ) void {
+            std.debug.assert(result.secret.len == 0);
+            if (credential_fn == null and regenerates) return;
+            self.deliverPending(.{ .credential = .{
+                .result = result,
+                .credential_fn = credential_fn,
+                .regenerates = regenerates,
+            } });
         }
 
         /// Queue a terminal clipboard result produced on the loop
@@ -11466,6 +11981,21 @@ pub fn Effects(comptime Msg: type) type {
             slot.state.store(.idle, .release);
         }
 
+        /// Credential slots may own a set copy or a retrieved secret;
+        /// wipe the full allocation before returning it to the allocator.
+        fn releaseCredentialSlot(self: *Self, slot: *Slot) void {
+            if (slot.fetch_buffer) |buffer| {
+                std.crypto.secureZero(u8, buffer);
+                self.allocator.free(buffer);
+                slot.fetch_buffer = null;
+            }
+            if (slot.line_buffer) |buffer| {
+                self.allocator.free(buffer);
+                slot.line_buffer = null;
+            }
+            slot.state.store(.idle, .release);
+        }
+
         /// Free a spawn slot's collect and line buffers (if any) and
         /// return it to `.idle` (spawn-time failures, fake cancels, and
         /// feed fallbacks). Loop-thread only.
@@ -12163,7 +12693,7 @@ pub fn Effects(comptime Msg: type) type {
         fn slotTerminalUndelivered(slot: *const Slot) bool {
             return switch (slot.kind) {
                 .spawn => slot.collect_buffer != null or slot.exit_undelivered,
-                .fetch, .file, .clipboard, .host, .image => slot.fetch_buffer != null,
+                .fetch, .file, .clipboard, .credential, .host, .image => slot.fetch_buffer != null,
             };
         }
 

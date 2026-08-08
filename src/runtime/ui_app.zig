@@ -1437,6 +1437,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .response => try self.effects.feedResponseOutcome(record.key, record.fetch_outcome, record.status, record.payload),
                     .file => try self.effects.feedFileResult(record.key, record.file_outcome, record.payload),
                     .clipboard => try self.effects.feedClipboardResult(record.key, record.clipboard_outcome, record.payload),
+                    .credential => try self.effects.feedCredentialResult(record.key, record.credential_outcome, ""),
                     // `.host` records ride the route in `code` (0 ok / 1
                     // err); rejections never reach here — they carry
                     // `.rejected` and regenerate from the same

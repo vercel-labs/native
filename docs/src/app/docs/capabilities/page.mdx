@@ -1,6 +1,6 @@
 # Capabilities
 
-Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/docs/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [model core](/docs/app-model), notifications and clipboard access ride the effects channel (`Cmd.showNotification` / `Cmd.clipboardWrite` in TypeScript, `fx.showNotification` / `fx.writeClipboard` in Zig) so `update` never needs a runtime handle.
+Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/docs/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [model core](/docs/app-model), notifications and clipboard access ride the effects channel (`Cmd.showNotification` / `Cmd.clipboardWrite` in TypeScript, `fx.showNotification` / `fx.writeClipboard` in Zig) so `update` never needs a runtime handle. Zig cores also access the credential store through `fx.setCredential`, `fx.getCredential`, and `fx.deleteCredential`.
 
 Web content itself is declare-to-use: an app ships the embedded web layer only when it declares web intent — `"webview"` in `.capabilities`, a `.frontend` block, a `.shell` webview view, or a web engine resolved to Chromium (`.web_engine = "chromium"` in app.zon, or the `-Dweb-engine`/`--web-engine` flags) — and an app that declares none of them builds native-only, where any attempt to create a webview fails with a teaching error instead of loading a layer the app never asked for. The [`webview_layer`](/docs/app-zon) manifest field overrides the inference in either direction. Native-only builds shed the platform web stack for real: the Windows executable carries no `WebView2Loader.dll` reference, and the Linux host neither links WebKitGTK nor requires `libwebkitgtk` on user machines.
 
@@ -82,7 +82,7 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
     </tr>
     <tr>
       <td>Credential store</td>
-      <td><code>runtime.setCredential(options)</code> / <code>runtime.getCredential(key)</code> / <code>runtime.deleteCredential(key)</code></td>
+      <td><code>runtime.setCredential(options)</code> / <code>runtime.getCredential(key, buffer)</code> / <code>runtime.deleteCredential(key)</code>; Zig <code>UiApp</code>: <code>fx.setCredential</code> / <code>fx.getCredential</code> / <code>fx.deleteCredential</code></td>
       <td><code>native-sdk.credentials.set</code> / <code>native-sdk.credentials.get</code> / <code>native-sdk.credentials.delete</code></td>
       <td><code>credentials</code></td>
       <td>macOS system WebView and macOS Chromium through Keychain; Linux system WebView through Secret Service/libsecret when available; Windows system WebView through Credential Manager</td>
@@ -105,6 +105,42 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
 </table>
 
 Unsupported platform hosts reject with the standard unsupported-service error.
+
+### Credential effects in Zig UiApp
+
+The runtime methods remain appropriate for code that already owns a runtime handle. Inside a Zig `UiApp.update`, use the typed effects instead. `service` namespaces credentials for an app or integration; `account` selects an identity or slot within that namespace. Both are part of the lookup key, so keep them stable between set, get, and delete.
+
+```zig
+pub const Msg = union(enum) {
+    save_api_key,
+    load_api_key,
+    forget_api_key,
+    credential_result: native_sdk.EffectCredentialResult,
+};
+
+.save_api_key => fx.setCredential(.{
+    .key = credential_fx_key,
+    .service = "com.example.notes.openai",
+    .account = "default",
+    .secret = model.pending_api_key,
+    .on_result = Effects.credentialMsg(.credential_result),
+}),
+.load_api_key => fx.getCredential(.{
+    .key = credential_fx_key,
+    .service = "com.example.notes.openai",
+    .account = "default",
+    .on_result = Effects.credentialMsg(.credential_result),
+}),
+.forget_api_key => fx.deleteCredential(.{
+    .key = credential_fx_key,
+    .service = "com.example.notes.openai",
+    .account = "default",
+    .on_result = Effects.credentialMsg(.credential_result),
+}),
+.credential_result => |result| model.applyCredentialResult(result),
+```
+
+A successful get exposes `result.secret` only during that `update` call; copy it only if the app truly needs to retain it. Results distinguish `ok`, `not_found`, `failed`, `rejected`, `recording_unsupported`, and `cancelled`. Credential reads are rejected with `recording_unsupported` before the OS credential store is touched whenever session recording is active. Set/delete remain available, but their secret bytes never enter effect-result journal records. This boundary does not redact secrets that an app independently places in ordinary input events or other recorded data.
 
 ## Audio streaming and the track cache
 
