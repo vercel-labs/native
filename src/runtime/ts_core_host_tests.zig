@@ -12,6 +12,7 @@ const std = @import("std");
 const effects_mod = @import("effects.zig");
 const runtime_clock = @import("clock.zig");
 const ts_core_host = @import("ts_core_host.zig");
+const platform = @import("../platform/root.zig");
 
 // ------------------------------------------------------ the mini core
 //
@@ -289,6 +290,7 @@ const mini_core = struct {
         uget, // 81: fetch "uget" -> ufetched/failed
         ufetched: struct { status: u64, body: []const u8 }, // 82: fetch ok
         // record with a u64-classed number field
+        navigate_webview, // 83: webview_navigate child URL
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -511,6 +513,7 @@ const mini_core = struct {
             .drop_paste => return .{ .model = model, .cmd = cmdCancel("paste") },
             .open_win => return .{ .model = model, .cmd = cmdWindowShow("player") },
             .quit_app => return .{ .model = model, .cmd = cmdQuitApp() },
+            .navigate_webview => return .{ .model = model, .cmd = cmdWebViewNavigate("preview", "https://status.test/page") },
             .open_chan => return .{ .model = model, .cmd = cmdChannelOpen(41, 47) },
             .close_chan => return .{ .model = model, .cmd = cmdChannelClose(41) },
             .chan_evt => |event| {
@@ -888,6 +891,15 @@ const mini_core = struct {
     fn cmdQuitApp() []const u8 {
         const out = rt.frameAlloc(u8, 1);
         out[0] = 0x11;
+        return out;
+    }
+
+    fn cmdWebViewNavigate(label: []const u8, url: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + label.len + 4 + url.len);
+        out[0] = 0x1E;
+        out[1] = @intCast(label.len);
+        @memcpy(out[2..][0..label.len], label);
+        _ = writeLongBytes(out, 2 + label.len, url);
         return out;
     }
 
@@ -2152,6 +2164,54 @@ test "window verbs bridge to the effects channel's label-addressed verbs" {
     // Fire-and-forget: neither verb parked a keyed effect or dispatched
     // a result Msg of its own — only init's boot request is pending.
     try std.testing.expectEqual(boot_pending, fx.pendingHostCount());
+}
+
+test "webview navigation decodes onto the effects mirror" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .navigate_webview);
+    const state = fx.webViewActionState();
+    try std.testing.expectEqual(@as(u32, 1), state.navigate_count);
+    try std.testing.expectEqualStrings("preview", state.label());
+    try std.testing.expectEqualStrings("https://status.test/page", state.url());
+}
+
+test "webview navigation invokes its bound runtime seam in real mode" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    fx.executor = .real;
+
+    const Stub = struct {
+        var calls: u32 = 0;
+        var window_id: platform.WindowId = 0;
+        var label: []const u8 = "";
+        var url: []const u8 = "";
+
+        fn navigate(context: *anyopaque, target: platform.WindowId, requested_label: []const u8, requested_url: []const u8) bool {
+            _ = context;
+            calls += 1;
+            window_id = target;
+            label = requested_label;
+            url = requested_url;
+            return true;
+        }
+    };
+    Stub.calls = 0;
+    var context: u8 = 0;
+    fx.bindWebViewActions(.{
+        .context = &context,
+        .window_id = 7,
+        .navigate_fn = Stub.navigate,
+    });
+
+    Host.init(fx);
+    Host.dispatch(fx, .navigate_webview);
+    try std.testing.expectEqual(@as(u32, 1), Stub.calls);
+    try std.testing.expectEqual(@as(platform.WindowId, 7), Stub.window_id);
+    try std.testing.expectEqualStrings("preview", Stub.label);
+    try std.testing.expectEqualStrings("https://status.test/page", Stub.url);
 }
 
 test "a channel opens, posts route the five-field arm by name, and close retires the key" {

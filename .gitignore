@@ -48,3 +48,4 @@ packages/core/node_modules/
 # TS scaffold writes into a new app's .gitignore)
 examples/soundboard-ts/node_modules/
 examples/system-monitor-ts/node_modules/
+examples/agent-wars/node_modules/

@@ -1,0 +1,40 @@
+.{
+    .id = "dev.native_sdk.agent_wars",
+    .name = "agent-wars",
+    .display_name = "Agent Wars",
+    .description = "Compare two Pi harness coding agents in a native-rendered visual evaluation bench.",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "command", "network" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "webview" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Agent Wars",
+                .width = 1380,
+                .height = 820,
+                .resizable = false,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "agent-wars-canvas", .kind = "gpu_surface", .fill = true, .role = "Agent Wars controls", .accessibility_label = "Agent Wars", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                    // app.native's fixed geometry: 16px outer padding, a
+                    // 668px column, and a 1px inset that leaves its border.
+                    // Both panes are child WebViews. They start with the
+                    // inline blank page and the TypeScript core navigates
+                    // them to the sidecar viewer after it is ready.
+                    .{ .label = "preview-a", .kind = "webview", .parent = "agent-wars-canvas", .url = "zero://inline", .x = 17, .y = 205, .width = 666, .height = 598, .layer = 20 },
+                    .{ .label = "preview-b", .kind = "webview", .parent = "agent-wars-canvas", .url = "zero://inline", .x = 697, .y = 205, .width = 666, .height = 598, .layer = 20 },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://inline", "http://127.0.0.1:43110" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+}

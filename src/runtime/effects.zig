@@ -76,6 +76,8 @@ const validation = @import("validation.zig");
 const runtime_clock = @import("clock.zig");
 const pty_transport = @import("pty.zig");
 
+const effects_log = std.log.scoped(.zero_effects);
+
 /// Maximum in-flight effects (spawn slots / worker threads).
 pub const max_effects: usize = 16;
 /// Maximum argv entries per spawn.
@@ -273,6 +275,17 @@ pub const WindowActionBinding = struct {
     quit_fn: *const fn (context: *anyopaque) bool,
 };
 
+/// Type-erased handle for navigating a declared child WebView from a
+/// TypeScript core command. The target window is supplied by `UiApp` and is
+/// refreshed whenever the canvas window identity changes; the callback uses
+/// the runtime's existing `updateView` path so label, target, URL-policy, and
+/// platform validation stay centralized.
+pub const WebViewActionBinding = struct {
+    context: *anyopaque,
+    window_id: platform.WindowId,
+    navigate_fn: *const fn (context: *anyopaque, window_id: platform.WindowId, label: []const u8, url: []const u8) bool,
+};
+
 /// Type-erased handle to the embedding host's named-command services,
 /// bound onto the effects channel (`bindHostCalls`). This is the seam
 /// behind `hostRequest`/`hostSend` — the generic named host call a
@@ -321,6 +334,34 @@ pub const WindowActionState = struct {
         const len = @min(label.len, max_window_action_label);
         @memcpy(self.last_label_buffer[0..len], label[0..len]);
         self.last_label_len = len;
+    }
+};
+
+/// The WebView-navigation mirror records the last fire-and-forget request so
+/// fake execution and session replay remain observable without a platform
+/// WebView. The live callback is still invoked in real mode.
+pub const WebViewActionState = struct {
+    navigate_count: u32 = 0,
+    label_buffer: [platform.max_webview_label_bytes]u8 = @splat(0),
+    label_len: usize = 0,
+    url_buffer: [platform.max_webview_url_bytes]u8 = @splat(0),
+    url_len: usize = 0,
+
+    pub fn label(self: *const WebViewActionState) []const u8 {
+        return self.label_buffer[0..self.label_len];
+    }
+
+    pub fn url(self: *const WebViewActionState) []const u8 {
+        return self.url_buffer[0..self.url_len];
+    }
+
+    fn record(self: *WebViewActionState, requested_label: []const u8, requested_url: []const u8) void {
+        const label_len = @min(requested_label.len, self.label_buffer.len);
+        @memcpy(self.label_buffer[0..label_len], requested_label[0..label_len]);
+        self.label_len = label_len;
+        const url_len = @min(requested_url.len, self.url_buffer.len);
+        @memcpy(self.url_buffer[0..url_len], requested_url[0..url_len]);
+        self.url_len = url_len;
     }
 };
 
@@ -4154,6 +4195,10 @@ pub fn Effects(comptime Msg: type) type {
         /// by `UiApp` alongside the services — the seam behind
         /// app-drawn window controls (loop-thread only).
         window_actions: ?WindowActionBinding = null,
+        /// The runtime's declared child-WebView navigation seam. Unlike
+        /// window actions, the target window id is refreshed by UiApp when
+        /// the canvas window identity becomes known.
+        webview_actions: ?WebViewActionBinding = null,
         /// The embedding host's named-command services (`hostSend` /
         /// `hostRequest`), bound by whoever hosts a transpiled app core
         /// (loop-thread only). Null means no host services: sends drop,
@@ -4163,6 +4208,8 @@ pub fn Effects(comptime Msg: type) type {
         /// Window-action mirror: counts and the last requested label,
         /// observable in tests (`windowActionState`).
         window_action_state: WindowActionState = .{},
+        /// WebView-navigation mirror, observable in tests.
+        webview_action_state: WebViewActionState = .{},
         /// The environment spawned children inherit and fetch honors
         /// (PATH for `spawnPath`-style lookups, proxy variables).
         /// Bound once from the loop thread before the first real
@@ -5326,6 +5373,13 @@ pub fn Effects(comptime Msg: type) type {
         /// live window table). Loop-thread only; the first bind sticks.
         pub fn bindWindowActions(self: *Self, binding: WindowActionBinding) void {
             if (self.window_actions == null) self.window_actions = binding;
+        }
+
+        /// Bind the runtime-owned WebView navigation seam. The runtime
+        /// context and callback are stable, while UiApp may refresh the
+        /// target canvas window id after the first frame event.
+        pub fn bindWebViewActions(self: *Self, binding: WebViewActionBinding) void {
+            self.webview_actions = binding;
         }
 
         /// Point named host commands at the embedding host's services
@@ -7833,11 +7887,31 @@ pub fn Effects(comptime Msg: type) type {
             _ = binding.quit_fn(binding.context);
         }
 
+        /// Navigate a declared child WebView in the bound canvas window.
+        /// Fire-and-forget: fake/replay records the request, while real mode
+        /// invokes the runtime callback. Invalid labels, the main WebView,
+        /// missing views, and denied origins fail closed and are logged by
+        /// the callback owner without aborting the update loop.
+        pub fn navigateWebView(self: *Self, label: []const u8, url: []const u8) void {
+            self.webview_action_state.navigate_count += 1;
+            self.webview_action_state.record(label, url);
+            if (self.executor == .fake) return;
+            const binding = self.webview_actions orelse return;
+            if (!binding.navigate_fn(binding.context, binding.window_id, label, url)) {
+                effects_log.warn("WebView navigation rejected for label '{s}'", .{label});
+            }
+        }
+
         /// The window-action mirror, for tests: how many close/minimize/
         /// show/quit requests rode the channel and the last label
         /// requested.
         pub fn windowActionState(self: *const Self) WindowActionState {
             return self.window_action_state;
+        }
+
+        /// The WebView-navigation mirror, for tests and replay diagnostics.
+        pub fn webViewActionState(self: *const Self) WebViewActionState {
+            return self.webview_action_state;
         }
 
         /// Set playback volume, clamped to 0.0—1.0. Remembered across

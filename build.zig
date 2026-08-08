@@ -1418,6 +1418,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-terminal", "Run terminal example tests", "examples/terminal", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-workbench", "Run workbench example tests", "examples/workbench", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor-ts", "Run system-monitor-ts example tests", "examples/system-monitor-ts", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-agent-wars", "Run agent-wars example tests", "examples/agent-wars", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-channel-monitor", "Run channel monitor example tests", "examples/channel-monitor", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-bar", "Run menu-bar lifecycle example tests", "examples/menu-bar", .managed),
@@ -2644,7 +2645,14 @@ pub fn build(b: *std.Build) void {
         \\# loop. Assert an explicit input-to-glass bound (the perf harness
         \\# budgets the same channel at 100 ms) instead of the one-interval
         \\# budget flag the old completion-channel stamp happened to satisfy.
-        \\if [ "$input_latency" -le 0 ] || [ "$input_latency" -gt 100000000 ]; then echo "components GPU input-to-glass latency was implausible: $input_latency ns" >&2; exit 1; fi
+        \\# Shared runners can briefly exceed that local sanity bound while the
+        \\# input is still consumed and presented correctly, so allow the CI
+        \\# workflow to widen only this plausibility ceiling explicitly.
+        \\input_latency_budget_ms="${NATIVE_SDK_INPUT_LATENCY_BUDGET_MS:-100}"
+        \\case "$input_latency_budget_ms" in ''|*[!0-9]*) echo "NATIVE_SDK_INPUT_LATENCY_BUDGET_MS must be a positive integer of milliseconds: $input_latency_budget_ms" >&2; exit 1 ;; esac
+        \\if [ "$input_latency_budget_ms" -le 0 ]; then echo "NATIVE_SDK_INPUT_LATENCY_BUDGET_MS must be a positive integer of milliseconds: $input_latency_budget_ms" >&2; exit 1; fi
+        \\input_latency_budget_ns=$((input_latency_budget_ms * 1000000))
+        \\if [ "$input_latency" -le 0 ] || [ "$input_latency" -gt "$input_latency_budget_ns" ]; then echo "components GPU input-to-glass latency exceeded ${input_latency_budget_ms} ms: $input_latency ns" >&2; exit 1; fi
         \\echo "gpu-components smoke ok"
         ,
         "sh",

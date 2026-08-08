@@ -1362,6 +1362,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .show_fn = effectsShowWindowByLabel,
                 .quit_fn = effectsQuitApp,
             });
+            self.effects.bindWebViewActions(.{
+                .context = runtime,
+                .window_id = self.canvas_window_id,
+                .navigate_fn = effectsNavigateWebView,
+            });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
             }
@@ -5976,6 +5981,18 @@ fn effectsShowWindowByLabel(context: *anyopaque, window_label: []const u8) bool 
 fn effectsQuitApp(context: *anyopaque) bool {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     runtime.quitApp() catch return false;
+    return true;
+}
+
+fn effectsNavigateWebView(context: *anyopaque, window_id: platform.WindowId, label: []const u8, url: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    _ = runtime.updateView(window_id, label, .{ .url = url }) catch |err| {
+        ui_app_log.warn(
+            "WebView navigation for '{s}' rejected: {s} - the view must be a declared child WebView and the URL's origin must be in security.navigation.allowed_origins",
+            .{ label, @errorName(err) },
+        );
+        return false;
+    };
     return true;
 }
 

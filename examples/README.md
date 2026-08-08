@@ -17,6 +17,7 @@ TypeScript is the primary app-authoring language. A new `native init my_app` pro
 | Example | Shows |
 | --- | --- |
 | `ai-chat-ts` | Multi-module TypeScript core, text editing, `Cmd.fetch`, environment messages, and deterministic replay. |
+| `agent-wars` | Two editable Pi harness models, a shared task, spawn-streamed status, and side-by-side WebView previews. |
 | `soundboard-ts` | Full music player: audio effects, timers, search, assets, native context menus, and adaptive markup. |
 | `system-monitor-ts` | Subprocess effects, timers, parsing, tables, charts, controlled scroll, and confirmation flows. |
 
@@ -60,4 +61,4 @@ The `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` distingu
 
 `mobile-shell`, `ios`, and `android` are mobile host projects (Xcode/Gradle shells plus shared `app.zon` metadata) rather than desktop app directories.
 
-Start with `native init` for a small TypeScript + Native markup app, then use `ai-chat-ts`, `soundboard-ts`, or `system-monitor-ts` according to the feature you need. Use `habits` when you specifically want the smallest Zig-core equivalent, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and the GPU trio for custom-rendered or retained-canvas panes.
+Start with `native init` for a small TypeScript + Native markup app, then use `ai-chat-ts`, `agent-wars`, `soundboard-ts`, or `system-monitor-ts` according to the feature you need. Use `habits` when you specifically want the smallest Zig-core equivalent, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and the GPU trio for custom-rendered or retained-canvas panes.

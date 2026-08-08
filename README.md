@@ -98,6 +98,7 @@ The apps pictured above live in [examples/](./examples), most as zero-config pro
 | Example | What it shows |
 | --- | --- |
 | [`ai-chat-ts`](./examples/ai-chat-ts) | TypeScript + Native markup end to end: modules, a text editor, fetch effects, and replay-safe configuration. |
+| [`agent-wars`](./examples/agent-wars) | A two-model Pi harness comparison app: native controls and progress around side-by-side WebView results. |
 | [`soundboard-ts`](./examples/soundboard-ts) | The full music-player showcase in TypeScript + Native markup: audio, search, assets, timers, and context menus. |
 | [`system-monitor-ts`](./examples/system-monitor-ts) | A live process monitor in TypeScript + Native markup: subprocess effects, tables, charts, and timers. |
 | [`calculator`](./examples/calculator) | A complete small app: markup keypad, keyboard input, chrome shortcuts, theming. |

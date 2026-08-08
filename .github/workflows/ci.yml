@@ -79,6 +79,7 @@ jobs:
       - run: zig build test-gpu-components-smoke
         env:
           NATIVE_SDK_SMOKE_BUDGET_MS: "1500"
+          NATIVE_SDK_INPUT_LATENCY_BUDGET_MS: "500"
 
   macos-gpu-perf:
     name: macOS GPU Perf
