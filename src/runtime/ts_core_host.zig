@@ -285,6 +285,11 @@
 //!                  activate (the tray "Open" consequence of the
 //!                  menu-bar-app loop). No result Msg; the window's own
 //!                  frame event carries the state.
+//!   webview_navigate -> `fx.navigateWebView(label, url)` — fire-and-
+//!                  forget navigation of a declared child WebView in the
+//!                  main window. The runtime applies the normal WebView
+//!                  label, target, and origin-policy checks; invalid or
+//!                  denied requests do not abort dispatch.
 //!   quit_app    -> `fx.quitApp()` — the graceful terminate through the
 //!                  same shutdown path a last-window close takes.
 //!   show_notification -> `fx.showNotification` fire-and-forget; invalid or
@@ -1061,6 +1066,13 @@ pub fn TsCoreHost(comptime core: type) type {
                     0x10 => {
                         const label = takeShortBytes(cmd, &at);
                         fx.showWindow(label);
+                    },
+                    // webview_navigate [op][label_len][label]
+                    //                  [url_len u32 LE][url]
+                    0x1E => {
+                        const label = takeShortBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        fx.navigateWebView(label, url);
                     },
                     // quit_app [op]
                     0x11 => fx.quitApp(),

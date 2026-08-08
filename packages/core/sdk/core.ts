@@ -223,6 +223,9 @@
 //                                "Open" consequence; also restores a
 //                                minimized window. An unknown label is a
 //                                no-op.
+//   Cmd.navigateWebView(label, url)
+//                                navigate a declared child WebView in the
+//                                main window (fire-and-forget).
 //   Cmd.quitApp()                graceful terminate, the tray "Quit"
 //                                consequence: the host quits through the
 //                                SAME shutdown path a last-window close
@@ -878,6 +881,7 @@ export type Cmd<M extends Msgish> =
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
+  | { readonly op: "webview_navigate"; readonly label: string; readonly url: Uint8Array }
   | { readonly op: "quit_app" }
   | {
       readonly op: "image_load";
@@ -1229,6 +1233,15 @@ export const Cmd = {
   /// labels are declarations.
   showWindow(label: string): Cmd<never> {
     return { op: "window_show", label };
+  },
+
+  /// Navigate a declared child WebView in the main window. The runtime
+  /// validates the label, rejects the main WebView, and applies the same
+  /// navigation origin policy used by declarative WebView updates. The
+  /// command is fire-and-forget; invalid or denied requests do not crash
+  /// the update loop. Passing the current URL again forces a reload.
+  navigateWebView(label: string, url: Uint8Array): Cmd<never> {
+    return { op: "webview_navigate", label, url };
   },
 
   /// Quit the app for real — the graceful terminate, and the tray "Quit"

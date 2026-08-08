@@ -237,6 +237,7 @@ export type CmdData =
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
+  | { readonly op: "webview_navigate"; readonly label: string; readonly url: Uint8Array }
   | { readonly op: "quit_app" }
   | {
       readonly op: "image_load";
@@ -492,6 +493,10 @@ export const Cmd = {
 
   showWindow(label: string): CmdData {
     return { op: "window_show", label };
+  },
+
+  navigateWebView(label: string, url: Uint8Array): CmdData {
+    return { op: "webview_navigate", label, url };
   },
 
   quitApp(): CmdData {
