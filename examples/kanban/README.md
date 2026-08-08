@@ -6,6 +6,8 @@ Drop one or more files anywhere on the board to add their basenames as Todo card
 
 Drag any card within a column or across Todo, Doing, and Done. The card itself lifts under the pointer at full opacity, leaving one blank, card-sized slot behind. As the pointer reaches another candidate position, that same reserved slot moves from the source to the candidate and neighboring cards glide around it—there are never two spaces for one card. On release, the same floating card eases from the pointer into the slot. Press Escape during a drag to cancel it and carry the card back to its source slot. Cards can move forwards, backwards, or directly across the board.
 
+Each card represents an agent-owned ticket: the title sits above a compact metadata row with a GitHub-style issue icon, ticket number, and the assigned OpenAI or Claude avatar. The avatar artwork is rasterized from SVGL's [OpenAI](https://svgl.app/library/openai.svg) and [Claude AI](https://svgl.app/library/claude-ai-icon.svg) SVGs so it can travel through the app manifest's static image channel.
+
 ```sh
 native dev
 native check

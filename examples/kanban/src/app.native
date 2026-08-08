@@ -5,44 +5,86 @@
 <column background="background">
   <!-- The header IS the titlebar (tall hidden-inset chrome). chromeMsg
        keeps its controls clear of the traffic lights. -->
-  <row height="{headerHeight}" padding="12" gap="10" cross="center" background="surface" window-drag="true" label="Kanban header">
+  <row height="{headerHeight}" padding="12" cross="center" window-drag="true" label="Kanban header">
     <spacer width="{chromeLeading}" />
-    <text size="sm" foreground="text_muted">Pick up a card and make some space · drop files to add more</text>
     <spacer grow="1" />
-    <button variant="primary" on-press="add">Add card</button>
+    <button size="icon" variant="ghost" icon="plus" label="Add card" on-press="add"></button>
   </row>
-  <separator />
   <row grow="1" gap="12" padding="16">
     <column grow="1" gap="8" padding="10" label="Todo">
       <text foreground="text_muted">Todo</text>
-      <column gap="8">
-        <for each="todoCards" key="id" as="c">
-          <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
-            <text grow="1">{c.title}</text>
-          </row>
-        </for>
-      </column>
+      <scroll grow="1" value="{todoScroll}" on-scroll="todo_scrolled" label="Todo cards">
+        <column gap="8">
+          <for each="todoCards" key="id" as="c">
+            <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
+              <column grow="1" gap="8">
+                <text>{c.title}</text>
+                <row height="24" gap="6" cross="center">
+                  <icon name="circle-dot" width="14" height="14" foreground="text_muted" />
+                  <text size="sm" foreground="text_muted">#{c.ticketNumber}</text>
+                  <spacer grow="1" />
+                  <if test="{c.assignee == 'openai'}">
+                    <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
+                  </if>
+                  <else>
+                    <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
+                  </else>
+                </row>
+              </column>
+            </row>
+          </for>
+        </column>
+      </scroll>
     </column>
     <column grow="1" gap="8" padding="10" label="Doing">
       <text foreground="text_muted">Doing</text>
-      <column gap="8">
-        <for each="doingCards" key="id" as="c">
-          <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
-            <text grow="1">{c.title}</text>
-          </row>
-        </for>
-      </column>
+      <scroll grow="1" value="{doingScroll}" on-scroll="doing_scrolled" label="Doing cards">
+        <column gap="8">
+          <for each="doingCards" key="id" as="c">
+            <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
+              <column grow="1" gap="8">
+                <text>{c.title}</text>
+                <row height="24" gap="6" cross="center">
+                  <icon name="circle-dot" width="14" height="14" foreground="text_muted" />
+                  <text size="sm" foreground="text_muted">#{c.ticketNumber}</text>
+                  <spacer grow="1" />
+                  <if test="{c.assignee == 'openai'}">
+                    <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
+                  </if>
+                  <else>
+                    <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
+                  </else>
+                </row>
+              </column>
+            </row>
+          </for>
+        </column>
+      </scroll>
     </column>
     <column grow="1" gap="8" padding="10" label="Done">
       <text foreground="text_muted">Done</text>
-      <column gap="8">
-        <for each="doneCards" key="id" as="c">
-          <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
-            <text grow="1">{c.title}</text>
-          </row>
-        </for>
-      </column>
+      <scroll grow="1" value="{doneScroll}" on-scroll="done_scrolled" label="Done cards">
+        <column gap="8">
+          <for each="doneCards" key="id" as="c">
+            <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
+              <column grow="1" gap="8">
+                <text>{c.title}</text>
+                <row height="24" gap="6" cross="center">
+                  <icon name="circle-dot" width="14" height="14" foreground="text_muted" />
+                  <text size="sm" foreground="text_muted">#{c.ticketNumber}</text>
+                  <spacer grow="1" />
+                  <if test="{c.assignee == 'openai'}">
+                    <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
+                  </if>
+                  <else>
+                    <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
+                  </else>
+                </row>
+              </column>
+            </row>
+          </for>
+        </column>
+      </scroll>
     </column>
   </row>
-  <status-bar>{todoCount} todo · {doingCount} doing · {doneCount} done · {droppedCount} added from files</status-bar>
 </column>

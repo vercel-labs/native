@@ -1946,28 +1946,30 @@ pub fn build(b: *std.Build) void {
         \\snapshot="$(cat "$automation_dir/snapshot.txt")"
         \\button_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=button name="Add card".*/\1/p' | head -n 1)"
         \\case "$button_id" in ''|*[!0-9]*) echo "writeback smoke: Add card button id was missing from the snapshot" >&2; exit 1 ;; esac
+        \\heading_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Todo".*/\1/p' | head -n 1)"
+        \\case "$heading_id" in ''|*[!0-9]*) echo "writeback smoke: Todo heading id was missing from the snapshot" >&2; exit 1 ;; esac
         \\# 1. Provenance: the button reports its authored span in the root file.
         \\provenance="$("$cli" automate provenance kanban-canvas "$button_id" 2>/dev/null)"
         \\case "$provenance" in *"authored=markup"*"root=src/app.native"*) ;; *) echo "writeback smoke: button provenance was not markup-authored: $provenance" >&2; exit 1 ;; esac
         \\case "$provenance" in *"node file=src/app.native"*) ;; *) echo "writeback smoke: button provenance named the wrong file: $provenance" >&2; exit 1 ;; esac
         \\# 2. Loop provenance: the boot view is deliberately self-contained,
         \\# so a card title reports its node in app.native plus its iteration key.
-        \\card_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Sketch the board layout".*/\1/p' | head -n 1)"
+        \\card_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Retry failed agent runs".*/\1/p' | head -n 1)"
         \\case "$card_id" in ''|*[!0-9]*) echo "writeback smoke: card text id was missing from the snapshot" >&2; exit 1 ;; esac
         \\card_provenance="$("$cli" automate provenance kanban-canvas "$card_id" 2>/dev/null)"
         \\case "$card_provenance" in *"node file=src/app.native"*) ;; *) echo "writeback smoke: card provenance named the wrong file: $card_provenance" >&2; exit 1 ;; esac
         \\case "$card_provenance" in *"keys="*) ;; *) echo "writeback smoke: card provenance missed the iteration key: $card_provenance" >&2; exit 1 ;; esac
-        \\# 3. Write-back: flip the button label through the verb; the app's own
+        \\# 3. Write-back: flip the Todo heading through the verb; the app's own
         \\# hot-reload watch picks the file change up and repaints.
-        \\"$cli" automate edit kanban-canvas "$button_id" set-text "Add task" >/dev/null 2>&1
-        \\"$cli" automate assert --timeout-ms 15000 'role=button name="Add task"' >/dev/null
-        \\# The file diff is byte-exact: exactly the label bytes changed.
-        \\sed 's/>Add card</>Add task</' .zig-cache/app.native.smoke-backup > .zig-cache/app.native.smoke-expected
+        \\"$cli" automate edit kanban-canvas "$heading_id" set-text "Backlog" >/dev/null 2>&1
+        \\"$cli" automate assert --timeout-ms 15000 'role=text name="Backlog"' >/dev/null
+        \\# The file diff is byte-exact: exactly the heading bytes changed.
+        \\sed 's/>Todo</>Backlog</' .zig-cache/app.native.smoke-backup > .zig-cache/app.native.smoke-expected
         \\cmp -s .zig-cache/app.native.smoke-expected src/app.native || { echo "writeback smoke: the edit was not minimal-diff" >&2; exit 1; }
         \\# 4. Flip it back through the same verb: the structural id survived the
         \\# reload (text is not identity), and the file restores byte-identical.
-        \\"$cli" automate edit kanban-canvas "$button_id" set-text "Add card" >/dev/null 2>&1
-        \\"$cli" automate assert --timeout-ms 15000 'role=button name="Add card"' >/dev/null
+        \\"$cli" automate edit kanban-canvas "$heading_id" set-text "Todo" >/dev/null 2>&1
+        \\"$cli" automate assert --timeout-ms 15000 'role=text name="Todo"' >/dev/null
         \\cmp -s .zig-cache/app.native.smoke-backup src/app.native || { echo "writeback smoke: the flip-back did not restore the file byte-identically" >&2; exit 1; }
         \\# 5. Refusal: an edit that fails validation leaves the file untouched.
         \\if "$cli" automate edit kanban-canvas "$button_id" set-attr bogus 1 >/dev/null 2>&1; then echo "writeback smoke: an invalid edit was not refused" >&2; exit 1; fi

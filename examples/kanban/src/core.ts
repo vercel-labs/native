@@ -8,27 +8,31 @@ import {
   type ChromeButtons,
   type ChromeInsets,
   type FileDropEvent,
+  type ScrollState,
 } from "@native-sdk/core/events";
 
 const MAX_CARDS = 64;
 const HEADER_NATURAL_HEIGHT = 52;
-const BOARD_SEPARATOR_HEIGHT = 1;
 const BOARD_PADDING = 16;
 const COLUMN_PADDING = 10;
 const COLUMN_TITLE_HEIGHT = 17.5;
 const COLUMN_TITLE_GAP = 8;
-const CARD_HEIGHT = 33.5;
+const CARD_HEIGHT = 69.5;
 const CARD_GAP = 8;
 const DRAG_CHANGE = 0;
 const DRAG_END = 1;
 const DRAG_CANCEL = 2;
 
 export type Column = "todo" | "doing" | "done";
+export type Agent = "openai" | "claude";
 
 export interface Card {
   readonly id: number;
   readonly column: Column;
   readonly title: Uint8Array;
+  readonly ticketNumber: number;
+  readonly assignee: Agent;
+  readonly avatarId: number;
 }
 
 export interface CardDrop {
@@ -46,6 +50,9 @@ export interface Model {
   readonly droppedCount: number;
   readonly chromeLeading: number;
   readonly headerHeight: number;
+  readonly todoScroll: number;
+  readonly doingScroll: number;
+  readonly doneScroll: number;
   readonly draggingId: number;
   readonly dragTargetColumn: Column;
   readonly dragBeforeId: number;
@@ -66,6 +73,9 @@ export type Msg =
   | { readonly kind: "add" }
   | { readonly kind: "card_dropped"; readonly sourceId: number; readonly phase: number; readonly x: number; readonly y: number; readonly viewWidth: number; readonly viewHeight: number }
   | { readonly kind: "files_dropped"; readonly drop: DroppedFiles }
+  | { readonly kind: "todo_scrolled"; readonly scroll: ScrollState }
+  | { readonly kind: "doing_scrolled"; readonly scroll: ScrollState }
+  | { readonly kind: "done_scrolled"; readonly scroll: ScrollState }
   | {
       readonly kind: "chrome_changed";
       readonly insets: ChromeInsets;
@@ -76,16 +86,19 @@ export type Msg =
 export function initialModel(): Model {
   return {
     cards: [
-      { id: 1, column: "todo", title: asciiBytes("Sketch the board layout") },
-      { id: 2, column: "todo", title: asciiBytes("Wire typed dispatch") },
-      { id: 3, column: "doing", title: asciiBytes("Write loop tests") },
-      { id: 4, column: "done", title: asciiBytes("Copy inbox scaffolding") },
-      { id: 5, column: "done", title: asciiBytes("Read the builder source") },
+      { id: 1, column: "todo", title: asciiBytes("Retry failed agent runs"), ticketNumber: 1841, assignee: "openai", avatarId: 1 },
+      { id: 2, column: "todo", title: asciiBytes("Preserve reconnect output"), ticketNumber: 1842, assignee: "claude", avatarId: 2 },
+      { id: 3, column: "doing", title: asciiBytes("Fix duplicate dispatch"), ticketNumber: 1843, assignee: "openai", avatarId: 1 },
+      { id: 4, column: "done", title: asciiBytes("Log agent handoffs"), ticketNumber: 1844, assignee: "claude", avatarId: 2 },
+      { id: 5, column: "done", title: asciiBytes("Document sandbox denials"), ticketNumber: 1845, assignee: "openai", avatarId: 1 },
     ],
     nextId: 6,
     droppedCount: 0,
     chromeLeading: 0,
     headerHeight: HEADER_NATURAL_HEIGHT,
+    todoScroll: 0,
+    doingScroll: 0,
+    doneScroll: 0,
     draggingId: 0,
     dragTargetColumn: "todo",
     dragBeforeId: 0,
@@ -120,6 +133,10 @@ export const viewUnbound = [
   "draggingId",
   "dragTargetColumn",
   "dragBeforeId",
+  "droppedCount",
+  "todoCount",
+  "doingCount",
+  "doneCount",
 ] as const;
 
 // -------------------------------------------------------------- derived
@@ -184,12 +201,22 @@ export function doneCount(model: Model): number {
 function appendCard(model: Model, title: Uint8Array): Model {
   if (model.cards.length >= MAX_CARDS) return model;
   const id = model.nextId;
-  if (id < 0 || id >= 9007199254740991) return model;
-  const card: Card = { id: Math.trunc(id), column: "todo", title: title };
+  if (!(id >= 0)) return model;
+  if (id >= 9007199254739151) return model;
+  const wholeId = Math.trunc(id);
+  const openaiAssigned = wholeId % 2 !== 0;
+  const card: Card = {
+    id: wholeId,
+    column: "todo",
+    title: title,
+    ticketNumber: Math.trunc(1840 + wholeId),
+    assignee: openaiAssigned ? "openai" : "claude",
+    avatarId: openaiAssigned ? 1 : 2,
+  };
   return {
     ...model,
     cards: [...model.cards, card],
-    nextId: Math.trunc(id + 1),
+    nextId: Math.trunc(wholeId + 1),
   };
 }
 
@@ -235,17 +262,24 @@ function dropColumn(drop: CardDrop): Column {
   return "done";
 }
 
+function columnScroll(model: Model, column: Column): number {
+  if (column === "todo") return model.todoScroll;
+  if (column === "doing") return model.doingScroll;
+  return model.doneScroll;
+}
+
 function dropBeforeCard(model: Model, drop: CardDrop, target: Column): Card | null {
   const targetCards = model.cards.filter(
     (card) => card.column === target && card.id !== drop.sourceId,
   );
-  const firstCardTop = model.headerHeight + BOARD_SEPARATOR_HEIGHT +
-    BOARD_PADDING + COLUMN_PADDING + COLUMN_TITLE_HEIGHT + COLUMN_TITLE_GAP;
+  const firstCardTop = model.headerHeight + BOARD_PADDING + COLUMN_PADDING +
+    COLUMN_TITLE_HEIGHT + COLUMN_TITLE_GAP;
   const firstCardCenter = firstCardTop + CARD_HEIGHT / 2;
   const stride = CARD_HEIGHT + CARD_GAP;
+  const contentY = drop.y + columnScroll(model, target);
   let threshold = firstCardCenter;
   for (const card of targetCards) {
-    if (drop.y < threshold) return card;
+    if (contentY < threshold) return card;
     threshold += stride;
   }
   return null;
@@ -254,7 +288,7 @@ function dropBeforeCard(model: Model, drop: CardDrop, target: Column): Card | nu
 export function update(model: Model, msg: Msg): Model {
   switch (msg.kind) {
     case "add":
-      return appendCard(model, asciiBytes(`Card ${model.nextId}`));
+      return appendCard(model, asciiBytes(`Investigate agent task ${model.nextId}`));
     case "card_dropped": {
       if (msg.phase === DRAG_CANCEL) return { ...model, draggingId: 0, dragBeforeId: 0 };
       const sourceIndex = model.cards.findIndex((card) => card.id === msg.sourceId);
@@ -287,6 +321,12 @@ export function update(model: Model, msg: Msg): Model {
       const droppedCount = total <= 9007199254740991 ? Math.trunc(total) : model.droppedCount;
       return { ...next, droppedCount: droppedCount };
     }
+    case "todo_scrolled":
+      return { ...model, todoScroll: msg.scroll.offsetY };
+    case "doing_scrolled":
+      return { ...model, doingScroll: msg.scroll.offsetY };
+    case "done_scrolled":
+      return { ...model, doneScroll: msg.scroll.offsetY };
     case "chrome_changed":
       return {
         ...model,

@@ -7,6 +7,14 @@
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
+    // Agent avatars rasterized from the OpenAI and Claude AI marks in SVGL.
+    // The ImageIds are stored on each card and bound by the markup avatar.
+    .assets = .{
+        .images = .{
+            .{ .id = 1, .path = "assets/logos/openai-svgl.png" },
+            .{ .id = 2, .path = "assets/logos/claude-svgl.png" },
+        },
+    },
     .shell = .{
         .windows = .{
             .{
