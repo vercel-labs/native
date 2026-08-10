@@ -12938,6 +12938,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
         if (object.statusItem) {
             [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         }
+        object.statusMenu = nil;
         BOOL hasTitle = title != NULL && title_len > 0;
         object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
         object.statusItemBaseImage = nil;
@@ -13075,38 +13076,31 @@ static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32
         BOOL configured = [state isEqualToString:@"configured"] || [state hasPrefix:@"configured "];
         BOOL warning = [state isEqualToString:@"warning"] || [state hasPrefix:@"warning "];
         NSString *title = [NSString stringWithFormat:@"%@ %@", configured ? @"✓" : warning ? @"⚠" : @"○", labels[index]];
-        if (configured) {
-            NSTextField *label = [NSTextField labelWithString:title];
-            label.font = [NSFont systemFontOfSize:11];
-            label.textColor = successColor;
-            [row addArrangedSubview:label];
-        } else {
-            NSView *control = [[NSView alloc] initWithFrame:NSZeroRect];
-            NSTextField *label = [NSTextField labelWithString:title];
-            label.font = [NSFont systemFontOfSize:11];
-            label.textColor = warning ? warningColor : NSColor.secondaryLabelColor;
-            label.translatesAutoresizingMaskIntoConstraints = NO;
-            label.accessibilityElement = NO;
-            NSButton *button = [NSButton buttonWithTitle:@"" target:object action:@selector(trayMenuItemClicked:)];
-            button.tag = itemIds[index];
-            button.bordered = NO;
-            button.transparent = YES;
-            button.enabled = enabled[index].boolValue;
-            button.translatesAutoresizingMaskIntoConstraints = NO;
-            button.accessibilityLabel = title;
-            [control addSubview:label];
-            [control addSubview:button];
-            [NSLayoutConstraint activateConstraints:@[
-                [label.leadingAnchor constraintEqualToAnchor:control.leadingAnchor],
-                [label.trailingAnchor constraintEqualToAnchor:control.trailingAnchor],
-                [label.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
-                [button.leadingAnchor constraintEqualToAnchor:control.leadingAnchor],
-                [button.trailingAnchor constraintEqualToAnchor:control.trailingAnchor],
-                [button.topAnchor constraintEqualToAnchor:control.topAnchor],
-                [button.bottomAnchor constraintEqualToAnchor:control.bottomAnchor],
-            ]];
-            [row addArrangedSubview:control];
-        }
+        NSView *control = [[NSView alloc] initWithFrame:NSZeroRect];
+        NSTextField *label = [NSTextField labelWithString:title];
+        label.font = [NSFont systemFontOfSize:11];
+        label.textColor = configured ? successColor : warning ? warningColor : NSColor.secondaryLabelColor;
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.accessibilityElement = NO;
+        NSButton *button = [NSButton buttonWithTitle:@"" target:object action:@selector(trayMenuItemClicked:)];
+        button.tag = itemIds[index];
+        button.bordered = NO;
+        button.transparent = YES;
+        button.enabled = enabled[index].boolValue;
+        button.translatesAutoresizingMaskIntoConstraints = NO;
+        button.accessibilityLabel = title;
+        [control addSubview:label];
+        [control addSubview:button];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.leadingAnchor constraintEqualToAnchor:control.leadingAnchor],
+            [label.trailingAnchor constraintEqualToAnchor:control.trailingAnchor],
+            [label.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
+            [button.leadingAnchor constraintEqualToAnchor:control.leadingAnchor],
+            [button.trailingAnchor constraintEqualToAnchor:control.trailingAnchor],
+            [button.topAnchor constraintEqualToAnchor:control.topAnchor],
+            [button.bottomAnchor constraintEqualToAnchor:control.bottomAnchor],
+        ]];
+        [row addArrangedSubview:control];
     }
     [row.heightAnchor constraintEqualToConstant:32].active = YES;
     [row.widthAnchor constraintEqualToConstant:320].active = YES;
@@ -13186,7 +13180,13 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         if (!object.statusItem) return;
-        NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+        NSMenu *menu = object.statusMenu;
+        if (menu == nil) {
+            menu = [[NSMenu alloc] initWithTitle:@""];
+            object.statusMenu = menu;
+        } else {
+            [menu removeAllItems];
+        }
         menu.autoenablesItems = NO;
         NSMutableArray<NSView *> *readoutRows = [NSMutableArray array];
         for (size_t i = 0; i < count; i++) {
@@ -13256,7 +13256,6 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             for (NSView *row in readoutRows) [row.widthAnchor constraintEqualToConstant:widest].active = YES;
         }
         menu.delegate = object;
-        object.statusMenu = menu;
         if (object.statusActivationCommand.length == 0 && object.statusAlternateActivationCommand.length == 0) {
             object.statusItem.menu = menu;
         }

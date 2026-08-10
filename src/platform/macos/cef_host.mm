@@ -3329,6 +3329,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
         if (object.statusItem) {
             [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         }
+        object.statusMenu = nil;
         // A titled menu-bar extra needs variable width; icon-only status
         // items keep the classic square well.
         BOOL hasTitle = title != NULL && title_len > 0;
@@ -3373,7 +3374,13 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
         if (!object.statusItem) return;
-        NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+        NSMenu *menu = object.statusMenu;
+        if (menu == nil) {
+            menu = [[NSMenu alloc] initWithTitle:@""];
+            object.statusMenu = menu;
+        } else {
+            [menu removeAllItems];
+        }
         menu.autoenablesItems = NO;
         for (size_t i = 0; i < count; i++) {
             if (separators[i]) {
@@ -3399,7 +3406,6 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             [menu addItem:item];
         }
         menu.delegate = object;
-        object.statusMenu = menu;
         if (object.statusActivationCommand.length == 0 && object.statusAlternateActivationCommand.length == 0) object.statusItem.menu = menu;
     }
 }

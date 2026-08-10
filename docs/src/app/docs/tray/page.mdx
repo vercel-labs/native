@@ -37,6 +37,26 @@ On macOS, `title` renders the tray as a menu-bar extra: a titled `NSStatusItem` 
       <td><code>[]const TrayMenuItem</code></td>
       <td><code>&.{}</code></td>
     </tr>
+    <tr>
+      <td><code>presentation</code></td>
+      <td><code>TrayPresentation</code></td>
+      <td><code>.{}</code></td>
+    </tr>
+    <tr>
+      <td><code>activation_command</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>alternate_activation_command</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>open_command</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
   </tbody>
 </table>
 
@@ -76,6 +96,26 @@ On macOS, `title` renders the tray as a menu-bar extra: a titled `NSStatusItem` 
       <td><code>bool</code></td>
       <td><code>true</code></td>
     </tr>
+    <tr>
+      <td><code>detail</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>role</code></td>
+      <td><code>TrayItemRole</code></td>
+      <td><code>.command</code></td>
+    </tr>
+    <tr>
+      <td><code>key</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>modifiers</code></td>
+      <td><code>ShortcutModifiers</code></td>
+      <td><code>.{}</code></td>
+    </tr>
   </tbody>
 </table>
 
@@ -85,9 +125,11 @@ Use the runtime methods from app code:
 
 - `runtime.createTray(options)` -- create or replace the tray icon
 - `runtime.updateTrayMenu(items)` -- update menu items without recreating the tray
+- `runtime.updateTrayTitle(title)` -- update only the live tray title
+- `runtime.updateTrayPresentation(presentation)` -- update the live title and visual presentation
 - `runtime.removeTray()` -- remove the tray icon
 
-The lower-level `PlatformServices.createTray`, `updateTrayMenu`, and `removeTray` hooks are available for platform adapters. `Runtime` validates tray options before dispatch: non-separator menu items need a label, command-backed items need a unique non-zero `id`, and menus are capped at 32 items.
+The lower-level `PlatformServices.createTray`, `updateTrayMenu`, `updateTrayTitle`, `updateTrayPresentation`, and `removeTray` hooks are available for platform adapters. `Runtime` validates tray options before dispatch: non-separator menu items need a label, command-backed items need a unique non-zero `id`, and menus are capped at 32 items.
 
 ## TypeScript: model-derived status items
 

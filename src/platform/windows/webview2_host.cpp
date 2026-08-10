@@ -7346,7 +7346,9 @@ int native_sdk_windows_update_tray_menu(Host *host, const uint32_t *item_ids, co
         item.label = slice(labels[index], label_lens[index]);
         item.detail = slice(details[index], detail_lens[index]);
         item.role = roles[index];
-        item.key = slice(keys[index], key_lens[index]);
+        // Shortcut validation accepts ASCII uppercase keys, while Windows key
+        // events are normalized to lowercase before matching.
+        item.key = lowerAscii(slice(keys[index], key_lens[index]));
         item.modifiers = modifiers[index];
         item.separator = separators[index] != 0;
         item.enabled = enabled_flags[index] != 0;

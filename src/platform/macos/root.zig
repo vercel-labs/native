@@ -2561,10 +2561,20 @@ test "mac platform module exports type" {
     _ = MacPlatform;
 }
 
-test "mac status agent rows recognize decorated configured and warning states" {
+test "mac status agent rows recognize decorated states and stay actionable" {
     const host_source = @embedFile("appkit_host.m");
     try std.testing.expect(std.mem.indexOf(u8, host_source, "[state hasPrefix:@\"configured \"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "[state hasPrefix:@\"warning \"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "label.textColor = configured ? successColor : warning ? warningColor : NSColor.secondaryLabelColor;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "button.tag = itemIds[index];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "button.enabled = enabled[index].boolValue;") != null);
+}
+
+test "mac status menu updates preserve the menu being opened" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMenu *menu = object.statusMenu;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[menu removeAllItems];") != null);
+    }
 }
 
 test "mac webview presses report the focused child label" {
