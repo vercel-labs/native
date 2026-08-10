@@ -2334,7 +2334,7 @@ pub fn build(b: *std.Build) void {
         \\theme_geist_id="$(widget_id button Geist)"
         \\case "$theme_geist_id" in ''|*[!0-9]*) echo "Geist theme toggle id was missing" >&2; exit 1 ;; esac
         \\"$cli" automate widget-click components-canvas "$theme_geist_id" >/dev/null 2>&1
-        \\"$cli" automate assert 'role=button name="Geist".*state=\[selected\]'
+        \\"$cli" automate assert 'role=button name="Geist".*state=\[[^]]*selected'
         \\"$cli" automate screenshot components-canvas >/dev/null 2>&1
         \\cp "$automation_dir/screenshot-components-canvas.png" "$automation_dir/screenshot-components-geist.png"
         \\test -s "$automation_dir/screenshot-components-house.png" || { echo "house theme screenshot was empty" >&2; exit 1; }
@@ -2354,7 +2354,7 @@ pub fn build(b: *std.Build) void {
         \\  "$cli" automate widget-key components-canvas arrowdown >/dev/null 2>&1
         \\  arrow_count=$((arrow_count + 1))
         \\done
-        \\"$cli" automate assert 'role=treeitem name="Tree".*state=\[selected\]' 'role=text name="Tree"'
+        \\"$cli" automate assert 'role=treeitem name="Tree".*state=\[[^]]*selected' 'role=text name="Tree"'
         \\scroll_line="$(grep 'name="Scrollable component tree"' "$snapshot" | head -1)"
         \\case "$scroll_line" in *'scroll=[offset=0,'*) echo "tree selection did not scroll the final row into view" >&2; exit 1 ;; *'scroll=[offset='*) ;; *) echo "component tree scroll semantics were missing" >&2; exit 1 ;; esac
         \\"$cli" automate widget-key components-canvas arrowleft >/dev/null 2>&1
@@ -2400,6 +2400,17 @@ pub fn build(b: *std.Build) void {
         \\"$cli" automate assert 'role=menuitem name="Production".*state=\[selected\]'
         \\"$cli" automate widget-key components-canvas escape >/dev/null 2>&1
         \\"$cli" automate assert --absent 'role=menu name=""'
+        \\navigation_scroll_id="$(widget_id group "Scrollable component tree")"
+        \\case "$navigation_scroll_id" in ''|*[!0-9]*) echo "component navigation scroll id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-wheel components-canvas "$navigation_scroll_id" 220 >/dev/null 2>&1
+        \\switch_row_id="$(widget_id treeitem Switch)"
+        \\case "$switch_row_id" in ''|*[!0-9]*) echo "switch navigation id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas "$switch_row_id" press >/dev/null 2>&1
+        \\"$cli" automate assert 'role=text name="Switch"' 'role=switch name="Notifications".*value=1' 'role=switch name="Airplane mode".*value=0'
+        \\airplane_id="$(widget_id switch "Airplane mode")"
+        \\case "$airplane_id" in ''|*[!0-9]*) echo "airplane mode switch id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click components-canvas "$airplane_id" >/dev/null 2>&1
+        \\"$cli" automate assert 'role=switch name="Notifications".*value=1' 'role=switch name="Airplane mode".*value=1'
         \\"$cli" automate screenshot components-canvas >/dev/null 2>&1
         \\test -s "$automation_dir/screenshot-components-canvas.png" || { echo "component gallery screenshot was empty" >&2; exit 1; }
         \\echo "gpu-components smoke ok"

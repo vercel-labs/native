@@ -161,7 +161,7 @@
       <if test="{selectedComponentId == 10}">
         <column gap="12">
           <checkbox checked="{checkboxChecked}" on-toggle="toggle_checkbox" text="Accept terms and conditions" />
-          <checkbox checked="false" on-toggle="action" text="Send usage reports" />
+          <checkbox checked="{usageReportsChecked}" on-toggle="toggle_usage_reports" text="Send usage reports" />
           <checkbox checked="true" disabled="true" text="Managed by your organization" />
         </column>
       </if>
@@ -203,9 +203,9 @@
             <drawer text="Filters" width="280" padding="24" on-dismiss="close_drawer">
               <column gap="12">
                 <spacer height="34" />
-                <checkbox checked="true" on-toggle="action" text="Only unread" />
-                <checkbox checked="false" on-toggle="action" text="Has attachments" />
-                <switch checked="{switchChecked}" on-toggle="toggle_switch">Compact rows</switch>
+                <checkbox checked="{onlyUnreadChecked}" on-toggle="toggle_only_unread" text="Only unread" />
+                <checkbox checked="{hasAttachmentsChecked}" on-toggle="toggle_has_attachments" text="Has attachments" />
+                <switch checked="{compactRows}" on-toggle="toggle_compact_rows">Compact rows</switch>
               </column>
             </drawer>
           </if>
@@ -344,8 +344,8 @@
 
       <if test="{selectedComponentId == 26}">
         <column gap="12">
-          <switch checked="{switchChecked}" on-toggle="toggle_switch">Notifications</switch>
-          <switch checked="false" on-toggle="toggle_switch">Airplane mode</switch>
+          <switch checked="{notificationsEnabled}" on-toggle="toggle_notifications">Notifications</switch>
+          <switch checked="{airplaneMode}" on-toggle="toggle_airplane_mode">Airplane mode</switch>
           <switch checked="true" disabled="true">Managed setting</switch>
         </column>
       </if>
@@ -397,8 +397,8 @@
       <if test="{selectedComponentId == 30}">
         <row gap="12" cross="center">
           <toggle checked="{bold}" on-toggle="toggle_bold">Bold</toggle>
-          <toggle checked="false" on-toggle="action">Italic</toggle>
-          <toggle disabled="true" on-toggle="action">Underline</toggle>
+          <toggle checked="{italic}" on-toggle="toggle_italic">Italic</toggle>
+          <toggle disabled="true">Underline</toggle>
         </row>
       </if>
 

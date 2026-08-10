@@ -2778,7 +2778,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         fn setCanvasWidgetFocusFromKeyboardMoved(self: *Runtime, view_index: usize, previous_id: ?canvas.ObjectId, target_id: canvas.ObjectId, focus_visible: bool) anyerror!bool {
             try setCanvasWidgetFocusFromKeyboardWithVisibility(self, view_index, target_id, focus_visible);
             const previous = previous_id orelse 0;
-            return target_id != 0 and target_id != previous;
+            return target_id != 0 and target_id != previous and self.views[view_index].canvas_widget_focused_id == target_id;
         }
 
         pub fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
@@ -2804,6 +2804,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     self.invalidateFor(.state, self.views[view_index].frame);
                 }
             }
+            // Logical tree/list navigation may name a row before geometry
+            // filtering so a scroll viewport can reveal it. If no runtime-
+            // owned scroll ancestor actually made the row visible (for
+            // example, a fixed clip_content card), keep focus on the current
+            // target instead of committing an invisible, unroutable id.
+            if (target_id != 0 and self.views[view_index].widgetLayoutTree().focusTargetById(target_id) == null) return;
             const previous_state = self.views[view_index].canvasWidgetRenderState();
             self.views[view_index].canvas_widget_focused_id = target_id;
             self.views[view_index].canvas_widget_focus_visible_id = next_focus_visible_id;

@@ -483,11 +483,12 @@ export function ComponentPreviewLive({
             aria-label={`${alt} — interactive WASM preview`}
             aria-roledescription="Interactive component preview rendered by the Native SDK engine. Press Escape to leave."
             tabIndex={0}
-            // DOM focus is only the transport into the embedded engine;
-            // the focused widget paints its own focus affordance. Cancel
-            // the docs-wide [tabindex] shadow here so overflow clipping
-            // cannot turn it into a stray blue stripe below the titlebar.
-            className={`absolute inset-0 h-full w-full touch-none outline-none focus-visible:shadow-none ${
+            // DOM focus is the transport into the embedded engine, but the
+            // first Tab into a preview arrives before an engine widget owns
+            // focus. Keep an inset canvas outline for that entry state while
+            // cancelling the docs-wide [tabindex] shadow, whose overflow can
+            // otherwise appear as a stray stripe below the titlebar.
+            className={`absolute inset-0 h-full w-full touch-none outline-none focus-visible:shadow-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-700 ${
               painted ? "opacity-100" : "opacity-0"
             }`}
             onPointerDown={(event) => {

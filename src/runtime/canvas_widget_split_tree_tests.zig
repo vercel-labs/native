@@ -712,6 +712,59 @@ test "list arrow navigation reveals and focuses rows below a scroll viewport" {
     try std.testing.expect(scrolled.findById(10).?.widget.value > 0);
 }
 
+test "tree arrow navigation refuses rows clipped without a scroll ancestor" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 64),
+    });
+
+    const rows = [_]canvas.Widget{
+        treeRowPanel(21, 0, 28, null, &.{}),
+        treeRowPanel(22, 0, 28, null, &.{}),
+        treeRowPanel(23, 0, 28, null, &.{}),
+        treeRowPanel(24, 0, 28, null, &.{}),
+    };
+    const tree = canvas.Widget{
+        .id = 20,
+        .kind = .tree,
+        .frame = geometry.RectF.init(0, 0, 0, 118),
+        .layout = .{ .gap = 2 },
+        .children = &rows,
+    };
+    const root = canvas.Widget{
+        .id = 10,
+        .kind = .stack,
+        .layout = .{ .clip_content = true },
+        .children = &.{tree},
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 64), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+
+    // Row 3 intersects the fixed clip, but row 4 is completely outside it.
+    // Without a scroll ancestor the logical successor cannot be revealed,
+    // so the final ArrowDown must leave focus on the last visible row.
+    try std.testing.expect(layout.focusTargetById(24) == null);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 10, .y = 40, .button = 0 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 10, .y = 40, .button = 0 } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 22), view.canvas_widget_focused_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 23), view.canvas_widget_focused_id);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 23), view.canvas_widget_focused_id);
+}
+
 // ------------------------------------------------------- layout tweens
 
 /// Install the standard 0.5 split on a fresh gpu-surface view and

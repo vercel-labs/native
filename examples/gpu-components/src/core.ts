@@ -123,10 +123,14 @@ export interface Model {
   readonly catalogExpanded: boolean;
   readonly accordionOpen: boolean;
   readonly checkboxChecked: boolean;
+  readonly usageReportsChecked: boolean;
   readonly comboboxOpen: boolean;
   readonly comboboxDraft: Draft;
   readonly dialogOpen: boolean;
   readonly drawerOpen: boolean;
+  readonly onlyUnreadChecked: boolean;
+  readonly hasAttachmentsChecked: boolean;
+  readonly compactRows: boolean;
   readonly dropdownOpen: boolean;
   readonly dropdownChoice: DropdownChoice;
   readonly inputDraft: Draft;
@@ -136,10 +140,12 @@ export interface Model {
   readonly selectChoice: SelectChoice;
   readonly sheetOpen: boolean;
   readonly sliderValue: number;
-  readonly switchChecked: boolean;
+  readonly notificationsEnabled: boolean;
+  readonly airplaneMode: boolean;
   readonly tab: Tab;
   readonly textareaDraft: Draft;
   readonly bold: boolean;
+  readonly italic: boolean;
   readonly alignment: Alignment;
   readonly listSelection: ListSelection;
   readonly srcExpanded: boolean;
@@ -155,6 +161,7 @@ export type Msg =
   | { readonly kind: "action" }
   | { readonly kind: "toggle_accordion" }
   | { readonly kind: "toggle_checkbox" }
+  | { readonly kind: "toggle_usage_reports" }
   | { readonly kind: "combobox_edited"; readonly edit: TextInputEvent }
   | { readonly kind: "open_combobox" }
   | { readonly kind: "close_combobox" }
@@ -164,6 +171,9 @@ export type Msg =
   | { readonly kind: "close_dialog" }
   | { readonly kind: "open_drawer" }
   | { readonly kind: "close_drawer" }
+  | { readonly kind: "toggle_only_unread" }
+  | { readonly kind: "toggle_has_attachments" }
+  | { readonly kind: "toggle_compact_rows" }
   | { readonly kind: "toggle_dropdown" }
   | { readonly kind: "close_dropdown" }
   | { readonly kind: "dropdown_duplicate" }
@@ -186,12 +196,14 @@ export type Msg =
   | { readonly kind: "open_sheet" }
   | { readonly kind: "close_sheet" }
   | { readonly kind: "slider_changed"; readonly fraction: number }
-  | { readonly kind: "toggle_switch" }
+  | { readonly kind: "toggle_notifications" }
+  | { readonly kind: "toggle_airplane_mode" }
   | { readonly kind: "tab_account" }
   | { readonly kind: "tab_password" }
   | { readonly kind: "tab_team" }
   | { readonly kind: "textarea_edited"; readonly edit: TextInputEvent }
   | { readonly kind: "toggle_bold" }
+  | { readonly kind: "toggle_italic" }
   | { readonly kind: "align_left" }
   | { readonly kind: "align_center" }
   | { readonly kind: "align_right" }
@@ -223,10 +235,14 @@ export function initialModel(): Model {
     catalogExpanded: true,
     accordionOpen: true,
     checkboxChecked: true,
+    usageReportsChecked: false,
     comboboxOpen: false,
     comboboxDraft: draft(""),
     dialogOpen: false,
     drawerOpen: false,
+    onlyUnreadChecked: true,
+    hasAttachmentsChecked: false,
+    compactRows: true,
     dropdownOpen: false,
     dropdownChoice: "none",
     inputDraft: draft("native-sdk"),
@@ -236,10 +252,12 @@ export function initialModel(): Model {
     selectChoice: "production",
     sheetOpen: false,
     sliderValue: 0.64,
-    switchChecked: true,
+    notificationsEnabled: true,
+    airplaneMode: false,
     tab: "account",
     textareaDraft: draft("TypeScript state, Native markup view."),
     bold: true,
+    italic: false,
     alignment: "left",
     listSelection: "report",
     srcExpanded: true,
@@ -328,6 +346,8 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, accordionOpen: !model.accordionOpen }, Cmd.none];
     case "toggle_checkbox":
       return [{ ...model, checkboxChecked: !model.checkboxChecked }, Cmd.none];
+    case "toggle_usage_reports":
+      return [{ ...model, usageReportsChecked: !model.usageReportsChecked }, Cmd.none];
     case "combobox_edited":
       return [{ ...model, comboboxDraft: applyDraft(model.comboboxDraft, msg.edit), comboboxOpen: true }, Cmd.none];
     case "open_combobox":
@@ -346,6 +366,12 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, drawerOpen: true }, Cmd.none];
     case "close_drawer":
       return [{ ...model, drawerOpen: false }, Cmd.none];
+    case "toggle_only_unread":
+      return [{ ...model, onlyUnreadChecked: !model.onlyUnreadChecked }, Cmd.none];
+    case "toggle_has_attachments":
+      return [{ ...model, hasAttachmentsChecked: !model.hasAttachmentsChecked }, Cmd.none];
+    case "toggle_compact_rows":
+      return [{ ...model, compactRows: !model.compactRows }, Cmd.none];
     case "toggle_dropdown":
       return [{ ...model, dropdownOpen: !model.dropdownOpen }, Cmd.none];
     case "close_dropdown":
@@ -391,8 +417,10 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
     case "slider_changed":
       if (!(msg.fraction >= 0 && msg.fraction <= 1)) return [model, Cmd.none];
       return [{ ...model, sliderValue: msg.fraction }, Cmd.none];
-    case "toggle_switch":
-      return [{ ...model, switchChecked: !model.switchChecked }, Cmd.none];
+    case "toggle_notifications":
+      return [{ ...model, notificationsEnabled: !model.notificationsEnabled }, Cmd.none];
+    case "toggle_airplane_mode":
+      return [{ ...model, airplaneMode: !model.airplaneMode }, Cmd.none];
     case "tab_account":
       return [{ ...model, tab: "account" }, Cmd.none];
     case "tab_password":
@@ -403,6 +431,8 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, textareaDraft: applyDraft(model.textareaDraft, msg.edit) }, Cmd.none];
     case "toggle_bold":
       return [{ ...model, bold: !model.bold }, Cmd.none];
+    case "toggle_italic":
+      return [{ ...model, italic: !model.italic }, Cmd.none];
     case "align_left":
       return [{ ...model, alignment: "left" }, Cmd.none];
     case "align_center":
