@@ -73,6 +73,7 @@ pub const validateShortcut = types.validateShortcut;
 pub const validateMenus = types.validateMenus;
 pub const validateMenuItem = types.validateMenuItem;
 pub const isValidShortcutKey = types.isValidShortcutKey;
+pub const isValidShortcutBinding = types.isValidShortcutBinding;
 pub const WindowRestorePolicy = types.WindowRestorePolicy;
 pub const WindowTitlebarStyle = types.WindowTitlebarStyle;
 pub const WindowChrome = types.WindowChrome;

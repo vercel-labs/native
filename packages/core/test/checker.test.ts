@@ -132,6 +132,27 @@ export function label(n: number): Uint8Array { return bytes(\`Today · \${n}\`);
   assert.deepEqual(ruleIds(renamedTemplate), ["NS1064"]);
 });
 
+test("NS1064 inspects rendered template values, not literals used only by conditions", () => {
+  const comparisonOnly = checkOnly(`
+import { asciiBytes } from "@native-sdk/core";
+export type Kind = "café" | "tea";
+export interface Model { readonly kind: Kind; readonly count: number; }
+export function label(model: Model): Uint8Array {
+  return asciiBytes(\`\${model.kind === "café" ? model.count : 0}\`);
+}
+`);
+  assert.deepEqual(ruleIds(comparisonOnly), []);
+
+  const renderedUnion = checkOnly(`
+import { asciiBytes } from "@native-sdk/core";
+export type Kind = "café" | "tea";
+export interface Model { readonly kind: Kind; }
+export function label(model: Model): Uint8Array { return asciiBytes(\`kind: \${model.kind}\`); }
+`);
+  assert.deepEqual(ruleIds(renderedUnion), ["NS1064"]);
+  assert.ok(renderedUnion.diagnostics[0]?.message.includes("U+00E9"));
+});
+
 test("the SDK utf8Bytes intrinsic accepts Unicode literals and templates", () => {
   const ids = ruleIds(
     checkOnly(`

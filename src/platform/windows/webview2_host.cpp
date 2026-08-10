@@ -543,7 +543,11 @@ struct Menu {
 struct TrayItem {
     uint32_t id = 0;
     std::string label;
+    std::string detail;
+    std::string key;
+    uint32_t modifiers = 0;
     uint32_t command_id = 0;
+    int role = 0;
     bool separator = false;
     bool enabled = true;
 };
@@ -700,6 +704,9 @@ struct Host {
     std::vector<Menu> menus;
     std::map<uint32_t, std::string> menu_commands;
     std::vector<TrayItem> tray_items;
+    std::string tray_activation_command;
+    std::string tray_alternate_activation_command;
+    std::string tray_open_command;
     int external_link_action = 0;
     bool app_active = false;
     bool notification_icon_added = false;
@@ -1471,8 +1478,8 @@ static std::string shortcutKeyLabel(const std::string &key) {
     return key;
 }
 
-static std::string menuShortcutSuffix(const MenuItem &item) {
-    if (item.key.empty()) return std::string();
+static std::string shortcutSuffix(const std::string &key, uint32_t modifiers) {
+    if (key.empty()) return std::string();
     std::string suffix = "\t";
     bool has_prefix = false;
     auto append = [&](const char *value) {
@@ -1480,13 +1487,17 @@ static std::string menuShortcutSuffix(const MenuItem &item) {
         suffix += value;
         has_prefix = true;
     };
-    if ((item.modifiers & kShortcutModifierPrimary) != 0 || (item.modifiers & kShortcutModifierControl) != 0) append("Ctrl");
-    if ((item.modifiers & kShortcutModifierCommand) != 0) append("Win");
-    if ((item.modifiers & kShortcutModifierOption) != 0) append("Alt");
-    if ((item.modifiers & kShortcutModifierShift) != 0) append("Shift");
+    if ((modifiers & kShortcutModifierPrimary) != 0 || (modifiers & kShortcutModifierControl) != 0) append("Ctrl");
+    if ((modifiers & kShortcutModifierCommand) != 0) append("Win");
+    if ((modifiers & kShortcutModifierOption) != 0) append("Alt");
+    if ((modifiers & kShortcutModifierShift) != 0) append("Shift");
     if (has_prefix) suffix += "+";
-    suffix += shortcutKeyLabel(item.key);
+    suffix += shortcutKeyLabel(key);
     return suffix;
+}
+
+static std::string menuShortcutSuffix(const MenuItem &item) {
+    return shortcutSuffix(item.key, item.modifiers);
 }
 
 static HMENU buildMenuBar(Host *host) {
@@ -1555,8 +1566,24 @@ static bool emitTrayActionForCommandId(Host *host, uint32_t command_id) {
     return false;
 }
 
+static bool emitStatusCommand(Host *host, HWND hwnd, const std::string &command) {
+    if (!host || !host->callback || command.empty()) return false;
+    const Window *window = windowForHwnd(host, hwnd);
+    if (!window) return false;
+    WindowsEvent event = {};
+    event.kind = kMenuCommand;
+    event.window_id = window->id;
+    event.command_name = command.c_str();
+    event.command_name_len = command.size();
+    host->callback(host->callback_context, &event);
+    return true;
+}
+
 static void showTrayMenu(Host *host, HWND hwnd) {
-    if (!host || !host->tray_active || host->tray_items.empty() || !hwnd) return;
+    if (!host || !host->tray_active || !hwnd) return;
+    emitStatusCommand(host, hwnd, host->tray_open_command);
+    // The open hook may synchronously rebuild or remove the tray.
+    if (!host->tray_active || host->tray_items.empty()) return;
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     for (const TrayItem &item : host->tray_items) {
@@ -1566,7 +1593,10 @@ static void showTrayMenu(Host *host, HWND hwnd) {
         }
         UINT flags = MF_STRING;
         if (!item.enabled) flags |= MF_GRAYED;
-        std::wstring label = widen(item.label);
+        std::string display_label = item.label;
+        if (!item.detail.empty()) display_label += " — " + item.detail;
+        display_label += shortcutSuffix(item.key, item.modifiers);
+        std::wstring label = widen(display_label);
         AppendMenuW(menu, flags, item.command_id, label.c_str());
     }
     POINT cursor = {};
@@ -1579,7 +1609,7 @@ static void showTrayMenu(Host *host, HWND hwnd) {
 }
 
 static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
-    if (!host || (host->shortcuts.empty() && host->menus.empty())) return false;
+    if (!host || (host->shortcuts.empty() && host->menus.empty() && host->tray_items.empty())) return false;
     if (!window) return false;
     std::string key = shortcutKeyFromWParam(wparam);
     if (key.empty()) return false;
@@ -1621,6 +1651,15 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
                 host->callback(host->callback_context, &event);
                 return true;
             }
+        }
+        // Status-menu key equivalents share the focused-window key path on
+        // Windows. AppKit gets this behavior from NSMenu; Win32 popup menus
+        // need the binding dispatched explicitly.
+        for (const TrayItem &item : host->tray_items) {
+            if (item.separator || !item.enabled || item.key.empty()) continue;
+            if (item.key != key) continue;
+            if (!shortcutModifiersMatch(item.modifiers, allow_implicit_shift)) continue;
+            return emitTrayActionForCommandId(host, item.command_id);
         }
     }
     return false;
@@ -5531,7 +5570,16 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case kNotificationCallbackMessage:
             if (host && host->tray_active) {
                 UINT tray_event = LOWORD(lparam);
-                if (tray_event == WM_CONTEXTMENU || tray_event == WM_RBUTTONUP || tray_event == WM_LBUTTONUP) {
+                if (tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP) {
+                    if (keyDown(VK_MENU) && !host->tray_alternate_activation_command.empty()) {
+                        emitStatusCommand(host, hwnd, host->tray_alternate_activation_command);
+                        return 0;
+                    }
+                    emitStatusCommand(host, hwnd, host->tray_activation_command);
+                    showTrayMenu(host, hwnd);
+                    return 0;
+                }
+                if (tray_event == WM_CONTEXTMENU || tray_event == WM_RBUTTONUP) {
                     showTrayMenu(host, hwnd);
                     return 0;
                 }
@@ -7275,24 +7323,31 @@ int native_sdk_windows_show_notification(Host *host, const char *title, size_t t
     return Shell_NotifyIconW(NIM_MODIFY, &data) ? 1 : 0;
 }
 
-int native_sdk_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len) {
+int native_sdk_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
     if (!host) return 0;
     std::string icon = slice(icon_path, icon_path_len);
     std::string tip = slice(tooltip, tooltip_len);
     if (!setNotificationIcon(host, icon, tip, true)) return 0;
+    host->tray_activation_command = slice(activation_command, activation_command_len);
+    host->tray_alternate_activation_command = slice(alternate_activation_command, alternate_activation_command_len);
+    host->tray_open_command = slice(open_command, open_command_len);
     host->tray_active = true;
     return 1;
 }
 
-int native_sdk_windows_update_tray_menu(Host *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+int native_sdk_windows_update_tray_menu(Host *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
     if (!host || !host->tray_active) return 0;
     host->tray_items.clear();
-    if (count > 0 && (!item_ids || !labels || !label_lens || !separators || !enabled_flags)) return 0;
+    if (count > 0 && (!item_ids || !labels || !label_lens || !separators || !enabled_flags || !details || !detail_lens || !roles || !keys || !key_lens || !modifiers)) return 0;
     host->tray_items.reserve(count);
     for (size_t index = 0; index < count; ++index) {
         TrayItem item;
         item.id = item_ids[index];
         item.label = slice(labels[index], label_lens[index]);
+        item.detail = slice(details[index], detail_lens[index]);
+        item.role = roles[index];
+        item.key = slice(keys[index], key_lens[index]);
+        item.modifiers = modifiers[index];
         item.separator = separators[index] != 0;
         item.enabled = enabled_flags[index] != 0;
         if (!item.separator) item.command_id = kTrayCommandBase + static_cast<uint32_t>(index);
@@ -7305,6 +7360,9 @@ void native_sdk_windows_remove_tray(Host *host) {
     if (!host) return;
     host->tray_active = false;
     host->tray_items.clear();
+    host->tray_activation_command.clear();
+    host->tray_alternate_activation_command.clear();
+    host->tray_open_command.clear();
     removeNotificationIcon(host);
 }
 

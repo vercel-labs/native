@@ -1770,9 +1770,11 @@ export class SubsetChecker {
     return decl.name.text;
   }
 
-  /// Find the first non-ASCII character spelled in a literal/template part
-  /// of an expression. This walks conditional literal branches and template
-  /// holes too, so an imported alias cannot hide a Unicode static segment.
+  /// Find the first non-ASCII character that an expression can contribute to
+  /// an asciiBytes result. Syntax that merely helps choose a value (for
+  /// example a Unicode literal in a conditional's comparison) is not output;
+  /// string-literal union values in template holes are output and must all be
+  /// ASCII-safe.
   private firstNonAsciiLiteral(expr: ts.Expression): string | null {
     let found: string | null = null;
     const inspectText = (value: string): void => {
@@ -1784,22 +1786,44 @@ export class SubsetChecker {
         }
       }
     };
-    const visit = (node: ts.Node): void => {
+    const inspectStringType = (value: ts.Expression): void => {
       if (found !== null) return;
-      if (ts.isStringLiteralLike(node)) {
-        inspectText(node.text);
+      const type = this.tast.typeOf(value);
+      if (type.isStringLiteral()) {
+        inspectText(type.value);
         return;
       }
-      if (
-        node.kind === ts.SyntaxKind.TemplateHead ||
-        node.kind === ts.SyntaxKind.TemplateMiddle ||
-        node.kind === ts.SyntaxKind.TemplateTail
-      ) {
-        inspectText((node as ts.TemplateLiteralLikeNode).text);
+      if (type.isUnion()) {
+        for (const member of type.types) {
+          if (member.isStringLiteral()) inspectText(member.value);
+        }
       }
-      ts.forEachChild(node, visit);
     };
-    visit(expr);
+    const inspectOutput = (value: ts.Expression): void => {
+      if (found !== null) return;
+      if (ts.isStringLiteralLike(value)) {
+        inspectText(value.text);
+      } else if (ts.isTemplateExpression(value)) {
+        inspectText(value.head.text);
+        for (const span of value.templateSpans) {
+          inspectOutput(span.expression);
+          inspectText(span.literal.text);
+        }
+      } else if (ts.isConditionalExpression(value)) {
+        inspectOutput(value.whenTrue);
+        inspectOutput(value.whenFalse);
+      } else if (
+        ts.isParenthesizedExpression(value) ||
+        ts.isAsExpression(value) ||
+        ts.isTypeAssertionExpression(value) ||
+        ts.isNonNullExpression(value)
+      ) {
+        inspectOutput(value.expression);
+      } else {
+        inspectStringType(value);
+      }
+    };
+    inspectOutput(expr);
     return found;
   }
 

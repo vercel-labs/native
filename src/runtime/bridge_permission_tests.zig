@@ -325,6 +325,8 @@ test "runtime validates native OS actions before platform dispatch" {
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Readout", .command = "app.bad", .role = .info }}));
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Command", .detail = "not allowed" }}));
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "No command", .key = "q" }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Bad key", .command = "app.bad-key", .key = "not-a-key", .modifiers = .{ .command = true } }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Unsafe key", .command = "app.unsafe-key", .key = "q" }}));
     try harness.runtime.createTray(.{
         .icon_path = "/tmp/tray.png",
         .tooltip = "native-sdk",

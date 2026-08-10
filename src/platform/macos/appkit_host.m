@@ -13068,8 +13068,12 @@ static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32
     NSColor *successColor = dark ? NSColor.systemGreenColor : [NSColor colorWithSRGBRed:0.06 green:0.42 blue:0.20 alpha:1.0];
     for (NSUInteger index = 0; index < labels.count; index++) {
         NSString *state = states[index];
-        BOOL configured = [state isEqualToString:@"configured"];
-        BOOL warning = [state isEqualToString:@"warning"];
+        // `detail` is presentation text as well as the semantic state. The
+        // documented examples append a glyph ("configured ✓", "warning ⚠"),
+        // so classify the leading token instead of requiring the whole label
+        // to be the bare state name.
+        BOOL configured = [state isEqualToString:@"configured"] || [state hasPrefix:@"configured "];
+        BOOL warning = [state isEqualToString:@"warning"] || [state hasPrefix:@"warning "];
         NSString *title = [NSString stringWithFormat:@"%@ %@", configured ? @"✓" : warning ? @"⚠" : @"○", labels[index]];
         if (configured) {
             NSTextField *label = [NSTextField labelWithString:title];

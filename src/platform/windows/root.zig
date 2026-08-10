@@ -187,8 +187,8 @@ extern fn native_sdk_windows_show_open_dialog(host: *WindowsHost, opts: *const W
 extern fn native_sdk_windows_show_save_dialog(host: *WindowsHost, opts: *const WindowsSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_windows_show_message_dialog(host: *WindowsHost, opts: *const WindowsMessageDialogOpts) c_int;
 extern fn native_sdk_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
-extern fn native_sdk_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize) c_int;
-extern fn native_sdk_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) c_int;
+extern fn native_sdk_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) c_int;
+extern fn native_sdk_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) c_int;
 extern fn native_sdk_windows_remove_tray(host: *WindowsHost) void;
 extern fn native_sdk_windows_add_recent_document(host: *WindowsHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_windows_clear_recent_documents(host: *WindowsHost) c_int;
@@ -1477,7 +1477,19 @@ const max_tray_items: usize = 32;
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
-    if (native_sdk_windows_create_tray(self.host, options.icon_path.ptr, options.icon_path.len, options.tooltip.ptr, options.tooltip.len) == 0) return error.UnsupportedService;
+    if (native_sdk_windows_create_tray(
+        self.host,
+        options.icon_path.ptr,
+        options.icon_path.len,
+        options.tooltip.ptr,
+        options.tooltip.len,
+        options.activation_command.ptr,
+        options.activation_command.len,
+        options.alternate_activation_command.ptr,
+        options.alternate_activation_command.len,
+        options.open_command.ptr,
+        options.open_command.len,
+    ) == 0) return error.UnsupportedService;
     if (options.items.len > 0) {
         try updateTrayMenu(context, options.items);
     }
@@ -1492,21 +1504,37 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
     var label_lens: [max_tray_items]usize = undefined;
     var separators: [max_tray_items]c_int = undefined;
     var enabled_flags: [max_tray_items]c_int = undefined;
+    var details: [max_tray_items][*]const u8 = undefined;
+    var detail_lens: [max_tray_items]usize = undefined;
+    var roles: [max_tray_items]c_int = undefined;
+    var keys: [max_tray_items][*]const u8 = undefined;
+    var key_lens: [max_tray_items]usize = undefined;
+    var modifiers: [max_tray_items]u32 = undefined;
     // Tray labels are app-supplied too, so they get the same mnemonic
-    // escape as context-menu items (the host copies before returning).
-    var label_pool: [max_tray_items * 64]u8 = undefined;
+    // escape as context-menu items. Detail is appended to the visible
+    // Windows fallback label, so escape it too (the host copies both before
+    // returning). Doubling covers the all-ampersands worst case.
+    var label_pool: [max_tray_items * (platform_mod.max_tray_item_label_bytes + platform_mod.max_tray_item_detail_bytes) * 2]u8 = undefined;
     var pool_used: usize = 0;
     for (items[0..count], 0..) |item, index| {
         const label = escapeMenuLabelAmpersands(item.label, &label_pool, &pool_used);
+        const detail = escapeMenuLabelAmpersands(item.detail, &label_pool, &pool_used);
         ids[index] = item.id;
         labels[index] = label.ptr;
         label_lens[index] = label.len;
         separators[index] = if (item.separator) 1 else 0;
-        // Windows has no rich status-menu row seam yet. Keep semantic
-        // readouts visibly present, but never expose them as dead actions.
+        // Windows has no custom status-menu row seam. Preserve semantic
+        // readouts as visible detail text, while only command/agent rows can
+        // become actions.
         enabled_flags[index] = if (item.enabled and (item.role == .command or item.role == .agent)) 1 else 0;
+        details[index] = detail.ptr;
+        detail_lens[index] = detail.len;
+        roles[index] = @intFromEnum(item.role);
+        keys[index] = item.key.ptr;
+        key_lens[index] = item.key.len;
+        modifiers[index] = shortcutModifierFlags(item.modifiers);
     }
-    if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, count) == 0) return error.UnsupportedService;
+    if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count) == 0) return error.UnsupportedService;
 }
 
 fn removeTray(context: ?*anyopaque) anyerror!void {
@@ -2052,6 +2080,23 @@ test "windows hide-on-close support requires the declared tray (the only re-show
     var chromium = testPlatformWithEngine(.chromium);
     chromium.app_info.declares_tray = true;
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .window_hide_on_close));
+}
+
+test "windows tray carries lifecycle commands rich rows and key equivalents into the host" {
+    // These are native Win32 behaviors, so the portable suite pins the
+    // compiled host seam. Windows packaging builds cross-compile the same
+    // source and catch signature/type drift.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "host->tray_activation_command = slice(activation_command, activation_command_len);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "emitStatusCommand(host, hwnd, host->tray_alternate_activation_command);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "emitStatusCommand(host, hwnd, host->tray_activation_command);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "emitStatusCommand(host, hwnd, host->tray_open_command);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "item.detail = slice(details[index], detail_lens[index]);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "item.key = slice(keys[index], key_lens[index]);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "item.modifiers = modifiers[index];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "display_label += shortcutSuffix(item.key, item.modifiers);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "return emitTrayActionForCommandId(host, item.command_id);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP") != null);
 }
 
 test "windows refuses a tray-less .hide main window at platform init instead of stranding it hidden" {

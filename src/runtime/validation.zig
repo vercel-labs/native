@@ -160,7 +160,10 @@ pub fn validateTrayMenuItems(items: []const platform.TrayMenuItem) !void {
             try validateCommandName(item.command);
         }
         if (!item.separator and item.label.len == 0) return error.InvalidTrayOptions;
-        if (item.key.len > 0 and (item.separator or item.command.len == 0)) return error.InvalidTrayOptions;
+        if (item.key.len > 0) {
+            if (item.separator or item.command.len == 0) return error.InvalidTrayOptions;
+            if (!platform.isValidShortcutBinding(item.key, item.modifiers)) return error.InvalidTrayOptions;
+        }
     }
 }
 

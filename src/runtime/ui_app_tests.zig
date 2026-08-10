@@ -3914,7 +3914,7 @@ test "ui app tray state rides automation snapshots and tray-action drives a row"
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = frame_event });
 
     // The snapshot exposes the applied tray: model-derived title, every
-    // dropdown row with id/label/command/enabled, and separators —
+    // dropdown row with its action and rich presentation fields, and separators —
     // the menu bar is outside every window capture, so this is the only
     // automation-visible evidence the model-driven tray exists.
     {
@@ -3923,10 +3923,10 @@ test "ui app tray state rides automation snapshots and tray-action drives a row"
         try automation.snapshot.writeText(harness.runtime.automationSnapshot("Tray"), &writer);
         const text = writer.buffered();
         try std.testing.expect(std.mem.indexOf(u8, text, "tray title=\"ZN 3\" items=4\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #1 label=\"Refresh\" command=\"app.refresh\" enabled=true\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #1 label=\"Refresh\" command=\"app.refresh\" enabled=true detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item separator\n") != null);
         // The fixture disables the SELECTED row (initially issue 0).
-        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=false\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=false detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
     }
 
     // `tray-action <id>` drives a dropdown row through the same platform
@@ -3939,8 +3939,8 @@ test "ui app tray state rides automation snapshots and tray-action drives a row"
         var writer = std.Io.Writer.fixed(&buffer);
         try automation.snapshot.writeText(harness.runtime.automationSnapshot("Tray"), &writer);
         const text = writer.buffered();
-        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #11 label=\"Adopt the tray seam\" command=\"issue.select.1\" enabled=false\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=true\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #11 label=\"Adopt the tray seam\" command=\"issue.select.1\" enabled=false detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=true detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
     }
 
     // Unknown or malformed item ids are loud driver misuse, never a

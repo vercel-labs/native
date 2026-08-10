@@ -356,8 +356,7 @@ pub const MenuItem = struct {
 
 pub fn validateShortcut(shortcut: Shortcut) Error!void {
     if (!isValidCommandId(shortcut.id, max_shortcut_id_bytes)) return error.InvalidShortcut;
-    if (!isValidShortcutKey(shortcut.key)) return error.InvalidShortcut;
-    if (!shortcut.modifiers.hasAny() and shortcutRequiresModifier(shortcut.key)) return error.InvalidShortcut;
+    if (!isValidShortcutBinding(shortcut.key, shortcut.modifiers)) return error.InvalidShortcut;
 }
 
 pub fn validateMenus(menus: []const Menu) Error!void {
@@ -376,9 +375,8 @@ pub fn validateMenuItem(item: MenuItem) Error!void {
     if (item.label.len == 0 or item.label.len > max_menu_item_label_bytes) return error.InvalidMenuOptions;
     if (!isValidCommandId(item.command, max_menu_command_bytes)) return error.InvalidCommand;
     if (item.key.len > 0) {
-        if (!isValidShortcutKey(item.key)) return error.InvalidShortcut;
         if (item.key.len > max_menu_key_bytes) return error.InvalidShortcut;
-        if (!item.modifiers.hasAny() and shortcutRequiresModifier(item.key)) return error.InvalidShortcut;
+        if (!isValidShortcutBinding(item.key, item.modifiers)) return error.InvalidShortcut;
     }
 }
 
@@ -434,6 +432,10 @@ pub fn isValidShortcutKey(key: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(key, special)) return true;
     }
     return false;
+}
+
+pub fn isValidShortcutBinding(key: []const u8, modifiers: ShortcutModifiers) bool {
+    return isValidShortcutKey(key) and (modifiers.hasAny() or !shortcutRequiresModifier(key));
 }
 
 fn shortcutRequiresModifier(key: []const u8) bool {

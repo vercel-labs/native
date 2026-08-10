@@ -2561,6 +2561,12 @@ test "mac platform module exports type" {
     _ = MacPlatform;
 }
 
+test "mac status agent rows recognize decorated configured and warning states" {
+    const host_source = @embedFile("appkit_host.m");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "[state hasPrefix:@\"configured \"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "[state hasPrefix:@\"warning \"]") != null);
+}
+
 test "mac webview presses report the focused child label" {
     // WKWebView owns the page's pointer stream, so the AppKit host
     // observes the down before dispatch and emits the explicit inverse
