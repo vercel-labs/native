@@ -676,6 +676,21 @@ pub const WindowOptions = struct {
     /// What the user's close affordance does — see `WindowClosePolicy`.
     /// Fixed at create like the titlebar: it is host window state.
     close_policy: WindowClosePolicy = .quit,
+    /// Move the window-control cluster from where the platform puts it,
+    /// in points, positive right and down — macOS's traffic lights,
+    /// ignored elsewhere. Zero, the default, leaves it where it is.
+    ///
+    /// A titlebar style fixes both the band's height and where the
+    /// system centres the controls in it, so an app whose header is a
+    /// different height than any offered band cannot line up with them.
+    /// This decouples the two: keep the band, move the controls.
+    ///
+    /// Host window state like the titlebar, so it rides the create; the
+    /// host re-applies it wherever the platform relayouts the controls
+    /// (macOS: fullscreen transitions). `WindowChrome.buttons` reports
+    /// the moved cluster, so a header centring against it needs no
+    /// second source of truth.
+    window_controls_offset: geometry.PointF = geometry.PointF.init(0, 0),
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
@@ -750,6 +765,8 @@ pub const WindowCreateOptions = struct {
     min_height: f32 = 0,
     /// See `WindowOptions.close_policy`.
     close_policy: WindowClosePolicy = .quit,
+    /// See `WindowOptions.window_controls_offset`.
+    window_controls_offset: geometry.PointF = geometry.PointF.init(0, 0),
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {

@@ -190,6 +190,7 @@ extern fn native_sdk_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]co
 extern fn native_sdk_appkit_request_frame(host: *AppKitHost) void;
 extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) c_int;
 extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_appkit_set_window_controls_offset(host: *AppKitHost, window_id: u64, dx: f64, dy: f64) c_int;
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
@@ -690,6 +691,10 @@ pub const MacPlatform = struct {
         // .hide threads through here so the STARTUP window's red
         // button hides from the first frame on.
         applyWindowClosePolicy(host, window_options.id, window_options.close_policy);
+        // And the control offset, which has to land before the first
+        // chrome query: `WindowChrome.buttons` is measured off the real
+        // button frames, so a late apply reports the unmoved cluster.
+        applyWindowControlsOffset(host, window_options.id, window_options.window_controls_offset);
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -1473,6 +1478,15 @@ fn applyWindowContentMinSize(host: *AppKitHost, window_id: u64, min_width: f32, 
     _ = native_sdk_appkit_set_window_content_min_size(host, window_id, width, height);
 }
 
+/// Move a created window's control cluster to its declared offset. Zero
+/// means "leave AppKit's placement alone" and skips the call, so a
+/// window that declares nothing never registers an offset at all.
+fn applyWindowControlsOffset(host: *AppKitHost, window_id: u64, offset: geometry.PointF) void {
+    if (!std.math.isFinite(offset.x) or !std.math.isFinite(offset.y)) return;
+    if (offset.x == 0 and offset.y == 0) return;
+    _ = native_sdk_appkit_set_window_controls_offset(host, window_id, offset.x, offset.y);
+}
+
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     try refuseUnsupportedTransparentWindow(self.web_engine, options);
@@ -1481,6 +1495,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, initialPlacementInt(options.initial_placement), restorePolicyInt(options.restore_policy), if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
     applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     applyWindowClosePolicy(self.host, options.id, options.close_policy);
+    applyWindowControlsOffset(self.host, options.id, options.window_controls_offset);
     return .{
         .id = options.id,
         .label = options.label,
