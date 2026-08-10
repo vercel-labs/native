@@ -96,6 +96,36 @@ test "runtime creates lists focuses and closes windows" {
     try std.testing.expect(!harness.runtime.windows[1].info.open);
 }
 
+test "an imperative window's control offset survives to the platform create" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "controls-offset", .source = platform.WebViewSource.html("<p>Main</p>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    // `WindowCreateOptions` converts to the `WindowOptions` the create
+    // seam takes, so a field the conversion forgets is dropped in silence.
+    const tools = try harness.runtime.createWindow(.{
+        .label = "tools",
+        .title = "Tools",
+        .window_controls_offset = geometry.PointF.init(6, -4),
+    });
+    const index: usize = @intCast(tools.id - 1);
+    try std.testing.expectEqual(@as(f32, 6), harness.null_platform.window_controls_offset[index].x);
+    try std.testing.expectEqual(@as(f32, -4), harness.null_platform.window_controls_offset[index].y);
+
+    // A window that declares nothing keeps the zero sentinel.
+    const plain = try harness.runtime.createWindow(.{ .label = "plain", .title = "Plain" });
+    const plain_index: usize = @intCast(plain.id - 1);
+    try std.testing.expectEqual(@as(f32, 0), harness.null_platform.window_controls_offset[plain_index].x);
+    try std.testing.expectEqual(@as(f32, 0), harness.null_platform.window_controls_offset[plain_index].y);
+}
+
 test "transparent imperative window without explicit source stays canvas-only" {
     const TestApp = struct {
         fn app(self: *@This()) App {
