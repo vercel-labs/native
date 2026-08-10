@@ -509,6 +509,15 @@ pub const ShellWindow = struct {
     /// STARTUP window threads it through the host create, and
     /// runtime-created windows apply their own declaration at create.
     close_policy: WindowClosePolicy = .quit,
+    /// Move the window-control cluster from where the platform puts it,
+    /// in points, positive right and down — macOS's traffic lights,
+    /// ignored elsewhere. A titlebar style fixes both the band height
+    /// and where the controls sit inside it, so a header of any other
+    /// height cannot line up with them; this decouples the two. Zero
+    /// leaves the platform's placement alone. Two scalars rather than a
+    /// point, to keep the ZON flat like `min_width`/`min_height`.
+    window_controls_offset_x: f32 = 0,
+    window_controls_offset_y: f32 = 0,
     views: []const ShellView = &.{},
 };
 

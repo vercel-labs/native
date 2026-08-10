@@ -106,6 +106,12 @@ pub const RunOptions = struct {
             // Close handling is host window state like the titlebar:
             // the manifest's declaration rides the host create.
             info.main_window.close_policy = manifestShellStartupClosePolicy();
+            // Same for the window-control offset: the host re-applies it
+            // after every relayout, so it has to know it from create on.
+            info.main_window.window_controls_offset = .{
+                .x = manifestShellStartupFloat("window_controls_offset_x", 0),
+                .y = manifestShellStartupFloat("window_controls_offset_y", 0),
+            };
         }
         return info;
     }
@@ -171,6 +177,10 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .min_width = windowMinSize(window, "min_width"),
         .min_height = windowMinSize(window, "min_height"),
         .close_policy = windowClosePolicy(window),
+        .window_controls_offset = .{
+            .x = windowFloat(window, "window_controls_offset_x", 0),
+            .y = windowFloat(window, "window_controls_offset_y", 0),
+        },
     };
 }
 
@@ -247,6 +257,17 @@ fn manifestShellStartupMinSize(comptime field: []const u8) f32 {
     if (comptime !@hasField(@TypeOf(shell), "windows")) return 0;
     if (comptime shell.windows.len == 0) return 0;
     return windowMinSize(shell.windows[0], field);
+}
+
+/// A plain float off the STARTUP window declaration. Unlike
+/// `manifestShellStartupMinSize`, negative values are meaningful here:
+/// the window-control offset moves the cluster left and up too.
+fn manifestShellStartupFloat(comptime field: []const u8, comptime default_value: f32) f32 {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return default_value;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return default_value;
+    if (comptime shell.windows.len == 0) return default_value;
+    return windowFloat(shell.windows[0], field, default_value);
 }
 
 /// Present-before-show for the STARTUP window: when app.zon's first
