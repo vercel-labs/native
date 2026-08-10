@@ -2214,6 +2214,8 @@ fn stageDmgBackground(
             const two_x_path = try std.fs.path.join(allocator, &.{ source_path, two_x_subpath });
             defer allocator.free(two_x_path);
             try assembleRetinaDmgBackground(io, one_x_path, two_x_path, output_path, "custom");
+            try source_dir.deleteFile(io, one_x_subpath);
+            try source_dir.deleteFile(io, two_x_subpath);
         } else {
             const output_subpath = try std.fs.path.join(allocator, &.{ ".background", background_name });
             defer allocator.free(output_subpath);
@@ -2233,6 +2235,8 @@ fn stageDmgBackground(
     const two_x_path = try std.fs.path.join(allocator, &.{ source_path, ".background", "background@2x.png" });
     defer allocator.free(two_x_path);
     try assembleRetinaDmgBackground(io, one_x_path, two_x_path, output_path, "generated");
+    try source_dir.deleteFile(io, ".background/background.png");
+    try source_dir.deleteFile(io, ".background/background@2x.png");
 }
 
 fn assembleRetinaDmgBackground(io: std.Io, one_x_path: []const u8, two_x_path: []const u8, output_path: []const u8, kind: []const u8) !void {
@@ -2676,6 +2680,37 @@ test "DMG background discovers an adjacent retina source" {
     const background_name = try dmgBackgroundNameAlloc(std.testing.allocator, "art/installer.png", true);
     defer std.testing.allocator.free(background_name);
     try std.testing.expectEqualStrings("background.tiff", background_name);
+}
+
+test "assembled DMG background does not retain source images" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-background-cleanup";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/source");
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .version = "1.0.0",
+        .dmg = .{
+            .window_width = 320,
+            .window_height = 240,
+            .applications_link = false,
+        },
+    };
+    var source_dir = try cwd.openDir(std.testing.io, root ++ "/source", .{});
+    defer source_dir.close(std.testing.io);
+    try stageDmgBackground(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+    }, source_dir, root ++ "/source", "background.tiff", null);
+
+    var background = try cwd.openFile(std.testing.io, root ++ "/source/.background/background.tiff", .{});
+    background.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(std.testing.io, root ++ "/source/.background/background.png", .{}));
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(std.testing.io, root ++ "/source/.background/background@2x.png", .{}));
 }
 
 test "macOS archive rejects an invalid DMG background before staging the app" {

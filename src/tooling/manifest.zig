@@ -474,7 +474,11 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(file_associations);
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app.zon URL schemes are invalid" };
     defer allocator.free(url_schemes);
-    validateDmgPackageSettings(metadata) catch return .{ .ok = false, .message = "app.zon dmg settings are invalid - check the volume/bundle names, window/icon geometry, and positions; an explicit items list needs exactly one app and unique safe destination names" };
+    // General manifest validation owns only values the app explicitly
+    // declared. Archive-time fallbacks (notably display_name as the volume
+    // name) are validated when a macOS archive is actually requested, so an
+    // otherwise valid display name does not make every `native check` fail.
+    validateDmgSettings(metadata.dmg) catch return .{ .ok = false, .message = "app.zon dmg settings are invalid - check the volume/bundle names, window/icon geometry, and positions; an explicit items list needs exactly one app and unique safe destination names" };
     if (try checkDmgSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.dmg)) |dmg_message| {
         return .{ .ok = false, .message = dmg_message };
     }
@@ -3114,6 +3118,25 @@ test "DMG settings default to a complete drag-to-Applications layout" {
     try std.testing.expect(metadata.dmg.applications_link);
     try std.testing.expect(metadata.dmg.background == null);
     try std.testing.expectEqual(@as(usize, 0), metadata.dmg.items.len);
+}
+
+test "manifest validation does not apply an implicit DMG volume name" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-manifest-dmg-implicit-volume";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .display_name = "Example: Studio",
+        \\  .version = "1.0.0",
+        \\}
+    });
+
+    const result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(result.ok);
 }
 
 test "DMG settings reject unsafe paths and out-of-window positions" {
