@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/core",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "The TypeScript authoring tier: the app-core subset, its checker and contract frontend, the exact-pinned core compiler dependency, and the SDK module cores import",
   "repository": {
     "type": "git",

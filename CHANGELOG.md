@@ -2,9 +2,36 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.8.3
+## 0.8.4
 
 <!-- release:start -->
+
+### New Features
+
+- **Streaming fetch responses for TypeScript cores**: `Cmd.fetch` can now deliver line-framed HTTP responses through typed message arms with deterministic terminal errors, loud cancellation, duplicate-key rejection, and bounded line sizes; the rebuilt Chatbot example streams Vercel AI Gateway replies with live model selection and a Stop action (#300).
+- **Desktop audio capture**: TypeScript cores can start bounded, timestamped microphone or system-output PCM streams on macOS and Windows with explicit lifecycle, permission, drop-count, and replay handling; the new Voice Memo example records, saves, and plays WAV files (#303).
+- **Customizable macOS DMG packaging**: `native package` now creates polished drag-to-Applications disk images with generated or custom Retina backgrounds, configurable Finder geometry, positioned app and Applications entries, and staged files, directories, or links (#304).
+- **Live TypeScript theme packs**: zero-config TypeScript apps can export `themePack(model)` to switch the built-in theme pack from app state without losing live system scheme, accessibility, accent, or scale inputs (#308).
+
+### Bug Fixes
+
+- **Smooth macOS dialog blur**: Host backdrop blur now uses an optimized three-pass Gaussian approximation and correct dirty-region invalidation, eliminating flat or stale dialog backgrounds while preserving the established scrim treatment (#299).
+- **Byte-accurate PTY event keys**: TypeScript PTY event routes now expose echoed session keys as `Uint8Array`, matching the byte-text host, generated facade, and external-core contract (#307).
+- **Reliable keyboard widget navigation**: Interactive canvas lists, trees, menus, and anchored controls now retain logical focus across clipped rows, scroll keyboard targets into view, and paint active and focus-visible states consistently (#308).
+
+### Improvements
+
+- **TypeScript component gallery**: The GPU component showcase is now a TypeScript core and Native markup app with isolated interactive specimens, model-driven Default and Geist switching, clearer navigation, and dedicated smoke coverage (#308).
+
+### Contributors
+
+- @ctate
+- @marcusschiesser
+- @NyxTools-M
+
+<!-- release:end -->
+
+## 0.8.3
 
 ### Bug Fixes
 
@@ -18,8 +45,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 ### Contributors
 
 - @ctate
-
-<!-- release:end -->
 
 ## 0.8.2
 
