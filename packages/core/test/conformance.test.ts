@@ -1619,6 +1619,19 @@ export function summary(model: Model): Uint8Array {
 `,
   },
   {
+    name: "SDK utf8Bytes intrinsic: Unicode literal and template text",
+    src: `
+import { utf8Bytes } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export function banner(): Uint8Array {
+  return utf8Bytes("Today · Loading… — café 😀");
+}
+export function summary(model: Model): Uint8Array {
+  return utf8Bytes(\`✓ \${model.count} ready\`);
+}
+`,
+  },
+  {
     name: "string + concatenation is taught, not emitted",
     gate: "NS1018",
     src: `

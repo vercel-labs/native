@@ -112,6 +112,7 @@ const CredentialKey = types.CredentialKey;
 const Credential = types.Credential;
 const TrayItemId = types.TrayItemId;
 const TrayOptions = types.TrayOptions;
+const TrayPresentation = types.TrayPresentation;
 const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
@@ -474,6 +475,13 @@ pub const NullPlatform = struct {
     tray_title_len: usize = 0,
     tray_tooltip: [max_tray_tooltip_bytes]u8 = undefined,
     tray_tooltip_len: usize = 0,
+    tray_activation_command: [max_tray_item_command_bytes]u8 = undefined,
+    tray_activation_command_len: usize = 0,
+    tray_alternate_activation_command: [max_tray_item_command_bytes]u8 = undefined,
+    tray_alternate_activation_command_len: usize = 0,
+    tray_open_command: [max_tray_item_command_bytes]u8 = undefined,
+    tray_open_command_len: usize = 0,
+    tray_presentation: TrayPresentation = .{},
     tray_items: [max_tray_items]TrayMenuItem = undefined,
     tray_item_count: usize = 0,
     tray_create_count: usize = 0,
@@ -844,6 +852,7 @@ pub const NullPlatform = struct {
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
+                .update_tray_presentation_fn = updateTrayPresentation,
                 .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
@@ -1497,8 +1506,16 @@ pub const NullPlatform = struct {
         self.tray_title = undefined;
         self.tray_tooltip = undefined;
         self.tray_icon_path_len = (try copyInto(&self.tray_icon_path, options.icon_path)).len;
-        self.tray_title_len = (try copyInto(&self.tray_title, options.title)).len;
+        const has_presentation = options.presentation.title.len > 0 or options.presentation.width != 0 or
+            options.presentation.tone != .normal or options.presentation.icon_opacity != 1 or options.presentation.monospaced;
+        const presentation = if (has_presentation) options.presentation else TrayPresentation{ .title = options.title };
+        self.tray_title_len = (try copyInto(&self.tray_title, presentation.title)).len;
         self.tray_tooltip_len = (try copyInto(&self.tray_tooltip, options.tooltip)).len;
+        self.tray_activation_command_len = (try copyInto(&self.tray_activation_command, options.activation_command)).len;
+        self.tray_alternate_activation_command_len = (try copyInto(&self.tray_alternate_activation_command, options.alternate_activation_command)).len;
+        self.tray_open_command_len = (try copyInto(&self.tray_open_command, options.open_command)).len;
+        self.tray_presentation = presentation;
+        self.tray_presentation.title = self.tray_title[0..self.tray_title_len];
         try updateTrayMenu(context, options.items);
         self.tray_create_count += 1;
     }
@@ -1516,6 +1533,13 @@ pub const NullPlatform = struct {
         self.tray_title = undefined;
         self.tray_title_len = (try copyInto(&self.tray_title, title)).len;
         self.tray_title_update_count += 1;
+    }
+
+    fn updateTrayPresentation(context: ?*anyopaque, presentation: TrayPresentation) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        try updateTrayTitle(context, presentation.title);
+        self.tray_presentation = presentation;
+        self.tray_presentation.title = self.tray_title[0..self.tray_title_len];
     }
 
     fn removeTray(context: ?*anyopaque) anyerror!void {
@@ -2837,6 +2861,22 @@ pub const NullPlatform = struct {
 
     pub fn lastTrayTooltip(self: *const NullPlatform) []const u8 {
         return self.tray_tooltip[0..self.tray_tooltip_len];
+    }
+
+    pub fn lastTrayActivationCommand(self: *const NullPlatform) []const u8 {
+        return self.tray_activation_command[0..self.tray_activation_command_len];
+    }
+
+    pub fn lastTrayAlternateActivationCommand(self: *const NullPlatform) []const u8 {
+        return self.tray_alternate_activation_command[0..self.tray_alternate_activation_command_len];
+    }
+
+    pub fn lastTrayOpenCommand(self: *const NullPlatform) []const u8 {
+        return self.tray_open_command[0..self.tray_open_command_len];
+    }
+
+    pub fn lastTrayPresentation(self: *const NullPlatform) TrayPresentation {
+        return self.tray_presentation;
     }
 
     pub fn trayItems(self: *const NullPlatform) []const TrayMenuItem {

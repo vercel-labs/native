@@ -37,8 +37,65 @@
 //   - `AppearanceEvent`, `ChromeEvent`, `AudioEvent`: the full arm
 //     payload shapes, canonical and importable for helper signatures
 //     (an arm value is structurally assignable to its event record).
+//   - `StatusItemState` and its nested records: the model-derived shell
+//     returned by `statusItem(model)`; the generated launcher installs it
+//     and refreshes its presentation and menu after committed model changes.
 
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.ts";
+
+/// One row in a menu-bar status item's menu. Non-separator rows need a
+/// unique non-zero `id`, a non-empty `label`, and (when actionable) a
+/// command name accepted by `commandMsg`. Rich readout roles may carry
+/// secondary `detail`; command rows may carry a key equivalent. Spell
+/// every field explicitly because app-core records have one exact shape.
+/// A status item may expose at most 32 rows.
+export type StatusItemTone = "normal" | "warning" | "critical";
+
+export type StatusItemMenuRole = "command" | "info" | "header" | "hero" | "agent" | "context";
+
+export interface StatusItemModifiers {
+  readonly primary: boolean;
+  readonly command: boolean;
+  readonly control: boolean;
+  readonly option: boolean;
+  readonly shift: boolean;
+}
+
+export interface StatusItemPresentation {
+  readonly title: Uint8Array;
+  readonly width: number;
+  readonly tone: StatusItemTone;
+  readonly iconOpacity: number;
+  readonly monospaced: boolean;
+}
+
+export interface StatusItemMenuItem {
+  readonly id: number;
+  readonly label: Uint8Array;
+  readonly command: Uint8Array;
+  readonly separator: boolean;
+  readonly enabled: boolean;
+  readonly detail: Uint8Array;
+  readonly role: StatusItemMenuRole;
+  readonly key: Uint8Array;
+  readonly modifiers: StatusItemModifiers;
+}
+
+/// The generated launcher's model-derived menu-bar status item. Export
+/// `statusItem(model: Model): StatusItemState` from `src/core.ts`; its
+/// install-time shell fields plus the first presentation/menu are captured
+/// on the first frame; presentation and rows are re-derived after every
+/// committed model update. Byte slices are borrowed only for that apply,
+/// so returning literals or freshly built arrays is safe.
+export interface StatusItemState {
+  readonly iconPath: Uint8Array;
+  readonly tooltip: Uint8Array;
+  readonly activationCommand: Uint8Array;
+  readonly alternateActivationCommand: Uint8Array;
+  readonly openCommand: Uint8Array;
+  readonly presentation: StatusItemPresentation;
+  readonly items: readonly StatusItemMenuItem[];
+}
 
 /// The scroll-state mirror markup's `on-scroll` matches structurally: a
 /// record of exactly these eight numeric fields — the TWO-AXIS shape, one

@@ -116,6 +116,32 @@ export function greeting(): Uint8Array { return asciiBytes("hello"); }
   assert.deepEqual(ids, []);
 });
 
+test("NS1064 rejects Unicode in asciiBytes and points to utf8Bytes", () => {
+  const direct = checkOnly(`
+import { asciiBytes } from "@native-sdk/core";
+export function label(): Uint8Array { return asciiBytes("Loading…"); }
+`);
+  assert.deepEqual(ruleIds(direct), ["NS1064"]);
+  assert.ok(direct.diagnostics[0]?.message.includes("U+2026"));
+  assert.ok(direct.diagnostics[0]?.message.includes("utf8Bytes"));
+
+  const renamedTemplate = checkOnly(`
+import { asciiBytes as bytes } from "@native-sdk/core";
+export function label(n: number): Uint8Array { return bytes(\`Today · \${n}\`); }
+`);
+  assert.deepEqual(ruleIds(renamedTemplate), ["NS1064"]);
+});
+
+test("the SDK utf8Bytes intrinsic accepts Unicode literals and templates", () => {
+  const ids = ruleIds(
+    checkOnly(`
+import { utf8Bytes } from "@native-sdk/core";
+export function label(n: number): Uint8Array { return utf8Bytes(\`Today · \${n}… 😀\`); }
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
 test("NS1005 ambient time and randomness", () => {
   for (const expr of ["Math.random()", "Date.now()"]) {
     const ids = ruleIds(checkOnly(`export function f(): number { return ${expr}; }`));
@@ -839,6 +865,54 @@ export function themePack(): ThemePack { return "house"; }
 export function update(model: Model, msg: Msg): Model { return model; }
 `);
   assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+});
+
+test("NS1033 statusItem is the exact model-derived presentation and menu helper", () => {
+  const clean = check(`
+import { asciiBytes } from "@native-sdk/core";
+import { type StatusItemState } from "@native-sdk/core/events";
+export interface Model { readonly playing: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { playing: false }; }
+export function update(model: Model, msg: Msg): Model { return { playing: !model.playing }; }
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/tray.svg"),
+    tooltip: asciiBytes("Player"),
+    activationCommand: asciiBytes("refresh"),
+    alternateActivationCommand: asciiBytes("toggle"),
+    openCommand: asciiBytes("refresh"),
+    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
+    items: [
+      { id: 1, label: asciiBytes(model.playing ? "Pause" : "Play"), command: asciiBytes("toggle"), separator: false, enabled: true, detail: asciiBytes("configured"), role: "agent", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+    ],
+  };
+}
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const wrongShape = checkOnly(`
+export interface StatusItemMenuItem { readonly id: number; readonly label: Uint8Array; readonly command: Uint8Array; readonly separator: boolean; }
+export interface StatusItemState { readonly title: Uint8Array; readonly items: readonly StatusItemMenuItem[]; }
+export interface Model { readonly playing: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { playing: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItem(model: Model): StatusItemState { throw { kind: "unreachable" }; }
+`);
+  assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+
+  const wrongHelper = checkOnly(`
+export interface StatusItemState { readonly title: Uint8Array; readonly items: readonly Uint8Array[]; }
+export interface Model { readonly playing: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { playing: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItem(): StatusItemState { throw { kind: "unreachable" }; }
+`);
+  assert.ok(ruleIds(wrongHelper).includes("NS1033"), `got ${ruleIds(wrongHelper)}`);
 });
 
 test("NS1061: value-record aliases refuse the shapes value storage cannot carry", () => {

@@ -12,9 +12,8 @@
 // as Zig) and driven through the real runtime by
 // tests/ts-core/host_e2e_tests.zig.
 
-import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
-
-export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
+import { Cmd, Sub, asciiBytes, utf8Bytes } from "@native-sdk/core";
+import { type AudioState, type StatusItemState } from "@native-sdk/core/events";
 
 export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 
@@ -462,4 +461,49 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
 export function subscriptions(model: Model): Sub<Msg> {
   if (!model.polling) return Sub.none;
   return Sub.timer("tick", 100, "tick");
+}
+
+/// The generated launcher owns this shell helper: it installs the
+/// status item from the committed boot model, then re-derives title and
+/// menu after every model-changing dispatch.
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/tray.svg"),
+    tooltip: utf8Bytes("TypeScript status fixture · UTF-8 😀"),
+    activationCommand: asciiBytes("core.refresh"),
+    alternateActivationCommand: asciiBytes("core.toggle"),
+    openCommand: asciiBytes("core.refresh"),
+    presentation: {
+      title: asciiBytes(model.polling ? "TS ON" : "TS OFF"),
+      width: model.polling ? 64 : 72,
+      tone: model.polling ? "normal" : "warning",
+      iconOpacity: model.polling ? 1 : 0.5,
+      monospaced: true,
+    },
+    items: [
+      {
+        id: 1,
+        label: model.polling ? utf8Bytes("Pause polling…") : utf8Bytes("Resume polling…"),
+        command: asciiBytes("core.toggle"),
+        separator: false,
+        enabled: true,
+        detail: model.polling ? utf8Bytes("configured ✓") : utf8Bytes("warning ⚠"),
+        role: "agent",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+      },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      {
+        id: 2,
+        label: asciiBytes("Refresh now"),
+        command: asciiBytes("core.refresh"),
+        separator: false,
+        enabled: model.polling,
+        detail: asciiBytes(""),
+        role: "command",
+        key: asciiBytes("r"),
+        modifiers: { primary: true, command: false, control: false, option: false, shift: false },
+      },
+    ],
+  };
 }

@@ -78,8 +78,14 @@ pub const RuntimeTrayItem = struct {
     label: []const u8 = "",
     separator: bool = false,
     enabled: bool = true,
+    detail: []const u8 = "",
+    role: platform.TrayItemRole = .command,
+    key: []const u8 = "",
+    modifiers: platform.ShortcutModifiers = .{},
     command_storage: [platform.max_tray_item_command_bytes]u8 = undefined,
     label_storage: [platform.max_tray_item_label_bytes]u8 = undefined,
+    detail_storage: [platform.max_tray_item_detail_bytes]u8 = undefined,
+    key_storage: [platform.max_menu_key_bytes]u8 = undefined,
 };
 
 pub const ShellApplyMode = enum {

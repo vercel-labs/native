@@ -398,9 +398,10 @@ const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callco
 extern fn native_sdk_appkit_show_open_dialog(host: *AppKitHost, opts: *const AppKitOpenDialogOpts, buffer: [*]u8, buffer_len: usize) AppKitOpenDialogResult;
 extern fn native_sdk_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_show_message_dialog(host: *AppKitHost, opts: *const AppKitMessageDialogOpts) c_int;
-extern fn native_sdk_appkit_create_tray(host: *AppKitHost, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize) void;
-extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) void;
+extern fn native_sdk_appkit_create_tray(host: *AppKitHost, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
+extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
 extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, title: [*]const u8, title_len: usize) void;
+extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int) void;
 extern fn native_sdk_appkit_remove_tray(host: *AppKitHost) void;
 extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
 
@@ -741,6 +742,7 @@ pub const MacPlatform = struct {
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
+                .update_tray_presentation_fn = updateTrayPresentation,
                 .remove_tray_fn = removeTray,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
@@ -2456,7 +2458,28 @@ const max_tray_items: usize = 32;
 
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_appkit_create_tray(self.host, options.icon_path.ptr, options.icon_path.len, options.title.ptr, options.title.len, options.tooltip.ptr, options.tooltip.len);
+    const has_presentation = options.presentation.title.len > 0 or options.presentation.width != 0 or
+        options.presentation.tone != .normal or options.presentation.icon_opacity != 1 or options.presentation.monospaced;
+    const presentation = if (has_presentation) options.presentation else platform_mod.TrayPresentation{ .title = options.title };
+    native_sdk_appkit_create_tray(
+        self.host,
+        options.icon_path.ptr,
+        options.icon_path.len,
+        presentation.title.ptr,
+        presentation.title.len,
+        options.tooltip.ptr,
+        options.tooltip.len,
+        presentation.width,
+        @intFromEnum(presentation.tone),
+        presentation.icon_opacity,
+        if (presentation.monospaced) 1 else 0,
+        options.activation_command.ptr,
+        options.activation_command.len,
+        options.alternate_activation_command.ptr,
+        options.alternate_activation_command.len,
+        options.open_command.ptr,
+        options.open_command.len,
+    );
     if (options.items.len > 0) {
         try updateTrayMenu(context, options.items);
     }
@@ -2470,19 +2493,40 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
     var label_lens: [max_tray_items]usize = undefined;
     var separators: [max_tray_items]c_int = undefined;
     var enabled_flags: [max_tray_items]c_int = undefined;
+    var details: [max_tray_items][*]const u8 = undefined;
+    var detail_lens: [max_tray_items]usize = undefined;
+    var roles: [max_tray_items]c_int = undefined;
+    var keys: [max_tray_items][*]const u8 = undefined;
+    var key_lens: [max_tray_items]usize = undefined;
+    var modifiers: [max_tray_items]u32 = undefined;
     for (items[0..count], 0..) |item, i| {
         ids[i] = item.id;
         labels[i] = item.label.ptr;
         label_lens[i] = item.label.len;
         separators[i] = if (item.separator) 1 else 0;
         enabled_flags[i] = if (item.enabled) 1 else 0;
+        details[i] = item.detail.ptr;
+        detail_lens[i] = item.detail.len;
+        roles[i] = @intFromEnum(item.role);
+        keys[i] = item.key.ptr;
+        key_lens[i] = item.key.len;
+        modifiers[i] = @as(u32, @intFromBool(item.modifiers.primary)) |
+            (@as(u32, @intFromBool(item.modifiers.command)) << 1) |
+            (@as(u32, @intFromBool(item.modifiers.control)) << 2) |
+            (@as(u32, @intFromBool(item.modifiers.option)) << 3) |
+            (@as(u32, @intFromBool(item.modifiers.shift)) << 4);
     }
-    native_sdk_appkit_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, count);
+    native_sdk_appkit_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count);
 }
 
 fn updateTrayTitle(context: ?*anyopaque, title: []const u8) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_appkit_update_tray_title(self.host, title.ptr, title.len);
+}
+
+fn updateTrayPresentation(context: ?*anyopaque, presentation: platform_mod.TrayPresentation) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_appkit_update_tray_presentation(self.host, presentation.title.ptr, presentation.title.len, presentation.width, @intFromEnum(presentation.tone), presentation.icon_opacity, if (presentation.monospaced) 1 else 0);
 }
 
 fn removeTray(context: ?*anyopaque) anyerror!void {

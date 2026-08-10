@@ -51,7 +51,7 @@ export function update(model: Model, msg: Msg): Model {
 A complete core in the idiom — readonly interfaces, a tagged Msg, spread updates, map/filter, bytes for text, derived exports:
 
 ```ts:src/core.ts
-import { asciiBytes } from "@native-sdk/core";
+import { utf8Bytes } from "@native-sdk/core";
 
 export type Bytes = Uint8Array;
 export type Filter = "all" | "active" | "done";
@@ -77,7 +77,7 @@ export type Msg =
 
 export function initialModel(): Model {
   return {
-    tasks: [{ id: 1, title: asciiBytes("Ship the core"), done: false }],
+    tasks: [{ id: 1, title: utf8Bytes("Ship the core"), done: false }],
     nextId: 2,
     filter: "all",
     draft: new Uint8Array(0),
@@ -155,16 +155,17 @@ pub fn pick__f64(xs: []const f64, i: i64) f64 {
 
 </CodeToggle>
 
-One rule deserves calling out early: **text is bytes**. Dynamic, user-visible text lives in the Model as `Uint8Array` — `string` is for literals, string-literal-union tags, and `===` comparisons. Turn literals and templates into bytes with the `asciiBytes` intrinsic:
+One rule deserves calling out early: **text is bytes**. Dynamic, user-visible text lives in the Model as `Uint8Array` — `string` is for literals, string-literal-union tags, and `===` comparisons. Turn display literals and templates into UTF-8 with `utf8Bytes`; use `asciiBytes` only when ASCII is part of the value's contract, such as a command name, key, or protocol token:
 
 ```ts
-import { asciiBytes } from "@native-sdk/core";
+import { asciiBytes, utf8Bytes } from "@native-sdk/core";
 
-const label = asciiBytes(`${done} of ${total} done`); // per-dispatch bytes
-const seed = asciiBytes("Stretch");                   // rodata, free to commit
+const label = utf8Bytes(`${done} of ${total} done`); // per-dispatch UTF-8
+const seed = utf8Bytes("Café…");                    // UTF-8 rodata
+const command = asciiBytes("app.refresh");          // guaranteed ASCII
 ```
 
-The compiler folds every `asciiBytes` call at compile time; under node the same import runs as a plain function with the same result. Observing a `string`'s code units (`.length`, `s[i]`) is a taught error because UTF-16 and UTF-8 would disagree, and `+` concatenation is taught away because runtime string building needs a JS string heap the binary does not carry.
+The compiler folds both byte intrinsics at compile time; under node the same imports run as plain functions with the same result. `asciiBytes` fails with NS1064 when a literal/template contains non-ASCII and throws `RangeError` if called directly with such text under node. `utf8Bytes` encodes Unicode exactly like `TextEncoder`, including U+FFFD for lone surrogates. Observing a `string`'s code units (`.length`, `s[i]`) is a taught error because UTF-16 and UTF-8 would disagree, and `+` concatenation is taught away because runtime string building needs a JS string heap the binary does not carry.
 
 Bytes still read like text: the everyday string methods work directly on `Uint8Array` values, with **byte-honest semantics** — every length, offset, and index is a BYTE length/offset (never a character count: `é` measures 2), search is byte-wise, and case mapping is Unicode simple case mapping (code point to code point from the Unicode tables, locale-free, no special casing — `ß` stays `ß`; invalid UTF-8 passes through unchanged). The compiled core and node run the same methods from the same generated tables, so both produce identical bytes by construction.
 
@@ -440,6 +441,32 @@ export type Msg =
 // case "stop": return [model, Cmd.audioCaptureStop(1)];
 ```
 
+## Model-derived menu-bar status items
+
+A `src/core.ts` app can own its complete native menu-bar item without custom Zig wiring. Export `statusItem(model): StatusItemState`; the generated launcher installs its icon, tooltip, click/open commands, presentation, and rows from the boot model, then re-derives the live presentation and menu after committed updates. It patches those two parts independently and never recreates the item just because model state changed.
+
+```ts:src/core.ts
+import { asciiBytes, utf8Bytes } from "@native-sdk/core";
+import { type StatusItemState } from "@native-sdk/core/events";
+
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/menu-bar.svg"),
+    tooltip: utf8Bytes("Sync status"),
+    activationCommand: asciiBytes("app.sync"),
+    alternateActivationCommand: asciiBytes(""),
+    openCommand: asciiBytes("app.sync"),
+    presentation: { title: model.syncing ? utf8Bytes("SYNC…") : utf8Bytes("READY"), width: 62, tone: model.failed ? "critical" : "normal", iconOpacity: model.stale ? 0.5 : 1, monospaced: true },
+    items: [
+      { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 2, label: utf8Bytes("Sync now…"), command: asciiBytes("app.sync"), separator: false, enabled: !model.syncing, detail: asciiBytes(""), role: "command", key: asciiBytes("r"), modifiers: { primary: true, command: false, control: false, option: false, shift: false } },
+    ],
+  };
+}
+```
+
+Import the canonical records and unions from `@native-sdk/core/events`. Presentation includes byte `title`, numeric `width`, `normal | warning | critical` tone, `iconOpacity` in 0…1, and `monospaced`. Rows include id/label/command/separator/enabled plus secondary `detail`, semantic `role`, key equivalent, and all five modifier booleans. Actionable ids are unique and non-zero, and there are at most 32 rows. `commandMsg(name): Msg | null` maps row selection, status-button activation, Option-activation, and menu-open refresh into the ordinary update loop. See [System Tray](/docs/tray) and the zero-Zig `examples/menu-bar` app for the full hide/Open/Quit lifecycle.
+
 ## Subscriptions are Sub data
 
 Recurring effects are declared, not issued: export `subscriptions(model): Sub<Msg>` and return descriptors derived from the current model. After every commit the host reconciles the returned set against its active timers by key — a new key (or a changed interval) arms a timer, a missing key cancels it — so starting, stopping, and re-tuning timers is just returning different data:
@@ -492,7 +519,7 @@ A markup text control (`<text-field text="{draft}" on-input="draft_edit" />`) ne
 
 ## Splitting a core into modules
 
-A core that outgrows one file splits into modules under `src/`: relative imports spelled with their real filenames (`./parsers.ts` — the same file runs under node, whose loader resolves real files), `src/` as the hard boundary (`../` and npm packages are teaching errors), and no runtime cycles (`import type` back-edges are fine and idiomatic — a helper module typically type-imports `Model` from the entry). Export lists and value re-exports are ordinary module surface: `export { helper, doneCount as remaining }` binds names over existing declarations, and `export { parsePs } from "./parsers.ts"` forwards another module's export by name — what stays out is `export default`, `export =`, and `export * from` (the core's flat namespace resolves by name, so every export names what it binds). `core.ts` stays the entry module and the app's public face: `update`, `initialModel`, `subscriptions`, the wiring channels, and the exported binding helpers live there (declared and exported under their own names — a rename or re-export cannot bind an entry point), and imported modules hold the machinery they call. The SDK also ships library modules in the same subset — `@native-sdk/core/text` is the byte-splice text engine (caret, selection, IME composition, ASCII case-insensitive compare), and `@native-sdk/core/events` is the canonical event record types (`TextInputEvent` re-exported, `ScrollState`, `FrameEvent`, `KeyEvent`, `PinchPhase`/`PinchEvent`, `ColorScheme`, the chrome records, `AudioState`/`AudioEvent`) so no core re-types the vocabulary — compiled into your core when imported and absent when not.
+A core that outgrows one file splits into modules under `src/`: relative imports spelled with their real filenames (`./parsers.ts` — the same file runs under node, whose loader resolves real files), `src/` as the hard boundary (`../` and npm packages are teaching errors), and no runtime cycles (`import type` back-edges are fine and idiomatic — a helper module typically type-imports `Model` from the entry). Export lists and value re-exports are ordinary module surface: `export { helper, doneCount as remaining }` binds names over existing declarations, and `export { parsePs } from "./parsers.ts"` forwards another module's export by name — what stays out is `export default`, `export =`, and `export * from` (the core's flat namespace resolves by name, so every export names what it binds). `core.ts` stays the entry module and the app's public face: `update`, `initialModel`, `subscriptions`, the wiring channels, `themePack` / `statusItem`, and the exported binding helpers live there (declared and exported under their own names — a rename or re-export cannot bind an entry point), and imported modules hold the machinery they call. The SDK also ships library modules in the same subset — `@native-sdk/core/text` is the byte-splice text engine (caret, selection, IME composition, ASCII case-insensitive compare), and `@native-sdk/core/events` is the canonical event and shell vocabulary (`TextInputEvent` re-exported, `ScrollState`, `FrameEvent`, `KeyEvent`, `PinchPhase`/`PinchEvent`, `ColorScheme`, the chrome records, `AudioState`/`AudioEvent`, and the status-item state/presentation/row/modifier records and unions) so no core re-types it — compiled into your core when imported and absent when not.
 
 <CodeToggle>
 

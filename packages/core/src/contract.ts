@@ -457,6 +457,11 @@ class ContractEmitter {
         }
       }
     }
+    // `statusItem` is consumed by the generated launcher, not markup. It
+    // is still an ordinary Model helper in the core ABI, so teach native
+    // check that this one helper is intentionally shell-bound without
+    // making every app repeat it in `viewUnbound`.
+    if (helperNames.includes("statusItem") && !model.includes("statusItem")) model.push("statusItem");
     return { model, msg };
   }
 

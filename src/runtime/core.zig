@@ -775,6 +775,7 @@ pub const Runtime = struct {
     pub const createTray = SystemServiceMethods.createTray;
     pub const updateTrayMenu = SystemServiceMethods.updateTrayMenu;
     pub const updateTrayTitle = SystemServiceMethods.updateTrayTitle;
+    pub const updateTrayPresentation = SystemServiceMethods.updateTrayPresentation;
     pub const removeTray = SystemServiceMethods.removeTray;
     const trayCommandNameForItem = SystemServiceMethods.trayCommandNameForItem;
     const supportsFeatureFromJson = SystemServiceMethods.supportsFeatureFromJson;

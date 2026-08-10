@@ -112,7 +112,8 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             try validateTrayOptions(options);
             try self.options.platform.services.createTray(options);
             try storeTrayItems(self, options.items);
-            self.tray_title = try copyInto(&self.tray_title_storage, options.title);
+            const title = if (options.presentation.title.len > 0) options.presentation.title else options.title;
+            self.tray_title = try copyInto(&self.tray_title_storage, title);
             self.tray_created = true;
         }
 
@@ -130,6 +131,12 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             try validateTrayTitle(title);
             try self.options.platform.services.updateTrayTitle(title);
             self.tray_title = try copyInto(&self.tray_title_storage, title);
+        }
+
+        pub fn updateTrayPresentation(self: *Runtime, presentation: platform.TrayPresentation) anyerror!void {
+            try validation.validateTrayPresentation(presentation);
+            try self.options.platform.services.updateTrayPresentation(presentation);
+            self.tray_title = try copyInto(&self.tray_title_storage, presentation.title);
         }
 
         pub fn removeTray(self: *Runtime) anyerror!void {
@@ -369,8 +376,12 @@ fn storeTrayItems(self: anytype, items: []const platform.TrayMenuItem) !void {
         self.tray_items[index].id = item.id;
         self.tray_items[index].command = try copyInto(&self.tray_items[index].command_storage, item.command);
         self.tray_items[index].label = try copyInto(&self.tray_items[index].label_storage, item.label);
+        self.tray_items[index].detail = try copyInto(&self.tray_items[index].detail_storage, item.detail);
         self.tray_items[index].separator = item.separator;
         self.tray_items[index].enabled = item.enabled;
+        self.tray_items[index].role = item.role;
+        self.tray_items[index].key = try copyInto(&self.tray_items[index].key_storage, item.key);
+        self.tray_items[index].modifiers = item.modifiers;
     }
     self.tray_item_count = items.len;
 }

@@ -1,0 +1,8 @@
+{
+  "name": "menu-bar",
+  "private": true,
+  "description": "TypeScript + Native markup menu-bar lifecycle example.",
+  "dependencies": {
+    "@native-sdk/core": "0.8.4"
+  }
+}

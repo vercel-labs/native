@@ -250,15 +250,31 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Menu items: `label` is the visible title, `command` the
             /// name handed to `on_command`, `id` a unique non-zero id.
             items: []const platform.TrayMenuItem = &.{},
+            /// Optional lifecycle commands: ordinary click (then open),
+            /// Option-click (without opening), and every menu-open. All
+            /// enter the same `on_command` route as menu rows.
+            activation_command: []const u8 = "",
+            alternate_activation_command: []const u8 = "",
+            open_command: []const u8 = "",
         };
 
         /// Model-derived status-item state returned by
-        /// `Options.status_item_fn`: the live button title and menu.
+        /// `Options.status_item_fn`: install-time shell fields plus the
+        /// live button presentation and menu.
         /// Slices may point at the scratch the fn received, the model, or
         /// static strings — they only need to outlive the apply (the
         /// runtime and platform copy what they keep).
         pub const StatusItemState = struct {
             title: []const u8 = "",
+            presentation: platform.TrayPresentation = .{},
+            /// Install-time shell fields. A TypeScript core has no Zig
+            /// options block, so its statusItem record supplies these on
+            /// the first frame. Empty fields inherit StatusItemOptions.
+            icon_path: []const u8 = "",
+            tooltip: []const u8 = "",
+            activation_command: []const u8 = "",
+            alternate_activation_command: []const u8 = "",
+            open_command: []const u8 = "",
             items: []const platform.TrayMenuItem = &.{},
         };
 
@@ -269,6 +285,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// apply.
         pub const StatusItemScratch = struct {
             title_buffer: [platform.max_tray_title_bytes]u8 = undefined,
+            arena_buffer: [2048]u8 = undefined,
             items: [platform.max_tray_items]platform.TrayMenuItem = undefined,
         };
 
@@ -3614,31 +3631,46 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Selecting one of its items dispatches the item's `command`
         /// through the ordinary `on_command` path (source `.tray`).
         /// Unsupported platforms degrade to a logged warning. With a
-        /// `status_item_fn`, the model's derived title/items win from
+        /// `status_item_fn`, the model's derived presentation/items win from
         /// the very first frame (the static options keep icon+tooltip).
         fn installStatusItem(self: *Self, runtime: *Runtime) void {
             if (self.status_item_installed) return;
             if (self.options.status_item == null and self.options.status_item_fn == null) return;
             self.status_item_installed = true;
             const static = self.options.status_item orelse StatusItemOptions{};
-            var title = static.title;
+            var presentation = platform.TrayPresentation{ .title = static.title };
+            var icon_path = static.icon_path;
+            var tooltip = static.tooltip;
+            var activation_command = static.activation_command;
+            var alternate_activation_command = static.alternate_activation_command;
+            var open_command = static.open_command;
             var items = static.items;
             if (self.options.status_item_fn) |state_fn| {
                 const state = state_fn(&self.model, &self.tray_scratch);
-                title = state.title;
+                presentation = state.presentation;
+                if (presentation.title.len == 0) presentation.title = state.title;
+                if (state.icon_path.len > 0) icon_path = state.icon_path;
+                if (state.tooltip.len > 0) tooltip = state.tooltip;
+                if (state.activation_command.len > 0) activation_command = state.activation_command;
+                if (state.alternate_activation_command.len > 0) alternate_activation_command = state.alternate_activation_command;
+                if (state.open_command.len > 0) open_command = state.open_command;
                 items = state.items;
             }
             runtime.createTray(.{
-                .title = title,
-                .icon_path = static.icon_path,
-                .tooltip = static.tooltip,
+                .title = presentation.title,
+                .icon_path = icon_path,
+                .tooltip = tooltip,
                 .items = items,
+                .presentation = presentation,
+                .activation_command = activation_command,
+                .alternate_activation_command = alternate_activation_command,
+                .open_command = open_command,
             }) catch |err| {
                 ui_app_log.warn("status item install failed: {s}", .{@errorName(err)});
                 return;
             };
             self.tray_created = true;
-            self.tray_title_hash = hashTrayTitle(title);
+            self.tray_title_hash = hashTrayPresentation(presentation);
             self.tray_menu_hash = hashTrayMenu(items);
         }
 
@@ -3650,17 +3682,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const state_fn = self.options.status_item_fn orelse return;
             if (!self.tray_created) return;
             const state = state_fn(&self.model, &self.tray_scratch);
+            var presentation = state.presentation;
+            if (presentation.title.len == 0) presentation.title = state.title;
 
-            const title_hash = hashTrayTitle(state.title);
+            const title_hash = hashTrayPresentation(presentation);
             if (title_hash != self.tray_title_hash) {
                 self.tray_title_hash = title_hash;
                 if (!self.tray_title_unsupported) {
-                    runtime.updateTrayTitle(state.title) catch |err| {
+                    runtime.updateTrayPresentation(presentation) catch |err| {
                         if (err == error.UnsupportedService) {
                             self.tray_title_unsupported = true;
-                            ui_app_log.warn("status item title updates unsupported on this platform: the menu keeps updating, the button title stays \"{s}\"-era static", .{state.title});
+                            ui_app_log.warn("status item presentation updates unsupported on this platform: the menu keeps updating", .{});
                         } else {
-                            ui_app_log.warn("status item title update failed: {s}", .{@errorName(err)});
+                            ui_app_log.warn("status item presentation update failed: {s}", .{@errorName(err)});
                         }
                     };
                 }
@@ -4464,9 +4498,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Change-detection hashes for the model-derived tray state:
         /// field lengths are folded in so adjacent slices can
         /// never alias across boundaries.
-        fn hashTrayTitle(title: []const u8) u64 {
-            var hasher = std.hash.Wyhash.init(0x7261795f7469746c); // "ray_titl"
-            hasher.update(title);
+        fn hashTrayPresentation(presentation: platform.TrayPresentation) u64 {
+            var hasher = std.hash.Wyhash.init(0x7261795f70726573); // "ray_pres"
+            hasher.update(presentation.title);
+            hasher.update(std.mem.asBytes(&presentation.width));
+            hasher.update(std.mem.asBytes(&presentation.icon_opacity));
+            hasher.update(&.{ @intFromEnum(presentation.tone), @intFromBool(presentation.monospaced) });
             return hasher.final();
         }
 
@@ -4479,7 +4516,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 hasher.update(item.label);
                 hasher.update(std.mem.asBytes(&item.command.len));
                 hasher.update(item.command);
-                hasher.update(&.{ @intFromBool(item.separator), @intFromBool(item.enabled) });
+                hasher.update(std.mem.asBytes(&item.detail.len));
+                hasher.update(item.detail);
+                hasher.update(std.mem.asBytes(&item.key.len));
+                hasher.update(item.key);
+                hasher.update(&.{
+                    @intFromBool(item.separator),
+                    @intFromBool(item.enabled),
+                    @intFromEnum(item.role),
+                    @intFromBool(item.modifiers.primary),
+                    @intFromBool(item.modifiers.command),
+                    @intFromBool(item.modifiers.control),
+                    @intFromBool(item.modifiers.option),
+                    @intFromBool(item.modifiers.shift),
+                });
             }
             return hasher.final();
         }

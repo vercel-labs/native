@@ -554,6 +554,9 @@ const Emitter = struct {
             \\    pub const Sub = []const u8;
             \\    pub const cmd_none: Cmd = &.{{}};
             \\    pub const sub_none: Sub = &.{{}};
+            \\    pub fn frameAllocator() std.mem.Allocator {{
+            \\        return shim_rt.frameAllocator();
+            \\    }}
             \\    pub fn frameAlloc(comptime T: type, n: usize) []T {{
             \\        return shim_rt.frameAlloc(T, n);
             \\    }}

@@ -25,8 +25,12 @@
 //!                    from src/app.native in Debug.
 //!   menus/shortcuts  a core exporting `commandMsg(name): Msg | null`
 //!                    receives command events (menus, shortcuts, chrome
-//!                    tabs) as ordinary Msgs; without the export command
-//!                    events stay host-handled only.
+//!                    tabs, status-item rows) as ordinary Msgs; without
+//!                    the export command events stay host-handled only.
+//!   status item      a core exporting `statusItem(model)` supplies the
+//!                    install-time icon/click hooks and live menu-bar
+//!                    presentation + rows; the adapter patches the two
+//!                    live parts independently after committed updates.
 //!   host events      the adapter wires the core's opt-in channels from
 //!                    its exports (export exists -> wired): `frameMsg`
 //!                    (presented frames), `keyMsg` (the app-level key

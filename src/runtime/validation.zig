@@ -119,7 +119,14 @@ fn validateCredentialField(value: []const u8, max_len: usize) !void {
 pub fn validateTrayOptions(options: platform.TrayOptions) !void {
     try validateTrayField(options.icon_path, platform.max_tray_icon_path_bytes);
     try validateTrayField(options.title, platform.max_tray_title_bytes);
+    try validateTrayPresentation(options.presentation);
     try validateTrayField(options.tooltip, platform.max_tray_tooltip_bytes);
+    try validateTrayField(options.activation_command, platform.max_tray_item_command_bytes);
+    try validateTrayField(options.alternate_activation_command, platform.max_tray_item_command_bytes);
+    try validateTrayField(options.open_command, platform.max_tray_item_command_bytes);
+    if (options.activation_command.len > 0) try validateCommandName(options.activation_command);
+    if (options.alternate_activation_command.len > 0) try validateCommandName(options.alternate_activation_command);
+    if (options.open_command.len > 0) try validateCommandName(options.open_command);
     try validateTrayMenuItems(options.items);
 }
 
@@ -127,11 +134,22 @@ pub fn validateTrayTitle(title: []const u8) !void {
     try validateTrayField(title, platform.max_tray_title_bytes);
 }
 
+pub fn validateTrayPresentation(presentation: platform.TrayPresentation) !void {
+    try validateTrayTitle(presentation.title);
+    if (!std.math.isFinite(presentation.width) or presentation.width < 0) return error.InvalidTrayOptions;
+    if (!std.math.isFinite(presentation.icon_opacity) or presentation.icon_opacity < 0 or presentation.icon_opacity > 1) return error.InvalidTrayOptions;
+}
+
 pub fn validateTrayMenuItems(items: []const platform.TrayMenuItem) !void {
     if (items.len > platform.max_tray_items) return error.InvalidTrayOptions;
     for (items, 0..) |item, index| {
         try validateTrayField(item.label, platform.max_tray_item_label_bytes);
         try validateTrayField(item.command, platform.max_tray_item_command_bytes);
+        try validateTrayField(item.detail, platform.max_tray_item_detail_bytes);
+        try validateTrayField(item.key, platform.max_menu_key_bytes);
+        if (item.role != .command and item.role != .agent and item.command.len > 0) return error.InvalidTrayOptions;
+        if (item.detail.len > 0 and item.role != .info and item.role != .hero and item.role != .agent and item.role != .context) return error.InvalidTrayOptions;
+        if (item.separator and (item.detail.len > 0 or item.role != .command)) return error.InvalidTrayOptions;
         if (item.id != 0) {
             for (items[0..index]) |previous| {
                 if (previous.id == item.id) return error.InvalidTrayOptions;
@@ -142,6 +160,7 @@ pub fn validateTrayMenuItems(items: []const platform.TrayMenuItem) !void {
             try validateCommandName(item.command);
         }
         if (!item.separator and item.label.len == 0) return error.InvalidTrayOptions;
+        if (item.key.len > 0 and (item.separator or item.command.len == 0)) return error.InvalidTrayOptions;
     }
 }
 

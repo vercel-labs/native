@@ -1,4 +1,40 @@
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.js";
+export type StatusItemTone = "normal" | "warning" | "critical";
+export type StatusItemMenuRole = "command" | "info" | "header" | "hero" | "agent" | "context";
+export interface StatusItemModifiers {
+    readonly primary: boolean;
+    readonly command: boolean;
+    readonly control: boolean;
+    readonly option: boolean;
+    readonly shift: boolean;
+}
+export interface StatusItemPresentation {
+    readonly title: Uint8Array;
+    readonly width: number;
+    readonly tone: StatusItemTone;
+    readonly iconOpacity: number;
+    readonly monospaced: boolean;
+}
+export interface StatusItemMenuItem {
+    readonly id: number;
+    readonly label: Uint8Array;
+    readonly command: Uint8Array;
+    readonly separator: boolean;
+    readonly enabled: boolean;
+    readonly detail: Uint8Array;
+    readonly role: StatusItemMenuRole;
+    readonly key: Uint8Array;
+    readonly modifiers: StatusItemModifiers;
+}
+export interface StatusItemState {
+    readonly iconPath: Uint8Array;
+    readonly tooltip: Uint8Array;
+    readonly activationCommand: Uint8Array;
+    readonly alternateActivationCommand: Uint8Array;
+    readonly openCommand: Uint8Array;
+    readonly presentation: StatusItemPresentation;
+    readonly items: readonly StatusItemMenuItem[];
+}
 export interface ScrollState {
     readonly offsetX: number;
     readonly offsetY: number;

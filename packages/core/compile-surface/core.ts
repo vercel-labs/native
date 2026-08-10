@@ -12,8 +12,73 @@
 // stage_external_core.mjs) alike.
 
 export function asciiBytes(s: string): Uint8Array {
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) > 0x7f) {
+      throw new RangeError("asciiBytes accepts ASCII only; use utf8Bytes for Unicode text");
+    }
+  }
   const out = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+export function utf8Bytes(s: string): Uint8Array {
+  let byteLength = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code <= 0x7f) {
+      byteLength += 1;
+    } else if (code <= 0x7ff) {
+      byteLength += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
+      const next = s.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        byteLength += 4;
+        i += 1;
+      } else {
+        byteLength += 3;
+      }
+    } else {
+      byteLength += 3;
+    }
+  }
+
+  const out = new Uint8Array(byteLength);
+  let at = 0;
+  for (let i = 0; i < s.length; i++) {
+    let code = s.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
+      const next = s.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+        i += 1;
+      } else {
+        code = 0xfffd;
+      }
+    } else if (code >= 0xd800 && code <= 0xdfff) {
+      code = 0xfffd;
+    }
+
+    if (code <= 0x7f) {
+      out[at] = code;
+      at += 1;
+    } else if (code <= 0x7ff) {
+      out[at] = 0xc0 | (code >> 6);
+      out[at + 1] = 0x80 | (code & 0x3f);
+      at += 2;
+    } else if (code <= 0xffff) {
+      out[at] = 0xe0 | (code >> 12);
+      out[at + 1] = 0x80 | ((code >> 6) & 0x3f);
+      out[at + 2] = 0x80 | (code & 0x3f);
+      at += 3;
+    } else {
+      out[at] = 0xf0 | (code >> 18);
+      out[at + 1] = 0x80 | ((code >> 12) & 0x3f);
+      out[at + 2] = 0x80 | ((code >> 6) & 0x3f);
+      out[at + 3] = 0x80 | (code & 0x3f);
+      at += 4;
+    }
+  }
   return out;
 }
 

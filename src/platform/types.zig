@@ -252,6 +252,7 @@ pub const max_tray_title_bytes: usize = 64;
 pub const max_tray_tooltip_bytes: usize = 256;
 pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
+pub const max_tray_item_detail_bytes: usize = 256;
 pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
@@ -1350,6 +1351,27 @@ pub const Credential = struct {
 
 pub const TrayItemId = u32;
 
+/// Visual emphasis for the menu-bar button's live presentation. Hosts
+/// without a colored-title seam may render every value as `normal`.
+pub const TrayTone = enum(u8) {
+    normal,
+    warning,
+    critical,
+};
+
+/// The model-derived part of a status item. Keeping this separate from
+/// icon/tooltip/activation options lets UiApp patch presentation without
+/// recreating the native item.
+pub const TrayPresentation = struct {
+    title: []const u8 = "",
+    /// Explicit status-item width in points; zero asks the host to choose
+    /// variable width for a title and square width for icon-only state.
+    width: f32 = 0,
+    tone: TrayTone = .normal,
+    icon_opacity: f32 = 1,
+    monospaced: bool = false,
+};
+
 pub const TrayOptions = struct {
     icon_path: []const u8 = "",
     /// Status-bar button title, shown when no icon resolves (macOS
@@ -1357,6 +1379,25 @@ pub const TrayOptions = struct {
     title: []const u8 = "",
     tooltip: []const u8 = "",
     items: []const TrayMenuItem = &.{},
+    presentation: TrayPresentation = .{},
+    /// Ordinary click, Option-click, and menu-open hooks. Each command
+    /// enters the same on_command route as a selected menu row.
+    activation_command: []const u8 = "",
+    alternate_activation_command: []const u8 = "",
+    open_command: []const u8 = "",
+};
+
+/// Semantic status-menu rows. `command` is the ordinary actionable row;
+/// the others let a capable host render readouts without presenting them
+/// as disabled actions. Hosts without rich-menu support may degrade them
+/// to non-actionable text rows.
+pub const TrayItemRole = enum(u8) {
+    command,
+    info,
+    header,
+    hero,
+    agent,
+    context,
 };
 
 pub const TrayMenuItem = struct {
@@ -1365,6 +1406,10 @@ pub const TrayMenuItem = struct {
     command: []const u8 = "",
     separator: bool = false,
     enabled: bool = true,
+    detail: []const u8 = "",
+    role: TrayItemRole = .command,
+    key: []const u8 = "",
+    modifiers: ShortcutModifiers = .{},
 };
 
 pub const NativeCommandEvent = struct {
@@ -2492,6 +2537,7 @@ pub const PlatformServices = struct {
     create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     update_tray_title_fn: ?*const fn (context: ?*anyopaque, title: []const u8) anyerror!void = null,
+    update_tray_presentation_fn: ?*const fn (context: ?*anyopaque, presentation: TrayPresentation) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
@@ -3043,6 +3089,14 @@ pub const PlatformServices = struct {
     pub fn updateTrayTitle(self: PlatformServices, title: []const u8) anyerror!void {
         const title_fn = self.update_tray_title_fn orelse return error.UnsupportedService;
         return title_fn(self.context, title);
+    }
+
+    /// Patch all live menu-bar presentation fields without recreating the
+    /// native item. A host that only implements title updates still gets a
+    /// correct title and intentionally degrades the richer styling.
+    pub fn updateTrayPresentation(self: PlatformServices, presentation: TrayPresentation) anyerror!void {
+        if (self.update_tray_presentation_fn) |update_fn| return update_fn(self.context, presentation);
+        return self.updateTrayTitle(presentation.title);
     }
 
     pub fn removeTray(self: PlatformServices) anyerror!void {

@@ -89,6 +89,43 @@ Use the runtime methods from app code:
 
 The lower-level `PlatformServices.createTray`, `updateTrayMenu`, and `removeTray` hooks are available for platform adapters. `Runtime` validates tray options before dispatch: non-separator menu items need a label, command-backed items need a unique non-zero `id`, and menus are capped at 32 items.
 
+## TypeScript: model-derived status items
+
+In a TypeScript app, export `statusItem(model)` from `src/core.ts`. The generated launcher installs it from the committed boot model and re-runs it after every model update. Presentation and menu are hashed independently, so changing the title, width, tone, icon opacity, or number style does not rebuild the dropdown or recreate the native status item.
+
+```ts:src/core.ts
+import { asciiBytes, utf8Bytes } from "@native-sdk/core";
+import { type StatusItemState } from "@native-sdk/core/events";
+
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/menu-bar.svg"),
+    tooltip: utf8Bytes("Player status"),
+    activationCommand: asciiBytes("app.refresh"),
+    alternateActivationCommand: asciiBytes("player.toggle"),
+    openCommand: asciiBytes("app.refresh"),
+    presentation: {
+      title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"),
+      width: model.playing ? 72 : 48,
+      tone: model.failed ? "critical" : "normal",
+      iconOpacity: model.stale ? 0.5 : 1,
+      monospaced: true,
+    },
+    items: [
+      { id: 10, label: model.today, command: asciiBytes(""), separator: false, enabled: false, detail: model.quota, role: "hero", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 3, label: utf8Bytes("Settings…"), command: asciiBytes("app.settings"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(","), modifiers: { primary: false, command: true, control: false, option: false, shift: false } },
+    ],
+  };
+}
+```
+
+`iconPath`, `tooltip`, `activationCommand`, `alternateActivationCommand`, and `openCommand` are captured when the item installs. A normal click emits `activationCommand` and opens the menu; an Option-click emits `alternateActivationCommand` without opening it. Every menu open emits `openCommand`, which is useful for an on-demand refresh while the background cadence stays slow. Empty commands disable those hooks.
+
+Rows use the exact `StatusItemMenuItem` record. `role` is `command`, `info`, `header`, `hero`, `agent`, or `context`; capable macOS hosts render the readout roles as native rich content while simpler hosts degrade them to text. `detail` carries secondary readout content, and `key` plus the five explicit `modifiers` fields declares a menu equivalent. Actionable rows need unique non-zero ids; separators conventionally use id 0 and empty byte fields. The menu may contain at most 32 rows. Map every row/click/open command to an ordinary message with `commandMsg(name): Msg | null`; no Zig `status_item_fn` glue is needed.
+
+Use `utf8Bytes` for titles, labels, tooltips, and details; it preserves characters such as `…`, `·`, and emoji as UTF-8. Use `asciiBytes` for guaranteed-ASCII command names, keys, paths, and empty byte fields. Passing non-ASCII literal/template text to `asciiBytes` is an NS1064 build error.
+
 ## Handling tray actions
 
 When a user clicks a tray menu item, the runtime dispatches a `CommandEvent` with source `.tray` and the native `tray_item_id`. Prefer command-backed items when the item represents a known app action:
@@ -146,9 +183,9 @@ app.* = PreviewApp.init(allocator, .{}, .{
 
 macOS (`NSStatusItem`) is the proven host; platforms without a status-bar service log a warning and continue. See `examples/canvas-preview` for the live composition.
 
-## Model-driven title and menu
+## Model-driven title and menu in Zig-core apps
 
-For a live menu-bar extra — an open-count badge in the title, the latest items in the dropdown — add `UiApp.Options.status_item_fn`. It is consulted on install and after every rebuild, and the runtime re-applies only what actually changed: a title-only change retitles the live status button (no flicker, no menu rebuild), a menu change updates the dropdown. The static `status_item` still provides the icon and tooltip.
+For a live menu-bar extra — an open-count badge in the title, the latest items in the dropdown — add `UiApp.Options.status_item_fn`. It is consulted on install and after every rebuild, and the runtime re-applies only what actually changed: a presentation-only change patches the live status button (no flicker, no menu rebuild), while a menu change updates the dropdown. The static `status_item` can provide install-time icon, tooltip, activation, alternate-activation, and open commands.
 
 ```zig
 fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusItemState {
@@ -156,7 +193,10 @@ fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusIt
     scratch.items[0] = .{ .id = 1, .label = "Refresh", .command = "app.refresh" };
     scratch.items[1] = .{ .separator = true };
     scratch.items[2] = .{ .id = 10, .label = model.latest_title, .command = "issue.select.latest" };
-    return .{ .title = title, .items = scratch.items[0..3] };
+    return .{
+        .presentation = .{ .title = title, .width = 62, .monospaced = true },
+        .items = scratch.items[0..3],
+    };
 }
 // options: .status_item_fn = statusItem,
 ```
@@ -192,7 +232,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 }
 ```
 
-In the TypeScript tier the same verbs are `Cmd.showWindow("main")` and `Cmd.quitApp()`. `examples/menu-bar` is the whole loop, tested end to end.
+In the TypeScript tier the same verbs are `Cmd.showWindow("main")` and `Cmd.quitApp()`, and the exported `statusItem(model)` helper above supplies the live title and rows. `examples/menu-bar` is the whole zero-Zig loop.
 
 Linux is the honest exception: the toolkit has no status item there yet, so nothing could bring a hidden window back — `close_policy = "hide"` is refused at build/create time with a teaching, and the platform-support matrix states it plainly.
 

@@ -1,0 +1,12 @@
+<!-- The window can disappear while this view's model keeps running: app.zon
+     declares close_policy="hide", and the status item can show it again. -->
+<column gap="12" padding="16" background="background">
+  <text size="lg">{trackTitle}</text>
+  <text foreground="text_muted">{playbackState}</text>
+  <row gap="8">
+    <button variant="primary" on-press="toggle_play">{playButtonLabel}</button>
+    <button on-press="next_track">Next</button>
+  </row>
+  <spacer grow="1" />
+  <status-bar>Closing this window hides it — the menu-bar extra keeps running.</status-bar>
+</column>

@@ -164,6 +164,39 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(doc.update_returns_cmd, true);
 });
 
+test("statusItem is projected as a launcher-bound model helper with its canonical records", () => {
+  const doc = contractOf(`
+import { asciiBytes } from "@native-sdk/core";
+import { type StatusItemState } from "@native-sdk/core/events";
+export interface Model { playing: boolean; }
+export type Msg = { kind: "toggle" } | { kind: "noop" };
+export function initialModel(): Model { return { playing: false }; }
+export function update(model: Model, msg: Msg): Model {
+  return msg.kind === "toggle" ? { playing: !model.playing } : model;
+}
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/tray.svg"),
+    tooltip: asciiBytes("Player"),
+    activationCommand: asciiBytes("refresh"),
+    alternateActivationCommand: asciiBytes("toggle"),
+    openCommand: asciiBytes("refresh"),
+    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
+    items: [{ id: 1, label: asciiBytes("Toggle"), command: asciiBytes("toggle"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } }],
+  };
+}
+`);
+  const helpers = doc.model_helpers as { name: string; returns: { kind: string; name: string } }[];
+  assert.deepEqual(helpers.map((helper) => helper.name), ["statusItem"]);
+  assert.deepEqual(helpers[0].returns, { kind: "value", name: "StatusItemState" });
+  assert.deepEqual(doc.model_unbound, ["statusItem"]);
+  const structs = (doc.types as { structs: { name: string }[] }).structs.map((record) => record.name);
+  assert.ok(structs.includes("StatusItemState"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemMenuItem"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemPresentation"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
+});
+
 test("Cmd.fetch accepts a line-stream route with bytes and status arms", () => {
   const doc = contractOf(`
 import { Cmd, asciiBytes } from "@native-sdk/core";

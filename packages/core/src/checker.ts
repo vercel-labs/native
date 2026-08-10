@@ -4,7 +4,7 @@
 // checker adds the subset rules on the typed AST; the emitter re-derives every
 // rule during emission and turns any gap into a loud internal error.
 
-import { ts, TypedAst, lineColumn, hasExportModifier, exportListBindings, type ExportListBinding } from "./typed_ast.ts";
+import { ts, TypedAst, lineColumn, hasExportModifier, exportListBindings, sdkCoreModulePath, type ExportListBinding } from "./typed_ast.ts";
 import { makeDiagnostic, type SubsetDiagnostic, type RuleId } from "./diagnostics.ts";
 import type { TypeTable } from "./types.ts";
 import {
@@ -466,6 +466,7 @@ export class SubsetChecker {
     this.checkSubPurity();
     this.checkModelBindingSurface();
     this.checkThemePackHelper();
+    this.checkStatusItemHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -511,7 +512,7 @@ export class SubsetChecker {
       }
       if (bindings && ts.isNamespaceImport(bindings)) {
         // NS1039 (half 2): the intrinsic SDK surface is imported by name —
-        // the purity rules (NS1017/NS1025) and the asciiBytes fold recognize
+        // the purity rules (NS1017/NS1025) and byte-text folds recognize
         // the factories by their imported names.
         this.report("NS1039", `\`import * as ${bindings.name.text}\` aliases the intrinsic SDK module.`, bindings);
         continue;
@@ -716,6 +717,122 @@ export class SubsetChecker {
       this.report(
         "NS1033",
         "`themePack` does not return exactly the built-in `\"house\" | \"geist\"` theme-pack union.",
+        decl.type,
+      );
+    }
+  }
+
+  /// `statusItem(model)` is the TypeScript launcher's live menu-bar
+  /// declaration. Validate both records exactly here: the Zig adapter
+  /// intentionally accepts only this one canonical, projection-safe
+  /// shape, and a source diagnostic is much more useful than generated
+  /// Zig reflection failing later.
+  private checkStatusItemHelper(): void {
+    let decl: ts.FunctionDeclaration | null = null;
+    for (const stmt of this.entry.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === "statusItem" && hasExportModifier(stmt)) {
+        decl = stmt;
+        break;
+      }
+    }
+    if (decl === null) {
+      for (const binding of exportListBindings(this.tast, this.entry)) {
+        if (
+          binding.exportedName === "statusItem" &&
+          binding.target !== null &&
+          binding.target !== undefined &&
+          ts.isFunctionDeclaration(binding.target) &&
+          binding.target.getSourceFile() === this.entry
+        ) {
+          decl = binding.target;
+          break;
+        }
+      }
+    }
+    if (decl === null) return;
+
+    const helper = this.table.modelHelperDecls().find(
+      (candidate) => candidate.name === "statusItem" && candidate.decl === decl,
+    );
+    if (helper === undefined || decl.type === undefined) {
+      this.report(
+        "NS1033",
+        "`statusItem` is not a single-Model-parameter helper with an explicit return type.",
+        decl.name ?? decl,
+      );
+      return;
+    }
+
+    const returns = this.table.resolveTypeNode(decl.type);
+    const state = returns.k === "struct" ? this.table.structs.get(returns.name) : undefined;
+    const stateNames = state?.fields.map((field) => field.tsName).sort() ?? [];
+    const iconPath = state?.fields.find((field) => field.tsName === "iconPath");
+    const tooltip = state?.fields.find((field) => field.tsName === "tooltip");
+    const activationCommand = state?.fields.find((field) => field.tsName === "activationCommand");
+    const alternateActivationCommand = state?.fields.find((field) => field.tsName === "alternateActivationCommand");
+    const openCommand = state?.fields.find((field) => field.tsName === "openCommand");
+    const presentationField = state?.fields.find((field) => field.tsName === "presentation");
+    const items = state?.fields.find((field) => field.tsName === "items");
+    const presentationType = presentationField?.type.k === "struct" ? presentationField.type : null;
+    const presentation = presentationType === null ? undefined : this.table.structs.get(presentationType.name);
+    const presentationNames = presentation?.fields.map((field) => field.tsName).sort() ?? [];
+    const title = presentation?.fields.find((field) => field.tsName === "title");
+    const width = presentation?.fields.find((field) => field.tsName === "width");
+    const tone = presentation?.fields.find((field) => field.tsName === "tone");
+    const iconOpacity = presentation?.fields.find((field) => field.tsName === "iconOpacity");
+    const monospaced = presentation?.fields.find((field) => field.tsName === "monospaced");
+    const itemType = items?.type.k === "slice" && items.type.elem.k === "struct" ? items.type.elem : null;
+    const item = itemType === null ? undefined : this.table.structs.get(itemType.name);
+    const itemNames = item?.fields.map((field) => field.tsName).sort() ?? [];
+    const id = item?.fields.find((field) => field.tsName === "id");
+    const label = item?.fields.find((field) => field.tsName === "label");
+    const command = item?.fields.find((field) => field.tsName === "command");
+    const separator = item?.fields.find((field) => field.tsName === "separator");
+    const enabled = item?.fields.find((field) => field.tsName === "enabled");
+    const detail = item?.fields.find((field) => field.tsName === "detail");
+    const role = item?.fields.find((field) => field.tsName === "role");
+    const key = item?.fields.find((field) => field.tsName === "key");
+    const modifiersField = item?.fields.find((field) => field.tsName === "modifiers");
+    const modifiersType = modifiersField?.type.k === "struct" ? modifiersField.type : null;
+    const modifiers = modifiersType === null ? undefined : this.table.structs.get(modifiersType.name);
+    const modifierNames = modifiers?.fields.map((field) => field.tsName).sort() ?? [];
+    const allByteFields = [iconPath, tooltip, activationCommand, alternateActivationCommand, openCommand].every(
+      (field) => field?.type.k === "bytes",
+    );
+    const enumMembersAre = (field: typeof tone, expected: readonly string[]): boolean => {
+      if (field?.type.k !== "enum") return false;
+      const found = this.table.enums.get(field.type.name)?.members.slice().sort() ?? [];
+      return found.join(",") === expected.slice().sort().join(",");
+    };
+    const boolModifierFields = modifiers !== undefined && modifiers.fields.every((field) => field.type.k === "bool");
+    const numericId = id !== undefined && ["number", "i64", "f64", "numAlias"].includes(id.type.k);
+    const numericWidth = width !== undefined && ["number", "i64", "f64", "numAlias"].includes(width.type.k);
+    const numericOpacity = iconOpacity !== undefined && ["number", "i64", "f64", "numAlias"].includes(iconOpacity.type.k);
+    const valid =
+      stateNames.join(",") === "activationCommand,alternateActivationCommand,iconPath,items,openCommand,presentation,tooltip" &&
+      allByteFields &&
+      presentationNames.join(",") === "iconOpacity,monospaced,title,tone,width" &&
+      title?.type.k === "bytes" &&
+      numericWidth &&
+      enumMembersAre(tone, ["normal", "warning", "critical"]) &&
+      numericOpacity &&
+      monospaced?.type.k === "bool" &&
+      item !== undefined &&
+      itemNames.join(",") === "command,detail,enabled,id,key,label,modifiers,role,separator" &&
+      numericId &&
+      label?.type.k === "bytes" &&
+      command?.type.k === "bytes" &&
+      separator?.type.k === "bool" &&
+      enabled?.type.k === "bool" &&
+      detail?.type.k === "bytes" &&
+      enumMembersAre(role, ["command", "info", "header", "hero", "agent", "context"]) &&
+      key?.type.k === "bytes" &&
+      modifierNames.join(",") === "command,control,option,primary,shift" &&
+      boolModifierFields;
+    if (!valid) {
+      this.report(
+        "NS1033",
+        "`statusItem` must return the exact canonical `StatusItemState` record (presentation, install-time shell fields, and rich menu rows); import it from `@native-sdk/core/events`.",
         decl.type,
       );
     }
@@ -1152,7 +1269,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 
@@ -1643,6 +1760,49 @@ export class SubsetChecker {
     return t.isUnion() && t.types.every((m) => m.isStringLiteral());
   }
 
+  /// The canonical name of a function imported from the intrinsic SDK root,
+  /// with local import renames resolved; null for app helpers and globals.
+  private sdkRootFunctionName(expr: ts.Expression): string | null {
+    if (!ts.isIdentifier(expr)) return null;
+    const decl = this.tast.declarationOf(expr);
+    if (!decl || !ts.isFunctionDeclaration(decl) || !decl.name) return null;
+    if (decl.getSourceFile().fileName !== sdkCoreModulePath) return null;
+    return decl.name.text;
+  }
+
+  /// Find the first non-ASCII character spelled in a literal/template part
+  /// of an expression. This walks conditional literal branches and template
+  /// holes too, so an imported alias cannot hide a Unicode static segment.
+  private firstNonAsciiLiteral(expr: ts.Expression): string | null {
+    let found: string | null = null;
+    const inspectText = (value: string): void => {
+      if (found !== null) return;
+      for (const ch of value) {
+        if ((ch.codePointAt(0) ?? 0) > 0x7f) {
+          found = ch;
+          return;
+        }
+      }
+    };
+    const visit = (node: ts.Node): void => {
+      if (found !== null) return;
+      if (ts.isStringLiteralLike(node)) {
+        inspectText(node.text);
+        return;
+      }
+      if (
+        node.kind === ts.SyntaxKind.TemplateHead ||
+        node.kind === ts.SyntaxKind.TemplateMiddle ||
+        node.kind === ts.SyntaxKind.TemplateTail
+      ) {
+        inspectText((node as ts.TemplateLiteralLikeNode).text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(expr);
+    return found;
+  }
+
   private walk(root: ts.Node): void {
     const visit = (node: ts.Node): void => {
       // NS1002 — synchronous updates.
@@ -1809,6 +1969,23 @@ export class SubsetChecker {
       // NS1018 — a tagged template runs a function over strings at runtime.
       if (ts.isTaggedTemplateExpression(node)) {
         this.report("NS1018", "A tagged template runs a function over its strings at runtime.", node);
+      }
+
+      // NS1064 — the narrow bridge fails closed on Unicode. The check is by
+      // resolved SDK identity (import renames honored), never by call text.
+      if (ts.isCallExpression(node) && this.sdkRootFunctionName(node.expression) === "asciiBytes") {
+        const arg = node.arguments[0];
+        if (arg) {
+          const character = this.firstNonAsciiLiteral(arg);
+          if (character !== null) {
+            const codePoint = character.codePointAt(0) ?? 0;
+            this.report(
+              "NS1064",
+              `\`asciiBytes(...)\` contains non-ASCII U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}.`,
+              arg,
+            );
+          }
+        }
       }
 
       // NS1045 — destructuring: record fields into const locals only.

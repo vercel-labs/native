@@ -703,7 +703,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
-@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate>
+@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSMenuDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
@@ -927,6 +927,11 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) dispatch_source_t sigtermSource;
 @property(nonatomic, strong) NSArray<NativeSdkShortcut *> *shortcuts;
 @property(nonatomic, strong) NSStatusItem *statusItem;
+@property(nonatomic, strong) NSImage *statusItemBaseImage;
+@property(nonatomic, strong) NSMenu *statusMenu;
+@property(nonatomic, strong) NSString *statusActivationCommand;
+@property(nonatomic, strong) NSString *statusAlternateActivationCommand;
+@property(nonatomic, strong) NSString *statusOpenCommand;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
@@ -998,6 +1003,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
 - (NSMenuItem *)commandMenuItem:(NSString *)title command:(NSString *)command key:(NSString *)key modifiers:(uint32_t)modifiers enabled:(BOOL)enabled checked:(BOOL)checked;
 - (void)menuCommandItemClicked:(NSMenuItem *)menuItem;
+- (void)menuWillOpen:(NSMenu *)menu;
+- (void)emitStatusCommand:(NSString *)command;
+- (void)statusItemActivated:(id)sender;
 - (uint64_t)activeCommandWindowId;
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount;
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context;
@@ -9523,6 +9531,11 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     }];
 }
 
+- (void)menuWillOpen:(NSMenu *)menu {
+    if (!self.statusItem || menu != self.statusMenu) return;
+    [self emitStatusCommand:self.statusOpenCommand];
+}
+
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount {
     if (menuCount == 0) {
         [self buildMenuBar];
@@ -11831,6 +11844,27 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     }
 }
 
+- (void)emitStatusCommand:(NSString *)command {
+    if (command.length == 0) return;
+    const char *bytes = command.UTF8String;
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_MENU_COMMAND,
+        .window_id = [self activeCommandWindowId],
+        .command_name = bytes,
+        .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+    }];
+}
+
+- (void)statusItemActivated:(id)sender {
+    (void)sender;
+    if ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0 && self.statusAlternateActivationCommand.length > 0) {
+        [self emitStatusCommand:self.statusAlternateActivationCommand];
+        return;
+    }
+    [self emitStatusCommand:self.statusActivationCommand];
+    if (self.statusMenu) [self.statusItem popUpStatusItemMenu:self.statusMenu];
+}
+
 @end
 
 static NSArray<NSString *> *NativeSdkPolicyListFromBytes(const char *bytes, size_t len, NSArray<NSString *> *fallback) {
@@ -12855,43 +12889,302 @@ int native_sdk_appkit_show_message_dialog(native_sdk_appkit_host_t *host, const 
     }
 }
 
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len) {
+static NSImage *NativeSdkTrayImageWithOpacity(NSImage *source, double opacity) {
+    if (!source) return nil;
+    const CGFloat fraction = MAX(0.0, MIN(1.0, opacity));
+    if (fraction >= 1.0) return source;
+    NSImage *image = [[NSImage alloc] initWithSize:source.size];
+    [image lockFocus];
+    [source drawInRect:NSMakeRect(0, 0, source.size.width, source.size.height)
+              fromRect:NSZeroRect
+             operation:NSCompositingOperationSourceOver
+              fraction:fraction
+        respectFlipped:YES
+                 hints:nil];
+    [image unlockFocus];
+    image.template = YES;
+    return image;
+}
+
+static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
+    if (!object.statusItem) return;
+    NSString *title = requestedTitle ?: @"";
+    if (!object.statusItemBaseImage && title.length == 0) {
+        title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+    }
+    NSFont *font = monospaced
+        ? ([NSFont fontWithName:@"Geist Mono" size:11] ?: [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular])
+        : [NSFont systemFontOfSize:11];
+    NSStatusBarButton *button = object.statusItem.button;
+    if (tone == 0) {
+        button.title = title;
+        button.font = font;
+        button.contentTintColor = nil;
+    } else {
+        NSColor *color = tone == 1 ? NSColor.systemOrangeColor : NSColor.systemRedColor;
+        button.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
+            NSForegroundColorAttributeName: color,
+            NSFontAttributeName: font,
+        }];
+        button.contentTintColor = color;
+    }
+    button.image = NativeSdkTrayImageWithOpacity(object.statusItemBaseImage, iconOpacity);
+    object.statusItem.length = width > 0 ? width : (requestedTitle.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength);
+}
+
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         if (object.statusItem) {
             [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         }
-        // A titled menu-bar extra needs variable width; icon-only status
-        // items keep the classic square well.
         BOOL hasTitle = title != NULL && title_len > 0;
         object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
+        object.statusItemBaseImage = nil;
 
         if (icon_path && icon_path_len > 0) {
             NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
-            NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];
+            NSImage *image = [[NSImage alloc] initWithContentsOfFile:NativeSdkResolvedAssetFilePath(path)];
             if (image) {
                 image.template = YES;
                 image.size = NSMakeSize(18, 18);
-                object.statusItem.button.image = image;
+                object.statusItemBaseImage = image;
             }
         }
-        if (hasTitle) {
-            object.statusItem.button.title = [[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"";
-        }
-        if (!object.statusItem.button.image && object.statusItem.button.title.length == 0) {
-            object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
-        }
+        NSString *titleString = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
         if (tooltip && tooltip_len > 0) {
             object.statusItem.button.toolTip = [[NSString alloc] initWithBytes:tooltip length:tooltip_len encoding:NSUTF8StringEncoding];
         }
+        object.statusActivationCommand = activation_command ? ([[NSString alloc] initWithBytes:activation_command length:activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        object.statusAlternateActivationCommand = alternate_activation_command ? ([[NSString alloc] initWithBytes:alternate_activation_command length:alternate_activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        object.statusOpenCommand = open_command ? ([[NSString alloc] initWithBytes:open_command length:open_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        if (object.statusActivationCommand.length > 0 || object.statusAlternateActivationCommand.length > 0) {
+            object.statusItem.button.target = object;
+            object.statusItem.button.action = @selector(statusItemActivated:);
+            [object.statusItem.button sendActionOn:NSEventMaskLeftMouseUp];
+        }
+        NativeSdkApplyTrayPresentation(object, titleString, width, tone, icon_opacity, monospaced != 0);
     }
 }
 
-void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+enum {
+    NativeSdkTrayRoleCommand = 0,
+    NativeSdkTrayRoleInfo = 1,
+    NativeSdkTrayRoleHeader = 2,
+    NativeSdkTrayRoleHero = 3,
+    NativeSdkTrayRoleAgent = 4,
+    NativeSdkTrayRoleContext = 5,
+};
+
+static NSView *NativeSdkTrayHeroView(NSString *headline, NSString *quota) {
+    NSArray<NSString *> *parts = [headline componentsSeparatedByString:@"\n"];
+    NSString *value = parts.count > 0 ? parts[0] : @"";
+    NSString *account = parts.count > 1 ? parts[1] : @"";
+    NSString *stale = parts.count > 2 ? parts[2] : @"";
+    NSString *reset = parts.count > 3 ? parts[3] : @"";
+    CGFloat height = quota.length > 0 ? 56 : 32;
+    if (stale.length > 0) height += 14;
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, height)];
+    NSTextField *amount = [NSTextField labelWithString:value ?: @""];
+    amount.font = [NSFont fontWithName:@"Geist Mono" size:20] ?: [NSFont monospacedDigitSystemFontOfSize:20 weight:NSFontWeightMedium];
+    amount.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *caption = [NSTextField labelWithString:(reset.length > 0 ? [NSString stringWithFormat:@"today · %@", reset] : @"today")];
+    caption.font = [NSFont systemFontOfSize:11];
+    caption.textColor = NSColor.secondaryLabelColor;
+    caption.translatesAutoresizingMaskIntoConstraints = NO;
+    [view addSubview:amount];
+    [view addSubview:caption];
+    [NSLayoutConstraint activateConstraints:@[
+        [amount.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:14],
+        [amount.topAnchor constraintEqualToAnchor:view.topAnchor constant:3],
+        [caption.leadingAnchor constraintEqualToAnchor:amount.trailingAnchor constant:6],
+        [caption.firstBaselineAnchor constraintEqualToAnchor:amount.firstBaselineAnchor],
+    ]];
+    if (account.length > 0) {
+        NSTextField *accountLabel = [NSTextField labelWithString:account];
+        accountLabel.font = [NSFont systemFontOfSize:10];
+        accountLabel.textColor = NSColor.secondaryLabelColor;
+        accountLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        accountLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [view addSubview:accountLabel];
+        [NSLayoutConstraint activateConstraints:@[
+            [accountLabel.trailingAnchor constraintEqualToAnchor:view.trailingAnchor constant:-14],
+            [accountLabel.firstBaselineAnchor constraintEqualToAnchor:caption.firstBaselineAnchor],
+            [accountLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:caption.trailingAnchor constant:12],
+        ]];
+    }
+    if (quota.length > 0) {
+        NSProgressIndicator *progress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+        progress.style = NSProgressIndicatorStyleBar;
+        progress.controlSize = NSControlSizeMini;
+        progress.indeterminate = NO;
+        progress.minValue = 0;
+        progress.maxValue = 100;
+        NSScanner *scanner = [NSScanner scannerWithString:quota];
+        double percent = 0;
+        [scanner scanDouble:&percent];
+        progress.doubleValue = MIN(MAX(percent, 0), 100);
+        progress.translatesAutoresizingMaskIntoConstraints = NO;
+        NSTextField *quotaLabel = [NSTextField labelWithString:quota];
+        quotaLabel.font = [NSFont systemFontOfSize:11];
+        quotaLabel.textColor = NSColor.secondaryLabelColor;
+        quotaLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [view addSubview:progress];
+        [view addSubview:quotaLabel];
+        [NSLayoutConstraint activateConstraints:@[
+            [progress.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:14],
+            [progress.trailingAnchor constraintEqualToAnchor:view.trailingAnchor constant:-14],
+            [progress.topAnchor constraintEqualToAnchor:amount.bottomAnchor constant:4],
+            [progress.heightAnchor constraintEqualToConstant:5],
+            [quotaLabel.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:14],
+            [quotaLabel.topAnchor constraintEqualToAnchor:progress.bottomAnchor constant:2],
+        ]];
+    }
+    if (stale.length > 0) {
+        NSTextField *staleLabel = [NSTextField labelWithString:stale];
+        staleLabel.font = [NSFont systemFontOfSize:10];
+        staleLabel.textColor = NSColor.tertiaryLabelColor;
+        staleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [view addSubview:staleLabel];
+        [NSLayoutConstraint activateConstraints:@[
+            [staleLabel.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:14],
+            [staleLabel.bottomAnchor constraintEqualToAnchor:view.bottomAnchor constant:-6],
+        ]];
+    }
+    view.accessibilityLabel = quota.length > 0 ? [NSString stringWithFormat:@"%@ today, %@", value ?: @"", quota] : [NSString stringWithFormat:@"%@ today", value ?: @""];
+    view.accessibilityRole = NSAccessibilityGroupRole;
+    return view;
+}
+
+static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32_t *itemIds, NSArray<NSString *> *labels, NSArray<NSString *> *states, NSArray<NSNumber *> *enabled) {
+    NSStackView *row = [[NSStackView alloc] initWithFrame:NSMakeRect(0, 0, 320, 32)];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 8;
+    row.edgeInsets = NSEdgeInsetsMake(5, 14, 5, 14);
+    NSString *appearance = [NSApp.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+    BOOL dark = [appearance isEqualToString:NSAppearanceNameDarkAqua];
+    NSColor *warningColor = dark ? NSColor.systemOrangeColor : [NSColor colorWithSRGBRed:0.54 green:0.23 blue:0.00 alpha:1.0];
+    NSColor *successColor = dark ? NSColor.systemGreenColor : [NSColor colorWithSRGBRed:0.06 green:0.42 blue:0.20 alpha:1.0];
+    for (NSUInteger index = 0; index < labels.count; index++) {
+        NSString *state = states[index];
+        BOOL configured = [state isEqualToString:@"configured"];
+        BOOL warning = [state isEqualToString:@"warning"];
+        NSString *title = [NSString stringWithFormat:@"%@ %@", configured ? @"✓" : warning ? @"⚠" : @"○", labels[index]];
+        if (configured) {
+            NSTextField *label = [NSTextField labelWithString:title];
+            label.font = [NSFont systemFontOfSize:11];
+            label.textColor = successColor;
+            [row addArrangedSubview:label];
+        } else {
+            NSView *control = [[NSView alloc] initWithFrame:NSZeroRect];
+            NSTextField *label = [NSTextField labelWithString:title];
+            label.font = [NSFont systemFontOfSize:11];
+            label.textColor = warning ? warningColor : NSColor.secondaryLabelColor;
+            label.translatesAutoresizingMaskIntoConstraints = NO;
+            label.accessibilityElement = NO;
+            NSButton *button = [NSButton buttonWithTitle:@"" target:object action:@selector(trayMenuItemClicked:)];
+            button.tag = itemIds[index];
+            button.bordered = NO;
+            button.transparent = YES;
+            button.enabled = enabled[index].boolValue;
+            button.translatesAutoresizingMaskIntoConstraints = NO;
+            button.accessibilityLabel = title;
+            [control addSubview:label];
+            [control addSubview:button];
+            [NSLayoutConstraint activateConstraints:@[
+                [label.leadingAnchor constraintEqualToAnchor:control.leadingAnchor],
+                [label.trailingAnchor constraintEqualToAnchor:control.trailingAnchor],
+                [label.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
+                [button.leadingAnchor constraintEqualToAnchor:control.leadingAnchor],
+                [button.trailingAnchor constraintEqualToAnchor:control.trailingAnchor],
+                [button.topAnchor constraintEqualToAnchor:control.topAnchor],
+                [button.bottomAnchor constraintEqualToAnchor:control.bottomAnchor],
+            ]];
+            [row addArrangedSubview:control];
+        }
+    }
+    [row.heightAnchor constraintEqualToConstant:32].active = YES;
+    [row.widthAnchor constraintEqualToConstant:320].active = YES;
+    return row;
+}
+
+static NSView *NativeSdkTrayContextView(NSString *primary, NSString *secondary) {
+    NSArray<NSString *> *parts = [secondary componentsSeparatedByString:@"\n"];
+    NSString *quota = parts.count > 0 ? parts[0] : @"";
+    NSString *windows = parts.count > 1 ? parts[1] : @"";
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 58)];
+    NSTextField *primaryLabel = [NSTextField labelWithString:primary ?: @""];
+    primaryLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    primaryLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    primaryLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *secondaryLabel = [NSTextField labelWithString:quota ?: @""];
+    secondaryLabel.font = [NSFont systemFontOfSize:10];
+    secondaryLabel.textColor = NSColor.secondaryLabelColor;
+    secondaryLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *windowsLabel = [NSTextField labelWithString:windows ?: @""];
+    windowsLabel.font = [NSFont systemFontOfSize:10];
+    windowsLabel.textColor = NSColor.secondaryLabelColor;
+    windowsLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [view addSubview:primaryLabel];
+    [view addSubview:secondaryLabel];
+    [view addSubview:windowsLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [primaryLabel.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:14],
+        [primaryLabel.trailingAnchor constraintLessThanOrEqualToAnchor:view.trailingAnchor constant:-14],
+        [primaryLabel.topAnchor constraintEqualToAnchor:view.topAnchor constant:6],
+        [secondaryLabel.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:14],
+        [secondaryLabel.topAnchor constraintEqualToAnchor:primaryLabel.bottomAnchor constant:2],
+        [windowsLabel.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:14],
+        [windowsLabel.topAnchor constraintEqualToAnchor:secondaryLabel.bottomAnchor constant:2],
+    ]];
+    view.accessibilityLabel = secondary.length > 0 ? [NSString stringWithFormat:@"%@, %@", primary ?: @"", [secondary stringByReplacingOccurrencesOfString:@"\n" withString:@", "]] : primary ?: @"";
+    view.accessibilityRole = NSAccessibilityGroupRole;
+    return view;
+}
+
+static NSView *NativeSdkTrayReadoutView(NSString *label, NSString *value, BOOL isHeader) {
+    NSFont *bodyFont = [NSFont menuFontOfSize:0];
+    NSTextField *labelField = [NSTextField labelWithString:label ?: @""];
+    labelField.font = isHeader ? [NSFont systemFontOfSize:bodyFont.pointSize - 2 weight:NSFontWeightSemibold] : bodyFont;
+    labelField.textColor = isHeader ? NSColor.secondaryLabelColor : NSColor.labelColor;
+    labelField.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:labelField];
+    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:@[
+        [labelField.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:14],
+        [labelField.topAnchor constraintEqualToAnchor:row.topAnchor constant:3],
+        [labelField.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-3],
+    ]];
+    if (value.length > 0) {
+        NSTextField *valueField = [NSTextField labelWithString:value];
+        valueField.font = [NSFont monospacedDigitSystemFontOfSize:bodyFont.pointSize weight:NSFontWeightRegular];
+        valueField.textColor = NSColor.secondaryLabelColor;
+        valueField.translatesAutoresizingMaskIntoConstraints = NO;
+        [row addSubview:valueField];
+        [constraints addObjectsFromArray:@[
+            [valueField.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-14],
+            [valueField.firstBaselineAnchor constraintEqualToAnchor:labelField.firstBaselineAnchor],
+            [valueField.leadingAnchor constraintGreaterThanOrEqualToAnchor:labelField.trailingAnchor constant:28],
+        ]];
+        row.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", label ?: @"", value];
+    } else {
+        [constraints addObject:[labelField.trailingAnchor constraintLessThanOrEqualToAnchor:row.trailingAnchor constant:-14]];
+        row.accessibilityLabel = label ?: @"";
+    }
+    [NSLayoutConstraint activateConstraints:constraints];
+    row.accessibilityRole = NSAccessibilityStaticTextRole;
+    return row;
+}
+
+void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         if (!object.statusItem) return;
         NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+        menu.autoenablesItems = NO;
+        NSMutableArray<NSView *> *readoutRows = [NSMutableArray array];
         for (size_t i = 0; i < count; i++) {
             if (separators[i]) {
                 [menu addItem:[NSMenuItem separatorItem]];
@@ -12904,9 +13197,65 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             item.tag = (NSInteger)item_ids[i];
             item.target = object;
             item.enabled = enabled_flags[i] != 0;
+            if (keys[i] && key_lens[i] > 0) {
+                NSString *key = [[NSString alloc] initWithBytes:keys[i] length:key_lens[i] encoding:NSUTF8StringEncoding] ?: @"";
+                item.keyEquivalent = NativeSdkMenuKeyEquivalent(key);
+                item.keyEquivalentModifierMask = NativeSdkMenuModifierFlags(modifiers[i]);
+            }
+            NSString *detail = details[i] && detail_lens[i] > 0 ? [[NSString alloc] initWithBytes:details[i] length:detail_lens[i] encoding:NSUTF8StringEncoding] : @"";
+            if (roles[i] == NativeSdkTrayRoleHero) {
+                item.action = NULL;
+                item.target = nil;
+                item.view = NativeSdkTrayHeroView(label, detail);
+                [menu addItem:item];
+                continue;
+            }
+            if (roles[i] == NativeSdkTrayRoleAgent) {
+                NSMutableArray<NSString *> *agentLabels = [NSMutableArray array];
+                NSMutableArray<NSString *> *agentStates = [NSMutableArray array];
+                NSMutableArray<NSNumber *> *agentEnabled = [NSMutableArray array];
+                uint32_t agentIds[32] = {0};
+                size_t agentCount = 0;
+                while (i < count && roles[i] == NativeSdkTrayRoleAgent && agentCount < 32) {
+                    [agentLabels addObject:(labels[i] ? [[NSString alloc] initWithBytes:labels[i] length:label_lens[i] encoding:NSUTF8StringEncoding] : @"")];
+                    [agentStates addObject:(details[i] ? [[NSString alloc] initWithBytes:details[i] length:detail_lens[i] encoding:NSUTF8StringEncoding] : @"")];
+                    [agentEnabled addObject:@(enabled_flags[i] != 0)];
+                    agentIds[agentCount++] = item_ids[i];
+                    i++;
+                }
+                i--;
+                item.action = NULL;
+                item.target = nil;
+                item.view = NativeSdkTrayAgentsView(object, agentIds, agentLabels, agentStates, agentEnabled);
+                [menu addItem:item];
+                continue;
+            }
+            if (roles[i] == NativeSdkTrayRoleContext) {
+                item.action = NULL;
+                item.target = nil;
+                item.view = NativeSdkTrayContextView(label, detail);
+                [menu addItem:item];
+                continue;
+            }
+            if (roles[i] == NativeSdkTrayRoleHeader || roles[i] == NativeSdkTrayRoleInfo) {
+                item.action = NULL;
+                item.target = nil;
+                NSView *view = NativeSdkTrayReadoutView(label, roles[i] == NativeSdkTrayRoleInfo ? detail : @"", roles[i] == NativeSdkTrayRoleHeader);
+                item.view = view;
+                [readoutRows addObject:view];
+            }
             [menu addItem:item];
         }
-        object.statusItem.menu = menu;
+        if (readoutRows.count > 0) {
+            CGFloat widest = 0;
+            for (NSView *row in readoutRows) widest = MAX(widest, row.fittingSize.width);
+            for (NSView *row in readoutRows) [row.widthAnchor constraintEqualToConstant:widest].active = YES;
+        }
+        menu.delegate = object;
+        object.statusMenu = menu;
+        if (object.statusActivationCommand.length == 0 && object.statusAlternateActivationCommand.length == 0) {
+            object.statusItem.menu = menu;
+        }
     }
 }
 
@@ -12914,17 +13263,16 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         if (!object.statusItem) return;
-        BOOL hasTitle = title != NULL && title_len > 0;
-        NSString *value = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        object.statusItem.button.title = value;
-        if (!object.statusItem.button.image && value.length == 0) {
-            // Same fallback as create: a bare status item must still show
-            // SOMETHING to stay clickable.
-            object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
-        }
-        // Titled extras need variable width; icon-only ones keep the
-        // classic square well (mirrors create's length choice).
-        object.statusItem.length = object.statusItem.button.title.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength;
+        NSString *value = title && title_len > 0 ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        NativeSdkApplyTrayPresentation(object, value, 0, 0, 1, NO);
+    }
+}
+
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        NSString *value = title ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        NativeSdkApplyTrayPresentation(object, value, width, tone, icon_opacity, monospaced != 0);
     }
 }
 
@@ -12933,6 +13281,8 @@ void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host) {
     if (object.statusItem) {
         [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         object.statusItem = nil;
+        object.statusItemBaseImage = nil;
+        object.statusMenu = nil;
     }
 }
 

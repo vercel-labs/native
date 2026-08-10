@@ -93,6 +93,10 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .command = item.command,
                     .separator = item.separator,
                     .enabled = item.enabled,
+                    .detail = item.detail,
+                    .role = item.role,
+                    .key = item.key,
+                    .modifiers = item.modifiers,
                 };
             }
             return .{

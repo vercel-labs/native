@@ -44,7 +44,12 @@
 //! the committed model. One model-helper convention joins that wiring:
 //! an exported `themePack(model): "house" | "geist"` helper selects the
 //! stock pack live through `theme_fn`, without taking ownership of the
-//! system appearance axes. The two seams the core owns — `update_fx` and
+//! system appearance axes. An exported
+//! `statusItem(model): StatusItemState` helper similarly owns the complete
+//! menu-bar item through `status_item_fn`: install-time icon/tooltip/click
+//! hooks plus the live presentation and menu. In hand wiring, empty
+//! install-time fields inherit the static `status_item` options. The two
+//! seams the core owns — `update_fx` and
 //! `init_fx` — are stamped by this adapter and must be left null.
 //!
 //! `Options.sync` is deliberately unsupported: it mutates the model in
@@ -199,6 +204,18 @@ pub fn TsUiApp(comptime core: type) type {
                 comptime validateThemePackHelper();
                 stamped.theme_fn = themePackAdapter;
             }
+            // A statusItem helper is the TS app's model-derived shell
+            // declaration. UiApp installs it on the first frame and
+            // independently patches presentation/menu after each
+            // committed rebuild; empty install fields inherit custom
+            // static status_item options in hand wiring.
+            if (comptime @hasDecl(Model, "statusItem")) {
+                if (options.status_item_fn != null) {
+                    @panic("TsUiApp wires status_item_fn from the core's statusItem helper - remove the wiring's status_item_fn");
+                }
+                comptime validateStatusItemHelper();
+                stamped.status_item_fn = statusItemAdapter;
+            }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
             // teaching compile error in the adapter below). A wiring that
@@ -263,6 +280,208 @@ pub fn TsUiApp(comptime core: type) type {
             {
                 @compileError(teaching);
             }
+        }
+
+        /// Convert the compiled core's canonical status-item records into
+        /// the platform rows UiApp already knows how to validate, copy,
+        /// hash, install, and patch. Interface records cross the core ABI
+        /// by pointer; value records are accepted too so hand-assembled
+        /// compiler fixtures exercise the same seam.
+        fn statusItemAdapter(model: *const Model, scratch: *App.StatusItemScratch) App.StatusItemState {
+            const params = @typeInfo(@TypeOf(Model.statusItem)).@"fn".params;
+            const raw_state = if (comptime params.len == 1)
+                model.statusItem()
+            else
+                model.statusItem(core.rt.frameAllocator());
+            const state = if (comptime @typeInfo(@TypeOf(raw_state)) == .pointer) raw_state.* else raw_state;
+            if (state.items.len > scratch.items.len) {
+                // The callback cannot return an error. Feed UiApp one
+                // deliberately invalid actionable row so the ordinary
+                // tray validator rejects the over-capacity declaration
+                // loudly instead of silently truncating it.
+                scratch.items[0] = .{ .id = 0, .label = "status item has more than 32 rows", .command = "status-item-overflow" };
+                return statusItemState(state, scratch.items[0..1]);
+            }
+            for (state.items, 0..) |raw_item, index| {
+                const item = if (comptime @typeInfo(@TypeOf(raw_item)) == .pointer) raw_item.* else raw_item;
+                scratch.items[index] = .{
+                    .id = statusItemId(item.id),
+                    .label = item.label,
+                    .command = item.command,
+                    .separator = item.separator,
+                    .enabled = item.enabled,
+                    .detail = item.detail,
+                    .role = statusItemRole(item.role),
+                    .key = item.key,
+                    .modifiers = .{
+                        .primary = item.modifiers.primary,
+                        .command = item.modifiers.command,
+                        .control = item.modifiers.control,
+                        .option = item.modifiers.option,
+                        .shift = item.modifiers.shift,
+                    },
+                };
+            }
+            return statusItemState(state, scratch.items[0..state.items.len]);
+        }
+
+        fn statusItemState(state: anytype, items: []const platform.TrayMenuItem) App.StatusItemState {
+            const presentation = if (comptime @typeInfo(@TypeOf(state.presentation)) == .pointer) state.presentation.* else state.presentation;
+            return .{
+                .presentation = .{
+                    .title = presentation.title,
+                    .width = statusItemFloat(presentation.width),
+                    .tone = statusItemTone(presentation.tone),
+                    .icon_opacity = statusItemFloat(presentation.iconOpacity),
+                    .monospaced = presentation.monospaced,
+                },
+                .icon_path = state.iconPath,
+                .tooltip = state.tooltip,
+                .activation_command = state.activationCommand,
+                .alternate_activation_command = state.alternateActivationCommand,
+                .open_command = state.openCommand,
+                .items = items,
+            };
+        }
+
+        /// JavaScript `number` slots may infer as integer or float in the
+        /// compiled core. Tray ids are u32; a negative, fractional,
+        /// non-finite, or overflowing value maps to zero so the runtime's
+        /// existing actionable-row validation produces the rejection.
+        fn statusItemId(value: anytype) u32 {
+            const number: f64 = switch (@typeInfo(@TypeOf(value))) {
+                .int => @floatFromInt(value),
+                .float => @floatCast(value),
+                else => unreachable,
+            };
+            if (!std.math.isFinite(number) or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32))) or @floor(number) != number) return 0;
+            return @intFromFloat(number);
+        }
+
+        fn statusItemFloat(value: anytype) f32 {
+            return switch (@typeInfo(@TypeOf(value))) {
+                .int => @floatFromInt(value),
+                .float => @floatCast(value),
+                else => unreachable,
+            };
+        }
+
+        fn statusItemTone(value: anytype) platform.TrayTone {
+            const name = @tagName(value);
+            inline for (std.meta.fields(platform.TrayTone)) |field| {
+                if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn statusItemRole(value: anytype) platform.TrayItemRole {
+            const name = @tagName(value);
+            inline for (std.meta.fields(platform.TrayItemRole)) |field| {
+                if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        /// Teaching re-derivation of frontend NS1033 for hand-assembled
+        /// cores. The nested records stay flat and exact so their ABI
+        /// projection is deterministic and arrays need no tagged union.
+        fn validateStatusItemHelper() void {
+            const teaching = "TsUiApp: statusItem must be exported from core.ts as statusItem(model: Model): StatusItemState; import StatusItemState from @native-sdk/core/events";
+            const helper_info = @typeInfo(@TypeOf(Model.statusItem));
+            if (helper_info != .@"fn") @compileError(teaching);
+            const function = helper_info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type == null or function.params[0].type.? != *const Model) {
+                @compileError(teaching);
+            }
+            if (function.params.len == 2) {
+                if (function.params[1].type == null or function.params[1].type.? != std.mem.Allocator or
+                    !@hasDecl(core, "rt") or !@hasDecl(core.rt, "frameAllocator"))
+                {
+                    @compileError(teaching);
+                }
+            }
+            const RawState = function.return_type orelse @compileError(teaching);
+            const State = statusItemRecordType(RawState, teaching);
+            const state_info = @typeInfo(State).@"struct";
+            if (state_info.fields.len != 7 or !@hasField(State, "iconPath") or !@hasField(State, "tooltip") or
+                !@hasField(State, "activationCommand") or !@hasField(State, "alternateActivationCommand") or
+                !@hasField(State, "openCommand") or !@hasField(State, "presentation") or !@hasField(State, "items"))
+            {
+                @compileError(teaching);
+            }
+            if (@FieldType(State, "iconPath") != []const u8 or @FieldType(State, "tooltip") != []const u8 or
+                @FieldType(State, "activationCommand") != []const u8 or @FieldType(State, "alternateActivationCommand") != []const u8 or
+                @FieldType(State, "openCommand") != []const u8)
+            {
+                @compileError(teaching);
+            }
+            const Presentation = statusItemRecordType(@FieldType(State, "presentation"), teaching);
+            const presentation_info = @typeInfo(Presentation).@"struct";
+            if (presentation_info.fields.len != 5 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
+                !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced"))
+            {
+                @compileError(teaching);
+            }
+            if (@FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
+                !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
+                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool)
+            {
+                @compileError(teaching);
+            }
+            const items_info = @typeInfo(@FieldType(State, "items"));
+            if (items_info != .pointer or items_info.pointer.size != .slice or !items_info.pointer.is_const) @compileError(teaching);
+            const Item = statusItemRecordType(items_info.pointer.child, teaching);
+            const item_info = @typeInfo(Item).@"struct";
+            if (item_info.fields.len != 9 or !@hasField(Item, "id") or !@hasField(Item, "label") or
+                !@hasField(Item, "command") or !@hasField(Item, "separator") or !@hasField(Item, "enabled") or
+                !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or !@hasField(Item, "modifiers"))
+            {
+                @compileError(teaching);
+            }
+            if (!statusItemNumericType(@FieldType(Item, "id"))) @compileError(teaching);
+            if (@FieldType(Item, "label") != []const u8 or @FieldType(Item, "command") != []const u8 or
+                @FieldType(Item, "separator") != bool or @FieldType(Item, "enabled") != bool or
+                @FieldType(Item, "detail") != []const u8 or
+                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context" }) or
+                @FieldType(Item, "key") != []const u8)
+            {
+                @compileError(teaching);
+            }
+            const Modifiers = statusItemRecordType(@FieldType(Item, "modifiers"), teaching);
+            const modifiers_info = @typeInfo(Modifiers).@"struct";
+            if (modifiers_info.fields.len != 5 or !@hasField(Modifiers, "primary") or !@hasField(Modifiers, "command") or
+                !@hasField(Modifiers, "control") or !@hasField(Modifiers, "option") or !@hasField(Modifiers, "shift") or
+                @FieldType(Modifiers, "primary") != bool or @FieldType(Modifiers, "command") != bool or
+                @FieldType(Modifiers, "control") != bool or @FieldType(Modifiers, "option") != bool or @FieldType(Modifiers, "shift") != bool)
+            {
+                @compileError(teaching);
+            }
+        }
+
+        fn statusItemNumericType(comptime T: type) bool {
+            return @typeInfo(T) == .int or @typeInfo(T) == .float;
+        }
+
+        fn statusItemEnumType(comptime T: type, comptime expected: []const []const u8) bool {
+            const info = @typeInfo(T);
+            if (info != .@"enum" or info.@"enum".fields.len != expected.len) return false;
+            inline for (expected) |name| {
+                var found = false;
+                inline for (info.@"enum".fields) |field| {
+                    if (std.mem.eql(u8, name, field.name)) found = true;
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+
+        fn statusItemRecordType(comptime Raw: type, comptime teaching: []const u8) type {
+            const Record = switch (@typeInfo(Raw)) {
+                .pointer => |pointer| if (pointer.size == .one and pointer.is_const) pointer.child else @compileError(teaching),
+                else => Raw,
+            };
+            if (@typeInfo(Record) != .@"struct") @compileError(teaching);
+            return Record;
         }
 
         /// `Options.init_fx`: register the wiring's boot images, perform

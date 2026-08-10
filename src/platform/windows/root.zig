@@ -1502,7 +1502,9 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
         labels[index] = label.ptr;
         label_lens[index] = label.len;
         separators[index] = if (item.separator) 1 else 0;
-        enabled_flags[index] = if (item.enabled) 1 else 0;
+        // Windows has no rich status-menu row seam yet. Keep semantic
+        // readouts visibly present, but never expose them as dead actions.
+        enabled_flags[index] = if (item.enabled and (item.role == .command or item.role == .agent)) 1 else 0;
     }
     if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, count) == 0) return error.UnsupportedService;
 }

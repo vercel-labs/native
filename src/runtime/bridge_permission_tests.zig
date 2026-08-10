@@ -320,22 +320,41 @@ test "runtime validates native OS actions before platform dispatch" {
 
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createTray(.{ .items = &.{.{ .label = "" }} }));
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .label = "" }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createTray(.{ .presentation = .{ .width = -1 } }));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createTray(.{ .presentation = .{ .icon_opacity = 1.1 } }));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Readout", .command = "app.bad", .role = .info }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Command", .detail = "not allowed" }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "No command", .key = "q" }}));
     try harness.runtime.createTray(.{
         .icon_path = "/tmp/tray.png",
         .tooltip = "native-sdk",
+        .presentation = .{ .title = "LIVE", .width = 62, .tone = .warning, .icon_opacity = 0.5, .monospaced = true },
+        .activation_command = "app.refresh",
+        .alternate_activation_command = "app.mode",
+        .open_command = "app.opened",
         .items = &.{
-            .{ .id = 1, .label = "Open" },
+            .{ .id = 1, .label = "Open", .detail = "ready", .role = .info },
             .{ .separator = true },
-            .{ .id = 2, .label = "Quit", .enabled = false },
+            .{ .id = 2, .label = "Quit", .command = "app.quit", .enabled = false, .detail = "warning", .role = .agent, .key = "q", .modifiers = .{ .command = true } },
         },
     });
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
     try std.testing.expectEqualStrings("/tmp/tray.png", harness.null_platform.lastTrayIconPath());
     try std.testing.expectEqualStrings("native-sdk", harness.null_platform.lastTrayTooltip());
+    try std.testing.expectEqualStrings("LIVE", harness.null_platform.lastTrayTitle());
+    try std.testing.expectEqualStrings("app.refresh", harness.null_platform.lastTrayActivationCommand());
+    try std.testing.expectEqualStrings("app.mode", harness.null_platform.lastTrayAlternateActivationCommand());
+    try std.testing.expectEqualStrings("app.opened", harness.null_platform.lastTrayOpenCommand());
+    try std.testing.expectEqual(platform.TrayTone.warning, harness.null_platform.lastTrayPresentation().tone);
+    try std.testing.expectEqual(@as(f32, 62), harness.null_platform.lastTrayPresentation().width);
     try std.testing.expectEqual(@as(usize, 3), harness.null_platform.trayItems().len);
     try std.testing.expectEqualStrings("Open", harness.null_platform.trayItems()[0].label);
     try std.testing.expect(harness.null_platform.trayItems()[1].separator);
     try std.testing.expect(!harness.null_platform.trayItems()[2].enabled);
+    try std.testing.expectEqual(platform.TrayItemRole.agent, harness.null_platform.trayItems()[2].role);
+    try std.testing.expectEqualStrings("warning", harness.null_platform.trayItems()[2].detail);
+    try std.testing.expectEqualStrings("q", harness.null_platform.trayItems()[2].key);
+    try std.testing.expect(harness.null_platform.trayItems()[2].modifiers.command);
     try harness.runtime.updateTrayMenu(&.{.{ .id = 3, .label = "Settings" }});
     try std.testing.expectEqual(@as(usize, 2), harness.null_platform.trayUpdateCount());
     try std.testing.expectEqualStrings("Settings", harness.null_platform.trayItems()[0].label);

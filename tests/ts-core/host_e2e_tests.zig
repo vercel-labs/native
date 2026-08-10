@@ -368,6 +368,53 @@ test "the compiled core boots through init_fx: boot request and subscription tim
     try std.testing.expectEqual(@as(i64, 0), h.app_state.model.ticks);
 }
 
+test "the compiled core's statusItem helper installs and updates title and menu" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // The installing frame derived the status item from the committed
+    // boot model without any per-app Zig status_item_fn wiring.
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.trayCreateCount());
+    try std.testing.expectEqualStrings("TS ON", h.harness.null_platform.lastTrayTitle());
+    try std.testing.expectEqualStrings("assets/tray.svg", h.harness.null_platform.lastTrayIconPath());
+    try std.testing.expectEqualStrings("TypeScript status fixture · UTF-8 😀", h.harness.null_platform.lastTrayTooltip());
+    try std.testing.expectEqualStrings("core.refresh", h.harness.null_platform.lastTrayActivationCommand());
+    try std.testing.expectEqualStrings("core.toggle", h.harness.null_platform.lastTrayAlternateActivationCommand());
+    try std.testing.expectEqualStrings("core.refresh", h.harness.null_platform.lastTrayOpenCommand());
+    const installed_presentation = h.harness.null_platform.lastTrayPresentation();
+    try std.testing.expectEqual(@as(f32, 64), installed_presentation.width);
+    try std.testing.expectEqual(native_sdk.platform.TrayTone.normal, installed_presentation.tone);
+    try std.testing.expectEqual(@as(f32, 1), installed_presentation.icon_opacity);
+    try std.testing.expect(installed_presentation.monospaced);
+    try std.testing.expectEqual(@as(usize, 3), h.harness.null_platform.trayItems().len);
+    try std.testing.expectEqualStrings("Pause polling…", h.harness.null_platform.trayItems()[0].label);
+    try std.testing.expectEqualStrings("configured ✓", h.harness.null_platform.trayItems()[0].detail);
+    try std.testing.expectEqual(native_sdk.platform.TrayItemRole.agent, h.harness.null_platform.trayItems()[0].role);
+    try std.testing.expect(h.harness.null_platform.trayItems()[1].separator);
+    try std.testing.expect(h.harness.null_platform.trayItems()[2].enabled);
+    try std.testing.expectEqualStrings("r", h.harness.null_platform.trayItems()[2].key);
+    try std.testing.expect(h.harness.null_platform.trayItems()[2].modifiers.primary);
+    const menu_updates = h.harness.null_platform.trayUpdateCount();
+    const title_updates = h.harness.null_platform.trayTitleUpdateCount();
+
+    // Native tray selection resolves id -> command, command -> Msg, then
+    // the committed model drives both live shell patches.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .tray_action = 1 });
+    try std.testing.expect(!Bridge.model().polling);
+    try std.testing.expectEqualStrings("TS OFF", h.harness.null_platform.lastTrayTitle());
+    const updated_presentation = h.harness.null_platform.lastTrayPresentation();
+    try std.testing.expectEqual(@as(f32, 72), updated_presentation.width);
+    try std.testing.expectEqual(native_sdk.platform.TrayTone.warning, updated_presentation.tone);
+    try std.testing.expectEqual(@as(f32, 0.5), updated_presentation.icon_opacity);
+    try std.testing.expectEqualStrings("Resume polling…", h.harness.null_platform.trayItems()[0].label);
+    try std.testing.expectEqualStrings("warning ⚠", h.harness.null_platform.trayItems()[0].detail);
+    try std.testing.expect(!h.harness.null_platform.trayItems()[2].enabled);
+    try std.testing.expectEqual(title_updates + 1, h.harness.null_platform.trayTitleUpdateCount());
+    try std.testing.expectEqual(menu_updates + 1, h.harness.null_platform.trayUpdateCount());
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.trayCreateCount());
+}
+
 test "requests round-trip, replace, and cancel through the real dispatch path" {
     HostStub.reset();
     const h = try Harness.create();

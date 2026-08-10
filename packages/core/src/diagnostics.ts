@@ -43,7 +43,7 @@ export const rules = {
   NS1004: {
     id: "NS1004",
     title: "text is not indexable",
-    fix: "Store text as `Uint8Array` bytes and index those; turn literals and templates into bytes with the `asciiBytes` intrinsic from \"@native-sdk/core\".",
+    fix: "Store text as `Uint8Array` bytes and index those; turn user-visible literals/templates into bytes with `utf8Bytes` from \"@native-sdk/core\" (`asciiBytes` is the narrower machine-text form).",
     why: "Code-unit reads behave differently in JS (UTF-16) and native (UTF-8); with them gone the encodings are indistinguishable.",
   },
   NS1005: {
@@ -127,7 +127,7 @@ export const rules = {
   NS1018: {
     id: "NS1018",
     title: "text builds with templates and bytes, not +",
-    fix: "Build the text as bytes: `asciiBytes(`${count} items`)` from \"@native-sdk/core\", or stitch byte buffers with `new Uint8Array(n)` + `.set`.",
+    fix: "Build the text as bytes: `utf8Bytes(`${count} items`)` from \"@native-sdk/core\", or stitch byte buffers with `new Uint8Array(n)` + `.set`.",
     why: "Runtime string concatenation would need a JS string heap the native binary does not carry; bytes in the frame arena are the one dynamic-text representation.",
   },
   NS1019: {
@@ -163,7 +163,7 @@ export const rules = {
   NS1024: {
     id: "NS1024",
     title: "model text is bytes",
-    fix: "Type the field `Uint8Array` and build its values with the `asciiBytes` intrinsic from \"@native-sdk/core\" (literals and templates fold at compile time), or use a string-literal union (`\"low\" | \"high\"`) when the field holds one of a closed set of tags.",
+    fix: "Type the field `Uint8Array` and build user-visible values with `utf8Bytes` from \"@native-sdk/core\" (`asciiBytes` is for guaranteed-ASCII machine text), or use a string-literal union (`\"low\" | \"high\"`) when the field holds one of a closed set of tags.",
     why: "A `string` model field would need a JS string heap at every commit; bytes have exactly one representation under node and native, and literal-union tags compile to a native enum.",
   },
   NS1025: {
@@ -217,8 +217,8 @@ export const rules = {
   NS1033: {
     id: "NS1033",
     title: "wiring exports match their runtime shapes",
-    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack` where `ThemePack` is `\"house\" | \"geist\"`; `export const appearanceMsg = \"<arm>\"` / `chromeMsg = \"<arm>\"` naming a Msg arm with that channel's record shape; `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` with one-`Uint8Array`-field arms.",
-    why: "The generated wiring builds host events and model-derived theme selection structurally from your declarations at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
+    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; `statusItem(model: Model): StatusItemState`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; and `envMsgs` entries targeting one-`Uint8Array`-field arms. Import canonical records from `@native-sdk/core/events`.",
+    why: "The generated wiring builds host events, model-derived theme selection, and the live menu-bar status item structurally from your declarations at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
   },
   NS1034: {
     id: "NS1034",
@@ -253,7 +253,7 @@ export const rules = {
   NS1039: {
     id: "NS1039",
     title: "a namespace import is a compile-time alias",
-    fix: "Reference members through the alias (`ns.helper(x)`, `ns.Config`) or import them by name; the SDK intrinsics are always named imports — `import { Cmd, Sub, asciiBytes } from \"@native-sdk/core\"`.",
+    fix: "Reference members through the alias (`ns.helper(x)`, `ns.Config`) or import them by name; the SDK intrinsics are always named imports — `import { Cmd, Sub, asciiBytes, utf8Bytes } from \"@native-sdk/core\"`.",
     why: "The core emits as one flat namespace, so `ns` is dot-syntax that erases at build time — it is not an object value that can be stored or passed — and the effect purity rules recognize the SDK factories by their imported names.",
   },
   NS1040: {
@@ -399,6 +399,12 @@ export const rules = {
     title: "the contract sidecar carries every crossing shape",
     fix: "Spell the crossing in a schema-carried form: value-stored records (object-literal aliases) for message payloads, named records around optional or array payloads, and integer aliases whose values reach past 255.",
     why: "The contract sidecar is the machine-readable twin of the core's surface, and a shape its schema cannot state would silently drop from every consumer — so the build stops here with the spelling that carries it instead.",
+  },
+  NS1064: {
+    id: "NS1064",
+    title: "asciiBytes is ASCII-only",
+    fix: "Use `utf8Bytes(...)` for user-visible or Unicode text; keep `asciiBytes(...)` for guaranteed-ASCII command names, keys, paths, URLs, and protocol values.",
+    why: "JavaScript strings are UTF-16 while the native text boundary is UTF-8; naming the encoding explicitly prevents a non-ASCII code unit from being truncated into a different byte sequence.",
   },
 } as const satisfies Record<string, RuleCopy>;
 

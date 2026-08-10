@@ -19,6 +19,33 @@ Editors highlight `.native` markup well in HTML mode — the default scaffold wr
 
 Start a new app with `native init` (zero-config: `app.zon` + `src/core.ts` + `src/app.native` + assets; the CLI generates the build graph). Use `examples/chatbot`, `examples/soundboard-ts`, and `examples/system-monitor-ts` as substantial TypeScript references. The `native check|dev|test|build` verbs drive any app directory shaped this way.
 
+## Menu-bar status items (TypeScript default)
+
+Export `statusItem(model: Model): StatusItemState` from `src/core.ts`. The generated launcher installs icon/tooltip/click-open commands plus the boot presentation/menu, re-derives it after every committed update, and patches presentation/menu independently. Import `StatusItemState` from `@native-sdk/core/events`. Commands route through the core's `commandMsg(name): Msg | null` export. There is no app-owned Zig wiring and `statusItem` is automatically marked shell-bound for the markup lint.
+
+```ts
+import { asciiBytes, utf8Bytes } from "@native-sdk/core";
+import { type StatusItemState } from "@native-sdk/core/events";
+
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/menu-bar.svg"),
+    tooltip: utf8Bytes("Player status"),
+    activationCommand: asciiBytes("app.refresh"),
+    alternateActivationCommand: asciiBytes("player.toggle"),
+    openCommand: asciiBytes("app.refresh"),
+    presentation: { title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"), width: 62, tone: "normal", iconOpacity: 1, monospaced: true },
+    items: [
+      { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 2, label: model.playing ? utf8Bytes("Pause") : utf8Bytes("Play"), command: asciiBytes("player.toggle"), separator: false, enabled: true, detail: utf8Bytes("configured ✓"), role: "agent", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+    ],
+  };
+}
+```
+
+Presentation fields are `title`, `width`, `tone`, `iconOpacity`, and `monospaced`. Rows add secondary `detail`, a semantic `command | info | header | hero | agent | context` role, a key equivalent, and all five modifier booleans to the ordinary id/label/command/separator/enabled fields. Actionable rows need unique non-zero whole u32 ids; separators conventionally use id 0, and the menu cap is 32 rows. `examples/menu-bar` is the full TypeScript + Native markup hide/Open/Quit lifecycle. The lower-level Zig `Options.status_item` / `status_item_fn` recipe appears below for Zig cores and custom wiring.
+
 ## App wiring (Zig cores and extensions only)
 
 A default TypeScript app writes none of this: generated wiring connects `src/core.ts`, `src/app.native`, and `app.zon`. Use the following only when the existing app has a Zig core or the task explicitly requires owned runtime wiring.
@@ -85,6 +112,8 @@ fn panes(model: *const Model, out: []App.WebViewPane) usize {
 URL changes navigate; bumping `reload_token` reloads the same URL (the CenterPane/Preview-tab shape). Pane URLs must pass `security.navigation.allowed_origins`. Panes reconcile against the runtime's live webview state on every rebuild and presented frame, so shell relayouts cannot detach them. `examples/canvas-preview` is the live reference; `zig build test-canvas-preview-smoke` verifies it.
 
 ### Menu-bar extra (status item)
+
+This is the Zig-core/custom-wiring form. Default TypeScript apps use the exported `statusItem(model)` helper above.
 
 `Options.status_item` installs a macOS `NSStatusItem` once, on the installing frame; its menu items dispatch commands through the same `on_command` mapping the toolbar and menus use (source `.tray`):
 

@@ -223,6 +223,10 @@ pub const TrayItem = struct {
     command: []const u8 = "",
     separator: bool = false,
     enabled: bool = true,
+    detail: []const u8 = "",
+    role: platform.TrayItemRole = .command,
+    key: []const u8 = "",
+    modifiers: platform.ShortcutModifiers = .{},
 };
 
 /// The live status item (tray): current button title + dropdown items.
