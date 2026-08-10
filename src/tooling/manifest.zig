@@ -1894,8 +1894,40 @@ fn tiffDimensions(bytes: []const u8) ?DmgImageDimensions {
     };
 }
 
+const max_tiff_directories = 64;
+
+const TiffIntegerKind = enum {
+    short,
+    long,
+    long8,
+};
+
+const TiffIntegerField = struct {
+    kind: TiffIntegerKind,
+    count: usize,
+    data_offset: usize,
+};
+
+const TiffDirectory = struct {
+    dimensions: DmgImageDimensions,
+    next_offset: usize,
+};
+
 fn classicTiffDimensions(bytes: []const u8, endian: std.builtin.Endian) ?DmgImageDimensions {
-    const ifd_offset = std.math.cast(usize, readEndianU32(bytes, 4, endian) orelse return null) orelse return null;
+    var ifd_offset = std.math.cast(usize, readEndianU32(bytes, 4, endian) orelse return null) orelse return null;
+    var dimensions: ?DmgImageDimensions = null;
+    var directory_count: usize = 0;
+    while (ifd_offset != 0) {
+        if (directory_count == max_tiff_directories) return null;
+        const directory = classicTiffDirectory(bytes, ifd_offset, endian) orelse return null;
+        if (dimensions == null) dimensions = directory.dimensions;
+        ifd_offset = directory.next_offset;
+        directory_count += 1;
+    }
+    return dimensions;
+}
+
+fn classicTiffDirectory(bytes: []const u8, ifd_offset: usize, endian: std.builtin.Endian) ?TiffDirectory {
     const entry_count = readEndianU16(bytes, ifd_offset, endian) orelse return null;
     const entries_start = std.math.add(usize, ifd_offset, 2) catch return null;
     const entries_bytes = std.math.mul(usize, entry_count, 12) catch return null;
@@ -1903,47 +1935,204 @@ fn classicTiffDimensions(bytes: []const u8, endian: std.builtin.Endian) ?DmgImag
     if (entries_end > bytes.len or bytes.len - entries_end < 4) return null;
     var width: ?usize = null;
     var height: ?usize = null;
+    var strip_offsets: ?TiffIntegerField = null;
+    var strip_byte_counts: ?TiffIntegerField = null;
+    var tile_offsets: ?TiffIntegerField = null;
+    var tile_byte_counts: ?TiffIntegerField = null;
     for (0..entry_count) |index| {
         const entry_offset = entries_start + index * 12;
         const tag = readEndianU16(bytes, entry_offset, endian) orelse return null;
-        if (tag != 256 and tag != 257) continue;
-        const field_type = readEndianU16(bytes, entry_offset + 2, endian) orelse return null;
-        if ((readEndianU32(bytes, entry_offset + 4, endian) orelse return null) != 1) return null;
-        const value: usize = switch (field_type) {
-            3 => readEndianU16(bytes, entry_offset + 8, endian) orelse return null,
-            4 => std.math.cast(usize, readEndianU32(bytes, entry_offset + 8, endian) orelse return null) orelse return null,
-            else => return null,
-        };
-        if (tag == 256) width = value else height = value;
+        switch (tag) {
+            256, 257 => {
+                const field = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+                if (field.count != 1) return null;
+                const value = tiffIntegerValue(bytes, field, 0, endian) orelse return null;
+                if (tag == 256) {
+                    if (width != null) return null;
+                    width = value;
+                } else {
+                    if (height != null) return null;
+                    height = value;
+                }
+            },
+            273 => {
+                if (strip_offsets != null) return null;
+                strip_offsets = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            279 => {
+                if (strip_byte_counts != null) return null;
+                strip_byte_counts = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            324 => {
+                if (tile_offsets != null) return null;
+                tile_offsets = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            325 => {
+                if (tile_byte_counts != null) return null;
+                tile_byte_counts = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            else => {},
+        }
     }
     if ((width orelse 0) == 0 or (height orelse 0) == 0) return null;
-    return .{ .width = width.?, .height = height.? };
+    if (!tiffImagePayloadsValid(bytes, endian, strip_offsets, strip_byte_counts, tile_offsets, tile_byte_counts)) return null;
+    return .{
+        .dimensions = .{ .width = width.?, .height = height.? },
+        .next_offset = std.math.cast(usize, readEndianU32(bytes, entries_end, endian) orelse return null) orelse return null,
+    };
+}
+
+fn classicTiffIntegerField(bytes: []const u8, entry_offset: usize, endian: std.builtin.Endian) ?TiffIntegerField {
+    const kind: TiffIntegerKind = switch (readEndianU16(bytes, entry_offset + 2, endian) orelse return null) {
+        3 => .short,
+        4 => .long,
+        else => return null,
+    };
+    const count = std.math.cast(usize, readEndianU32(bytes, entry_offset + 4, endian) orelse return null) orelse return null;
+    const payload_bytes = std.math.mul(usize, count, tiffIntegerSize(kind)) catch return null;
+    const data_offset = if (payload_bytes <= 4)
+        entry_offset + 8
+    else
+        std.math.cast(usize, readEndianU32(bytes, entry_offset + 8, endian) orelse return null) orelse return null;
+    if (data_offset > bytes.len or payload_bytes > bytes.len - data_offset) return null;
+    return .{ .kind = kind, .count = count, .data_offset = data_offset };
 }
 
 fn bigTiffDimensions(bytes: []const u8, endian: std.builtin.Endian) ?DmgImageDimensions {
     if (bytes.len < 16 or (readEndianU16(bytes, 4, endian) orelse return null) != 8 or (readEndianU16(bytes, 6, endian) orelse return null) != 0) return null;
-    const ifd_offset = std.math.cast(usize, readEndianU64(bytes, 8, endian) orelse return null) orelse return null;
-    const entry_count = readEndianU64(bytes, ifd_offset, endian) orelse return null;
-    const available_entries = if (ifd_offset <= bytes.len and bytes.len - ifd_offset >= 16) (bytes.len - ifd_offset - 16) / 20 else return null;
-    if (entry_count > available_entries) return null;
+    var ifd_offset = std.math.cast(usize, readEndianU64(bytes, 8, endian) orelse return null) orelse return null;
+    var dimensions: ?DmgImageDimensions = null;
+    var directory_count: usize = 0;
+    while (ifd_offset != 0) {
+        if (directory_count == max_tiff_directories) return null;
+        const directory = bigTiffDirectory(bytes, ifd_offset, endian) orelse return null;
+        if (dimensions == null) dimensions = directory.dimensions;
+        ifd_offset = directory.next_offset;
+        directory_count += 1;
+    }
+    return dimensions;
+}
+
+fn bigTiffDirectory(bytes: []const u8, ifd_offset: usize, endian: std.builtin.Endian) ?TiffDirectory {
+    const entry_count = std.math.cast(usize, readEndianU64(bytes, ifd_offset, endian) orelse return null) orelse return null;
+    const entries_start = std.math.add(usize, ifd_offset, 8) catch return null;
+    const entries_bytes = std.math.mul(usize, entry_count, 20) catch return null;
+    const entries_end = std.math.add(usize, entries_start, entries_bytes) catch return null;
+    if (entries_end > bytes.len or bytes.len - entries_end < 8) return null;
     var width: ?usize = null;
     var height: ?usize = null;
-    for (0..@as(usize, @intCast(entry_count))) |index| {
-        const entry_offset = ifd_offset + 8 + index * 20;
+    var strip_offsets: ?TiffIntegerField = null;
+    var strip_byte_counts: ?TiffIntegerField = null;
+    var tile_offsets: ?TiffIntegerField = null;
+    var tile_byte_counts: ?TiffIntegerField = null;
+    for (0..entry_count) |index| {
+        const entry_offset = entries_start + index * 20;
         const tag = readEndianU16(bytes, entry_offset, endian) orelse return null;
-        if (tag != 256 and tag != 257) continue;
-        const field_type = readEndianU16(bytes, entry_offset + 2, endian) orelse return null;
-        if ((readEndianU64(bytes, entry_offset + 4, endian) orelse return null) != 1) return null;
-        const value: usize = switch (field_type) {
-            3 => readEndianU16(bytes, entry_offset + 12, endian) orelse return null,
-            4 => std.math.cast(usize, readEndianU32(bytes, entry_offset + 12, endian) orelse return null) orelse return null,
-            16 => std.math.cast(usize, readEndianU64(bytes, entry_offset + 12, endian) orelse return null) orelse return null,
-            else => return null,
-        };
-        if (tag == 256) width = value else height = value;
+        switch (tag) {
+            256, 257 => {
+                const field = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+                if (field.count != 1) return null;
+                const value = tiffIntegerValue(bytes, field, 0, endian) orelse return null;
+                if (tag == 256) {
+                    if (width != null) return null;
+                    width = value;
+                } else {
+                    if (height != null) return null;
+                    height = value;
+                }
+            },
+            273 => {
+                if (strip_offsets != null) return null;
+                strip_offsets = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            279 => {
+                if (strip_byte_counts != null) return null;
+                strip_byte_counts = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            324 => {
+                if (tile_offsets != null) return null;
+                tile_offsets = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            325 => {
+                if (tile_byte_counts != null) return null;
+                tile_byte_counts = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            else => {},
+        }
     }
     if ((width orelse 0) == 0 or (height orelse 0) == 0) return null;
-    return .{ .width = width.?, .height = height.? };
+    if (!tiffImagePayloadsValid(bytes, endian, strip_offsets, strip_byte_counts, tile_offsets, tile_byte_counts)) return null;
+    return .{
+        .dimensions = .{ .width = width.?, .height = height.? },
+        .next_offset = std.math.cast(usize, readEndianU64(bytes, entries_end, endian) orelse return null) orelse return null,
+    };
+}
+
+fn bigTiffIntegerField(bytes: []const u8, entry_offset: usize, endian: std.builtin.Endian) ?TiffIntegerField {
+    const kind: TiffIntegerKind = switch (readEndianU16(bytes, entry_offset + 2, endian) orelse return null) {
+        3 => .short,
+        4 => .long,
+        16 => .long8,
+        else => return null,
+    };
+    const count = std.math.cast(usize, readEndianU64(bytes, entry_offset + 4, endian) orelse return null) orelse return null;
+    const payload_bytes = std.math.mul(usize, count, tiffIntegerSize(kind)) catch return null;
+    const data_offset = if (payload_bytes <= 8)
+        entry_offset + 12
+    else
+        std.math.cast(usize, readEndianU64(bytes, entry_offset + 12, endian) orelse return null) orelse return null;
+    if (data_offset > bytes.len or payload_bytes > bytes.len - data_offset) return null;
+    return .{ .kind = kind, .count = count, .data_offset = data_offset };
+}
+
+fn tiffIntegerSize(kind: TiffIntegerKind) usize {
+    return switch (kind) {
+        .short => 2,
+        .long => 4,
+        .long8 => 8,
+    };
+}
+
+fn tiffIntegerValue(bytes: []const u8, field: TiffIntegerField, index: usize, endian: std.builtin.Endian) ?usize {
+    if (index >= field.count) return null;
+    const value_offset = std.math.add(usize, field.data_offset, std.math.mul(usize, index, tiffIntegerSize(field.kind)) catch return null) catch return null;
+    return switch (field.kind) {
+        .short => readEndianU16(bytes, value_offset, endian) orelse return null,
+        .long => std.math.cast(usize, readEndianU32(bytes, value_offset, endian) orelse return null) orelse return null,
+        .long8 => std.math.cast(usize, readEndianU64(bytes, value_offset, endian) orelse return null) orelse return null,
+    };
+}
+
+fn tiffImagePayloadsValid(
+    bytes: []const u8,
+    endian: std.builtin.Endian,
+    strip_offsets: ?TiffIntegerField,
+    strip_byte_counts: ?TiffIntegerField,
+    tile_offsets: ?TiffIntegerField,
+    tile_byte_counts: ?TiffIntegerField,
+) bool {
+    const has_strips = strip_offsets != null or strip_byte_counts != null;
+    const has_tiles = tile_offsets != null or tile_byte_counts != null;
+    if (!has_strips and !has_tiles) return false;
+    if (has_strips) {
+        if (strip_offsets == null or strip_byte_counts == null) return false;
+        if (!tiffPayloadRangesValid(bytes, endian, strip_offsets.?, strip_byte_counts.?)) return false;
+    }
+    if (has_tiles) {
+        if (tile_offsets == null or tile_byte_counts == null) return false;
+        if (!tiffPayloadRangesValid(bytes, endian, tile_offsets.?, tile_byte_counts.?)) return false;
+    }
+    return true;
+}
+
+fn tiffPayloadRangesValid(bytes: []const u8, endian: std.builtin.Endian, offsets: TiffIntegerField, byte_counts: TiffIntegerField) bool {
+    if (offsets.count == 0 or offsets.count != byte_counts.count) return false;
+    for (0..offsets.count) |index| {
+        const payload_offset = tiffIntegerValue(bytes, offsets, index, endian) orelse return false;
+        const payload_bytes = tiffIntegerValue(bytes, byte_counts, index, endian) orelse return false;
+        if (payload_bytes == 0 or payload_offset > bytes.len or payload_bytes > bytes.len - payload_offset) return false;
+    }
+    return true;
 }
 
 fn readEndianU16(bytes: []const u8, offset: usize, endian: std.builtin.Endian) ?u16 {
@@ -3030,7 +3219,62 @@ test "DMG background readers validate JPEG and TIFF envelopes" {
     const tiff_dimensions = tiffDimensions(&tiff) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), tiff_dimensions.width);
     try std.testing.expectEqual(@as(usize, 1), tiff_dimensions.height);
-    try std.testing.expect(tiffDimensions(tiff[0..121]) == null);
+    try std.testing.expect(tiffDimensions(tiff[0..122]) == null);
+}
+
+test "TIFF background reader validates indirect strips and BigTIFF payloads" {
+    var multi_strip_tiff: [80]u8 = @splat(0);
+    multi_strip_tiff[0] = 'I';
+    multi_strip_tiff[1] = 'I';
+    std.mem.writeInt(u16, multi_strip_tiff[2..4], 42, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[4..8], 8, .little);
+    std.mem.writeInt(u16, multi_strip_tiff[8..10], 4, .little);
+    const classic_entries = [_][4]u32{
+        .{ 256, 4, 1, 1 }, // ImageWidth
+        .{ 257, 4, 1, 2 }, // ImageLength
+        .{ 273, 4, 2, 62 }, // StripOffsets array
+        .{ 279, 4, 2, 70 }, // StripByteCounts array
+    };
+    for (classic_entries, 0..) |entry, index| {
+        const offset = 10 + index * 12;
+        std.mem.writeInt(u16, multi_strip_tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, multi_strip_tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u32, multi_strip_tiff[offset + 4 ..][0..4], entry[2], .little);
+        std.mem.writeInt(u32, multi_strip_tiff[offset + 8 ..][0..4], entry[3], .little);
+    }
+    std.mem.writeInt(u32, multi_strip_tiff[62..66], 78, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[66..70], 79, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[70..74], 1, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[74..78], 1, .little);
+    const multi_strip_dimensions = tiffDimensions(&multi_strip_tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), multi_strip_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 2), multi_strip_dimensions.height);
+    try std.testing.expect(tiffDimensions(multi_strip_tiff[0..79]) == null);
+
+    var big_tiff: [113]u8 = @splat(0);
+    big_tiff[0] = 'I';
+    big_tiff[1] = 'I';
+    std.mem.writeInt(u16, big_tiff[2..4], 43, .little);
+    std.mem.writeInt(u16, big_tiff[4..6], 8, .little);
+    std.mem.writeInt(u64, big_tiff[8..16], 16, .little);
+    std.mem.writeInt(u64, big_tiff[16..24], 4, .little);
+    const big_entries = [_][4]u64{
+        .{ 256, 16, 1, 1 }, // ImageWidth
+        .{ 257, 16, 1, 1 }, // ImageLength
+        .{ 273, 16, 1, 112 }, // StripOffsets
+        .{ 279, 16, 1, 1 }, // StripByteCounts
+    };
+    for (big_entries, 0..) |entry, index| {
+        const offset = 24 + index * 20;
+        std.mem.writeInt(u16, big_tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, big_tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u64, big_tiff[offset + 4 ..][0..8], entry[2], .little);
+        std.mem.writeInt(u64, big_tiff[offset + 12 ..][0..8], entry[3], .little);
+    }
+    const big_dimensions = tiffDimensions(&big_tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), big_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 1), big_dimensions.height);
+    try std.testing.expect(tiffDimensions(big_tiff[0..112]) == null);
 }
 
 test "DMG explicit items select and position Finder contents" {
