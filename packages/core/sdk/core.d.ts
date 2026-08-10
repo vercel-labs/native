@@ -86,7 +86,7 @@ export interface AudioCaptureRoute<M extends Msgish> {
 export type PtyState = "output" | "exit";
 export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
 export type PtyEventArm = {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: PtyState;
     readonly bytes: Uint8Array;
     readonly code: number;

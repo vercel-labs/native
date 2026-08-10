@@ -3560,7 +3560,7 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 export interface Model { readonly chunks: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "pty_evt"; readonly key: string; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
 export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
 `;
 
@@ -4417,7 +4417,7 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 export interface Model { readonly chunks: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "pty_evt"; readonly key: string; readonly state: NarrowState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: NarrowState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
 export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
@@ -4521,7 +4521,7 @@ export type NarrowReason = "exited" | "cancelled";
 export interface Model { readonly chunks: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "pty_evt"; readonly key: string; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: NarrowReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: NarrowReason; readonly signal: number; readonly droppedWrites: number };
 export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {

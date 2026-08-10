@@ -639,8 +639,9 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 
 /// The payload shape of a pty event arm — seven fields, matched by NAME
 /// (the AudioEventArm convention). `key` is the app's own session key
-/// (the `Cmd.ptySpawn` `key`, or "" when the spawn named none) — two
-/// sessions routing one event arm are told apart by this field. `state`
+/// as byte text (the `Cmd.ptySpawn` `key`, or empty bytes when the spawn
+/// named none) — two sessions routing one event arm are told apart by
+/// this field. `state`
 /// must be a named string-literal-union alias carrying exactly the two
 /// PtyState members and `reason` one carrying exactly the five
 /// PtyExitReason members (any declaration order — the host matches
@@ -651,7 +652,7 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 /// payloads refused over the session's life — zero means every write
 /// reached the child, never a silent drop.
 export type PtyEventArm = {
-  readonly key: string;
+  readonly key: Uint8Array;
   readonly state: PtyState;
   readonly bytes: Uint8Array;
   readonly code: number;
@@ -661,7 +662,7 @@ export type PtyEventArm = {
 };
 
 /// The Msg arms a pty session may target: arms whose payload is exactly
-/// the six PtyEventArm fields. The `state` and `reason` checks run BOTH
+/// the seven PtyEventArm fields. The `state` and `reason` checks run BOTH
 /// directions (the AudioEventKind convention): the `&` constraint holds
 /// the arm's unions to PtyState/PtyExitReason, and the tuple-wrapped
 /// reverse checks hold them to the arm's — a narrower union would
@@ -682,7 +683,7 @@ export type PtyEventKind<M extends Msgish> = M extends Msgish
   : never;
 
 /// `Cmd.ptySpawn` routing: every session event dispatches the `event`
-/// arm (the six-field PtyEventArm record, matched by field name).
+/// arm (the seven-field PtyEventArm record, matched by field name).
 /// `cols`/`rows` are the initial grid the child observes (80x24 when
 /// omitted); `term` is the TERM the child starts with (omitted = the
 /// engine's default). The optional `key` names the session for
