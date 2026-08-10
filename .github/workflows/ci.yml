@@ -61,6 +61,12 @@ jobs:
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # gpu-components is a TypeScript-core app, so its smoke build needs
+      # the frontend compiler and exact-pinned TypeScript toolchain.
+      - run: npm ci --prefix packages/core
       - run: zig build test-webview-system-link
       - run: zig build test-webview-smoke
       # Signed-package seal pin: an ad-hoc signed package must pass
