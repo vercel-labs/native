@@ -611,6 +611,62 @@ test "widget render state dirty bounds tracks changed runtime states" {
     );
 }
 
+test "quiet logical menu focus paints and dirties the active row without an outline" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(10, 12, 120, 32),
+            .text = "Duplicate",
+        },
+        .{
+            .id = 3,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(10, 52, 120, 32),
+            .text = "Rename",
+        },
+    };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 160, 100), &nodes);
+
+    // A pointer-opened menu keeps focus-visible quiet, but ArrowDown
+    // still establishes a logical active row. That row needs the menu
+    // wash so the movement is perceptible, without acquiring the focus
+    // outline reserved for keyboard traversal between controls.
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{ .focused_id = 2 });
+    var duplicate_wash = false;
+    var rename_wash = false;
+    var duplicate_outline = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| {
+            if (fill.id == widgetPartId(2, 1)) duplicate_wash = true;
+            if (fill.id == widgetPartId(3, 1)) rename_wash = true;
+        },
+        .stroke_rect => |stroke| {
+            if (stroke.id == widgetPartId(2, 2)) duplicate_outline = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(duplicate_wash);
+    try std.testing.expect(!rename_wash);
+    try std.testing.expect(!duplicate_outline);
+
+    // Moving to the next row changes pixels on both the old and new
+    // rows; retained rendering must invalidate the complete union.
+    const duplicate_frame = layout.findById(2).?.frame;
+    const rename_frame = layout.findById(3).?.frame;
+    const dirty = layout.renderStateDirtyBounds(
+        .{ .focused_id = 2 },
+        .{ .focused_id = 3 },
+    ).?;
+    try std.testing.expect(dirty.x <= @min(duplicate_frame.x, rename_frame.x));
+    try std.testing.expect(dirty.y <= @min(duplicate_frame.y, rename_frame.y));
+    try std.testing.expect(dirty.maxX() >= @max(duplicate_frame.maxX(), rename_frame.maxX()));
+    try std.testing.expect(dirty.maxY() >= @max(duplicate_frame.maxY(), rename_frame.maxY()));
+}
+
 test "widget render state dirty bounds tracks terminal logical focus" {
     const rows = [_]canvas.TerminalRow{.{ .cells = &.{} }};
     var grid = canvas.TerminalGrid{

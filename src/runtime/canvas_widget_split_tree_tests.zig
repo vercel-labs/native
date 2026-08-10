@@ -372,6 +372,57 @@ test "tree keymap walks visible rows, collapses, expands, and selects through re
     try std.testing.expect(!after_enter.findById(12).?.widget.state.selected);
 }
 
+test "tree roving focus only shows a ring after Tab entry" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 100),
+    });
+
+    const rows = [_]canvas.Widget{
+        treeRowPanel(11, 0, 24, null, &.{}),
+        treeRowPanel(12, 30, 24, null, &.{}),
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 10, .kind = .tree, .children = &rows },
+        geometry.RectF.init(0, 0, 240, 100),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+
+    // Pointer entry is quiet. Roving to the next row with ArrowDown
+    // must preserve that modality instead of flashing a focus ring
+    // before the selection echo rebuilds the tree.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 10, .y = 10, .button = 0 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 10, .y = 10, .button = 0 } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 11), view.canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_focus_visible_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 12), view.canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_focus_visible_id);
+
+    // Tab is the explicit focus-visible entry. Once it establishes the
+    // ring, roving arrows carry that visible keyboard focus with them.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .modifiers = .{ .shift = true } } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 11), view.canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 11), view.canvas_widget_focus_visible_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 12), view.canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 12), view.canvas_widget_focus_visible_id);
+}
+
 test "flat tree levels resolve logical parents and children" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
@@ -535,6 +586,130 @@ test "a virtual list declaring the tree role scopes the tree keymap over its row
     try std.testing.expectEqual(@as(canvas.ObjectId, 21), view.canvas_widget_focused_id);
     try key.down(harness, app, "end");
     try std.testing.expectEqual(@as(canvas.ObjectId, 23), view.canvas_widget_focused_id);
+}
+
+test "tree arrow navigation reveals and focuses rows below a scroll viewport" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 64),
+    });
+
+    const rows = [_]canvas.Widget{
+        treeRowPanel(21, 0, 28, null, &.{}),
+        treeRowPanel(22, 0, 28, null, &.{}),
+        treeRowPanel(23, 0, 28, null, &.{}),
+        treeRowPanel(24, 0, 28, null, &.{}),
+    };
+    const tree = canvas.Widget{
+        .id = 20,
+        .kind = .tree,
+        .frame = geometry.RectF.init(0, 0, 0, 118),
+        .layout = .{ .gap = 2 },
+        .children = &rows,
+    };
+    const root = canvas.Widget{
+        .id = 10,
+        .kind = .scroll_view,
+        .children = &.{tree},
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 64), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+
+    // Row 2 is fully visible and row 3 has only its leading 4pt inside
+    // the viewport. Focus row 2 by pointer, then walk onto row 3.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 10, .y = 40, .button = 0 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 10, .y = 40, .button = 0 } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 22), view.canvas_widget_focused_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 23), view.canvas_widget_focused_id);
+
+    // The next logical row starts fully below the clip. ArrowDown must
+    // minimally scroll it into view, move focus, and route the keyboard
+    // selection arrival to that newly visible row.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 24), view.canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 24), app_state.last_keyboard_target_id);
+    try std.testing.expect(app_state.last_keyboard_focus_moved);
+
+    const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const viewport = scrolled.findById(10).?.frame.normalized();
+    const focused = scrolled.findById(24).?.frame.normalized();
+    try std.testing.expect(focused.y >= viewport.y);
+    try std.testing.expect(focused.maxY() <= viewport.maxY());
+    try std.testing.expect(scrolled.findById(10).?.widget.value > 0);
+}
+
+test "list arrow navigation reveals and focuses rows below a scroll viewport" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 64),
+    });
+
+    const rows = [_]canvas.Widget{
+        .{ .id = 31, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "One" },
+        .{ .id = 32, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Two" },
+        .{ .id = 33, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Three" },
+        .{ .id = 34, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Four" },
+    };
+    const list = canvas.Widget{
+        .id = 30,
+        .kind = .list,
+        .frame = geometry.RectF.init(0, 0, 0, 118),
+        .layout = .{ .gap = 2 },
+        .children = &rows,
+    };
+    const root = canvas.Widget{
+        .id = 10,
+        .kind = .scroll_view,
+        .children = &.{list},
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 64), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try harness.runtime.focusView(1, "canvas");
+    const view = &harness.runtime.views[0];
+
+    // Keyboard entry grants the list-row roving contract (pointer focus
+    // stays intentionally quiet). The first Tab focuses the scroll view,
+    // the second reaches row 1.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 31), view.canvas_widget_focused_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 33), view.canvas_widget_focused_id);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 34), view.canvas_widget_focused_id);
+
+    const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const viewport = scrolled.findById(10).?.frame.normalized();
+    const focused = scrolled.findById(34).?.frame.normalized();
+    try std.testing.expect(focused.y >= viewport.y);
+    try std.testing.expect(focused.maxY() <= viewport.maxY());
+    try std.testing.expect(scrolled.findById(10).?.widget.value > 0);
 }
 
 // ------------------------------------------------------- layout tweens

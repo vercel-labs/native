@@ -911,7 +911,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// Keyboard entry point into an anchored menu surface: the marked
         /// (`selected`) row when the menu has one, otherwise the first
         /// focusable row for an ArrowDown entry or the last for ArrowUp —
-        /// the open-select keymap.
+        /// the open-menu keymap shared by picker and menu-button triggers.
         pub fn canvasWidgetMenuSurfaceEntryId(self: *const RuntimeView, surface_index: usize, from_end: bool) ?canvas.ObjectId {
             var first: ?canvas.ObjectId = null;
             var last: ?canvas.ObjectId = null;

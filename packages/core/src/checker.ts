@@ -465,6 +465,7 @@ export class SubsetChecker {
     this.checkCmdPurity();
     this.checkSubPurity();
     this.checkModelBindingSurface();
+    this.checkThemePackHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -658,6 +659,65 @@ export class SubsetChecker {
         );
       }
       taken.set(h.zigName, `exported helper \`${h.name}\``);
+    }
+  }
+
+  /// `themePack(model)` is both an ordinary exported Model helper and a
+  /// generated-launcher convention. Keep its shape exact here so a typo
+  /// is taught in core.ts instead of failing inside the generated Zig
+  /// adapter (or, worse, becoming an inert markup-only helper).
+  private checkThemePackHelper(): void {
+    let decl: ts.FunctionDeclaration | null = null;
+    for (const stmt of this.entry.statements) {
+      if (
+        ts.isFunctionDeclaration(stmt) &&
+        stmt.name?.text === "themePack" &&
+        hasExportModifier(stmt)
+      ) {
+        decl = stmt;
+        break;
+      }
+    }
+    if (decl === null) {
+      for (const binding of exportListBindings(this.tast, this.entry)) {
+        if (
+          binding.exportedName === "themePack" &&
+          binding.target !== null &&
+          binding.target !== undefined &&
+          ts.isFunctionDeclaration(binding.target) &&
+          binding.target.getSourceFile() === this.entry
+        ) {
+          decl = binding.target;
+          break;
+        }
+      }
+    }
+    if (decl === null) return;
+
+    const helper = this.table.modelHelperDecls().find(
+      (candidate) => candidate.name === "themePack" && candidate.decl === decl,
+    );
+    if (helper === undefined || decl.type === undefined) {
+      this.report(
+        "NS1033",
+        "`themePack` is not a single-Model-parameter helper with an explicit return type.",
+        decl.name ?? decl,
+      );
+      return;
+    }
+
+    const returns = this.table.resolveTypeNode(decl.type);
+    if (
+      returns.k !== "enum" ||
+      returns.members.length !== 2 ||
+      !returns.members.includes("house") ||
+      !returns.members.includes("geist")
+    ) {
+      this.report(
+        "NS1033",
+        "`themePack` does not return exactly the built-in `\"house\" | \"geist\"` theme-pack union.",
+        decl.type,
+      );
     }
   }
 
@@ -1092,7 +1152,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

@@ -742,6 +742,12 @@ pub const cursorForWidgetTarget = widget_runtime.cursorForWidgetTarget;
 /// widget-level predicate is `widgetIsHitTarget`, which also admits any
 /// widget carrying a bound press/toggle handler.
 pub const widgetKindHitTarget = @import("widget_access.zig").widgetKindHitTarget;
+/// Widget-level keyboard focusability without geometry/ancestor-clip
+/// filtering. Runtime roving-focus groups use this to identify a logical
+/// offscreen successor before scrolling it into view; ordinary focus
+/// traversal still goes through `WidgetLayoutTree.focusTarget*`, which
+/// rejects clipped targets.
+pub const widgetIsFocusable = @import("widget_access.zig").isFocusable;
 /// Widget-level hit-target-ness: kind-level `widgetKindHitTarget` plus
 /// any widget with a bound press/toggle handler (stamped into
 /// `semantics.actions` by the builder and both markup engines).

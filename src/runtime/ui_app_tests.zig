@@ -43,6 +43,10 @@ fn counterCommand(name: []const u8) ?CounterMsg {
     return null;
 }
 
+fn counterThemePack(model: *const CounterModel) canvas.ThemePack {
+    return if (model.count == 0) .house else .geist;
+}
+
 const counter_views = [_]app_manifest.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
 };
@@ -1677,6 +1681,50 @@ test "unthemed apps follow the system appearance live; explicit tokens opt out" 
     try std.testing.expectEqualDeep(light.colors.background, fixed_state.effectiveTokens().colors.background);
     fixed_state.system_appearance = .{ .color_scheme = .dark };
     try std.testing.expectEqualDeep(light.colors.background, fixed_state.effectiveTokens().colors.background);
+}
+
+test "model-derived theme packs retain live appearance, accent, and surface scale" {
+    var options = counterOptions();
+    options.theme = .geist; // The model-derived pack wins this fallback.
+    options.theme_fn = counterThemePack;
+    options.theme_accent = canvas.Color.rgb8(0xdf, 0x26, 0x70);
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    app_state.system_appearance = .{ .color_scheme = .dark, .reduce_motion = true };
+    app_state.pixel_snap_scale = 2;
+
+    var house = canvas.DesignTokens.theme(.{
+        .color_scheme = .dark,
+        .reduce_motion = true,
+        .pack = .house,
+    });
+    house = house.withOverrides(canvas.accentOverrides(options.theme_accent.?, .dark));
+    var actual = app_state.effectiveTokens();
+    try std.testing.expectEqualDeep(house.colors.background, actual.colors.background);
+    try std.testing.expectEqualDeep(house.colors.accent, actual.colors.accent);
+    try std.testing.expectEqualDeep(house.colors.focus_ring, actual.colors.focus_ring);
+    try std.testing.expectEqual(house.metrics.control_height, actual.metrics.control_height);
+    try std.testing.expectEqual(@as(u32, 0), actual.motion.normal_ms);
+    try std.testing.expectEqual(@as(f32, 2), actual.pixel_snap.scale);
+
+    app_state.model.count = 1;
+    var geist = canvas.DesignTokens.theme(.{
+        .color_scheme = .dark,
+        .reduce_motion = true,
+        .pack = .geist,
+    });
+    geist = geist.withOverrides(canvas.accentOverrides(options.theme_accent.?, .dark));
+    actual = app_state.effectiveTokens();
+    try std.testing.expectEqualDeep(geist.colors.background, actual.colors.background);
+    try std.testing.expectEqualDeep(geist.colors.accent, actual.colors.accent);
+    try std.testing.expectEqualDeep(geist.colors.focus_ring, actual.colors.focus_ring);
+    try std.testing.expectEqual(geist.metrics.control_height, actual.metrics.control_height);
+    try std.testing.expect(house.metrics.control_height != geist.metrics.control_height);
+    try std.testing.expectEqual(@as(u32, 0), actual.motion.normal_ms);
+    try std.testing.expectEqual(@as(f32, 2), actual.pixel_snap.scale);
 }
 
 test "static tokens carry the surface scale and re-snap on a scale change" {

@@ -483,7 +483,11 @@ export function ComponentPreviewLive({
             aria-label={`${alt} — interactive WASM preview`}
             aria-roledescription="Interactive component preview rendered by the Native SDK engine. Press Escape to leave."
             tabIndex={0}
-            className={`absolute inset-0 h-full w-full touch-none outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-700 ${
+            // DOM focus is only the transport into the embedded engine;
+            // the focused widget paints its own focus affordance. Cancel
+            // the docs-wide [tabindex] shadow here so overflow clipping
+            // cannot turn it into a stray blue stripe below the titlebar.
+            className={`absolute inset-0 h-full w-full touch-none outline-none focus-visible:shadow-none ${
               painted ? "opacity-100" : "opacity-0"
             }`}
             onPointerDown={(event) => {

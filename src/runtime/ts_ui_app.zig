@@ -41,7 +41,10 @@
 //! Everything else on `UiApp.Options` is the wiring's, unchanged: view
 //! or markup, scene, `on_command` maps command ids through the core's
 //! `commandMsg`, `tokens_fn`/`windows_fn`/`status_item_fn` derive from
-//! the committed model. The two seams the core owns — `update_fx` and
+//! the committed model. One model-helper convention joins that wiring:
+//! an exported `themePack(model): "house" | "geist"` helper selects the
+//! stock pack live through `theme_fn`, without taking ownership of the
+//! system appearance axes. The two seams the core owns — `update_fx` and
 //! `init_fx` — are stamped by this adapter and must be left null.
 //!
 //! `Options.sync` is deliberately unsupported: it mutates the model in
@@ -183,6 +186,19 @@ pub fn TsUiApp(comptime core: type) type {
             var stamped = options;
             stamped.init_fx = initFx;
             stamped.update_fx = updateFx;
+            // A TypeScript core can select a built-in pack from ordinary
+            // model state without ejecting the generated launcher. The
+            // exported single-model helper emits as a Model method, so it
+            // is equally visible on direct compiler output and the
+            // external-core mirror. The app owns only the pack; UiApp's
+            // stock-token path keeps following the OS appearance.
+            if (comptime @hasDecl(Model, "themePack")) {
+                if (options.theme_fn != null) {
+                    @panic("TsUiApp wires theme_fn from the core's themePack helper - remove the wiring's theme_fn");
+                }
+                comptime validateThemePackHelper();
+                stamped.theme_fn = themePackAdapter;
+            }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
             // teaching compile error in the adapter below). A wiring that
@@ -225,6 +241,28 @@ pub fn TsUiApp(comptime core: type) type {
                 stamped.on_chrome = chromeMsgAdapter;
             }
             return stamped;
+        }
+
+        fn themePackAdapter(model: *const Model) canvas.ThemePack {
+            const pack = model.themePack();
+            return canvas.ThemePack.fromName(@tagName(pack)).?;
+        }
+
+        fn validateThemePackHelper() void {
+            const teaching = "TsUiApp: themePack must be exported from core.ts as themePack(model: Model): ThemePack, where ThemePack is exactly \"house\" | \"geist\"";
+            const helper_info = @typeInfo(@TypeOf(Model.themePack));
+            if (helper_info != .@"fn") @compileError(teaching);
+            const function = helper_info.@"fn";
+            if (function.params.len != 1 or function.params[0].type == null or function.params[0].type.? != *const Model) {
+                @compileError(teaching);
+            }
+            const Pack = function.return_type orelse @compileError(teaching);
+            const pack_info = @typeInfo(Pack);
+            if (pack_info != .@"enum" or pack_info.@"enum".fields.len != 2 or
+                !@hasField(Pack, "house") or !@hasField(Pack, "geist"))
+            {
+                @compileError(teaching);
+            }
         }
 
         /// `Options.init_fx`: register the wiring's boot images, perform

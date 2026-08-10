@@ -1,0 +1,456 @@
+<!-- The GPU component gallery is deliberately only two things: a component
+     tree and one isolated, interactive specimen. The tree and every specimen
+     use the same built-in markup components an application author uses. -->
+<row background="background">
+  <column width="248" padding="12" gap="8" background="surface" label="Component navigation">
+    <column gap="6">
+      <text foreground="text_muted">Theme</text>
+      <toggle-group gap="2" label="Theme">
+        <toggle-button size="sm" selected="{themePack == 'house'}" on-toggle="theme_house">Default</toggle-button>
+        <toggle-button size="sm" selected="{themePack == 'geist'}" on-toggle="theme_geist">Geist</toggle-button>
+      </toggle-group>
+    </column>
+    <separator />
+    <scroll grow="1" label="Scrollable component tree">
+      <tree gap="2" label="Components">
+        <list-item
+          icon="folder-open"
+          role="treeitem"
+          tree-level="1"
+          expanded="{catalogExpanded}"
+          on-toggle="toggle_catalog"
+          on-press="action"
+          on-change="action"
+        >Components</list-item>
+        <if test="{catalogExpanded}">
+          <row>
+            <spacer width="14" />
+            <column grow="1" gap="2">
+              <for each="components" key="id" as="c">
+                <list-item
+                  role="treeitem"
+                  tree-level="2"
+                  selected="{c.id == selectedComponentId}"
+                  on-press="select_component:{c.id}"
+                  on-change="select_component:{c.id}"
+                >{c.label}</list-item>
+              </for>
+            </column>
+          </row>
+        </if>
+      </tree>
+    </scroll>
+  </column>
+
+  <separator width="1" />
+
+  <scroll grow="1" label="Selected component specimen">
+    <column padding="32" gap="20">
+      <column gap="6">
+        <text size="heading">{selectedLabel}</text>
+        <text foreground="text_muted">Interactive built-in component specimen</text>
+      </column>
+      <separator />
+
+      <if test="{selectedComponentId == 1}">
+        <column width="440">
+          <accordion text="Details" selected="{accordionOpen}" on-toggle="toggle_accordion">
+            <column padding="12" gap="8">
+              <text wrap="true" foreground="text_muted">Accordion details are visible. The model owns this expanded state.</text>
+            </column>
+          </accordion>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 2}">
+        <column width="440" gap="12">
+          <alert text="A new version is available.">
+            <text wrap="true" foreground="text_muted">Restart the app to finish updating.</text>
+          </alert>
+          <alert text="Your session has expired." variant="destructive" />
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 3}">
+        <row gap="12" cross="center">
+          <avatar label="Zig user">ZN</avatar>
+          <avatar label="TypeScript user">TS</avatar>
+          <avatar label="Native SDK user">NS</avatar>
+        </row>
+      </if>
+
+      <if test="{selectedComponentId == 4}">
+        <row gap="10" cross="center">
+          <badge>Default</badge>
+          <badge variant="secondary">Secondary</badge>
+          <badge variant="outline">Outline</badge>
+          <badge variant="destructive">Destructive</badge>
+          <badge variant="secondary" icon="check">Verified</badge>
+        </row>
+      </if>
+
+      <if test="{selectedComponentId == 5}">
+        <breadcrumb gap="8" cross="center">
+          <text foreground="text_muted" on-press="action">Home</text>
+          <icon name="chevron-right" foreground="text_muted" />
+          <text foreground="text_muted" on-press="action">Components</text>
+          <icon name="chevron-right" foreground="text_muted" />
+          <text>Breadcrumb</text>
+        </breadcrumb>
+      </if>
+
+      <if test="{selectedComponentId == 6}">
+        <column width="440" gap="28">
+          <column gap="8">
+            <bubble>
+              <text wrap="true">Ready to ship the TypeScript component gallery?</text>
+            </bubble>
+            <bubble>
+              <text wrap="true">Every specimen is rendered from Native markup.</text>
+              <reactions>+2</reactions>
+            </bubble>
+          </column>
+          <column cross="end">
+            <bubble variant="primary">
+              <text wrap="true">Looks good to me.</text>
+            </bubble>
+          </column>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 7}">
+        <column gap="14">
+          <row gap="12" cross="center">
+            <button variant="primary" on-press="action">Primary</button>
+            <button variant="secondary" on-press="action">Secondary</button>
+            <button variant="outline" on-press="action">Outline</button>
+            <button variant="ghost" on-press="action">Ghost</button>
+            <button variant="destructive" on-press="action">Delete</button>
+          </row>
+          <row gap="12" cross="center">
+            <button size="sm" variant="outline" on-press="action">Small</button>
+            <button variant="outline" on-press="action">Default</button>
+            <button size="lg" variant="outline" on-press="action">Large</button>
+            <button size="icon" icon="plus" label="Add" on-press="action" />
+            <button disabled="true">Disabled</button>
+          </row>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 8}">
+        <button-group>
+          <button variant="outline" on-press="action">Cut</button>
+          <button variant="outline" on-press="action">Copy</button>
+          <button variant="outline" on-press="action">Paste</button>
+        </button-group>
+      </if>
+
+      <if test="{selectedComponentId == 9}">
+        <card width="360">
+          <column gap="12">
+            <text>Deploy your app</text>
+            <text wrap="true" foreground="text_muted">Package the TypeScript core and Native markup into one native binary.</text>
+            <row gap="8">
+              <button variant="primary" on-press="action">Deploy</button>
+              <button variant="ghost" on-press="action">Cancel</button>
+            </row>
+          </column>
+        </card>
+      </if>
+
+      <if test="{selectedComponentId == 10}">
+        <column gap="12">
+          <checkbox checked="{checkboxChecked}" on-toggle="toggle_checkbox" text="Accept terms and conditions" />
+          <checkbox checked="false" on-toggle="action" text="Send usage reports" />
+          <checkbox checked="true" disabled="true" text="Managed by your organization" />
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 11}">
+        <stack width="280">
+          <combobox placeholder="Search frameworks" text="{comboboxText}" on-input="combobox_edited" on-press="open_combobox" />
+          <if test="{comboboxOpen}">
+            <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_combobox">
+              <menu-item icon="search" on-press="choose_native">Native SDK</menu-item>
+              <menu-item icon="panel-left" on-press="choose_canvas">Canvas</menu-item>
+            </dropdown-menu>
+          </if>
+        </stack>
+      </if>
+
+      <if test="{selectedComponentId == 12}">
+        <column>
+          <button variant="outline" on-press="open_dialog">Open dialog</button>
+          <if test="{dialogOpen}">
+            <dialog text="Confirm deployment" width="400" height="230" padding="24" on-dismiss="close_dialog">
+              <column gap="14">
+                <spacer height="34" />
+                <text wrap="true" foreground="text_muted">Deploy this build to the production environment?</text>
+                <row gap="8" main="end">
+                  <button variant="ghost" on-press="close_dialog">Cancel</button>
+                  <button variant="primary" on-press="close_dialog">Deploy</button>
+                </row>
+              </column>
+            </dialog>
+          </if>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 13}">
+        <column>
+          <button variant="outline" icon="menu" on-press="open_drawer">Open filters</button>
+          <if test="{drawerOpen}">
+            <drawer text="Filters" width="280" padding="24" on-dismiss="close_drawer">
+              <column gap="12">
+                <spacer height="34" />
+                <checkbox checked="true" on-toggle="action" text="Only unread" />
+                <checkbox checked="false" on-toggle="action" text="Has attachments" />
+                <switch checked="{switchChecked}" on-toggle="toggle_switch">Compact rows</switch>
+              </column>
+            </drawer>
+          </if>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 14}">
+        <column width="240" gap="10">
+          <stack>
+            <button variant="outline" icon="chevron-down" on-press="toggle_dropdown">Actions</button>
+            <if test="{dropdownOpen}">
+              <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_dropdown">
+                <menu-item icon="copy" on-press="dropdown_duplicate">Duplicate</menu-item>
+                <menu-item icon="edit" on-press="dropdown_rename">Rename</menu-item>
+                <menu-item icon="download" on-press="dropdown_download">Download</menu-item>
+                <separator />
+                <menu-item icon="trash" on-press="dropdown_delete">Delete</menu-item>
+              </dropdown-menu>
+            </if>
+          </stack>
+          <text foreground="text_muted">{dropdownStatus}</text>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 15}">
+        <column width="360" gap="12">
+          <input placeholder="Email address" text="{inputText}" on-input="input_edited" label="Email address" />
+          <input placeholder="Disabled" disabled="true" label="Disabled input" />
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 16}">
+        <pagination gap="4">
+          <button variant="ghost" icon="chevron-left" on-press="previous_page">Previous</button>
+          <button variant="outline" selected="{page == 1}" on-press="page_one">1</button>
+          <button variant="ghost" selected="{page == 2}" on-press="page_two">2</button>
+          <button variant="ghost" selected="{page == 3}" on-press="page_three">3</button>
+          <icon name="ellipsis" />
+          <button variant="ghost" icon="chevron-right" icon-placement="trailing" on-press="next_page">Next</button>
+        </pagination>
+      </if>
+
+      <if test="{selectedComponentId == 17}">
+        <column width="320" gap="10">
+          <progress value="{sliderValue}" label="Upload progress" />
+          <text foreground="text_muted">Build upload progress</text>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 18}">
+        <radio-group gap="12" label="Density">
+          <radio checked="{density == 'default'}" on-toggle="density_default" text="Default" />
+          <radio checked="{density == 'comfortable'}" on-toggle="density_comfortable" text="Comfortable" />
+          <radio checked="false" disabled="true" text="Compact" />
+        </radio-group>
+      </if>
+
+      <if test="{selectedComponentId == 19}">
+        <row height="220" grow="1">
+          <resizable width="280" min-width="180">
+            <column padding="16" gap="8">
+              <text>Resizable panel</text>
+              <text wrap="true" foreground="text_muted">Drag the trailing edge to change this panel's width.</text>
+            </column>
+          </resizable>
+        </row>
+      </if>
+
+      <if test="{selectedComponentId == 20}">
+        <stack width="280">
+          <select on-press="toggle_select" label="Environment selector">{selectLabel}</select>
+          <if test="{selectOpen}">
+            <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_select">
+              <menu-item selected="{selectChoice == 'production'}" on-press="select_production">Production</menu-item>
+              <menu-item selected="{selectChoice == 'staging'}" on-press="select_staging">Staging</menu-item>
+              <menu-item selected="{selectChoice == 'development'}" on-press="select_development">Development</menu-item>
+            </dropdown-menu>
+          </if>
+        </stack>
+      </if>
+
+      <if test="{selectedComponentId == 21}">
+        <column width="440" gap="24">
+          <separator />
+          <row gap="16" cross="center">
+            <text>One</text>
+            <separator width="1" height="24" />
+            <text>Two</text>
+            <separator width="1" height="24" />
+            <text>Three</text>
+          </row>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 22}">
+        <column>
+          <button variant="outline" icon="external-link" on-press="open_sheet">Open share sheet</button>
+          <if test="{sheetOpen}">
+            <sheet text="Share" height="210" padding="24" on-dismiss="close_sheet">
+              <column gap="12">
+                <spacer height="34" />
+                <text wrap="true" foreground="text_muted">Anyone with the link can view this component gallery.</text>
+                <row gap="8">
+                  <input text="https://native-sdk.dev/components" label="Share link" grow="1" />
+                  <button variant="secondary" icon="copy" on-press="action">Copy</button>
+                </row>
+              </column>
+            </sheet>
+          </if>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 23}">
+        <row gap="12" cross="center" width="420">
+          <skeleton width="48" height="48" />
+          <column grow="1" gap="10">
+            <skeleton height="14" />
+            <skeleton width="220" height="14" />
+          </column>
+        </row>
+      </if>
+
+      <if test="{selectedComponentId == 24}">
+        <column width="320" gap="20">
+          <slider value="{sliderValue}" on-change="slider_changed" label="Volume" />
+          <slider value="0.72" disabled="true" label="Disabled slider" />
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 25}">
+        <row gap="12" cross="center">
+          <spinner />
+          <text foreground="text_muted">Loading components...</text>
+        </row>
+      </if>
+
+      <if test="{selectedComponentId == 26}">
+        <column gap="12">
+          <switch checked="{switchChecked}" on-toggle="toggle_switch">Notifications</switch>
+          <switch checked="false" on-toggle="toggle_switch">Airplane mode</switch>
+          <switch checked="true" disabled="true">Managed setting</switch>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 27}">
+        <table width="520">
+          <table-row>
+            <table-cell grow="1" size="sm" foreground="text_muted">Invoice</table-cell>
+            <table-cell grow="1" size="sm" foreground="text_muted">Status</table-cell>
+            <table-cell grow="1" size="sm" foreground="text_muted" text-alignment="end">Amount</table-cell>
+          </table-row>
+          <table-row>
+            <table-cell grow="1" on-press="action">INV-001</table-cell>
+            <table-cell grow="1">Paid</table-cell>
+            <table-cell grow="1" text-alignment="end">$250.00</table-cell>
+          </table-row>
+          <table-row selected="true">
+            <table-cell grow="1" on-press="action">INV-002</table-cell>
+            <table-cell grow="1">Pending</table-cell>
+            <table-cell grow="1" text-alignment="end">$150.00</table-cell>
+          </table-row>
+          <table-row>
+            <table-cell grow="1" on-press="action">INV-003</table-cell>
+            <table-cell grow="1">Overdue</table-cell>
+            <table-cell grow="1" text-alignment="end">$350.00</table-cell>
+          </table-row>
+        </table>
+      </if>
+
+      <if test="{selectedComponentId == 28}">
+        <column gap="18">
+          <row>
+            <tabs label="Account settings">
+              <button selected="{tab == 'account'}" on-press="tab_account">Account</button>
+              <button selected="{tab == 'password'}" on-press="tab_password">Password</button>
+              <button selected="{tab == 'team'}" on-press="tab_team">Team</button>
+            </tabs>
+          </row>
+          <if test="{tab == 'account'}"><text foreground="text_muted">Manage your account details.</text></if>
+          <if test="{tab == 'password'}"><text foreground="text_muted">Change your password.</text></if>
+          <if test="{tab == 'team'}"><text foreground="text_muted">Manage your team.</text></if>
+        </column>
+      </if>
+
+      <if test="{selectedComponentId == 29}">
+        <textarea width="420" height="130" placeholder="Write a release note" text="{textareaText}" on-input="textarea_edited" label="Release note" />
+      </if>
+
+      <if test="{selectedComponentId == 30}">
+        <row gap="12" cross="center">
+          <toggle checked="{bold}" on-toggle="toggle_bold">Bold</toggle>
+          <toggle checked="false" on-toggle="action">Italic</toggle>
+          <toggle disabled="true" on-toggle="action">Underline</toggle>
+        </row>
+      </if>
+
+      <if test="{selectedComponentId == 31}">
+        <toggle-group label="Text alignment">
+          <toggle-button selected="{alignment == 'left'}" on-toggle="align_left">Left</toggle-button>
+          <toggle-button selected="{alignment == 'center'}" on-toggle="align_center">Center</toggle-button>
+          <toggle-button selected="{alignment == 'right'}" on-toggle="align_right">Right</toggle-button>
+        </toggle-group>
+      </if>
+
+      <if test="{selectedComponentId == 32}">
+        <row padding="48">
+          <stack>
+            <button variant="outline" icon="edit" label="Bold" on-press="toggle_bold" />
+            <tooltip anchor="above" tooltip-delay="0">Bold the selection</tooltip>
+          </stack>
+        </row>
+      </if>
+
+      <if test="{selectedComponentId == 33}">
+        <list width="380" gap="2">
+          <list-item icon="file-text" selected="{listSelection == 'report'}" on-press="list_report">Quarterly report.md</list-item>
+          <list-item icon="file-text" selected="{listSelection == 'checklist'}" on-press="list_checklist">Launch checklist.md</list-item>
+          <list-item icon="folder" selected="{listSelection == 'archive'}" on-press="list_archive">Archive</list-item>
+          <list-item icon="music" disabled="true">demo-track.wav</list-item>
+        </list>
+      </if>
+
+      <if test="{selectedComponentId == 34}">
+        <tree width="380" gap="2" label="Files">
+          <list-item icon="folder-open" role="treeitem" tree-level="1" expanded="{srcExpanded}" selected="{treeSelection == 'src'}" on-toggle="toggle_src" on-press="tree_src" on-change="tree_src">src</list-item>
+          <if test="{srcExpanded}">
+            <row>
+              <spacer width="20" />
+              <column grow="1" gap="2">
+                <list-item icon="file-text" role="treeitem" tree-level="2" selected="{treeSelection == 'main'}" on-press="tree_main" on-change="tree_main">main.ts</list-item>
+                <list-item icon="file-text" role="treeitem" tree-level="2" selected="{treeSelection == 'view'}" on-press="tree_view" on-change="tree_view">app.native</list-item>
+              </column>
+            </row>
+          </if>
+          <list-item icon="folder" role="treeitem" tree-level="1" expanded="{assetsExpanded}" selected="{treeSelection == 'assets'}" on-toggle="toggle_assets" on-press="tree_assets" on-change="tree_assets">assets</list-item>
+          <if test="{assetsExpanded}">
+            <row>
+              <spacer width="20" />
+              <column grow="1" gap="2">
+                <list-item icon="file-text" role="treeitem" tree-level="2" selected="{treeSelection == 'logo'}" on-press="tree_logo" on-change="tree_logo">logo.png</list-item>
+              </column>
+            </row>
+          </if>
+        </tree>
+      </if>
+    </column>
+  </scroll>
+</row>

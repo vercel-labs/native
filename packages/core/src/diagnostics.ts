@@ -104,7 +104,7 @@ export const rules = {
     id: "NS1014",
     title: "the core's entry points live in core.ts",
     fix: "Move this export into src/core.ts (imported modules may hold the helpers it calls and the types it uses).",
-    why: "The build wires `update`, `initialModel`, `subscriptions`, the host-event channels, and `viewUnbound` from the entry module only, so an entry export in an imported file would be silently ignored.",
+    why: "The build wires `update`, `initialModel`, `subscriptions`, the host-event channels, `themePack`, and `viewUnbound` from the entry module only, so an entry export in an imported file would be silently ignored.",
   },
   NS1015: {
     id: "NS1015",
@@ -216,9 +216,9 @@ export const rules = {
   },
   NS1033: {
     id: "NS1033",
-    title: "wiring channel exports match their host event shapes",
-    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `export const appearanceMsg = \"<arm>\"` / `chromeMsg = \"<arm>\"` naming a Msg arm with that channel's record shape; `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` with one-`Uint8Array`-field arms.",
-    why: "The generated wiring builds these host events structurally from your declarations at build time (the effects-routing rule applied to the app shell); a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
+    title: "wiring exports match their runtime shapes",
+    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack` where `ThemePack` is `\"house\" | \"geist\"`; `export const appearanceMsg = \"<arm>\"` / `chromeMsg = \"<arm>\"` naming a Msg arm with that channel's record shape; `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` with one-`Uint8Array`-field arms.",
+    why: "The generated wiring builds host events and model-derived theme selection structurally from your declarations at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
   },
   NS1034: {
     id: "NS1034",

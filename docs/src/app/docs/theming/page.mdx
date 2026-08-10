@@ -28,6 +28,22 @@ const MyApp = native_sdk.UiApp(Model, Msg);
 .theme = app_runner.manifestThemePack(),
 ```
 
+In a zero-config TypeScript app, export a single-model `themePack` helper when the pack itself belongs in live app state. The generated launcher recognizes this helper and wires the stock-token path automatically:
+
+```ts
+export type ThemePack = "house" | "geist";
+
+export interface Model {
+  readonly theme: ThemePack;
+}
+
+export function themePack(model: Model): ThemePack {
+  return model.theme;
+}
+```
+
+Change `model.theme` through ordinary messages (for example, from a pair of model-driven `toggle-button`s). The helper is evaluated on every rebuild. It changes only the built-in pack: system light/dark, high contrast, reduced motion, manifest `theme_accent`, and each surface's scale remain live runtime inputs. Without the helper, `app.zon` remains the static pack choice.
+
 Apps that derive their own tokens select the pack directly — `ThemeOptions.pack` is just another theme axis, exactly as switchable at runtime as the scheme:
 
 ```zig

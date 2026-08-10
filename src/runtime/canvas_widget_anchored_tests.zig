@@ -31,6 +31,9 @@ const PickerModel = struct {
     // issue/file browsers draw one).
     switcher_open: bool = false,
     switcher_dismissals: u32 = 0,
+    actions_open: bool = false,
+    action: u32 = 99,
+    actions: u32 = 0,
 };
 
 const PickerMsg = union(enum) {
@@ -41,6 +44,9 @@ const PickerMsg = union(enum) {
     crumb_press,
     toggle_switcher,
     close_switcher,
+    toggle_actions,
+    close_actions,
+    action: u32,
 };
 
 const PickerApp = ui_app_model.UiApp(PickerModel, PickerMsg);
@@ -67,6 +73,13 @@ fn pickerUpdate(model: *PickerModel, msg: PickerMsg) void {
             model.switcher_open = false;
             model.switcher_dismissals += 1;
         },
+        .toggle_actions => model.actions_open = !model.actions_open,
+        .close_actions => model.actions_open = false,
+        .action => |index| {
+            model.action = index;
+            model.actions += 1;
+            model.actions_open = false;
+        },
     }
 }
 
@@ -86,6 +99,29 @@ fn pickerView(ui: *PickerApp.Ui, model: *const PickerModel) PickerApp.Ui.Node {
         }),
     }) else ui.stack(.{ .height = 28 }, .{trigger});
 
+    // A menu button uses the same anchored ownership shape as the picker,
+    // but remains an ordinary button: dropdown keyboard behavior belongs
+    // to the built-in composition rather than an app-authored key handler.
+    const actions_trigger = ui.el(.button, .{
+        .text = "Actions",
+        .width = 160,
+        .expanded = model.actions_open,
+        .on_press = .toggle_actions,
+    }, .{});
+    const actions = if (model.actions_open) ui.stack(.{ .height = 28 }, .{
+        actions_trigger,
+        ui.el(.dropdown_menu, .{
+            .anchor = .below,
+            .anchor_alignment = .stretch,
+            .width = 160,
+            .height = 90,
+            .on_dismiss = .close_actions,
+        }, .{
+            ui.el(.menu_item, .{ .key = .{ .int = 20 }, .text = "Duplicate", .height = 26, .on_press = PickerMsg{ .action = 0 } }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 21 }, .text = "Rename", .height = 26, .on_press = PickerMsg{ .action = 1 } }, .{}),
+        }),
+    }) else ui.stack(.{ .height = 28 }, .{actions_trigger});
+
     // A plain-text trigger: pressable (the handler makes it a hit
     // target) but NOT focusable — clicking it clears widget focus, so
     // its menu floats with nothing focused.
@@ -104,6 +140,7 @@ fn pickerView(ui: *PickerApp.Ui, model: *const PickerModel) PickerApp.Ui.Node {
 
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
         picker,
+        actions,
         switcher,
         ui.button(.{ .on_press = .crumb_press, .on_hold = .crumb_hold }, "Crumb"),
         ui.text(.{}, ui.fmt("picked {d}", .{model.picked})),
@@ -404,6 +441,52 @@ test "anchored picker: the open-select keymap opens, walks, commits, and returns
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.picks);
     try std.testing.expect(!fixture.app_state.model.open);
     try std.testing.expect(fixture.widgetIdByText(.menu_item, "Beta") == null);
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+}
+
+test "anchored dropdown menu: button arrows walk, commit, and return focus" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.button, "Actions").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.actions_open);
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    const duplicate_id = fixture.widgetIdByText(.menu_item, "Duplicate").?;
+    const rename_id = fixture.widgetIdByText(.menu_item, "Rename").?;
+    try fixture.key("arrowdown");
+    try std.testing.expectEqual(duplicate_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), fixture.harness.runtime.views[0].canvas_widget_focus_visible_id);
+
+    // Pointer entry is deliberately quiet, but a menu still needs a
+    // visible active-row affordance when arrows move into it. Logical
+    // focus paints the row wash; focus-visible remains empty, so no
+    // traversal outline flashes on the menu item.
+    const display_list = try fixture.harness.runtime.canvasDisplayList(1, canvas_label);
+    var duplicate_wash = false;
+    var duplicate_outline = false;
+    for (display_list.commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| {
+            if (fill.id == partId(duplicate_id, 1)) duplicate_wash = true;
+        },
+        .stroke_rect => |stroke| {
+            if (stroke.id == partId(duplicate_id, 2)) duplicate_outline = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(duplicate_wash);
+    try std.testing.expect(!duplicate_outline);
+
+    try fixture.key("arrowdown");
+    try std.testing.expectEqual(rename_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+    try fixture.key("arrowup");
+    try std.testing.expectEqual(duplicate_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    try fixture.key("enter");
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.action);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.actions);
+    try std.testing.expect(!fixture.app_state.model.actions_open);
     try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
 }
 

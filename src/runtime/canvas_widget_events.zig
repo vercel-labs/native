@@ -2705,7 +2705,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     self.views[index].canvasWidgetScopedFocusTarget(id, direction) orelse layout.focusTarget(current_id, direction) orelse return false
                 else
                     layout.focusTarget(current_id, direction) orelse return false;
-                const moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id);
+                const moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
                 if (moved and
                     (canvasWidgetTerminalOwnsTabInput(layout, target) or
                         canvasWidgetCodeEditorOwnsTabInput(layout, target)))
@@ -2720,36 +2720,44 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
             const focused_id = current_id orelse return false;
             const focused = layout.focusTargetById(focused_id) orelse return false;
+            // Roving within a composite preserves how focus ENTERED it:
+            // pointer/programmatic entry stays quiet, while a ring earned
+            // through Tab follows the active descendant. Arrow/Home/End
+            // are not themselves a fresh focus-visible entry.
+            const preserve_focus_visible = self.views[index].canvas_widget_focus_visible_id == focused_id;
             // FRAMEWORK BEHAVIOR CHANGE (deliberate, scoped — the same
             // seam as the keyboard-routing gate below): arrows and
             // Home/End never escalate QUIET focus on a plain list row
             // into the visible ring register. Only Tab (handled above)
             // enters the keyboard-contract; from quiet row focus the
             // navigation keys fall through to the app, whose selection
-            // model owns them. Ring-visible rows keep the full group
-            // walk unchanged; tree rows are exempt.
+            // model owns them. Tree rows are exempt from that fallthrough
+            // because the runtime owns their ARIA keymap; the roving move
+            // below still preserves quiet versus focus-visible entry.
             if (canvasWidgetQuietListRowFocus(self, index, focused_id)) return false;
             if (canvasWidgetGroupFocusEdgeFromInput(input_event)) |edge| {
                 // A tree row's Home/End jump to the SCOPE's edges (rows
                 // nest, so the group edge walk's same-parent rule would
                 // stop at one level).
                 if (canvas_widget_runtime.canvasWidgetTreeFocusEdgeTarget(layout, focused, edge)) |target| {
-                    return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id);
+                    return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
                 }
                 const target = canvasWidgetGroupFocusEdgeTarget(layout, focused, edge) orelse return false;
-                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id);
+                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             const direction = canvasWidgetSpatialFocusDirection(input_event) orelse return false;
-            // The open-select keymap: ArrowDown/Up on a select/combobox
-            // trigger whose anchored menu is MOUNTED moves the keyboard
-            // into the menu (the marked row when one is selected, else
-            // the first/last row). Without a mounted menu the arrows fall
-            // through to the control resolver, which turns them into the
-            // trigger's press — the model-owned open.
-            if ((focused.kind == .select or focused.kind == .combobox) and (direction == .down or direction == .up)) {
+            // The open-menu keymap: ArrowDown/Up on a menu-owning trigger
+            // whose anchored surface is MOUNTED moves the keyboard into
+            // the menu (the marked row when one is selected, else the
+            // first/last row). Select/combobox and ordinary menu buttons
+            // share this ownership contract; the surface relationship,
+            // not an example-specific key handler, identifies the popup.
+            // Without a mounted menu, select/combobox arrows fall through
+            // to the control resolver for the model-owned open.
+            if (canvasWidgetAnchoredMenuTriggerKind(focused.kind) and (direction == .down or direction == .up)) {
                 if (self.views[index].canvasWidgetOwnedMenuSurfaceIndex(focused.index)) |surface_index| {
                     if (self.views[index].canvasWidgetMenuSurfaceEntryId(surface_index, direction == .up)) |entry_id| {
-                        return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, entry_id);
+                        return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, entry_id, preserve_focus_visible);
                     }
                 }
             }
@@ -2757,27 +2765,48 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // visible rows, Left/Right move to parent / first child when
             // they are moves (collapse/expand stay routed intents).
             if (canvas_widget_runtime.canvasWidgetTreeDirectionalFocusTarget(layout, focused, direction)) |target| {
-                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id);
+                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             if (canvasWidgetGroupDirectionalFocusTarget(layout, focused, direction)) |target| {
-                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id);
+                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             const target = layout.focusTarget(focused_id, direction) orelse return false;
             if (!canvasWidgetSpatialFocusAllowed(layout, focused, target, direction)) return false;
-            return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id);
+            return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
         }
 
-        fn setCanvasWidgetFocusFromKeyboardMoved(self: *Runtime, view_index: usize, previous_id: ?canvas.ObjectId, target_id: canvas.ObjectId) anyerror!bool {
-            try setCanvasWidgetFocusFromKeyboard(self, view_index, target_id);
+        fn setCanvasWidgetFocusFromKeyboardMoved(self: *Runtime, view_index: usize, previous_id: ?canvas.ObjectId, target_id: canvas.ObjectId, focus_visible: bool) anyerror!bool {
+            try setCanvasWidgetFocusFromKeyboardWithVisibility(self, view_index, target_id, focus_visible);
             const previous = previous_id orelse 0;
             return target_id != 0 and target_id != previous;
         }
 
         pub fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
-            if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == target_id) return;
+            try setCanvasWidgetFocusFromKeyboardWithVisibility(self, view_index, target_id, true);
+        }
+
+        fn setCanvasWidgetFocusFromKeyboardWithVisibility(self: *Runtime, view_index: usize, target_id: canvas.ObjectId, focus_visible: bool) anyerror!void {
+            const next_focus_visible_id: canvas.ObjectId = if (focus_visible) target_id else 0;
+            if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+
+            // Roving tree/list navigation may resolve a logical row that
+            // is currently clipped. Reveal it before the focus write so
+            // keyboard routing, semantics, and rendering all see an
+            // ordinary visible target during this same key event.
+            const scroll_dirty = try self.views[view_index].scrollCanvasWidgetIntoView(target_id);
+            if (scroll_dirty) |dirty| {
+                const previous_cursor = self.views[view_index].canvas_widget_cursor;
+                try reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, view_index, null);
+                if (previous_cursor != self.views[view_index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, view_index);
+                if (canvasDirtyRegionForView(self.views[view_index].frame, dirty)) |dirty_region| {
+                    self.invalidateFor(.state, dirty_region);
+                } else {
+                    self.invalidateFor(.state, self.views[view_index].frame);
+                }
+            }
             const previous_state = self.views[view_index].canvasWidgetRenderState();
             self.views[view_index].canvas_widget_focused_id = target_id;
-            self.views[view_index].canvas_widget_focus_visible_id = target_id;
+            self.views[view_index].canvas_widget_focus_visible_id = next_focus_visible_id;
             // The one provenance write that grants the keyboard
             // contract: only rings placed HERE carry the standing
             // reveal intent a later layout adoption may honor.
@@ -2785,12 +2814,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // that intent where it dismisses — the register clears
             // there and only a fresh arrival through this write
             // re-grants it.
-            self.views[view_index].canvas_widget_focus_visible_keyboard = target_id != 0;
+            self.views[view_index].canvas_widget_focus_visible_keyboard = next_focus_visible_id != 0;
             // Keyboard focus-visible is the tooltip's second reveal
             // path: landing on a tooltip-owning trigger shows it
             // immediately, moving on hides the previous one (the
             // `.focus_visible` cause of the intent choke point).
-            try reconcileCanvasTooltipIntent(self, view_index, .{ .focus_visible = target_id });
+            try reconcileCanvasTooltipIntent(self, view_index, .{ .focus_visible = next_focus_visible_id });
             // Keyboard focus landing on an editable establishes a caret:
             // without a selection the emitters draw no caret line, so a
             // tabbed-into field would render its ring but no insertion
@@ -2807,6 +2836,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 }
             }
             try invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+            if (scroll_dirty != null) {
+                _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, view_index);
+            }
         }
 
         pub fn invalidateForWidgetInvalidations(self: *Runtime, view_frame: geometry.RectF, invalidations: []const canvas.WidgetInvalidation) void {
@@ -2863,6 +2895,13 @@ fn canvasWidgetCodeEditorOwnsTabInput(layout: canvas.WidgetLayoutTree, target: c
     if (target.kind != .textarea or target.index >= layout.nodes.len) return false;
     const widget = layout.nodes[target.index].widget;
     return widget.runtime_flags.code_editor and !widget.state.disabled;
+}
+
+fn canvasWidgetAnchoredMenuTriggerKind(kind: canvas.WidgetKind) bool {
+    return switch (kind) {
+        .button, .icon_button, .select, .combobox => true,
+        else => false,
+    };
 }
 
 fn canvasDirtyRegionForView(view_frame: geometry.RectF, local_dirty: geometry.RectF) ?geometry.RectF {

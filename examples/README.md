@@ -17,6 +17,7 @@ TypeScript is the primary app-authoring language. A new `native init my_app` pro
 | Example | Shows |
 | --- | --- |
 | `chatbot` | Multi-module TypeScript core, text editing, streaming `Cmd.fetch`, environment messages, and deterministic replay. |
+| `gpu-components` | Isolated interactive Native UI specimens, disclosure trees, anchored menus, and controlled component state. |
 | `soundboard-ts` | Full music player: audio effects, timers, search, assets, native context menus, and adaptive markup. |
 | `system-monitor-ts` | Subprocess effects, timers, parsing, tables, charts, controlled scroll, and confirmation flows. |
 
@@ -38,7 +39,6 @@ The `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` distingu
 | `system-monitor` | Live process sampling, confirmation dialogs, a settings window. |
 | `gpu-surface` | A Metal-backed GPU surface composed beside native controls and WebView content. |
 | `gpu-dashboard` | Native chrome, a GPU surface, and a retained canvas display list. |
-| `gpu-components` | The retained GPU widget controls in one native-first component lab. |
 | `canvas-preview` | Canvas + WebView in one window, panes snapped to canvas anchors, a status item. |
 | `effects-probe` | The effect system live: spawn/fetch/file effects, cancellation, worker wakes. |
 | `menu-bar` | The menu-bar app lifecycle: `close_policy = "hide"`, a status item whose Open/Quit rows drive `fx.showWindow`/`fx.quitApp`, Dock reopen. |
@@ -60,4 +60,4 @@ The `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` distingu
 
 `mobile-shell`, `ios`, and `android` are mobile host projects (Xcode/Gradle shells plus shared `app.zon` metadata) rather than desktop app directories.
 
-Start with `native init` for a small TypeScript + Native markup app, then use `chatbot`, `soundboard-ts`, or `system-monitor-ts` according to the feature you need. Use `habits` when you specifically want the smallest Zig-core equivalent, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and the GPU trio for custom-rendered or retained-canvas panes.
+Start with `native init` for a small TypeScript + Native markup app, then use `chatbot`, `gpu-components`, `soundboard-ts`, or `system-monitor-ts` according to the feature you need. Use `habits` when you specifically want the smallest Zig-core equivalent, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and `gpu-surface` or `gpu-dashboard` for custom-rendered or retained-canvas panes.

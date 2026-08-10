@@ -1,20 +1,16 @@
 # Native SDK gpu-components example
 
-This example is a retained GPU widget lab for trying the finished native-first component surface:
+An isolated gallery of the built-in Native UI components, authored entirely in **TypeScript + Native markup**. There is no app-owned Zig: `src/core.ts` owns controlled state, `src/app.native` owns the component tree and specimens, and `app.zon` describes the desktop shell.
 
-- Native toolbar shell view with native-sdk-rendered sidebar, status strip, and GPU component surface.
-- Buttons, icon buttons, text, icons, fields, checkbox, toggle, slider, progress, segmented control, lists, scroll views, popovers, menus, tooltips, and data grids.
-- Built-in component catalog in the house style: Accordion, Alert, Avatar, Badge, Breadcrumb, Bubble, Button, Button Group, Card, Checkbox, Combobox, Dialog, Drawer, Dropdown Menu, Input, Pagination, Progress, Radio Group, Resizable, Select, Separator, Sheet, Skeleton, Slider, Spinner, Switch, Table, Tabs, Textarea, Toggle, Toggle Group, and Tooltip.
-- Retained widget semantics for focus, press, toggle, select, text editing, scrolling, and data-grid roles.
-- Token-driven rounded corners, shadows, blur, typography, color, and scroll physics.
+The left pane has a live Default/Geist theme-pack selector and a real disclosure `tree` whose rows use the built-in roving keyboard focus and scroll-into-view behavior. The right pane renders only the selected component. The selector changes the pack in the TypeScript model while the runtime keeps following system appearance. Accordion disclosure, dropdown/select/combobox menus, modal surfaces, fields, sliders, tabs, lists, and the focused Tree specimen are all interactive examples of the public markup API.
 
-Run with the macOS system backend. The GPU component lab defaults to `ReleaseFast`; pass `-Doptimize=Debug` only when debugging renderer internals.
+Run the app with the repository CLI:
 
 ```sh
 native dev
 ```
 
-Run the headless canvas and scene tests:
+Compile the TypeScript core, validate the markup contract, and run the generated headless app suite:
 
 ```sh
 native test -Dplatform=null

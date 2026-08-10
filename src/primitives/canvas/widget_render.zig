@@ -4287,8 +4287,17 @@ fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
 fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
     var copy = widget;
     if (state.focused_id != null or state.focus_visible_id != null) {
-        copy.state.focused = if (state.focus_visible_id) |focus_visible_id|
-            copy.id != 0 and copy.id == focus_visible_id
+        // A menu's active row is logical focus, regardless of whether
+        // the menu was opened with the pointer or keyboard. Menu items
+        // render that state as a quiet full-row wash and never as a
+        // focus-ring outline. Every other widget keeps the modality-
+        // aware focus-visible projection used for keyboard-only rings.
+        const painted_focus_id = if (copy.kind == .menu_item)
+            state.focused_id
+        else
+            state.focus_visible_id;
+        copy.state.focused = if (painted_focus_id) |focused_id|
+            copy.id != 0 and copy.id == focused_id
         else
             false;
     }

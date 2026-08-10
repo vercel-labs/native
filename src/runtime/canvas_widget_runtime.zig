@@ -1589,11 +1589,17 @@ pub fn canvasWidgetAdjacentGroupFocusTarget(
     focused: canvas.WidgetFocusTarget,
     direction: CanvasWidgetGroupDirection,
 ) ?canvas.WidgetFocusTarget {
+    const logical_scroll_list = parent_index < layout.nodes.len and
+        layout.nodes[parent_index].widget.kind == .list and
+        focused.kind == .list_item;
     var previous: ?canvas.WidgetFocusTarget = null;
     var saw_focused = false;
-    for (layout.nodes) |node| {
+    for (layout.nodes, 0..) |node, node_index| {
         if (node.parent_index != parent_index or node.widget.kind != focused.kind) continue;
-        const target = layout.focusTargetById(node.widget.id) orelse continue;
+        const target = if (logical_scroll_list)
+            canvasWidgetLogicalFocusTarget(layout, node_index) orelse continue
+        else
+            layout.focusTargetById(node.widget.id) orelse continue;
         if (saw_focused) return target;
         if (target.id == focused.id) {
             if (direction == .previous) return previous;
@@ -1633,7 +1639,28 @@ pub fn canvasWidgetTreeScopeIndex(layout: canvas.WidgetLayoutTree, node_index: u
 
 fn canvasWidgetTreeRowFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
     if (layout.nodes[node_index].widget.semantics.role != .treeitem) return null;
-    return layout.focusTargetById(layout.nodes[node_index].widget.id);
+    return canvasWidgetLogicalFocusTarget(layout, node_index);
+}
+
+/// A roving group must be able to name its next LOGICAL row even when a
+/// scroll ancestor clips that row out of the current viewport. Keep every
+/// other focus gate (identity, disabled/hidden state, hidden ancestors,
+/// concealed disclosure content), but deliberately omit only the geometry
+/// clip check performed by `WidgetLayoutTree.focusTargetById`. The runtime
+/// scrolls this target into view before it commits focus.
+fn canvasWidgetLogicalFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
+    if (node_index >= layout.nodes.len) return null;
+    if (canvas.isWidgetHiddenInAncestors(layout, node_index)) return null;
+    if (canvas.isWidgetConcealedByDisclosure(layout, node_index)) return null;
+    const node = layout.nodes[node_index];
+    if (!canvas.widgetIsFocusable(node.widget)) return null;
+    return .{
+        .id = node.widget.id,
+        .kind = node.widget.kind,
+        .bounds = node.frame,
+        .index = node_index,
+        .state = node.widget.state,
+    };
 }
 
 /// The tree keymap's focus moves. Up/Down walk the scope's rows in node

@@ -807,6 +807,40 @@ export function update(model: Model, msg: Msg): Model {
   assert.ok(!ruleIds(clean).includes("NS1032"), `got ${ruleIds(clean)}`);
 });
 
+test("NS1033 themePack is an exact model-derived built-in pack helper", () => {
+  const clean = checkOnly(`
+export type ThemePack = "house" | "geist";
+export interface Model { readonly theme: ThemePack; }
+export type Msg = { readonly kind: "house" } | { readonly kind: "geist" };
+export function initialModel(): Model { return { theme: "house" }; }
+export function themePack(model: Model): ThemePack { return model.theme; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "house": return { theme: "house" }; case "geist": return { theme: "geist" }; }
+}
+`);
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const wrongPack = checkOnly(`
+export type ThemePack = "house" | "solarized";
+export interface Model { readonly theme: ThemePack; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { theme: "house" }; }
+export function themePack(model: Model): ThemePack { return model.theme; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongPack).includes("NS1033"), `got ${ruleIds(wrongPack)}`);
+
+  const wrongShape = checkOnly(`
+export type ThemePack = "house" | "geist";
+export interface Model { readonly theme: ThemePack; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { theme: "house" }; }
+export function themePack(): ThemePack { return "house"; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+});
+
 test("NS1061: value-record aliases refuse the shapes value storage cannot carry", () => {
   // The model root is reference storage by contract.
   const root = checkOnly(`

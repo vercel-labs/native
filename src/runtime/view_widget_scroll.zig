@@ -380,6 +380,57 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             return self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame);
         }
 
+        /// Minimally scroll every runtime-owned ancestor viewport needed
+        /// to make `id` fully visible. Roving tree/list navigation resolves
+        /// the logical successor before geometry focusability, then calls
+        /// this seam before committing focus so an offscreen row becomes a
+        /// normal routable focus target in the same key event.
+        pub fn scrollCanvasWidgetIntoView(self: *RuntimeView, id: canvas.ObjectId) anyerror!?geometry.RectF {
+            const target_index = self.canvasWidgetNodeIndexById(id) orelse return null;
+            var dirty: ?geometry.RectF = null;
+            var current = self.widget_layout_nodes[target_index].parent_index;
+            while (current) |ancestor_index| {
+                if (ancestor_index >= self.widget_layout_node_count) break;
+                const ancestor = self.widget_layout_nodes[ancestor_index];
+
+                // Anchored surfaces escape ancestor clips rather than
+                // scrolling with their source branch.
+                if (canvas.widgetIsAnchored(ancestor.widget)) break;
+
+                if (canvasWidgetScrollableKind(ancestor.widget.kind) and ancestor.widget.kind != .textarea) {
+                    const viewport = ancestor.frame.inset(ancestor.widget.layout.padding).normalized();
+                    if (!viewport.isEmpty()) {
+                        if (canvas.widgetScrollsAxis(ancestor.widget, .vertical)) {
+                            const target = self.widget_layout_nodes[target_index].frame.normalized();
+                            const delta_y: f32 = if (target.y < viewport.y)
+                                target.y - viewport.y
+                            else if (target.maxY() > viewport.maxY())
+                                target.maxY() - viewport.maxY()
+                            else
+                                0;
+                            if (delta_y != 0) {
+                                dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .vertical, delta_y, .discrete, false));
+                            }
+                        }
+                        if (canvas.widgetScrollsAxis(ancestor.widget, .horizontal)) {
+                            const target = self.widget_layout_nodes[target_index].frame.normalized();
+                            const delta_x: f32 = if (target.x < viewport.x)
+                                target.x - viewport.x
+                            else if (target.maxX() > viewport.maxX())
+                                target.maxX() - viewport.maxX()
+                            else
+                                0;
+                            if (delta_x != 0) {
+                                dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .horizontal, delta_x, .discrete, false));
+                            }
+                        }
+                    }
+                }
+                current = self.widget_layout_nodes[ancestor_index].parent_index;
+            }
+            return dirty;
+        }
+
         pub fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
             var dirty: ?geometry.RectF = null;
             var changed = false;

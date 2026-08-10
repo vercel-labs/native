@@ -71,8 +71,15 @@ fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
 fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
     var copy = widget;
     if (state.focused_id != null or state.focus_visible_id != null) {
-        copy.state.focused = if (state.focus_visible_id) |focus_visible_id|
-            copy.id != 0 and copy.id == focus_visible_id
+        // Keep dirty-bounds projection identical to display emission:
+        // menu rows paint logical focus as their active-row wash, while
+        // all focus-ring controls continue to follow focus-visible.
+        const painted_focus_id = if (copy.kind == .menu_item)
+            state.focused_id
+        else
+            state.focus_visible_id;
+        copy.state.focused = if (painted_focus_id) |focused_id|
+            copy.id != 0 and copy.id == focused_id
         else
             false;
     }

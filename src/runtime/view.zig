@@ -857,6 +857,7 @@ pub const RuntimeView = struct {
     pub const applyCanvasWidgetTextareaScroll = CanvasWidgetScrollMethods.applyCanvasWidgetTextareaScroll;
     pub const applyCanvasWidgetScrollDriverOffset = CanvasWidgetScrollMethods.applyCanvasWidgetScrollDriverOffset;
     pub const applyCanvasWidgetScrollKeyboardTarget = CanvasWidgetScrollMethods.applyCanvasWidgetScrollKeyboardTarget;
+    pub const scrollCanvasWidgetIntoView = CanvasWidgetScrollMethods.scrollCanvasWidgetIntoView;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
     pub const canvasWidgetScrollContentExtentX = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtentX;
