@@ -1553,9 +1553,9 @@ static bool emitMenuCommandForId(Host *host, HWND hwnd, uint32_t command_id) {
     return true;
 }
 
-static bool emitTrayActionForCommandId(Host *host, uint32_t command_id) {
+static bool emitTrayActionForCommandId(Host *host, const std::vector<TrayItem> &items, uint32_t command_id) {
     if (!host || !host->callback) return false;
-    for (const TrayItem &item : host->tray_items) {
+    for (const TrayItem &item : items) {
         if (item.separator || item.command_id != command_id) continue;
         WindowsEvent event = {};
         event.kind = kTrayAction;
@@ -1584,9 +1584,13 @@ static void showTrayMenu(Host *host, HWND hwnd) {
     emitStatusCommand(host, hwnd, host->tray_open_command);
     // The open hook may synchronously rebuild or remove the tray.
     if (!host->tray_active || host->tray_items.empty()) return;
+    // TrackPopupMenu owns a nested message loop. Timers and posted wakes can
+    // rebuild host->tray_items while this menu is open, so retain the exact
+    // command-id -> stable item-id mapping represented by the visible rows.
+    const std::vector<TrayItem> displayed_items = host->tray_items;
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    for (const TrayItem &item : host->tray_items) {
+    for (const TrayItem &item : displayed_items) {
         if (item.separator) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             continue;
@@ -1604,7 +1608,7 @@ static void showTrayMenu(Host *host, HWND hwnd) {
     SetForegroundWindow(hwnd);
     UINT command_id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
-    if (command_id != 0) emitTrayActionForCommandId(host, command_id);
+    if (command_id != 0) emitTrayActionForCommandId(host, displayed_items, command_id);
     PostMessageW(hwnd, WM_NULL, 0, 0);
 }
 
@@ -1659,7 +1663,7 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
             if (item.separator || !item.enabled || item.key.empty()) continue;
             if (item.key != key) continue;
             if (!shortcutModifiersMatch(item.modifiers, allow_implicit_shift)) continue;
-            return emitTrayActionForCommandId(host, item.command_id);
+            return emitTrayActionForCommandId(host, host->tray_items, item.command_id);
         }
     }
     return false;

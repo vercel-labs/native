@@ -2458,9 +2458,8 @@ const max_tray_items: usize = 32;
 
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    const has_presentation = options.presentation.title.len > 0 or options.presentation.width != 0 or
-        options.presentation.tone != .normal or options.presentation.icon_opacity != 1 or options.presentation.monospaced;
-    const presentation = if (has_presentation) options.presentation else platform_mod.TrayPresentation{ .title = options.title };
+    var presentation = options.presentation;
+    if (presentation.title.len == 0) presentation.title = options.title;
     native_sdk_appkit_create_tray(
         self.host,
         options.icon_path.ptr,

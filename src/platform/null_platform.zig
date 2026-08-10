@@ -1506,9 +1506,8 @@ pub const NullPlatform = struct {
         self.tray_title = undefined;
         self.tray_tooltip = undefined;
         self.tray_icon_path_len = (try copyInto(&self.tray_icon_path, options.icon_path)).len;
-        const has_presentation = options.presentation.title.len > 0 or options.presentation.width != 0 or
-            options.presentation.tone != .normal or options.presentation.icon_opacity != 1 or options.presentation.monospaced;
-        const presentation = if (has_presentation) options.presentation else TrayPresentation{ .title = options.title };
+        var presentation = options.presentation;
+        if (presentation.title.len == 0) presentation.title = options.title;
         self.tray_title_len = (try copyInto(&self.tray_title, presentation.title)).len;
         self.tray_tooltip_len = (try copyInto(&self.tray_tooltip, options.tooltip)).len;
         self.tray_activation_command_len = (try copyInto(&self.tray_activation_command, options.activation_command)).len;

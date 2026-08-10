@@ -2095,7 +2095,9 @@ test "windows tray carries lifecycle commands rich rows and key equivalents into
     try std.testing.expect(std.mem.indexOf(u8, host_source, "item.key = lowerAscii(slice(keys[index], key_lens[index]));") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "item.modifiers = modifiers[index];") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "display_label += shortcutSuffix(item.key, item.modifiers);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "return emitTrayActionForCommandId(host, item.command_id);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "const std::vector<TrayItem> displayed_items = host->tray_items;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "emitTrayActionForCommandId(host, displayed_items, command_id);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "return emitTrayActionForCommandId(host, host->tray_items, item.command_id);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP") != null);
 }
 
