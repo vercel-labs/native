@@ -797,6 +797,7 @@ pub const WindowCreateOptions = struct {
             .min_width = self.min_width,
             .min_height = self.min_height,
             .close_policy = self.close_policy,
+            .window_controls_offset = self.window_controls_offset,
         };
     }
 };
