@@ -136,6 +136,75 @@ pub fn TsUiApp(comptime core: type) type {
             outcome_handle: ?*runtime_effects.ChannelHandle = null,
         };
 
+        /// One effects host binding must carry both app services and the
+        /// framework-owned persistence verbs when an app enables both. The
+        /// reserved persistence names route to that binding; every other
+        /// command and the worker completion lifecycle stay with the app
+        /// service carrier.
+        const HostCallMux = struct {
+            primary: runtime_effects.HostCallBinding,
+            persist: runtime_effects.HostCallBinding,
+
+            fn binding(self: *HostCallMux) runtime_effects.HostCallBinding {
+                return .{
+                    .context = self,
+                    .send_fn = send,
+                    .request_fn = request,
+                    .cancel_fn = cancel,
+                    .reject_duplicate_keys = self.primary.reject_duplicate_keys,
+                    .poll_fn = poll,
+                    .pending_fn = pending,
+                    .bind_services_fn = bindServices,
+                    .shutdown_fn = shutdown,
+                };
+            }
+
+            fn persistenceName(name: []const u8) bool {
+                return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
+            }
+
+            fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const target = if (persistenceName(name)) self.persist else self.primary;
+                target.send_fn(target.context, name, payload);
+            }
+
+            fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const target = if (persistenceName(name)) self.persist else self.primary;
+                target.request_fn(target.context, name, key, payload);
+            }
+
+            fn cancel(context: *anyopaque, key: u64) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                if (self.primary.cancel_fn) |cancel_fn| cancel_fn(self.primary.context, key);
+            }
+
+            fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const poll_fn = self.primary.poll_fn orelse return null;
+                return poll_fn(self.primary.context);
+            }
+
+            fn pending(context: *anyopaque) bool {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const pending_fn = self.primary.pending_fn orelse return false;
+                return pending_fn(self.primary.context);
+            }
+
+            fn bindServices(context: *anyopaque, services: *const platform.PlatformServices) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                if (self.primary.bind_services_fn) |bind_fn| bind_fn(self.primary.context, services);
+                if (self.persist.bind_services_fn) |bind_fn| bind_fn(self.persist.context, services);
+            }
+
+            fn shutdown(context: *anyopaque) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                if (self.primary.shutdown_fn) |shutdown_fn| shutdown_fn(self.primary.context);
+                if (self.persist.shutdown_fn) |shutdown_fn| shutdown_fn(self.persist.context);
+            }
+        };
+
         /// Build-time manifest/wire fence for the three persistence routes.
         /// The generated runner calls this with app.zon's comptime strings so
         /// a typo or payload mismatch fails during `native build`, before a
@@ -190,6 +259,9 @@ pub fn TsUiApp(comptime core: type) type {
             /// meaningful for cores exporting `envMsgs`. The slices must
             /// outlive install.
             env_values: []const EnvValue = &.{},
+            /// Generated service registry/carrier for Cmd.host/request. Null
+            /// preserves the existing embedding-host behavior.
+            host_calls: ?runtime_effects.HostCallBinding = null,
             persist: ?PersistOptions = null,
         };
 
@@ -225,7 +297,9 @@ pub fn TsUiApp(comptime core: type) type {
         /// installing frame.
         var boot_images_store: []const BootImage = &.{};
         var env_values_store: []const EnvValue = &.{};
+        var host_calls_store: ?runtime_effects.HostCallBinding = null;
         var persist_options_store: ?PersistOptions = null;
+        var host_call_mux_store: ?HostCallMux = null;
         var lifecycle_store: ?*const fn (event: runtime_core.LifecycleEvent) ?Msg = null;
         var lifecycle_flush_after_update = false;
 
@@ -234,7 +308,12 @@ pub fn TsUiApp(comptime core: type) type {
             Host.setImageCacheDir(core_options.image_cache_dir);
             boot_images_store = core_options.boot_images;
             env_values_store = core_options.env_values;
+            host_calls_store = core_options.host_calls;
             persist_options_store = core_options.persist;
+            host_call_mux_store = if (core_options.host_calls != null and core_options.persist != null) .{
+                .primary = core_options.host_calls.?,
+                .persist = core_options.persist.?.binding,
+            } else null;
             if (core_options.env_values.len > 0 and comptime !@hasDecl(core, "envMsgs")) {
                 @panic("TsUiApp received env_values but the core exports no envMsgs channel - declare `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` in core.ts");
             }
@@ -578,6 +657,13 @@ pub fn TsUiApp(comptime core: type) type {
         /// the launch environment overrides as ordinary journaled Msgs,
         /// then refresh the app-held root.
         fn initFx(model: *Model, fx: *Effects) void {
+            if (host_call_mux_store) |*mux| {
+                fx.bindHostCalls(mux.binding());
+            } else if (host_calls_store) |binding| {
+                fx.bindHostCalls(binding);
+            } else if (persist_options_store) |persist| {
+                fx.bindHostCalls(persist.binding);
+            }
             for (boot_images_store) |image| {
                 // Registration is synchronous; a failed decode leaves the
                 // views on their fallback (avatar initials) — a bad asset
@@ -585,7 +671,6 @@ pub fn TsUiApp(comptime core: type) type {
                 _ = fx.registerImageBytes(image.id, image.bytes) catch continue;
             }
             if (persist_options_store) |persist| {
-                fx.bindHostCalls(persist.binding);
                 if (persist.outcome_handle) |handle| {
                     handle.* = fx.openChannel(.{
                         .key = persist_outcome_channel_key,

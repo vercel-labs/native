@@ -338,6 +338,24 @@ pub const HostCallBinding = struct {
     /// cancelled — any late `feedHostResult` for it reports
     /// `error.EffectNotFound` and delivers nothing.
     cancel_fn: ?*const fn (context: *anyopaque, key: u64) void = null,
+    /// Service transports join the spawn/stream keyed discipline: a second
+    /// live request rejects without replacing the first. Legacy embedding
+    /// bindings retain the generic host seam's replacement behavior.
+    reject_duplicate_keys: bool = false,
+    /// Optional worker-carrier completion seam. `bytes` stays valid until
+    /// the next poll; Effects copies it immediately on the loop thread.
+    poll_fn: ?*const fn (context: *anyopaque) ?HostCallCompletion = null,
+    pending_fn: ?*const fn (context: *anyopaque) bool = null,
+    /// Supplies the platform's thread-safe wake handle after UiApp binds it.
+    bind_services_fn: ?*const fn (context: *anyopaque, services: *const platform.PlatformServices) void = null,
+    /// Quiesce carrier workers/children before PlatformServices is severed.
+    shutdown_fn: ?*const fn (context: *anyopaque) void = null,
+};
+
+pub const HostCallCompletion = struct {
+    key: u64,
+    ok: bool,
+    bytes: []const u8,
 };
 
 /// Window-action label capacity (`Effects.closeWindow`/`minimizeWindow`/
@@ -5286,6 +5304,11 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.replay_pty_write_head = 0;
             self.replay_pty_write_len = 0;
+            // A worker-backed host carrier may still be blocked in a child
+            // read. Quiesce it while the platform wake binding remains live.
+            if (self.host_calls) |binding| {
+                if (binding.shutdown_fn) |shutdown_fn| shutdown_fn(binding.context);
+            }
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -5401,6 +5424,9 @@ pub fn Effects(comptime Msg: type) type {
         pub fn bindServices(self: *Self, services: *const platform.PlatformServices) void {
             if (self.services != null) return;
             self.services = services;
+            if (self.host_calls) |binding| {
+                if (binding.bind_services_fn) |bind_fn| bind_fn(binding.context, services);
+            }
             // Open-before-bind: a channel wake header is already armed
             // and its producer may already be posting, so this bind IS
             // the publication site. Bind-before-open publishes at the
@@ -5654,7 +5680,11 @@ pub fn Effects(comptime Msg: type) type {
         /// (see `HostCallBinding`). Loop-thread only; the first bind
         /// sticks.
         pub fn bindHostCalls(self: *Self, binding: HostCallBinding) void {
-            if (self.host_calls == null) self.host_calls = binding;
+            if (self.host_calls != null) return;
+            self.host_calls = binding;
+            if (self.services) |services| {
+                if (binding.bind_services_fn) |bind_fn| bind_fn(binding.context, services);
+            }
         }
 
         /// Bind the engine-owned Tier-2 store. Loop-thread only; first bind
@@ -8005,11 +8035,11 @@ pub fn Effects(comptime Msg: type) type {
         /// performs `name` with `payload` and answers with exactly one
         /// `feedHostResult(key, ok, bytes)`, delivered as one
         /// `on_result` Msg (`EffectHostResult`) on the next drain. Key
-        /// discipline differs from spawn/fetch/file/clipboard on
-        /// purpose (the wire contract): issuing a key whose host
-        /// request is still in flight REPLACES it — the old request's
-        /// result is dropped, silently — and `cancelHostRequest` drops
-        /// one without dispatching anything. Rejection is never silent:
+        /// discipline is selected by the binding: legacy generic host
+        /// bindings replace a still-live same-key request, while the
+        /// service carrier joins spawn/stream discipline and rejects the
+        /// duplicate without disturbing the first. `cancelHostRequest`
+        /// drops one without dispatching anything. Rejection is never silent:
         /// an over-bound name/payload, a key colliding with another
         /// effect kind, a full slot table, or a real-mode channel with
         /// no bound host services delivers exactly one err-route Msg
@@ -8092,6 +8122,9 @@ pub fn Effects(comptime Msg: type) type {
                         slot.cancelled_generation = slot.generation;
                         slot.cancel_requested.store(true, .release);
                         continue;
+                    }
+                    if (!native_request and self.host_calls != null and self.host_calls.?.reject_duplicate_keys) {
+                        return self.rejectHost(options.key, options.on_result);
                     }
                     // Tell the host first: a late answer for the old
                     // occupancy must find nothing.
@@ -9826,7 +9859,23 @@ pub fn Effects(comptime Msg: type) type {
                 self.pending_staged_len > 0 or
                 self.channel_pending_count.load(.seq_cst) > 0 or
                 self.pty_pending_count.load(.seq_cst) > 0 or
-                self.queue_count.load(.seq_cst) > 0;
+                self.queue_count.load(.seq_cst) > 0 or
+                (if (self.host_calls) |binding|
+                    if (binding.pending_fn) |pending_fn| pending_fn(binding.context) else false
+                else
+                    false);
+        }
+
+        /// Move carrier-owned terminals into the ordinary host-result queue
+        /// on the loop thread. A late terminal for a cancelled/replaced key
+        /// finds no slot and retires silently, exactly like every other keyed
+        /// effect family.
+        fn adoptHostCompletions(self: *Self) void {
+            const binding = self.host_calls orelse return;
+            const poll_fn = binding.poll_fn orelse return;
+            while (poll_fn(binding.context)) |completion| {
+                self.feedHostResult(completion.key, completion.ok, completion.bytes) catch {};
+            }
         }
 
         /// One drain pass's causal boundary: a snapshot of the
@@ -9873,6 +9922,7 @@ pub fn Effects(comptime Msg: type) type {
         /// Snapshot the completion backlog at the start of one drain
         /// pass. Loop-thread only, like the drain itself.
         pub fn drainBoundary(self: *Self) DrainBoundary {
+            self.adoptHostCompletions();
             // Advance the pass clock and release replay-side retired
             // video identities whose window closed (`sweepRetiredVideos`
             // has the full argument). Cheap and empty outside replay.
@@ -9921,6 +9971,7 @@ pub fn Effects(comptime Msg: type) type {
         /// this form serves callers that own their delivery timing —
         /// tests driving the channel directly.
         pub fn takeMsg(self: *Self) ?Msg {
+            self.adoptHostCompletions();
             var unbounded: DrainBoundary = .{
                 .pending_before = std.math.maxInt(u64),
                 .queue_budget = std.math.maxInt(usize),

@@ -454,6 +454,9 @@ export class SubsetChecker {
   private readonly files: readonly ts.SourceFile[];
   private readonly entry: ts.SourceFile;
   private readonly fileSet: Set<ts.SourceFile>;
+  /// Null means the app has no service registry. An empty set is distinct:
+  /// service files exist, but none exported a callable operation.
+  private readonly serviceOps: ReadonlySet<string> | null;
   private readonly capabilities: Set<string>;
   private readonly persistRoutes: PersistRoutes | undefined;
   private usesPersist = false;
@@ -463,6 +466,7 @@ export class SubsetChecker {
     tast: TypedAst,
     table: TypeTable,
     files: readonly ts.SourceFile[] | ts.SourceFile,
+    serviceOps: ReadonlySet<string> | null = null,
     capabilities: readonly string[] = [],
     persistRoutes?: PersistRoutes,
   ) {
@@ -471,12 +475,14 @@ export class SubsetChecker {
     this.files = Array.isArray(files) ? files : [files as ts.SourceFile];
     this.entry = this.files[0];
     this.fileSet = new Set(this.files);
+    this.serviceOps = serviceOps;
     this.capabilities = new Set(capabilities);
     this.persistRoutes = persistRoutes;
   }
 
   check(): CheckResult {
     for (const file of this.files) this.findCmdNames(file);
+    this.checkServiceCalls();
     for (const file of this.files) this.checkModuleShape(file);
     this.checkEntryContract();
     this.checkPersistRoutes();
@@ -507,6 +513,34 @@ export class SubsetChecker {
       cmdNames: this.cmdNames,
       subNames: this.subNames,
     };
+  }
+
+  /// NS1067 — once an app declares a service registry, every generic
+  /// Cmd.host/request literal must resolve either to that registry or to
+  /// the SDK-reserved native family. The service binding owns both command
+  /// channels, so an unknown fire-and-forget host call would otherwise be
+  /// dropped silently by ServiceHost.send.
+  private checkServiceCalls(): void {
+    if (this.serviceOps === null || this.cmdNames.size === 0) return;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        (node.expression.name.text === "request" || node.expression.name.text === "host") &&
+        ts.isIdentifier(node.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression)
+      ) {
+        const name = node.arguments[0];
+        if (!name || !ts.isStringLiteral(name)) {
+          this.report("NS1067", "A service call name is not a string literal from the generated registry.", name ?? node);
+        } else if (!name.text.startsWith("native-sdk.") && !this.serviceOps.has(name.text)) {
+          this.report("NS1067", `\`${name.text}\` names no operation in services.contract.json.`, name);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    for (const file of this.files) visit(file);
   }
 
   /// app.zon owns these names, while the TypeScript core owns Msg. Validate
@@ -1497,9 +1531,12 @@ export class SubsetChecker {
   /// module-level type-origin table and each union's payload-member table so
   /// a valid TypeScript name fails with a teaching instead of duplicate Zig.
   private checkGeneratedMetadataNames(): void {
-    const reportTypeOrigins = (name: ts.Identifier): void => {
+    const reportGeneratedName = (name: ts.Identifier): void => {
       if (name.text === "type_origins") {
         this.report("NS1038", "`type_origins` collides with the generated contract type-origin metadata declaration.", name);
+      }
+      if (this.serviceOps !== null && name.text.startsWith("__nativeSdk")) {
+        this.report("NS1067", "A core declaration imported by the service host uses the reserved `__nativeSdk` transport-lowering prefix.", name);
       }
     };
     for (const file of this.files) {
@@ -1510,10 +1547,10 @@ export class SubsetChecker {
           ts.isClassDeclaration(stmt) ||
           ts.isFunctionDeclaration(stmt)
         ) {
-          if (stmt.name) reportTypeOrigins(stmt.name);
+          if (stmt.name) reportGeneratedName(stmt.name);
         } else if (ts.isVariableStatement(stmt)) {
           for (const decl of stmt.declarationList.declarations) {
-            if (ts.isIdentifier(decl.name)) reportTypeOrigins(decl.name);
+            if (ts.isIdentifier(decl.name)) reportGeneratedName(decl.name);
           }
         }
       }

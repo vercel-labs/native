@@ -22,6 +22,8 @@ const sidecar_mod = @import("sidecar.zig");
 const emit_mod = @import("emit.zig");
 const emit_facade_mod = @import("emit_facade.zig");
 const emit_profile_mod = @import("emit_profile.zig");
+const service_contract_mod = @import("service_contract.zig");
+const emit_service_mod = @import("emit_service.zig");
 
 const usage =
     \\usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...
@@ -48,6 +50,8 @@ pub fn main(init: std.process.Init) !void {
     var stderr_buffer: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writerStreaming(init.io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
+
+    if (try serviceProjection(init, args, stderr)) return;
 
     var sidecar_path: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
@@ -356,6 +360,85 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         };
     }
+}
+
+/// The service contract is a distinct schema from core.contract.json. Keep
+/// its projection mode explicit so neither reader can accidentally accept a
+/// document from the other class.
+fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *std.Io.Writer) !bool {
+    var input: ?[]const u8 = null;
+    var host_out: ?[]const u8 = null;
+    var registry_out: ?[]const u8 = null;
+    var saw_service_flag = false;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--services-sidecar") and index + 1 < args.len) {
+            saw_service_flag = true;
+            index += 1;
+            input = args[index];
+        } else if (std.mem.eql(u8, arg, "--service-host-main") and index + 1 < args.len) {
+            saw_service_flag = true;
+            index += 1;
+            host_out = args[index];
+        } else if (std.mem.eql(u8, arg, "--service-registry") and index + 1 < args.len) {
+            saw_service_flag = true;
+            index += 1;
+            registry_out = args[index];
+        } else if (saw_service_flag) {
+            try stderr.print("corewire: unknown service projection argument \"{s}\"\n", .{arg});
+            try stderr.flush();
+            std.process.exit(2);
+        }
+    }
+    if (!saw_service_flag) return false;
+    const sidecar_path = input orelse {
+        try stderr.print("usage: corewire --services-sidecar <services.contract.json> --service-host-main <service_host_main.ts> --service-registry <services.zig>\n", .{});
+        try stderr.flush();
+        std.process.exit(2);
+    };
+    if (host_out == null and registry_out == null) {
+        try stderr.print("corewire: the service projection needs --service-host-main and/or --service-registry\n", .{});
+        try stderr.flush();
+        std.process.exit(2);
+    }
+    if (host_out != null and registry_out != null and std.ascii.eqlIgnoreCase(host_out.?, registry_out.?)) {
+        try stderr.print("corewire: the service host and registry outputs name one file\n", .{});
+        try stderr.flush();
+        std.process.exit(2);
+    }
+    const arena = init.arena.allocator();
+    const source = std.Io.Dir.cwd().readFileAlloc(init.io, sidecar_path, arena, .limited(service_contract_mod.max_bytes)) catch |err| {
+        try stderr.print("corewire: cannot read {s}: {t}\n", .{ sidecar_path, err });
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    const contract = service_contract_mod.read(arena, source, stderr) catch |err| switch (err) {
+        error.InvalidContract => {
+            try stderr.flush();
+            std.process.exit(1);
+        },
+        error.OutOfMemory => return error.OutOfMemory,
+        error.WriteFailed => return error.WriteFailed,
+    };
+    if (host_out) |path| {
+        const generated = try emit_service_mod.emitHost(arena, contract);
+        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
+            try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+    }
+    if (registry_out) |path| {
+        const generated = try emit_service_mod.emitRegistry(arena, contract);
+        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
+            try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+    }
+    try stderr.flush();
+    return true;
 }
 
 /// Rewrite one record-field slot's type-table spelling from i64 to f64

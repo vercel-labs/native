@@ -585,10 +585,11 @@ export function lineColumn(file: SourceFile, pos: number): { line: number; colum
   return { line: lc.line + 1, column: lc.character + 1 };
 }
 
-/// Build a checked program rooted at the app-core entry file. tsc resolves
-/// the whole import graph from it (relative modules under src/, the SDK
-/// modules by their published names), so a multi-file core needs no extra
-/// root names; modules.ts validates the graph's boundaries first.
-export function createSubsetProgram(entry: string): tsImpl.Program {
-  return tsImpl.createProgram([entry, bytesTextMethodsDts], subsetCompilerOptions());
+/// Build the one checked program used by both TypeScript classes. `roots`
+/// includes the independently discovered src/services/**/*.ts modules: a
+/// valid core never imports those files, so they cannot be discovered from
+/// the entry root. The caller still passes only core files to the subset
+/// checker and integer inference.
+export function createSubsetProgram(entry: string, roots: readonly string[] = [entry]): tsImpl.Program {
+  return tsImpl.createProgram([...new Set([entry, ...roots, bytesTextMethodsDts])], subsetCompilerOptions());
 }

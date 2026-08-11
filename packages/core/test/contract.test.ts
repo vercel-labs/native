@@ -275,12 +275,12 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       });
     };
 
-    assert.equal(run(source(false), 1).warnings.some((d) => d.id === "NS1065"), false);
-    const stale = run(source(true), 1).warnings.find((d) => d.id === "NS1065");
+    assert.equal(run(source(false), 1).warnings.some((d) => d.id === "NS1068"), false);
+    const stale = run(source(true), 1).warnings.find((d) => d.id === "NS1068");
     assert.ok(stale);
     assert.match(stale.message, /stayed at 1/);
-    assert.equal(run(source(true), 2).warnings.some((d) => d.id === "NS1065"), false);
-    const reused = run(source(false), 1).warnings.find((d) => d.id === "NS1065");
+    assert.equal(run(source(true), 2).warnings.some((d) => d.id === "NS1068"), false);
+    const reused = run(source(false), 1).warnings.find((d) => d.id === "NS1068");
     assert.ok(reused);
     assert.match(reused.message, /moved backward from 2 to 1/);
   } finally {

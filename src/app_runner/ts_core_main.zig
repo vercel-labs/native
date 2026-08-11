@@ -62,6 +62,7 @@ const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const manifest = @import("app_manifest_zon");
 pub const core = @import("core.zig");
+const services = @import("services.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -132,6 +133,30 @@ pub fn main(init: std.process.Init) !void {
         .data,
         &data_dir_buffer,
     ) catch "";
+    if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, app_data_dir) catch {};
+
+    // Phase-1 TypeScript services: a lazily-spawned sibling executable,
+    // generated and compiled from services.contract.json. Replay never calls
+    // the binding, so the child never starts. Its ambient environment is an
+    // explicit allowlist and its cwd is the app data directory.
+    var service_env = std.process.Environ.Map.init(std.heap.page_allocator);
+    defer service_env.deinit();
+    const env_keys = init.environ_map.keys();
+    const env_values = init.environ_map.values();
+    for (env_keys, env_values) |key, value| {
+        if (native_sdk.serviceEnvironmentVariableAllowed(key)) service_env.put(key, value) catch {};
+    }
+    var service_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const service_path = siblingServiceHostPath(init.io, &service_path_buffer);
+    const ServiceTransport = native_sdk.ServiceHost(services);
+    var service_transport = ServiceTransport.init(
+        std.heap.page_allocator,
+        init.io,
+        service_path,
+        app_data_dir,
+        &service_env,
+    );
+    defer service_transport.deinit();
     // app.zon-declared images, read once at launch (bounded; a missing or
     // over-bound file skips its entry and the views keep their fallback)
     // and registered by the adapter on the installing frame.
@@ -234,6 +259,7 @@ pub fn main(init: std.process.Init) !void {
         .image_cache_dir = audio_cache_dir,
         .boot_images = boot_images_buffer[0..boot_image_count],
         .env_values = env_values_buffer[0..env_value_count],
+        .host_calls = if (comptime services.enabled) service_transport.binding() else null,
         .persist = persist_options,
     }, options);
     defer app_state.destroy();
@@ -251,6 +277,14 @@ pub fn main(init: std.process.Init) !void {
             .navigation = .{ .allowed_origins = allowed_origins },
         },
     }, init);
+}
+
+fn siblingServiceHostPath(io: std.Io, buffer: []u8) []const u8 {
+    var executable_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = std.process.executablePath(io, &executable_buffer) catch return "";
+    const dir = std.fs.path.dirname(executable_buffer[0..len]) orelse return "";
+    const suffix = if (@import("builtin").os.tag == .windows) ".exe" else "";
+    return std.fmt.bufPrint(buffer, "{s}/{s}_services{s}", .{ dir, manifest.name, suffix }) catch "";
 }
 
 const PersistHost = struct {

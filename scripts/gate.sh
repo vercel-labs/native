@@ -31,6 +31,11 @@
 #                                                 webview/browser run their
 #                                                 in-dir `zig build test`)
 #   docs/**                                     -> docs `pnpm check`
+#   **/src/services/**, service seam runtime,
+#   compiler, corewire, fixture, or skill paths -> real compiled service-host
+#                                                 success/error/crash/timeout/
+#                                                 replay battery + focused
+#                                                 frontend/contract tests
 #   anything else (README, .github, packages,
 #   scripts, skills, release docs, ...)         -> root suites only
 # A docs-ONLY diff runs only the docs check. The docs check is path-gated
@@ -102,6 +107,7 @@ framework_changed=false
 macos_platform_changed=false
 docs_changed=false
 meta_changed=false
+service_seam_changed=false
 affected_examples=""   # space-separated example dir names
 mobile_affected=false
 
@@ -129,6 +135,7 @@ while IFS= read -r file; do
   [ -n "$file" ] || continue
   case "$file" in
     docs/*) docs_changed=true ;;
+    packages/core/*) meta_changed=true ;;
     src/platform/macos/*) framework_changed=true; macos_platform_changed=true ;;
     src/*|build.zig|build.zig.zon|build/*|tools/*|tests/*|assets/*) framework_changed=true ;;
     examples/*/*)
@@ -140,6 +147,11 @@ while IFS= read -r file; do
       esac
       ;;
     *) meta_changed=true ;;
+  esac
+  case "$file" in
+    */src/services/*|src/runtime/service_host.zig|src/app_runner/ts_core_main.zig|tests/ts-services/*|tools/corewire/emit_service.zig|tools/corewire/service_contract.zig|packages/core/src/checker.ts|packages/core/src/cli.ts|packages/core/src/diagnostics.ts|packages/core/src/frontend.ts|packages/core/src/modules.ts|packages/core/src/service_contract.ts|packages/core/src/typed_ast.ts|packages/core/scripts/compiler_typecheck.mjs|packages/core/scripts/stage_external_services.mjs|packages/core/scripts/run_external_service_compiler.mjs|skill-data/ts-services/*|packages/native-sdk/*service_host*|build.zig|build/app.zig)
+      service_seam_changed=true
+      ;;
   esac
 done <<EOF_FILES
 $changed_files
@@ -272,6 +284,14 @@ if [ "$tier" = "fast" ]; then
     $mobile_affected && run_step "examples-mobile" zig build test-examples-mobile
   fi
 
+  if $service_seam_changed; then
+    run_step "ts-services-frontend" node --test packages/core/test/services.test.ts
+    run_step "ts-services-e2e" zig build test-ts-services-e2e
+  else
+    skip_step "ts-services-frontend" "service seam paths unchanged vs $base_ref"
+    skip_step "ts-services-e2e" "service seam paths unchanged vs $base_ref"
+  fi
+
   if $macos_platform_changed; then
     cef_host_step
   else
@@ -286,6 +306,8 @@ if [ "$tier" = "fast" ]; then
 else # full
   run_step "zig-test" zig build test
   run_step "zig-validate" zig build validate
+  run_step "ts-services-frontend" node --test packages/core/test/services.test.ts
+  run_step "ts-services-e2e" zig build test-ts-services-e2e
   run_step "examples-frontends" zig build test-examples-frontends
   run_step "examples-native" zig build test-examples-native
   run_step "examples-mobile" zig build test-examples-mobile

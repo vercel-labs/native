@@ -4,7 +4,7 @@ import { CodeToggle } from "@/components/code-toggle";
 
 An app core is pure TypeScript: no npm packages run inside it, because no JS engine ships in the binary. That line is drawn on purpose, and it buys the properties the rest of the toolkit stands on — byte-identical record→replay, headless testing of the whole app, automation over real state, and native dispatch speed with zero allocation at runtime. The language inside the core is complete ([TypeScript Cores](/docs/typescript) covers exactly what that means); the ecosystem lives at the edges, and every edge has a first-class pattern.
 
-The question behind "can I use npm?" is almost always one of these four:
+The question behind "can I use npm?" is almost always one of these five:
 
 <table>
   <thead>
@@ -15,6 +15,11 @@ The question behind "can I use npm?" is almost always one of these four:
     </tr>
   </thead>
   <tbody>
+    <tr>
+      <td>Filesystem, JSON/regex parsing, transforms, or imperative work in ordinary TypeScript</td>
+      <td>A compiled module under <code>src/services/</code></td>
+      <td>A native service-host process, reached with <code>Cmd.request</code></td>
+    </tr>
     <tr>
       <td>An HTTP API — including AI/LLM endpoints</td>
       <td><code>Cmd.fetch</code> with routed results</td>
@@ -37,6 +42,12 @@ The question behind "can I use npm?" is almost always one of these four:
     </tr>
   </tbody>
 </table>
+
+## Compiled TypeScript services
+
+Put ordinary static-tier TypeScript under `src/services/` when the work needs Node built-ins, regexes, JSON, `Map`/`Set`, `Date`, classes, or ambient process authority. Each directly exported, non-default named synchronous function becomes an operation named `<module-basename>.<export>` and takes zero arguments or one `Uint8Array`, returning `Uint8Array`. The core calls it with `Cmd.request`, so success and failure still arrive as Msgs and record/replay remains offline.
+
+This is compiled native code with no JavaScript engine. Phase 1 is vendored-source-only: bare package imports teach NS1066, so check the utility's source in under `src/services/`. The host is a lazily spawned sibling executable on desktop today; [TypeScript services](/docs/typescript#typescript-services) covers authority, crash recovery, packaging, and the mobile/in-process limitation.
 
 ## Calling APIs, AI endpoints included
 
@@ -167,7 +178,8 @@ import { parseCsvRow } from "./csv.ts";                    // vendored under src
 import { containsIgnoreCase } from "@native-sdk/core/text"; // the SDK library channel
 ```
 
-- **Vendor it under `src/`.** Subset-clean TypeScript compiles into the core like your own modules ([splitting a core into modules](/docs/typescript#splitting-a-core-into-modules)); the subset checker tells you immediately — by rule ID, with the rewrite — whether a vendored file fits. Code that leans on classes, exceptions, or regexes generally wants rewriting rather than vendoring, and the rewrite is usually smaller than the dependency.
+- **Vendor subset-clean code under `src/` outside `src/services/`.** It compiles into the core like your own modules ([splitting a core into modules](/docs/typescript#splitting-a-core-into-modules)); the subset checker tells you immediately — by rule ID, with the rewrite — whether it fits.
+- **Vendor ordinary static-tier code under `src/services/`.** Classes, regexes, JSON, `Map`/`Set`, `Date`, Node built-ins, and imperative transforms stay in TypeScript and compile into the service host; the core reaches their exported byte operations through `Cmd.request`.
 - **`@native-sdk/core/*` is the curated library channel**: SDK modules written in the same subset, compiled into your core when imported and absent when not. Today that is `@native-sdk/core/text` — the byte-splice text engine (caret, selection, IME, case-insensitive search) — and `@native-sdk/core/events` — the canonical event record types markup and the wiring channels match. The channel grows with the toolkit; JSON encoding/parsing over bytes, today demonstrated in `examples/chatbot/src/api.ts`, is the kind of module it exists to absorb.
 
-One thing deliberately does not exist: a package manager for cores. A core's import graph is exactly the files under `src/` plus the SDK modules — the whole program is readable, the build is hermetic, and nothing arrives at build time that you have not checked in.
+One thing deliberately does not exist: a package manager for cores. A core's import graph is exactly its class under `src/` plus the SDK modules. Phase-1 services are hermetic too: their source is checked in under `src/services/`, with no install or network step. Nothing arrives at build time that you have not checked in.

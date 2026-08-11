@@ -98,12 +98,15 @@ const TsCoreStage = struct {
     /// The compiled-core archive: the app module links it (with libc,
     /// for the toolchain's runtime) beside the staged mirror.
     archive: std.Build.LazyPath,
+    /// Plain-scriptc service host compiled from src/services/, when that
+    /// class exists. It is installed/packaged beside the app executable.
+    service_exe: ?std.Build.LazyPath = null,
 };
 
 /// The frontend's own sources — the staleness set of every build step
 /// that runs it (a frontend edit re-checks every core).
 const frontend_sources = [_][]const u8{
-    "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "ownership.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+    "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "ownership.ts", "service_contract.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
 };
 
 /// Whether the frontend's TypeScript compiler (@typescript/old, the
@@ -261,6 +264,25 @@ fn tsExternalCompilerJs(b: *std.Build, dep: *std.Build.Dependency) ?[]const u8 {
     }
 }
 
+fn requireTsExternalCompilerJs(b: *std.Build, dep: *std.Build.Dependency) []const u8 {
+    return tsExternalCompilerJs(b, dep) orelse {
+        const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
+        std.debug.print(
+            \\
+            \\error: the external TypeScript compiler is not installed (cores and services
+            \\compile through it). It ships as an exact-pinned dependency of the SDK's
+            \\packages/core — install it once with:
+            \\  cd {s}/packages/core && npm ci
+            \\(or point NATIVE_SDK_CORE_COMPILER at the pinned release's command; an
+            \\npm-installed @native-sdk/cli carries the compiler automatically — if it is
+            \\missing there, the install is broken: reinstall @native-sdk/cli).
+            \\
+            \\
+        , .{sdk_root});
+        std.process.exit(1);
+    };
+}
+
 /// The SDK dependency's real root, resolved the way both the toolchain
 /// check and its teaching name it.
 fn tsSdkRoot(allocator: std.mem.Allocator, io: std.Io, dep: *std.Build.Dependency) []const u8 {
@@ -340,6 +362,7 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
 fn tsCoreStage(
     b: *std.Build,
     dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
     app_root: []const u8,
     app_name: []const u8,
     persist_capability: bool,
@@ -347,6 +370,7 @@ fn tsCoreStage(
     persist_version: ?u64,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
+    const has_services = appHasServiceFiles(b, app_root);
 
     // The frontend, in check-only mode: the subset checker and the
     // contract sidecar, no emission. Every check-time teaching gates the
@@ -371,6 +395,10 @@ fn tsCoreStage(
     // The document's entry spelling is app-relative (the sidecar/facade
     // contract carries no machine paths).
     check.addArgs(&.{ "--contract-entry", "src/core.ts" });
+    const services_contract: ?std.Build.LazyPath = if (has_services) services_contract: {
+        check.addArg("--services-contract");
+        break :services_contract check.addOutputFileArg("services.contract.json");
+    } else null;
     if (persist_capability) check.addArgs(&.{ "--capability", "persist" });
     if (store_capability) check.addArgs(&.{ "--capability", "store" });
     if (persist_version) |version| {
@@ -394,6 +422,62 @@ fn tsCoreStage(
     const facade = project.addOutputFileArg("core_facade.ts");
     project.addArg("--profile");
     const profile = project.addOutputFileArg("core_profile.json");
+
+    // The fourth corewire projection is intentionally driven only by the
+    // service sidecar: the generated TypeScript dispatch loop and Zig
+    // name/index registry never rediscover facts from author source.
+    var service_registry: std.Build.LazyPath = dep.path("src/app_runner/no_services.zig");
+    var service_exe: ?std.Build.LazyPath = null;
+    if (services_contract) |service_contract| {
+        const service_project = b.addRunArtifact(corewire_exe);
+        service_project.addArg("--services-sidecar");
+        service_project.addFileArg(service_contract);
+        service_project.addArg("--service-host-main");
+        const service_host_main = service_project.addOutputFileArg("service_host_main.ts");
+        service_project.addArg("--service-registry");
+        service_registry = service_project.addOutputFileArg("services.zig");
+
+        // Ordinary service TypeScript is staged without core-subset rewrites.
+        // The one service-boundary lowering turns NS1067's `{ kind, message }`
+        // throw into the tagged Error shape scriptc 0.0.22 can catch from an
+        // imported op; no deterministic profile fences participate here.
+        const service_stage_run = b.addSystemCommand(&.{node});
+        service_stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_services.mjs"));
+        service_stage_run.addArg("--src");
+        service_stage_run.addDirectoryArg(b.path(appPath(b, app_root, "src")));
+        service_stage_run.addArg("--host-main");
+        service_stage_run.addFileArg(service_host_main);
+        service_stage_run.addArg("--out");
+        const service_stage_dir = service_stage_run.addOutputDirectoryArg("services-stage");
+        // The staging script discovers nested service modules recursively;
+        // a directory LazyPath alone does not hash those discovered files.
+        service_stage_run.has_side_effects = true;
+
+        const service_compile = b.addSystemCommand(&.{node});
+        service_compile.addFileArg(dep.path("packages/core/scripts/run_external_service_compiler.mjs"));
+        service_compile.addArg("--stage");
+        service_compile.addDirectoryArg(service_stage_dir);
+        service_compile.addArg("--manifest");
+        service_compile.addFileArg(dep.path("packages/core/package.json"));
+        service_compile.addArg("--contract");
+        service_compile.addFileArg(service_contract);
+        service_compile.addArg("--out-exe");
+        const service_suffix = if (target.result.os.tag == .windows) ".exe" else "";
+        service_exe = service_compile.addOutputFileArg(b.fmt("{s}_services{s}", .{ app_name, service_suffix }));
+        service_compile.addArgs(&.{
+            "--host-platform",
+            b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+            "--target-platform",
+            b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi }),
+        });
+        if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
+            service_compile.addArgs(&.{ "--compiler", override });
+        } else {
+            const compiler_js = requireTsExternalCompilerJs(b, dep);
+            service_compile.addArg("--compiler-js");
+            service_compile.addFileArg(.{ .cwd_relative = compiler_js });
+        }
+    }
 
     // The compile stage: author sources + staged SDK + static surface +
     // generated entry/profile, one scratch tree.
@@ -433,22 +517,7 @@ fn tsCoreStage(
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        const compiler_js = tsExternalCompilerJs(b, dep) orelse {
-            const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
-            std.debug.print(
-                \\
-                \\error: the external core compiler is not installed (TypeScript cores compile
-                \\through it). It ships as an exact-pinned dependency of the SDK's packages/core
-                \\— install it once with:
-                \\  cd {s}/packages/core && npm ci
-                \\(or point NATIVE_SDK_CORE_COMPILER at the pinned release's command; an
-                \\npm-installed @native-sdk/cli carries the compiler automatically — if it is
-                \\missing there, the install is broken: reinstall @native-sdk/cli).
-                \\
-                \\
-            , .{sdk_root});
-            std.process.exit(1);
-        };
+        const compiler_js = requireTsExternalCompilerJs(b, dep);
         compile.addArg("--compiler-js");
         compile.addFileArg(.{ .cwd_relative = compiler_js });
     }
@@ -466,9 +535,10 @@ fn tsCoreStage(
     _ = staged.addCopyFile(shim, "core.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/core_abi.zig"), "core_abi.zig");
+    _ = staged.addCopyFile(service_registry, "services.zig");
     _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
-    return .{ .main_root = main_root, .archive = archive };
+    return .{ .main_root = main_root, .archive = archive, .service_exe = service_exe };
 }
 
 /// corewire (the contract-sidecar shim generator), compiled from the SDK
@@ -524,6 +594,19 @@ fn addAppTsDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, src_path: []
         if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
         transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
     }
+}
+
+fn appHasServiceFiles(b: *std.Build, app_root: []const u8) bool {
+    const services_path = appPath(b, app_root, "src/services");
+    var dir = b.build_root.handle.openDir(b.graph.io, services_path, .{ .iterate = true }) catch return false;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return false;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".ts") and
+            !std.mem.endsWith(u8, entry.basename, ".d.ts")) return true;
+    }
+    return false;
 }
 
 /// The `native_sdk_app_*` C ABI every embed static library exports.
@@ -733,6 +816,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         tsCoreStage(
             b,
             dep,
+            target,
             app_options.app_root,
             app_options.name,
             app_config.persist_capability,
@@ -833,7 +917,23 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install.step);
 
-    const run = b.addRunArtifact(exe);
+    const service_install: ?*std.Build.Step.InstallFile = if (ts_stage) |stage| if (stage.service_exe) |service_exe| service_install: {
+        const suffix = if (target.result.os.tag == .windows) ".exe" else "";
+        const value = b.addInstallFileWithDir(service_exe, .bin, b.fmt("{s}_services{s}", .{ app_options.name, suffix }));
+        b.getInstallStep().dependOn(&value.step);
+        break :service_install value;
+    } else null else null;
+
+    // A service-bearing app runs from the installed layout so the host is
+    // a real sibling exactly as it is in a package. Service-free apps keep
+    // the direct cached-artifact fast path.
+    const run = if (service_install != null) run: {
+        const suffix = if (target.result.os.tag == .windows) ".exe" else "";
+        const value = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("{s}{s}", .{ app_options.name, suffix }))});
+        value.step.dependOn(&install.step);
+        value.step.dependOn(&service_install.?.step);
+        break :run value;
+    } else b.addRunArtifact(exe);
     addCefRuntimeRunFiles(b, target, run, exe, web_engine, cef_dir);
     addWebView2RuntimeRunFiles(dep, target, run, web_engine, web_layer);
     const run_step = b.step("run", "Run the app");
@@ -942,6 +1042,10 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             b.fmt("zig-out/package/{s}", .{package_target_name}));
         package_run.addArg("--binary");
         package_run.addFileArg(exe.getEmittedBin());
+        if (ts_stage) |stage| if (stage.service_exe) |service_exe| {
+            package_run.addArg("--service-binary");
+            package_run.addFileArg(service_exe);
+        };
         // The archive and report names carry an optimize label; this
         // build graph knows the packaged binary's REAL mode, so forward
         // it instead of letting the CLI assume one.

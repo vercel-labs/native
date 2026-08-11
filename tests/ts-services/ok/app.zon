@@ -1,0 +1,24 @@
+.{
+    .id = "dev.native_sdk.ts_services_fixture",
+    .name = "ts-services-fixture",
+    .display_name = "TypeScript Services Fixture",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    .permissions = .{"view"},
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{.{
+            .label = "main",
+            .title = "TypeScript Services Fixture",
+            .width = 520,
+            .height = 320,
+            .views = .{.{
+                .label = "fixture-canvas",
+                .kind = "gpu_surface",
+                .fill = true,
+                .role = "TypeScript services fixture",
+                .accessibility_label = "TypeScript services fixture",
+            }},
+        }},
+    },
+}

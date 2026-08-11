@@ -42,17 +42,33 @@ for (const [specifier, file] of [
   const p = path.join(coreRoot, file);
   if (fs.existsSync(p)) maps.push("--external-types", `${specifier}=${p}`);
 }
-const probe = spawnSync(process.execPath, [compilerJs, "coverage", entry, ...maps], { encoding: "utf8" });
-const out = `${probe.stdout ?? ""}${probe.stderr ?? ""}`;
-if (probe.status === 0) process.exit(0);
-// Analyzer refusals for TYPE errors carry the compiler's own diagnostics;
-// pass them through untouched and fail the check.
-if (/TypeScript error/.test(out) || /error SC0001/.test(out)) {
-  process.stderr.write(out);
-  process.exit(1);
+function serviceEntries(root) {
+  const found = [];
+  if (!fs.existsSync(root)) return found;
+  for (const item of fs.readdirSync(root, { withFileTypes: true })) {
+    const candidate = path.join(root, item.name);
+    if (item.isDirectory()) found.push(...serviceEntries(candidate));
+    else if (item.isFile() && item.name.endsWith(".ts") && !item.name.endsWith(".d.ts")) found.push(candidate);
+  }
+  return found.sort();
 }
-// Any other nonzero outcome (analyzer internal trouble) must not wedge
-// `native check`: the compile stage will judge for real.
-process.stderr.write(out);
-console.error("native check: the external compiler's analyzer could not run to a verdict here; the build will judge for real");
-process.exit(0);
+
+let typeFailure = false;
+for (const candidate of [entry, ...serviceEntries(path.join(path.dirname(entry), "services"))]) {
+  const probe = spawnSync(process.execPath, [compilerJs, "coverage", candidate, ...maps], { encoding: "utf8" });
+  const out = `${probe.stdout ?? ""}${probe.stderr ?? ""}`;
+  if (probe.status === 0) continue;
+  // Analyzer refusals for TYPE errors carry the compiler's own diagnostics;
+  // pass them through untouched and fail the check. Service files receive
+  // this verdict independently because the core is forbidden to import them.
+  if (/TypeScript error/.test(out) || /error SC0001/.test(out)) {
+    process.stderr.write(out);
+    typeFailure = true;
+    continue;
+  }
+  // Any other nonzero outcome (analyzer internal trouble) must not wedge
+  // `native check`: the compile stage will judge for real.
+  process.stderr.write(out);
+  console.error(`native check: the external compiler's analyzer could not reach a verdict for ${candidate}; the build will judge for real`);
+}
+process.exit(typeFailure ? 1 : 0);

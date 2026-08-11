@@ -13,6 +13,7 @@ import { IntInference } from "./infer.ts";
 import { SubsetChecker } from "./checker.ts";
 import type { PersistRoutes } from "./checker.ts";
 import { emitContractSidecar, ContractError } from "./contract.ts";
+import { emitServiceContract } from "./service_contract.ts";
 import { makeDiagnostic, formatDiagnostic, type SubsetDiagnostic } from "./diagnostics.ts";
 import path from "node:path";
 import fs from "node:fs";
@@ -22,6 +23,10 @@ export interface FrontendOptions {
   /// schema format 1) from the checked program — the entry spelling the
   /// document states (never a filesystem-absolute leak).
   readonly contractEntry?: string;
+  /// Ask the CLI/API caller to consume services.contract.json. The service
+  /// surface is analyzed whenever src/services exists because core request
+  /// names validate against it; this flag records emission intent.
+  readonly servicesContract?: boolean;
   /// app.zon capabilities supplied by the build/check launcher. The core
   /// frontend stays manifest-format agnostic; it needs only declared names
   /// for capability-backed effect diagnostics.
@@ -41,6 +46,9 @@ export interface FrontendResult {
   /// The contract sidecar JSON, when options.contractEntry asked for it
   /// (null otherwise, and on any failed check).
   readonly contract: string | null;
+  /// The non-deterministic service registry, or null when the app has no
+  /// src/services modules (and on any failed check).
+  readonly servicesContract: string | null;
   readonly diagnostics: SubsetDiagnostic[];
   /// Non-fatal capability and persistence-contract teaching notices:
   /// surfaced as warnings, never failing the check.
@@ -58,26 +66,34 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   // otherwise surface as a raw resolution error.
   const graph = resolveModuleGraph(entry);
   if (graph.diagnostics.length > 0) {
-    return { ok: false, contract: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
 
-  const program = createSubsetProgram(entry);
+  const program = createSubsetProgram(entry, graph.files);
   const tast = new TypedAst(program);
   const byPath = new Map(program.getSourceFiles().map((f) => [path.resolve(f.fileName), f]));
   const files: ts.SourceFile[] = [];
   for (const p of graph.files) {
     const file = byPath.get(path.resolve(p));
     if (!file) {
-      return { ok: false, contract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${p}`], inputs: [...graph.files] };
+      return { ok: false, contract: null, servicesContract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${p}`], inputs: [...graph.files] };
     }
     files.push(file);
   }
   if (files.length === 0) {
-    return { ok: false, contract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${entry}`], inputs: [] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${entry}`], inputs: [] };
   }
 
+  const fileByPath = new Map(files.map((file) => [path.resolve(file.fileName), file]));
+  const coreFiles = graph.coreFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
+  const serviceFiles = graph.serviceFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
+  const serviceHostFiles = graph.serviceHostFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
+
   const typeErrors: string[] = [];
-  for (const file of files) {
+  // The core keeps the pinned in-process provider verdict. Services are
+  // judged by scriptc's TS7 frontend in the service compile/coverage lane;
+  // this provider intentionally has no Node builtin declaration universe.
+  for (const file of coreFiles) {
     for (const d of tast.fileDiagnostics(file)) {
       if (d.category !== ts.DiagnosticCategory.Error) continue;
       const where = d.file && d.start !== undefined ? lineColumn(d.file, d.start) : null;
@@ -87,17 +103,32 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     }
   }
   if (typeErrors.length > 0) {
-    return { ok: false, contract: null, diagnostics: [], warnings: [], typeErrors: [...new Set(typeErrors)], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: [], warnings: [], typeErrors: [...new Set(typeErrors)], inputs: [...graph.files] };
   }
 
-  const table = new TypeTable(tast, files);
-  const checker = new SubsetChecker(tast, table, files, options.capabilities ?? [], options.persistRoutes);
+  const serviceSurface = emitServiceContract(tast, serviceFiles, serviceHostFiles, path.dirname(path.resolve(entry)));
+  if (serviceSurface.diagnostics.length > 0) {
+    return { ok: false, contract: null, servicesContract: null, diagnostics: [...serviceSurface.diagnostics], warnings: [], typeErrors: [], inputs: [...graph.files] };
+  }
+
+  const table = new TypeTable(tast, coreFiles);
+  const serviceOps = serviceSurface.contract === null
+    ? null
+    : new Set(serviceSurface.operations.map((op) => op.name));
+  const checker = new SubsetChecker(
+    tast,
+    table,
+    coreFiles,
+    serviceOps,
+    options.capabilities ?? [],
+    options.persistRoutes,
+  );
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {
-    return { ok: false, contract: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
   }
 
-  const infer = new IntInference(tast, table, files);
+  const infer = new IntInference(tast, table, coreFiles);
   if (infer.conflicts.length > 0) {
     // R2 consistency: an edge the inference fixed point could not make
     // same-typed is the author's to resolve, taught at check time.
@@ -112,28 +143,28 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
         column,
       );
     });
-    return { ok: false, contract: null, diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
   }
   try {
     // The contract sidecar emits from the SAME checked analysis, so a
     // contract-bearing run keeps every check-time teaching.
     const emittedContract =
       options.contractEntry !== undefined || options.persistVersion !== undefined
-        ? emitContractSidecar({ tast, table, infer, checkResult, files, entry: options.contractEntry ?? "src/core.ts" })
+        ? emitContractSidecar({ tast, table, infer, checkResult, files: coreFiles, entry: options.contractEntry ?? "src/core.ts" })
         : null;
     const warnings = [...checkResult.warnings];
     if (emittedContract !== null && options.persistVersion !== undefined && options.persistStatePath !== undefined) {
       const fingerprint = (JSON.parse(emittedContract) as { model_fingerprint: string }).model_fingerprint;
-      warnings.push(...checkPersistSchemaState(files[0], options.persistStatePath, options.persistVersion, fingerprint));
+      warnings.push(...checkPersistSchemaState(coreFiles[0], options.persistStatePath, options.persistVersion, fingerprint));
     }
     const contract = options.contractEntry !== undefined ? emittedContract : null;
-    return { ok: true, contract, diagnostics: [], warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: true, contract, servicesContract: serviceSurface.contract, diagnostics: [], warnings, typeErrors: [], inputs: [...graph.files] };
   } catch (e) {
     if (e instanceof ContractError) {
       const file = e.node.getSourceFile();
       const { line, column } = lineColumn(file, e.node.getStart());
       const d = makeDiagnostic("NS1063", `${e.message[0].toUpperCase()}${e.message.slice(1)}.`, file.fileName, line, column);
-      return { ok: false, contract: null, diagnostics: [d], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+      return { ok: false, contract: null, servicesContract: null, diagnostics: [d], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
     }
     throw e;
   }
@@ -166,7 +197,7 @@ function checkPersistSchemaState(
   const { line, column } = lineColumn(entry, entry.getStart());
   if (previous !== null && version < previous.version) {
     return [makeDiagnostic(
-      "NS1065",
+      "NS1068",
       `app.zon's persistence version moved backward from ${previous.version} to ${version}.`,
       entry.fileName,
       line,
@@ -175,7 +206,7 @@ function checkPersistSchemaState(
   }
   if (previous !== null && version === previous.version && fingerprint !== previous.model_fingerprint) {
     return [makeDiagnostic(
-      "NS1065",
+      "NS1068",
       `The checked Model shape changed while app.zon's persistence version stayed at ${version}.`,
       entry.fileName,
       line,

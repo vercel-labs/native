@@ -648,6 +648,43 @@ test "real-mode host calls ride the binding and answer through the feed" {
     try std.testing.expectEqual(@as(u32, 1), h.app_state.model.result_count);
 }
 
+test "service bindings reject a duplicate live key without replacing the first request" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    const Stub = struct {
+        var request_count: usize = 0;
+        fn send(_: *anyopaque, _: []const u8, _: []const u8) void {}
+        fn request(_: *anyopaque, _: []const u8, _: u64, _: []const u8) void {
+            request_count += 1;
+        }
+    };
+    Stub.request_count = 0;
+    var context: u8 = 0;
+    fx.bindHostCalls(.{
+        .context = &context,
+        .send_fn = Stub.send,
+        .request_fn = Stub.request,
+        .reject_duplicate_keys = true,
+    });
+
+    test_payload = "first";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .ask);
+    test_payload = "duplicate";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .replace);
+    try std.testing.expectEqual(@as(usize, 1), Stub.request_count);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("rejected", h.app_state.model.bytesPrefix());
+
+    // The first occupancy survived the refusal and can still complete.
+    try fx.feedHostResult(ask_key, true, "first-answer");
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("first-answer", h.app_state.model.bytesPrefix());
+}
+
 test "real-mode requests without bound host services reject through the err route" {
     var h = try Harness.create();
     defer h.destroy();
