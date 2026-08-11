@@ -1565,10 +1565,11 @@ pub const NullPlatform = struct {
         const parts = localCivilFromDays(days) orelse return error.InvalidTimestamp;
         const hour = second_of_day / 3600;
         const minute = (second_of_day % 3600) / 60;
+        const second = second_of_day % 60;
         return switch (style) {
             .date => try std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2}", .{ parts.year, parts.month, parts.day }),
-            .time => try std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}", .{ hour, minute }),
-            .datetime => try std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{ parts.year, parts.month, parts.day, hour, minute }),
+            .time => try std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, minute, second }),
+            .datetime => try std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ parts.year, parts.month, parts.day, hour, minute, second }),
         };
     }
 

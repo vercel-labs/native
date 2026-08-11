@@ -366,7 +366,7 @@ test "native system commands use runtime validation and platform services" {
     h.harness.null_platform.local_time_offset_minutes = -360;
     var time_payload: [16]u8 = undefined;
     std.mem.writeInt(u64, time_payload[0..8], @bitCast(@as(f64, 2)), .little);
-    std.mem.writeInt(u64, time_payload[8..16], @bitCast(@as(f64, 1_704_164_640_000)), .little);
+    std.mem.writeInt(u64, time_payload[8..16], @bitCast(@as(f64, 1_704_164_645_000)), .little);
     fx.hostRequest(.{
         .key = ask_key,
         .name = "native-sdk.time.formatLocal",
@@ -374,7 +374,7 @@ test "native system commands use runtime validation and platform services" {
         .on_result = HostEffects.hostMsg(.host_result),
     });
     try h.wake();
-    try std.testing.expectEqualStrings("2024-01-01 21:04", h.app_state.model.bytesPrefix());
+    try std.testing.expectEqualStrings("2024-01-01 21:04:05", h.app_state.model.bytesPrefix());
 }
 
 fn appendNativeRequestBytes(buffer: []u8, at: *usize, bytes: []const u8) void {

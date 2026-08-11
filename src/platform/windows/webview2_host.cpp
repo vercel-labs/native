@@ -7642,7 +7642,7 @@ size_t native_sdk_windows_format_local_time(Host *host, int64_t timestamp_ms, in
     wchar_t date_text[128] = {};
     wchar_t time_text[128] = {};
     if ((style == 0 || style == 2) && GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &system_time, nullptr, date_text, ARRAYSIZE(date_text), nullptr) == 0) return 0;
-    if ((style == 1 || style == 2) && GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &system_time, nullptr, time_text, ARRAYSIZE(time_text)) == 0) return 0;
+    if ((style == 1 || style == 2) && GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &system_time, nullptr, time_text, ARRAYSIZE(time_text)) == 0) return 0;
 
     std::wstring text;
     if (style == 0) text = date_text;

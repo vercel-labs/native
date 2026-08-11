@@ -12854,9 +12854,9 @@ size_t native_sdk_appkit_format_local_time(native_sdk_appkit_host_t *host, int64
         if (!date) return 0;
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         formatter.locale = [NSLocale autoupdatingCurrentLocale];
-        formatter.timeZone = [NSTimeZone autoupdatingCurrentTimeZone];
+        formatter.timeZone = [NSTimeZone localTimeZone];
         formatter.dateStyle = (style == 0 || style == 2) ? NSDateFormatterShortStyle : NSDateFormatterNoStyle;
-        formatter.timeStyle = (style == 1 || style == 2) ? NSDateFormatterShortStyle : NSDateFormatterNoStyle;
+        formatter.timeStyle = (style == 1 || style == 2) ? NSDateFormatterMediumStyle : NSDateFormatterNoStyle;
         NSString *text = [formatter stringFromDate:date];
         NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
         if (!utf8 || utf8.length == 0 || utf8.length > buffer_len) return 0;

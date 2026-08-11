@@ -344,9 +344,9 @@ test "null platform records OS actions" {
 
     null_platform.local_time_offset_minutes = -360;
     var local_time_buffer: [max_local_time_text_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("2024-01-01 21:04", try services.formatLocalTime(1_704_164_640_000, .datetime, &local_time_buffer));
-    try std.testing.expectEqualStrings("2024-01-01", try services.formatLocalTime(1_704_164_640_000, .date, &local_time_buffer));
-    try std.testing.expectEqualStrings("21:04", try services.formatLocalTime(1_704_164_640_000, .time, &local_time_buffer));
+    try std.testing.expectEqualStrings("2024-01-01 21:04:05", try services.formatLocalTime(1_704_164_645_000, .datetime, &local_time_buffer));
+    try std.testing.expectEqualStrings("2024-01-01", try services.formatLocalTime(1_704_164_645_000, .date, &local_time_buffer));
+    try std.testing.expectEqualStrings("21:04:05", try services.formatLocalTime(1_704_164_645_000, .time, &local_time_buffer));
 
     try services.clearRecentDocuments();
     try std.testing.expectEqual(@as(usize, 1), null_platform.recentDocumentsClearedCount());
