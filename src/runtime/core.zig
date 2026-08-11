@@ -773,6 +773,7 @@ pub const Runtime = struct {
     pub const setCredential = SystemServiceMethods.setCredential;
     pub const getCredential = SystemServiceMethods.getCredential;
     pub const deleteCredential = SystemServiceMethods.deleteCredential;
+    pub const formatLocalTime = SystemServiceMethods.formatLocalTime;
     pub const createTray = SystemServiceMethods.createTray;
     pub const updateTrayMenu = SystemServiceMethods.updateTrayMenu;
     pub const updateTrayTitle = SystemServiceMethods.updateTrayTitle;

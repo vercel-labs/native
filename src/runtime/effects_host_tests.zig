@@ -67,6 +67,8 @@ const HostMsg = union(enum) {
     ask_colliding,
     query_launch_at_login,
     enable_launch_at_login,
+    open_external_url,
+    reveal_path,
     replace,
     drop,
     send,
@@ -132,6 +134,8 @@ fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
             .payload = &.{1},
             .on_result = HostEffects.hostMsg(.host_result),
         }),
+        .open_external_url => fx.hostSend("native-sdk.os.openUrl", "https://example.com/docs"),
+        .reveal_path => fx.hostSend("native-sdk.os.revealPath", "/tmp/native-sdk.log"),
         .replace => fx.hostRequest(.{
             .key = ask_key,
             .name = "svc.echo",
@@ -305,6 +309,79 @@ test "native launch-at-login requests distinguish operation failures from unsupp
     try h.wake();
     try std.testing.expectEqual(@as(u32, 2), h.app_state.model.err_count);
     try std.testing.expectEqualStrings("failed", h.app_state.model.bytesPrefix());
+}
+
+test "native system commands use runtime validation and platform services" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    const allowed_urls = [_][]const u8{"https://example.com/*"};
+    h.harness.runtime.options.security.navigation.external_links = .{
+        .action = .open_system_browser,
+        .allowed_urls = &allowed_urls,
+    };
+    try h.app_state.dispatch(&h.harness.runtime, 1, .open_external_url);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .reveal_path);
+    try std.testing.expectEqualStrings("https://example.com/docs", h.harness.null_platform.lastExternalUrl());
+    try std.testing.expectEqualStrings("/tmp/native-sdk.log", h.harness.null_platform.lastRevealedPath());
+
+    var credential_payload: [4 + 5 + 4 + 12 + 4 + 19]u8 = undefined;
+    var credential_at: usize = 0;
+    appendNativeRequestBytes(&credential_payload, &credential_at, "alice");
+    appendNativeRequestBytes(&credential_payload, &credential_at, "secret-token");
+    appendNativeRequestBytes(&credential_payload, &credential_at, "dev.native-sdk.test");
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.credentials.set",
+        .payload = &credential_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.credentialSetCount());
+
+    var key_payload: [4 + 5 + 4 + 19]u8 = undefined;
+    var key_at: usize = 0;
+    appendNativeRequestBytes(&key_payload, &key_at, "alice");
+    appendNativeRequestBytes(&key_payload, &key_at, "dev.native-sdk.test");
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.credentials.get",
+        .payload = &key_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqualStrings("secret-token", h.app_state.model.bytesPrefix());
+
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.credentials.delete",
+        .payload = &key_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.credentialDeleteCount());
+
+    h.harness.null_platform.local_time_offset_minutes = -360;
+    var time_payload: [16]u8 = undefined;
+    std.mem.writeInt(u64, time_payload[0..8], @bitCast(@as(f64, 2)), .little);
+    std.mem.writeInt(u64, time_payload[8..16], @bitCast(@as(f64, 1_704_164_640_000)), .little);
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.time.formatLocal",
+        .payload = &time_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqualStrings("2024-01-01 21:04", h.app_state.model.bytesPrefix());
+}
+
+fn appendNativeRequestBytes(buffer: []u8, at: *usize, bytes: []const u8) void {
+    std.mem.writeInt(u32, buffer[at.*..][0..4], @intCast(bytes.len), .little);
+    at.* += 4;
+    @memcpy(buffer[at.*..][0..bytes.len], bytes);
+    at.* += bytes.len;
 }
 
 test "re-issuing a live host key replaces the pending request and drops the undelivered result" {

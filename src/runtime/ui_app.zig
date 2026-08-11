@@ -1415,6 +1415,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .dock_presence_fn = effectsSetDockPresence,
                 .quit_fn = effectsQuitApp,
             });
+            self.effects.bindSystemServices(.{
+                .context = runtime,
+                .open_external_url_fn = effectsOpenExternalUrl,
+                .reveal_path_fn = effectsRevealPath,
+                .set_credential_fn = effectsSetCredential,
+                .get_credential_fn = effectsGetCredential,
+                .delete_credential_fn = effectsDeleteCredential,
+                .format_local_time_fn = effectsFormatLocalTime,
+            });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
             }
@@ -6174,6 +6183,36 @@ fn effectsQuitApp(context: *anyopaque) bool {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     runtime.quitApp() catch return false;
     return true;
+}
+
+fn effectsOpenExternalUrl(context: *anyopaque, url: []const u8) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.openExternalUrl(url);
+}
+
+fn effectsRevealPath(context: *anyopaque, path: []const u8) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.revealPath(path);
+}
+
+fn effectsSetCredential(context: *anyopaque, credential: platform.Credential) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.setCredential(credential);
+}
+
+fn effectsGetCredential(context: *anyopaque, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8 {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.getCredential(key, buffer);
+}
+
+fn effectsDeleteCredential(context: *anyopaque, key: platform.CredentialKey) anyerror!bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.deleteCredential(key);
+}
+
+fn effectsFormatLocalTime(context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.formatLocalTime(timestamp_ms, style, buffer);
 }
 
 /// The build storage pinned under a presented native context menu:

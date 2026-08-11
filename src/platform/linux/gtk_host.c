@@ -5081,6 +5081,27 @@ int native_sdk_gtk_delete_credential(native_sdk_gtk_host_t *host, const char *se
     return ok ? 1 : 0;
 }
 
+size_t native_sdk_gtk_format_local_time(native_sdk_gtk_host_t *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len) {
+    (void)host;
+    if (!buffer || buffer_len == 0 || style < 0 || style > 2) return 0;
+    gint64 seconds = timestamp_ms / 1000;
+    if (timestamp_ms < 0 && timestamp_ms % 1000 != 0) seconds -= 1;
+    GDateTime *date = g_date_time_new_from_unix_local(seconds);
+    if (!date) return 0;
+    const char *pattern = style == 0 ? "%x" : (style == 1 ? "%X" : "%x %X");
+    char *text = g_date_time_format(date, pattern);
+    g_date_time_unref(date);
+    if (!text) return 0;
+    size_t len = strlen(text);
+    if (len == 0 || len > buffer_len) {
+        g_free(text);
+        return 0;
+    }
+    memcpy(buffer, text, len);
+    g_free(text);
+    return len;
+}
+
 /* ---------------------------------------------------------------- audio
  *
  * Backend: the GStreamer PLAYBIN pipeline (gst-1.0). One in-box element
