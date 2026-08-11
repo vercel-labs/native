@@ -227,6 +227,7 @@ pub fn TsUiApp(comptime core: type) type {
         var env_values_store: []const EnvValue = &.{};
         var persist_options_store: ?PersistOptions = null;
         var lifecycle_store: ?*const fn (event: runtime_core.LifecycleEvent) ?Msg = null;
+        var lifecycle_flush_after_update = false;
 
         fn applyCoreOptions(core_options: CoreOptions) void {
             Host.setAudioCacheDir(core_options.audio_cache_dir);
@@ -254,6 +255,7 @@ pub fn TsUiApp(comptime core: type) type {
             }
             var stamped = options;
             lifecycle_store = stamped.on_lifecycle;
+            lifecycle_flush_after_update = false;
             stamped.on_lifecycle = lifecycleAdapter;
             stamped.init_fx = initFx;
             stamped.update_fx = updateFx;
@@ -327,13 +329,23 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         fn lifecycleAdapter(event: runtime_core.LifecycleEvent) ?Msg {
-            if (event == .deactivate or event == .stop) {
-                if (persist_options_store) |persist| {
-                    persist.binding.send_fn(persist.binding.context, "core.persist.flush", "");
-                }
+            const mapped = if (lifecycle_store) |map| map(event) else null;
+            if (event != .deactivate and event != .stop) return mapped;
+            if (mapped != null) {
+                // UiApp dispatches the mapped Msg after this callback returns.
+                // Delay the flush until updateFx has committed that cycle, so
+                // a Cmd.persist issued by the lifecycle update is included.
+                lifecycle_flush_after_update = true;
+            } else {
+                flushPersistence();
             }
-            const map = lifecycle_store orelse return null;
-            return map(event);
+            return mapped;
+        }
+
+        fn flushPersistence() void {
+            if (persist_options_store) |persist| {
+                persist.binding.send_fn(persist.binding.context, "core.persist.flush", "");
+            }
         }
 
         fn themePackAdapter(model: *const Model) canvas.ThemePack {
@@ -598,6 +610,10 @@ pub fn TsUiApp(comptime core: type) type {
                 if (persist.restore.migration_from_version) |from_version| {
                     if (Host.migrateSnapshot(persist.restore.bytes, from_version, std.heap.page_allocator)) |migrated| {
                         defer std.heap.page_allocator.free(migrated);
+                        if (migrated.len > persist_store.max_snapshot_bytes) {
+                            fx.journalPersistRestore(.rejected, "");
+                            return .rejected;
+                        }
                         Host.restoreSnapshot(migrated);
                         persist.binding.send_fn(persist.binding.context, "core.persist", migrated);
                         fx.journalPersistRestore(.ok, migrated);
@@ -1010,6 +1026,10 @@ pub fn TsUiApp(comptime core: type) type {
         fn updateFx(model: *Model, msg: Msg, fx: *Effects) void {
             Host.dispatch(fx, msg);
             model.* = Host.model().*;
+            if (lifecycle_flush_after_update) {
+                lifecycle_flush_after_update = false;
+                flushPersistence();
+            }
         }
     };
 }

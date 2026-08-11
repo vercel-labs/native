@@ -32,6 +32,11 @@ fn command(name: []const u8) ?core.Msg {
     return null;
 }
 
+fn lifecycle(event: native_sdk.LifecycleEvent) ?core.Msg {
+    if (event == .deactivate) return .increment_and_persist;
+    return null;
+}
+
 fn options() App.Options {
     return .{
         .name = "persist-e2e",
@@ -39,12 +44,15 @@ fn options() App.Options {
         .canvas_label = canvas_label,
         .view = view,
         .on_command = command,
+        .on_lifecycle = lifecycle,
     };
 }
 
 const StoreHost = struct {
     coordinator: ?*native_sdk.persist_store.Coordinator = null,
     send_count: usize = 0,
+    flush_count: usize = 0,
+    send_count_at_flush: usize = 0,
 
     fn binding(self: *StoreHost) native_sdk.HostCallBinding {
         return .{ .context = self, .send_fn = send, .request_fn = request };
@@ -52,6 +60,12 @@ const StoreHost = struct {
 
     fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
         const self: *StoreHost = @ptrCast(@alignCast(context));
+        if (std.mem.eql(u8, name, "core.persist.flush")) {
+            self.flush_count += 1;
+            self.send_count_at_flush = self.send_count;
+            if (self.coordinator) |coordinator| coordinator.flush();
+            return;
+        }
         if (!std.mem.eql(u8, name, "core.persist")) return;
         self.send_count += 1;
         if (self.coordinator) |coordinator| {
@@ -249,6 +263,47 @@ test "older snapshots migrate once and a thrown migration fails closed" {
     try std.testing.expectEqual(@as(i64, 0), Bridge.model().value);
     try std.testing.expectEqual(@as(i64, 3), Bridge.model().restoreState);
     try std.testing.expectEqualStrings("migrate_failed", Bridge.model().lastError);
+}
+
+test "an oversized migrated snapshot is rejected before it becomes the model" {
+    const legacy = try std.testing.allocator.alloc(u8, native_sdk.max_persist_snapshot_bytes);
+    defer std.testing.allocator.free(legacy);
+    @memset(legacy, 'x');
+
+    var host: StoreHost = .{};
+    const rejected = try Harness.create(.{ .persist = .{
+        .binding = host.binding(),
+        .routes = routes(),
+        .restore = .{
+            .outcome = .migrate_failed,
+            .bytes = legacy,
+            .migration_from_version = 1,
+        },
+    } }, null);
+    defer rejected.destroy();
+
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().value);
+    try std.testing.expectEqualStrings("initial", Bridge.model().label);
+    try std.testing.expectEqual(@as(i64, 3), Bridge.model().restoreState);
+    try std.testing.expectEqualStrings("rejected", Bridge.model().lastError);
+    try std.testing.expectEqual(@as(usize, 0), host.send_count);
+}
+
+test "deactivation flushes after its mapped update can request persistence" {
+    var host: StoreHost = .{};
+    const running = try Harness.create(.{ .persist = .{
+        .binding = host.binding(),
+        .routes = routes(),
+        .restore = .{ .outcome = .none },
+    } }, null);
+    defer running.destroy();
+
+    try running.harness.runtime.dispatchPlatformEvent(running.app, .app_deactivated);
+
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().value);
+    try std.testing.expectEqual(@as(usize, 1), host.send_count);
+    try std.testing.expectEqual(@as(usize, 1), host.flush_count);
+    try std.testing.expectEqual(@as(usize, 1), host.send_count_at_flush);
 }
 
 test "replay restores journal bytes and Cmd.persist never reaches the live host" {

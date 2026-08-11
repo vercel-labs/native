@@ -112,8 +112,8 @@ const fixed_exports = [_][]const u8{
     "dispatch_bool",         "dispatch_enum",     "dispatch_record",   "dispatch_text_input",
     "dispatch_scroll_state", "abi_subscriptions", "model_snapshot",    "persist_snapshot",
     "restore_model",         "migrate_model",     "helper_call",       "abi_command_msg",
-    "abi_key_msg",           "abi_pinch_msg",     "abi_drop_msg",      "appearanceMsg",
-    "chromeMsg",             "envMsgs",           "viewUnbound",
+    "abi_frame_msg",         "abi_key_msg",       "abi_pinch_msg",     "abi_drop_msg",
+    "appearanceMsg",         "chromeMsg",         "envMsgs",           "viewUnbound",
 };
 
 /// Ambient VALUE bindings generated code calls directly. A model helper is
@@ -3884,6 +3884,20 @@ test "a helper taking a fixed export's name refuses" {
         sidecar_mod.minimal_valid_json,
         "\"model_helpers\": []",
         "\"model_helpers\": [{\"name\": \"dispatch_void\", \"params\": [], \"returns\": {\"kind\": \"bytes\"}, \"arena\": false}]",
+    );
+    try expectFacadeRefusal(arena, source, "collides with a declaration the generated facade itself must export");
+}
+
+test "a helper cannot shadow the generated frame channel export" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"abi_frame_msg\", \"params\": [], \"returns\": {\"kind\": \"bytes\"}, \"arena\": false}]",
     );
     try expectFacadeRefusal(arena, source, "collides with a declaration the generated facade itself must export");
 }
