@@ -265,6 +265,22 @@ test "native launch-at-login requests use the platform service without a generic
     try std.testing.expectEqual(@as(u32, 1), h.harness.null_platform.launch_at_login_set_count);
 }
 
+test "native launch-at-login set preserves an unsupported platform result" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // Model a host without the setter after the effects channel has bound
+    // the runtime-owned services value. Unsupported is a capability result,
+    // not an attempted registration failure.
+    h.harness.runtime.options.platform.services.set_launch_at_login_fn = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .enable_launch_at_login);
+    try h.wake();
+
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("unsupported", h.app_state.model.bytesPrefix());
+    try std.testing.expectEqual(@as(u32, 0), h.harness.null_platform.launch_at_login_set_count);
+}
+
 test "re-issuing a live host key replaces the pending request and drops the undelivered result" {
     var h = try Harness.create();
     defer h.destroy();

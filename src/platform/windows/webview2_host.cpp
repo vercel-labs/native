@@ -3214,7 +3214,7 @@ static bool presentTransparentWindow(Host *host, Window &window) {
 }
 
 static void showWindowImplicit(Window &window) {
-    if (!window.hwnd || window.shown) return;
+    if (!window.hwnd || window.shown || window.policy_hidden) return;
     ShowWindow(window.hwnd, window.activate_on_show ? SW_SHOW : SW_SHOWNOACTIVATE);
     window.shown = true;
     window.deferred_show_started_ms = 0;

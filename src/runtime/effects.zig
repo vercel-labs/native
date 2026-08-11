@@ -7718,8 +7718,12 @@ pub fn Effects(comptime Msg: type) type {
                 self.feedHostResult(key, false, "invalid_request") catch {};
                 return;
             }
-            const status = services.setLaunchAtLogin(payload[0] == 1) catch {
-                self.feedHostResult(key, false, "failed") catch {};
+            const status = services.setLaunchAtLogin(payload[0] == 1) catch |err| {
+                const message = switch (err) {
+                    error.UnsupportedService => "unsupported",
+                    else => "failed",
+                };
+                self.feedHostResult(key, false, message) catch {};
                 return;
             };
             self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};

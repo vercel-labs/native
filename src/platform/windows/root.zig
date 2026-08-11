@@ -2452,6 +2452,11 @@ test "windows first-present windows have a fallback reveal deadline" {
         host_source,
         "window.deferred_show_started_ms = window.show_on_first_present ? GetTickCount64() : 0;",
     ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (!window.hwnd || window.shown || window.policy_hidden) return;",
+    ) != null);
 }
 
 test "windows busy message loop drains due gpu frames outside input callbacks" {

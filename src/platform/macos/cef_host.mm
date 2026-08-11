@@ -2,10 +2,12 @@
 
 #import <AppKit/AppKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <dispatch/dispatch.h>
 #import <ImageIO/ImageIO.h>
 #import <Security/Security.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <crt_externs.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +47,18 @@ static const uint32_t NativeSdkShortcutModifierControl = 1u << 2;
 static const uint32_t NativeSdkShortcutModifierOption = 1u << 3;
 static const uint32_t NativeSdkShortcutModifierShift = 1u << 4;
 
+// Class lookup alone does not load ServiceManagement. Load the framework
+// explicitly on first use, then keep resolving SMAppService dynamically so
+// hosts on older macOS releases report unsupported.
 static id NativeSdkMainAppService(void) {
+    static void *serviceManagementHandle = NULL;
+    static dispatch_once_t serviceManagementOnce;
+    dispatch_once(&serviceManagementOnce, ^{
+        serviceManagementHandle = dlopen(
+            "/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement",
+            RTLD_LAZY | RTLD_LOCAL);
+    });
+    if (!serviceManagementHandle) return nil;
     Class serviceClass = NSClassFromString(@"SMAppService");
     SEL selector = NSSelectorFromString(@"mainApp");
     if (!serviceClass || ![serviceClass respondsToSelector:selector]) return nil;

@@ -4397,7 +4397,7 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
      * placeholder pump — from here on frames exist only on demand. */
     const int first_present = !view->gpu_presented;
     view->gpu_presented = 1;
-    if (first_present && win && !win->shown) {
+    if (first_present && win && !win->shown && !win->policy_hidden) {
         native_sdk_cancel_deferred_show(win);
         native_sdk_show_window_implicit(win);
         native_sdk_emit_window_frame(host, win, 1);

@@ -2029,7 +2029,7 @@ test "linux first-present windows stay unmapped until present with a cancellable
     const first_present_at = std.mem.indexOf(
         u8,
         host_source,
-        "if (first_present && win && !win->shown)",
+        "if (first_present && win && !win->shown && !win->policy_hidden)",
     ) orelse return error.TestExpectedEqual;
     const first_present_tail = host_source[first_present_at..];
     const cancel_at = std.mem.indexOf(

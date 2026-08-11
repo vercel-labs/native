@@ -41,8 +41,18 @@ static const uint32_t NativeSdkShortcutModifierOption = 1u << 3;
 static const uint32_t NativeSdkShortcutModifierShift = 1u << 4;
 
 // SMAppService is resolved dynamically so the host keeps its existing
-// deployment target; older macOS releases simply report unavailable.
+// deployment target. Class lookup alone does not load the framework, so
+// load it explicitly on first use; older macOS releases simply leave the
+// class unavailable and report unsupported.
 static id NativeSdkMainAppService(void) {
+    static void *serviceManagementHandle = NULL;
+    static dispatch_once_t serviceManagementOnce;
+    dispatch_once(&serviceManagementOnce, ^{
+        serviceManagementHandle = dlopen(
+            "/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement",
+            RTLD_LAZY | RTLD_LOCAL);
+    });
+    if (!serviceManagementHandle) return nil;
     Class serviceClass = NSClassFromString(@"SMAppService");
     SEL selector = NSSelectorFromString(@"mainApp");
     if (!serviceClass || ![serviceClass respondsToSelector:selector]) return nil;
@@ -7990,6 +8000,9 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 - (void)hideWindowWithId:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
+    // Hiding is an explicit policy decision and therefore supersedes a
+    // pending first-present reveal and its fallback deadline.
+    [self.deferredShowWindows removeObjectForKey:@(windowId)];
     [self.policyHiddenWindows addObject:@(windowId)];
     [window orderOut:nil];
     [self emitWindowFrameForWindowId:windowId open:YES];

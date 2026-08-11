@@ -3033,9 +3033,23 @@ test "both mac hosts carry the menu-bar lifecycle and fullscreen hooks" {
         try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_set_launch_at_login") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "registerAndReturnError:") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "unregisterAndReturnError:") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "dlopen(") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "ServiceManagement.framework/ServiceManagement") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSWindowCollectionBehaviorFullScreenNone") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "standardWindowButton:NSWindowZoomButton") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "1u << 4") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "policyHiddenWindows") != null);
     }
+
+    // AppKit canvas windows also carry a pending first-present/fallback
+    // reveal. An explicit hide must retire that pending reveal before it
+    // records the policy-hidden state.
+    const appkit_source = hosts[0];
+    const hide_at = std.mem.indexOf(u8, appkit_source, "- (void)hideWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+    const hide_tail = appkit_source[hide_at..];
+    const show_at = std.mem.indexOf(u8, hide_tail, "- (void)showWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+    const hide_body = hide_tail[0..show_at];
+    const cancel_at = std.mem.indexOf(u8, hide_body, "[self.deferredShowWindows removeObjectForKey:@(windowId)];") orelse return error.TestExpectedEqual;
+    const policy_at = std.mem.indexOf(u8, hide_body, "[self.policyHiddenWindows addObject:@(windowId)];") orelse return error.TestExpectedEqual;
+    try std.testing.expect(cancel_at < policy_at);
 }

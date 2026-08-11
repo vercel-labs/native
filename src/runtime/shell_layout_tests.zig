@@ -690,6 +690,33 @@ test "canvas shell windows present before they become visible" {
     try std.testing.expect(!harness.null_platform.window_visible[hidden_index]);
     try harness.runtime.showWindow(hidden.id);
     try std.testing.expect(harness.null_platform.window_visible[hidden_index]);
+
+    // An app-driven hide has the same strength even when it lands while
+    // an ordinary canvas window is still waiting for its first present.
+    // Neither that present nor the native fallback may undo the hide.
+    const deferred_hidden_views = [_]app_manifest.ShellView{
+        .{ .label = "deferred-canvas", .kind = .gpu_surface, .fill = true },
+    };
+    const deferred_hidden = try harness.runtime.createShellWindow(.{
+        .label = "deferred-hidden",
+        .title = "Deferred Hidden",
+        .views = &deferred_hidden_views,
+    }, null);
+    const deferred_hidden_index = for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |info, i| {
+        if (info.id == deferred_hidden.id) break i;
+    } else return error.WindowNotFound;
+    try std.testing.expectEqual(platform.WindowShowMode.on_first_present, harness.null_platform.window_show[deferred_hidden_index]);
+    try harness.runtime.hideWindow(deferred_hidden.id);
+    try harness.runtime.options.platform.services.presentGpuSurfacePacket(.{
+        .window_id = deferred_hidden.id,
+        .label = "deferred-canvas",
+        .surface_size = geometry.SizeF.init(720, 480),
+        .json = "{\"v\":1}",
+    });
+    try std.testing.expect(!harness.null_platform.window_visible[deferred_hidden_index]);
+    try std.testing.expect(harness.null_platform.windows[deferred_hidden_index].hidden);
+    try harness.runtime.showWindow(deferred_hidden.id);
+    try std.testing.expect(harness.null_platform.window_visible[deferred_hidden_index]);
 }
 
 test "overlay window presentation reaches create and passive show preserves focus" {

@@ -1127,7 +1127,10 @@ pub const NullPlatform = struct {
             self.show_op_seq += 1;
             self.window_first_present_seq[index] = self.show_op_seq;
         }
-        if (!self.window_visible[index] and self.window_show[index] == .on_first_present) {
+        if (!self.windows[index].hidden and
+            !self.window_visible[index] and
+            self.window_show[index] == .on_first_present)
+        {
             self.window_visible[index] = true;
             self.show_op_seq += 1;
             self.window_shown_seq[index] = self.show_op_seq;
