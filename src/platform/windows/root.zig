@@ -2388,22 +2388,31 @@ test "windows busy message loop drains due gpu frames outside input callbacks" {
     // The waitable timer is the precise idle wake source, but queued input
     // may win the message-loop race. Pin the complementary post-dispatch
     // drain: it must run only after DispatchMessage returns (outside the
-    // runtime callback that requested the frame), and the helper must retire
-    // the one-shot before emitting so synchronous presentation can re-arm it.
+    // runtime callback that requested the frame) while the host is still
+    // running. The helper must retire the one-shot before emitting so
+    // synchronous presentation can re-arm it, and abort if that callback
+    // stops the host so no later due surface receives a post-shutdown event.
     const host_source = @embedFile("webview2_host.cpp");
     const run_at = std.mem.indexOf(u8, host_source, "void native_sdk_windows_run(") orelse return error.TestExpectedEqual;
     const run_tail = host_source[run_at..];
     const dispatch_at = std.mem.indexOf(u8, run_tail, "DispatchMessageW(&message);") orelse return error.TestExpectedEqual;
     const post_dispatch = run_tail[dispatch_at..];
-    try std.testing.expect(std.mem.indexOf(u8, post_dispatch, "gpuSurfaceDrainDueFrameEmissions(host);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, post_dispatch, "if (host->running) gpuSurfaceDrainDueFrameEmissions(host);") != null);
 
     const helper_at = std.mem.indexOf(u8, host_source, "static void gpuSurfaceDrainDueFrameEmissions(Host *host)") orelse return error.TestExpectedEqual;
     const helper_tail = host_source[helper_at..];
     const helper_end = std.mem.indexOf(u8, helper_tail, "static void paintGpuSurface(") orelse return error.TestExpectedEqual;
     const helper = helper_tail[0..helper_end];
+    try std.testing.expect(std.mem.indexOf(u8, helper, "if (!host || !host->running) return;") != null);
+    const loop_at = std.mem.indexOf(u8, helper, "for (const std::string &key : due_keys)") orelse return error.TestExpectedEqual;
+    const loop = helper[loop_at..];
+    const before_emit_guard_at = std.mem.indexOf(u8, loop, "if (!host->running) return;") orelse return error.TestExpectedEqual;
     const kill_at = std.mem.indexOf(u8, helper, "KillTimer(hwnd, kGpuEmitTimerId);") orelse return error.TestExpectedEqual;
     const clear_at = std.mem.indexOf(u8, helper, "view.gpu_emission_scheduled = false;") orelse return error.TestExpectedEqual;
     const emit_at = std.mem.indexOf(u8, helper, "gpuSurfaceEmitFrame(host, view, hwnd);") orelse return error.TestExpectedEqual;
+    const after_emit = helper[emit_at + "gpuSurfaceEmitFrame(host, view, hwnd);".len ..];
+    try std.testing.expect(std.mem.indexOf(u8, after_emit, "if (!host->running) return;") != null);
+    try std.testing.expect(loop_at + before_emit_guard_at < emit_at);
     try std.testing.expect(kill_at < clear_at);
     try std.testing.expect(clear_at < emit_at);
 }

@@ -133,12 +133,14 @@ function Snapshot-Fields([string]$snapshot) {
     if (-not $view) { return $null }
     $line = $view.Line
     $frame = [regex]::Match($line, 'gpu_frame=(\d+)')
+    $frameTimestamp = [regex]::Match($line, 'gpu_timestamp_ns=(\d+)')
     $inputCount = [regex]::Match($line, 'gpu_input_count=(\d+)')
     $input = [regex]::Match($line, 'gpu_input_timestamp_ns=(\d+)')
     $latency = [regex]::Match($line, 'gpu_input_latency_ns=(\d+)')
-    if (-not ($frame.Success -and $inputCount.Success -and $input.Success -and $latency.Success)) { return $null }
+    if (-not ($frame.Success -and $frameTimestamp.Success -and $inputCount.Success -and $input.Success -and $latency.Success)) { return $null }
     return [pscustomobject]@{
         Frame = [uint64]$frame.Groups[1].Value
+        FrameTimestampNs = [uint64]$frameTimestamp.Groups[1].Value
         InputCount = [uint64]$inputCount.Groups[1].Value
         InputTimestampNs = [uint64]$input.Groups[1].Value
         InputLatencyNs = [uint64]$latency.Groups[1].Value
@@ -167,22 +169,39 @@ function Move-And-Measure([IntPtr]$canvas, [string]$id, [double]$x, [double]$y, 
     if (-not $before) { throw "GPU view telemetry missing before hover input" }
     $point = Screen-Point $canvas $x $y $scaleX $scaleY
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $lastFields = $before
+    $lastHovered = $false
     if (-not [NativeSdkInputPerf]::SetCursorPos($point.X, $point.Y)) {
         throw "SetCursorPos failed"
     }
     while ($watch.ElapsedMilliseconds -lt 1000) {
         $snapshot = Read-Snapshot
         $fields = Snapshot-Fields $snapshot
+        $hovered = $fields -and (Widget-Hovered $snapshot $id)
+        if ($fields) {
+            $lastFields = $fields
+            $lastHovered = $hovered
+        }
         if ($fields -and
-            $fields.InputTimestampNs -ne $before.InputTimestampNs -and
+            # Input receipt republishes its timestamp before the responding
+            # present replaces the previous sample's latency. Require the
+            # observable frame clock to have reached this exact input before
+            # accepting the hover state and latency as one sample.
+            $fields.InputCount -gt $before.InputCount -and
+            $fields.InputTimestampNs -gt $before.InputTimestampNs -and
+            $fields.FrameTimestampNs -ge $fields.InputTimestampNs -and
             $fields.InputLatencyNs -gt 0 -and
-            (Widget-Hovered $snapshot $id)) {
+            $hovered) {
             $watch.Stop()
             return [pscustomobject]@{
                 Target = $id
                 ExternalMs = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
                 BuiltinMs = [Math]::Round($fields.InputLatencyNs / 1000000.0, 3)
                 Frame = $fields.Frame
+                InputCount = $fields.InputCount
+                InputTimestampNs = $fields.InputTimestampNs
+                FrameTimestampNs = $fields.FrameTimestampNs
+                Hovered = $hovered
                 TimedOut = $false
             }
         }
@@ -194,6 +213,10 @@ function Move-And-Measure([IntPtr]$canvas, [string]$id, [double]$x, [double]$y, 
         ExternalMs = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
         BuiltinMs = 0
         Frame = $before.Frame
+        InputCount = $lastFields.InputCount
+        InputTimestampNs = $lastFields.InputTimestampNs
+        FrameTimestampNs = $lastFields.FrameTimestampNs
+        Hovered = $lastHovered
         TimedOut = $true
     }
 }

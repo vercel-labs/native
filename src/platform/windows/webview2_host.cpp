@@ -2893,7 +2893,7 @@ static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
  * own view (or another due view), so each key is re-resolved immediately
  * before use and no iterator/reference survives an engine callback. */
 static void gpuSurfaceDrainDueFrameEmissions(Host *host) {
-    if (!host) return;
+    if (!host || !host->running) return;
     const uint64_t now = gpuTimestampNs();
     std::vector<std::string> due_keys;
     for (const auto &entry : host->native_views) {
@@ -2905,6 +2905,10 @@ static void gpuSurfaceDrainDueFrameEmissions(Host *host) {
         }
     }
     for (const std::string &key : due_keys) {
+        /* Emission enters application code synchronously. A preceding due
+         * surface may have stopped the host, so never begin another callback
+         * after shutdown/failure. */
+        if (!host->running) return;
         auto found = host->native_views.find(key);
         if (found == host->native_views.end()) continue;
         NativeView &view = found->second;
@@ -2916,6 +2920,7 @@ static void gpuSurfaceDrainDueFrameEmissions(Host *host) {
         KillTimer(hwnd, kGpuEmitTimerId);
         view.gpu_emission_scheduled = false;
         gpuSurfaceEmitFrame(host, view, hwnd);
+        if (!host->running) return;
     }
     gpuSurfaceRefreshFrameWakeTimer(host);
 }
@@ -3258,7 +3263,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                 KillTimer(hwnd, kGpuEmitTimerId);
                 view->gpu_emission_scheduled = false;
                 gpuSurfaceEmitFrame(host, *view, hwnd);
-                gpuSurfaceRefreshFrameWakeTimer(host);
+                if (host->running) gpuSurfaceRefreshFrameWakeTimer(host);
                 return 0;
             }
             break;
@@ -6152,7 +6157,7 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
         if (received <= 0) break;
         TranslateMessage(&message);
         DispatchMessageW(&message);
-        gpuSurfaceDrainDueFrameEmissions(host);
+        if (host->running) gpuSurfaceDrainDueFrameEmissions(host);
     }
     WindowsEvent shutdown = {};
     shutdown.kind = kShutdown;

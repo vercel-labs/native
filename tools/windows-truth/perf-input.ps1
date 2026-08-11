@@ -65,8 +65,12 @@ try {
     if (-not $view) { throw "dashboard canvas bounds missing" }
     $surfaceWidth = [double]$view.Matches[0].Groups[3].Value
     $surfaceHeight = [double]$view.Matches[0].Groups[4].Value
-    $hoverA = Snapshot-Widget "switch" "Auto refresh"
-    $hoverB = Snapshot-Widget "slider" "Confidence threshold"
+    # Measure controls whose hover state changes pixels. The switch and
+    # slider expose semantic `hovered` state but intentionally have no hover
+    # chrome, so they produce no responding present and therefore no honest
+    # glass-latency sample to correlate.
+    $hoverA = Snapshot-Widget "button" "Refresh dashboard"
+    $hoverB = Snapshot-Widget "button" "Live render status"
     $wheel = Snapshot-Widget "group" "Recent activity"
     if (-not ($hoverA -and $hoverB -and $wheel)) { throw "performance probe widgets missing" }
 
