@@ -315,13 +315,14 @@ fn decodeEnvelope(bytes: []const u8, expected: ?Config) Decoded {
     const schema_version = takeInt(u64, bytes, &at);
     const model_fingerprint = takeInt(u64, bytes, &at);
     const body_len_u64 = takeInt(u64, bytes, &at);
-    const checksum = bytes[at .. at + checksum_len];
+    const checksum_at = at;
+    const checksum = bytes[checksum_at .. checksum_at + checksum_len];
     at += checksum_len;
     if (format != store_format or body_len_u64 > max_snapshot_bytes) return .corrupt;
     const body_len = std.math.cast(usize, body_len_u64) orelse return .corrupt;
     if (bytes.len != header_len + body_len) return .corrupt;
     const body = bytes[at..];
-    const actual = checksumBytes(body);
+    const actual = checksumEnvelope(bytes[0..checksum_at], body);
     if (!std.crypto.timing_safe.eql([checksum_len]u8, checksum[0..checksum_len].*, actual)) return .corrupt;
 
     if (expected) |config| {
@@ -342,15 +343,19 @@ fn encodeEnvelope(out: []u8, config: Config, snapshot: []const u8) void {
     putInt(u64, out, &at, config.schema_version);
     putInt(u64, out, &at, config.model_fingerprint);
     putInt(u64, out, &at, snapshot.len);
-    const checksum = checksumBytes(snapshot);
-    @memcpy(out[at .. at + checksum_len], &checksum);
+    const checksum_at = at;
     at += checksum_len;
     @memcpy(out[at..], snapshot);
+    const checksum = checksumEnvelope(out[0..checksum_at], snapshot);
+    @memcpy(out[checksum_at .. checksum_at + checksum_len], &checksum);
 }
 
-fn checksumBytes(bytes: []const u8) [checksum_len]u8 {
+fn checksumEnvelope(header: []const u8, body: []const u8) [checksum_len]u8 {
     var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(header);
+    hasher.update(body);
+    hasher.final(&digest);
     return digest[0..checksum_len].*;
 }
 
@@ -413,6 +418,35 @@ test "snapshot store falls back to the previous generation when primary is torn"
     var primary_buffer: [512]u8 = undefined;
     const primary = joinPath(&primary_buffer, path, snapshot_name).?;
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = primary, .data = "torn" });
+
+    var restored = store.restore();
+    defer restored.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Outcome.ok, restored.outcome);
+    try std.testing.expectEqualStrings("first", restored.bytes);
+    try std.testing.expect(restored.used_backup);
+}
+
+test "snapshot store falls back when primary metadata is corrupted" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try testDirPath(&tmp, &path_buffer);
+    const config: Config = .{ .schema_version = 1, .model_fingerprint = 7, .snapshot_format = 1 };
+    const store = Store.init(std.testing.io, std.testing.allocator, path, config);
+
+    try std.testing.expectEqual(Outcome.ok, store.write("first"));
+    try std.testing.expectEqual(Outcome.ok, store.write("second"));
+    var primary_buffer: [512]u8 = undefined;
+    const primary = joinPath(&primary_buffer, path, snapshot_name).?;
+    const envelope = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        primary,
+        std.testing.allocator,
+        .limited(header_len + max_snapshot_bytes),
+    );
+    defer std.testing.allocator.free(envelope);
+    envelope[magic.len + @sizeOf(u32) + @sizeOf(u32)] ^= 0x80;
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = primary, .data = envelope });
 
     var restored = store.restore();
     defer restored.deinit(std.testing.allocator);

@@ -339,6 +339,7 @@ const mini_core = struct {
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
     pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var initial_model_calls: usize = 0;
 
     fn frameCreate(value: Model) *Model {
         const slot = rt.frameAlloc(Model, 1);
@@ -347,6 +348,7 @@ const mini_core = struct {
     }
 
     pub fn initialModel() InitResult {
+        initial_model_calls += 1;
         return .{
             .model = frameCreate(.{
                 .polling = false,
@@ -413,6 +415,10 @@ const mini_core = struct {
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
+    }
+
+    pub fn bootCommand() []const u8 {
+        return cmdRequest("status.read", "status", 7, 8, "boot");
     }
 
     pub fn update(model: *const Model, msg: Msg) UpdateResult {
@@ -2486,12 +2492,14 @@ test "boot commits the model before any effects and performBoot fires the boot c
     // The pre-effects half: the committed boot model is readable, no
     // effect has been issued, and the frame arena is reset.
     Host.boot();
+    const calls_after_boot = mini_core.initial_model_calls;
     try std.testing.expect(!Host.model().polling);
     try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
 
-    // The effects half re-derives the boot command from the pure
-    // initialModel and performs it exactly as init does.
+    // The effects half retrieves only the command. Re-running initialModel
+    // here would also reset a compiled core after persistence restore.
     Host.performBoot(fx);
+    try std.testing.expectEqual(calls_after_boot, mini_core.initial_model_calls);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingHostCount());
     const request = fx.pendingHostAt(0).?;
     try std.testing.expectEqual(boot_request_key, request.key);

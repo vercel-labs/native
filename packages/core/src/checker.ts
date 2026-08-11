@@ -741,6 +741,20 @@ export class SubsetChecker {
         break;
       }
     }
+    if (decl === null) {
+      for (const binding of exportListBindings(this.tast, this.entry)) {
+        if (
+          binding.exportedName === "migrate" &&
+          binding.target !== null &&
+          binding.target !== undefined &&
+          ts.isFunctionDeclaration(binding.target) &&
+          binding.target.getSourceFile() === this.entry
+        ) {
+          decl = binding.target;
+          break;
+        }
+      }
+    }
     if (decl === null) return;
     const params = decl.parameters;
     const snapshot = params[0]?.type === undefined ? null : this.table.resolveTypeNode(params[0].type);

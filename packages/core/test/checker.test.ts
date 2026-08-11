@@ -888,6 +888,28 @@ export function update(model: Model, msg: Msg): Model { return model; }
   assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
 });
 
+test("NS1033 validates migrate hooks exported through an export list", () => {
+  const valid = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function migrate(snapshot: Uint8Array, fromVersion: number): Model { return { count: fromVersion }; }
+export { migrate };
+`);
+  assert.ok(!ruleIds(valid).includes("NS1033"), `got ${ruleIds(valid)}`);
+
+  const malformed = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function migrate(snapshot: string, fromVersion: number): Model { return { count: fromVersion }; }
+export { migrate };
+`);
+  assert.ok(ruleIds(malformed).includes("NS1033"), `got ${ruleIds(malformed)}`);
+});
+
 test("NS1033 statusItem is the exact model-derived presentation and menu helper", () => {
   const clean = check(`
 import { asciiBytes } from "@native-sdk/core";

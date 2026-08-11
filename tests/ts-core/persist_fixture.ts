@@ -19,13 +19,16 @@ export type Msg =
 
 export type MigrateError = { readonly kind: "unsupported_persist_version" };
 
-export function initialModel(): Model {
-  return {
-    value: 0,
-    label: asciiBytes("initial"),
-    restoreState: 0,
-    lastError: asciiBytes(""),
-  };
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [
+    {
+      value: 0,
+      label: asciiBytes("initial"),
+      restoreState: 0,
+      lastError: asciiBytes(""),
+    },
+    Cmd.none,
+  ];
 }
 
 export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {

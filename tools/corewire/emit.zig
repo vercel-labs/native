@@ -947,12 +947,16 @@ const Emitter = struct {
                 \\
                 \\pub const InitResult = struct {{ model: *const {s}, cmd: rt.Cmd }};
                 \\
-                \\pub fn initialModel() InitResult {{
-                \\    boot();
+                \\pub fn bootCommand() rt.Cmd {{
                 \\    var cmd_ptr: [*]const u8 = undefined;
                 \\    var cmd_len: usize = 0;
                 \\    abi.boot_cmd(&cmd_ptr, &cmd_len);
-                \\    return .{{ .model = snapshotModel(), .cmd = cmd_ptr[0..cmd_len] }};
+                \\    return cmd_ptr[0..cmd_len];
+                \\}}
+                \\
+                \\pub fn initialModel() InitResult {{
+                \\    boot();
+                \\    return .{{ .model = snapshotModel(), .cmd = bootCommand() }};
                 \\}}
                 \\
             , .{model_name});
@@ -1595,6 +1599,17 @@ test "emission is deterministic and carries the mirror surface" {
     // A bare-model init emits the pointer-returning shape.
     try testing.expect(std.mem.indexOf(u8, first, "pub fn initialModel() *const Model {") != null);
     try testing.expect(std.mem.indexOf(u8, first, "pub const UpdateResult = struct { model: *const Model, cmd: rt.Cmd };") != null);
+
+    const command_init_source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"init_returns_cmd\": false",
+        "\"init_returns_cmd\": true",
+    );
+    const command_init = try emitFromJson(arena, command_init_source);
+    try testing.expect(std.mem.indexOf(u8, command_init, "pub fn bootCommand() rt.Cmd {") != null);
+    try testing.expect(std.mem.indexOf(u8, command_init, ".cmd = bootCommand()") != null);
 }
 
 test "u64-attested slots generate the unsigned twin; i64 and f64 slots are untouched" {

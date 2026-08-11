@@ -19,6 +19,8 @@
 //!                        arms' declaration-order indices)
 //!   core.initialModel()  `*const Model`, or `InitResult{ model, cmd }`
 //!                        for a boot command
+//!   core.bootCommand()   the boot `Cmd` without reinitializing the core,
+//!                        required when `initialModel` returns `InitResult`
 //!   core.update(m, msg)  `*const Model`, or `UpdateResult{ model, cmd }`
 //!   core.commitModelRoot the frame-end commit walker
 //!   core.subscriptions   optional: `fn (*const Model) []const u8`
@@ -752,15 +754,13 @@ pub fn TsCoreHost(comptime core: type) type {
 
         /// The effects half of `init`: perform the boot command and
         /// reconcile the initial subscriptions against the committed
-        /// boot model. The command bytes are re-derived by re-running
-        /// the PURE `initialModel` (they were frame-resident and did not
-        /// survive `boot`'s frame reset; the duplicate model value is
-        /// frame-transient garbage) — purity is the app-core subset's
-        /// own guarantee, so the bytes are identical by construction.
+        /// boot model. The generated shim re-materializes only the boot
+        /// command through `bootCommand`; calling `initialModel` here would
+        /// reinitialize the compiled core and discard a model restored
+        /// between `boot` and `performBoot`.
         pub fn performBoot(fx: *Fx) void {
             if (comptime init_returns_cmd) {
-                const again = core.initialModel();
-                finishCycle(fx, again.cmd, 0);
+                finishCycle(fx, core.bootCommand(), 0);
             } else {
                 finishCycle(fx, "", 0);
             }
