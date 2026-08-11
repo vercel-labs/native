@@ -171,6 +171,7 @@ pub const FormFactor = platform.FormFactor;
 pub const WindowDragRegion = platform.WindowDragRegion;
 pub const WindowShowMode = platform.WindowShowMode;
 pub const WindowClosePolicy = platform.WindowClosePolicy;
+pub const LaunchAtLoginStatus = platform.LaunchAtLoginStatus;
 pub const Menu = platform.Menu;
 pub const MenuItem = platform.MenuItem;
 pub const Shortcut = platform.Shortcut;

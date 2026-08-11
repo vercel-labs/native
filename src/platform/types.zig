@@ -575,6 +575,11 @@ pub const WindowDragRegion = struct {
 pub const WindowShowMode = enum {
     immediate,
     on_first_present,
+    /// Create the native window ordered out and keep it that way until
+    /// an explicit `showWindow`/focus request. This is the launch shape
+    /// for a menu-bar app whose real surface is its status item: the
+    /// host window exists for runtime/view ownership but never flashes.
+    hidden,
 };
 
 /// What the user's close affordance (the red traffic light, cmd+W, the
@@ -621,6 +626,12 @@ pub const WindowOptions = struct {
     /// or `showWindow`) activates the app and takes keyboard focus.
     /// Explicit `focusWindow` remains an activation request either way.
     activate_on_show: bool = true,
+    /// Whether macOS may move the window into a native fullscreen
+    /// Space. False keeps ordinary resizing but removes the green
+    /// fullscreen affordance and rejects the fullscreen shortcut.
+    /// Other desktop hosts currently have no separate fullscreen mode
+    /// at this seam and keep their existing maximize behavior.
+    allows_fullscreen: bool = true,
     /// Content min-size floor the WINDOW enforces (macOS
     /// `contentMinSize`): the user cannot resize below it, so declared
     /// layout floors stop clamping/clipping panes instead of stopping
@@ -647,15 +658,14 @@ pub const WindowState = struct {
     focused: bool = true,
     maximized: bool = false,
     fullscreen: bool = false,
-    /// True while the window is alive but off the glass because its
-    /// `close_policy = .hide` intercepted a user close (the menu-bar-app
-    /// shape): the window keeps its views and native identity, `open`
-    /// stays true, and a show — `Effects.showWindow`, a tray action's
-    /// consequence, the macOS Dock reopen — flips it back. Distinct from
-    /// minimized (which keeps a Dock/taskbar affordance) and from
-    /// closed (`open = false`, the window is gone). Session-transient:
-    /// never persisted to the window-state store, so every launch
-    /// starts shown.
+    /// True while the window is alive but ordered off the glass: an
+    /// explicitly hidden startup window, `Effects.hideWindow`, or a
+    /// `close_policy = .hide` user close. The window keeps its views and
+    /// native identity, `open` stays true, and show/focus flips it back.
+    /// Distinct from minimized (which keeps a Dock/taskbar affordance)
+    /// and closed (`open = false`, the window is gone). Session-transient:
+    /// it is never restored from the window-state store; each launch uses
+    /// the declaration's show policy again.
     hidden: bool = false,
 };
 
@@ -698,6 +708,7 @@ pub const WindowCreateOptions = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    allows_fullscreen: bool = true,
     /// Window-enforced content min-size floor (see
     /// `WindowOptions.min_width`/`min_height`); 0 = no floor.
     min_width: f32 = 0,
@@ -721,11 +732,24 @@ pub const WindowCreateOptions = struct {
             .always_on_top = self.always_on_top,
             .click_through = self.click_through,
             .activate_on_show = self.activate_on_show,
+            .allows_fullscreen = self.allows_fullscreen,
             .min_width = self.min_width,
             .min_height = self.min_height,
             .close_policy = self.close_policy,
         };
     }
+};
+
+/// The operating system's registration state for launching this app at
+/// user login. `requires_approval` is a successful query, not an I/O
+/// failure: macOS knows the registration but the user must approve it
+/// in System Settings. `not_found` means the current executable is not
+/// an installed application bundle that SMAppService can register.
+pub const LaunchAtLoginStatus = enum {
+    disabled,
+    enabled,
+    requires_approval,
+    not_found,
 };
 
 pub const WebViewOptions = struct {
@@ -2478,12 +2502,26 @@ pub const PlatformServices = struct {
     /// controls — chromeless windows have no system button to click.
     /// Platforms without the concept leave this null.
     minimize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// Keep a live window and all of its views, but order it off the
+    /// glass. The runtime marks `WindowInfo.hidden` while it is out;
+    /// `show_window_fn` is the inverse. Platforms without a reliable
+    /// re-show path leave this null.
+    hide_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     /// The real OS show verb: unhide + order front. It activates by
     /// default; windows created with `activate_on_show = false` use the
     /// platform's passive variant. This is the counterpart to a
     /// `close_policy = .hide` hide, and the tray "Open" consequence.
     /// Platforms without the concept leave this null.
     show_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// Change whether the process appears in the Dock/app switcher.
+    /// macOS maps true/false to the regular/accessory activation
+    /// policies; other hosts leave this null.
+    set_dock_presence_fn: ?*const fn (context: ?*anyopaque, visible: bool) anyerror!void = null,
+    /// Query and update the installed app bundle's SMAppService login
+    /// registration. Unbundled development executables and hosts
+    /// without the service leave these null / return UnsupportedService.
+    launch_at_login_status_fn: ?*const fn (context: ?*anyopaque) anyerror!LaunchAtLoginStatus = null,
+    set_launch_at_login_fn: ?*const fn (context: ?*anyopaque, enabled: bool) anyerror!LaunchAtLoginStatus = null,
     /// The graceful app quit: terminate through the SAME shutdown path
     /// a last-window close takes — but the host QUEUES the emit, so
     /// `app_shutdown` dispatches on its NEXT loop turn, only after the
@@ -2907,9 +2945,29 @@ pub const PlatformServices = struct {
         return minimize_fn(self.context, window_id);
     }
 
+    pub fn hideWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const hide_fn = self.hide_window_fn orelse return error.UnsupportedService;
+        return hide_fn(self.context, window_id);
+    }
+
     pub fn showWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const show_fn = self.show_window_fn orelse return error.UnsupportedService;
         return show_fn(self.context, window_id);
+    }
+
+    pub fn setDockPresence(self: PlatformServices, visible: bool) anyerror!void {
+        const set_fn = self.set_dock_presence_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, visible);
+    }
+
+    pub fn launchAtLoginStatus(self: PlatformServices) anyerror!LaunchAtLoginStatus {
+        const status_fn = self.launch_at_login_status_fn orelse return error.UnsupportedService;
+        return status_fn(self.context);
+    }
+
+    pub fn setLaunchAtLogin(self: PlatformServices, enabled: bool) anyerror!LaunchAtLoginStatus {
+        const set_fn = self.set_launch_at_login_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, enabled);
     }
 
     pub fn quitApp(self: PlatformServices) anyerror!void {

@@ -6083,7 +6083,7 @@ static bool createNativeWindow(Host *host, Window &window) {
         window.hwnd = nullptr;
         return false;
     }
-    if (!window.show_on_first_present) {
+    if (!window.show_on_first_present && !window.policy_hidden) {
         showWindowImplicit(window);
     }
     SetTimer(hwnd, kFrameTimerId, 16, nullptr);
@@ -6144,6 +6144,7 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.click_through = (window_flags & (1u << 2)) != 0;
     window.activate_on_show = (window_flags & (1u << 3)) == 0;
     window.show_on_first_present = show_policy == 1;
+    window.policy_hidden = show_policy == 2;
     host->windows[window.id] = window;
     return host;
 }
@@ -6550,6 +6551,7 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.click_through = (window_flags & (1u << 2)) != 0;
     window.activate_on_show = (window_flags & (1u << 3)) == 0;
     window.show_on_first_present = show_policy == 1;
+    window.policy_hidden = show_policy == 2;
     /* Register BEFORE creating: createNativeWindow's post-create frame
      * pass (hidden titlebar styles) resolves the window through the map
      * by HWND, so the stored entry must be the one it mutates. */
@@ -6697,6 +6699,7 @@ int native_sdk_windows_focus_window(Host *host, uint64_t window_id) {
     if (!host) return 0;
     auto found = host->windows.find(window_id);
     if (found == host->windows.end() || !found->second.hwnd) return 0;
+    found->second.policy_hidden = false;
     if (!found->second.shown) {
         ShowWindow(found->second.hwnd, SW_SHOW);
         found->second.shown = true;
@@ -6725,6 +6728,17 @@ int native_sdk_windows_minimize_window(Host *host, uint64_t window_id) {
     auto found = host->windows.find(window_id);
     if (found == host->windows.end() || !found->second.hwnd) return 0;
     ShowWindow(found->second.hwnd, SW_MINIMIZE);
+    return 1;
+}
+
+int native_sdk_windows_hide_window(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    found->second.policy_hidden = true;
+    found->second.shown = false;
+    ShowWindow(found->second.hwnd, SW_HIDE);
+    emit(host, found->second, kWindowFrame);
     return 1;
 }
 

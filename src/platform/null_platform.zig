@@ -342,11 +342,13 @@ pub const NullPlatform = struct {
     window_always_on_top: [max_windows]bool = [_]bool{false} ** max_windows,
     window_click_through: [max_windows]bool = [_]bool{false} ** max_windows,
     window_activate_on_show: [max_windows]bool = [_]bool{true} ** max_windows,
+    window_allows_fullscreen: [max_windows]bool = [_]bool{true} ** max_windows,
     /// Minimize calls per window (`minimize_window_fn`), indexed like
     /// `windows`: the observable seam for app-drawn minimize controls —
     /// the null platform has no Dock to genie into, so the count IS the
     /// behavior tests pin.
     window_minimize_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    window_hide_count: [max_windows]u32 = [_]u32{0} ** max_windows,
     /// Show calls per window (`show_window_fn`), indexed like `windows`
     /// — the counterpart seam (tray "Open", the un-hide verb).
     window_show_count: [max_windows]u32 = [_]u32{0} ** max_windows,
@@ -393,6 +395,11 @@ pub const NullPlatform = struct {
     /// runtime's `showWindow` rollback test uses to assert a refused
     /// show restores hidden and moves no focus.
     fail_next_show_window: bool = false,
+    fail_next_hide_window: bool = false,
+    dock_visible: bool = true,
+    dock_presence_count: u32 = 0,
+    launch_at_login_status: types.LaunchAtLoginStatus = .disabled,
+    launch_at_login_set_count: u32 = 0,
     /// Captured `WindowOptions.min_width`/`min_height` per created
     /// window — the content min-size floor that must survive to the
     /// create seam (macOS applies it as `contentMinSize`); same
@@ -825,7 +832,11 @@ pub const NullPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
+                .set_dock_presence_fn = setDockPresence,
+                .launch_at_login_status_fn = launchAtLoginStatus,
+                .set_launch_at_login_fn = setLaunchAtLogin,
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
@@ -1078,6 +1089,7 @@ pub const NullPlatform = struct {
             .scale_factor = self.surface_value.scale_factor,
             .open = true,
             .focused = focused,
+            .hidden = options.show == .hidden,
         };
         self.windows[self.window_count] = info;
         self.window_resizable[self.window_count] = options.resizable;
@@ -1086,6 +1098,7 @@ pub const NullPlatform = struct {
         self.window_always_on_top[self.window_count] = options.always_on_top;
         self.window_click_through[self.window_count] = options.click_through;
         self.window_activate_on_show[self.window_count] = options.activate_on_show;
+        self.window_allows_fullscreen[self.window_count] = options.allows_fullscreen;
         self.window_show[self.window_count] = options.show;
         self.window_close_policy[self.window_count] = options.close_policy;
         self.window_min_width[self.window_count] = options.min_width;
@@ -1228,6 +1241,37 @@ pub const NullPlatform = struct {
             self.window_shown_seq[index] = self.show_op_seq;
         }
         self.window_show_count[index] += 1;
+    }
+
+    fn hideWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_hide_window) {
+            self.fail_next_hide_window = false;
+            return error.HideFailed;
+        }
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        self.windows[index].hidden = true;
+        self.windows[index].focused = false;
+        self.window_visible[index] = false;
+        self.window_hide_count[index] += 1;
+    }
+
+    fn setDockPresence(context: ?*anyopaque, visible: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.dock_visible = visible;
+        self.dock_presence_count += 1;
+    }
+
+    fn launchAtLoginStatus(context: ?*anyopaque) anyerror!types.LaunchAtLoginStatus {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        return self.launch_at_login_status;
+    }
+
+    fn setLaunchAtLogin(context: ?*anyopaque, enabled: bool) anyerror!types.LaunchAtLoginStatus {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.launch_at_login_set_count += 1;
+        self.launch_at_login_status = if (enabled) .enabled else .disabled;
+        return self.launch_at_login_status;
     }
 
     fn quitApp(context: ?*anyopaque) anyerror!void {
@@ -2657,6 +2701,11 @@ pub const NullPlatform = struct {
         return self.window_minimize_count[index];
     }
 
+    pub fn hideCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
+        const index = self.findWindowIndex(window_id) orelse return 0;
+        return self.window_hide_count[index];
+    }
+
     /// Test seam: show calls observed for a window (the un-hide verb's
     /// pinned observable, like `minimizeCountForWindow`).
     pub fn showCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
@@ -2698,6 +2747,7 @@ pub const NullPlatform = struct {
             self.window_always_on_top[cursor] = self.window_always_on_top[cursor + 1];
             self.window_click_through[cursor] = self.window_click_through[cursor + 1];
             self.window_activate_on_show[cursor] = self.window_activate_on_show[cursor + 1];
+            self.window_allows_fullscreen[cursor] = self.window_allows_fullscreen[cursor + 1];
             self.window_show[cursor] = self.window_show[cursor + 1];
             self.window_visible[cursor] = self.window_visible[cursor + 1];
             self.window_first_present_seq[cursor] = self.window_first_present_seq[cursor + 1];
@@ -2705,6 +2755,7 @@ pub const NullPlatform = struct {
             self.window_min_width[cursor] = self.window_min_width[cursor + 1];
             self.window_min_height[cursor] = self.window_min_height[cursor + 1];
             self.window_minimize_count[cursor] = self.window_minimize_count[cursor + 1];
+            self.window_hide_count[cursor] = self.window_hide_count[cursor + 1];
             self.window_show_count[cursor] = self.window_show_count[cursor + 1];
             self.window_occluded[cursor] = self.window_occluded[cursor + 1];
             self.window_close_policy[cursor] = self.window_close_policy[cursor + 1];

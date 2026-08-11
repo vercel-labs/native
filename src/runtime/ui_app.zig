@@ -346,6 +346,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             always_on_top: bool = false,
             click_through: bool = false,
             activate_on_show: bool = true,
+            /// Whether macOS offers native fullscreen for this window.
+            /// False leaves the window resizable but disables the green
+            /// fullscreen affordance and fullscreen command.
+            allows_fullscreen: bool = true,
             /// Msg dispatched when the USER closes the window (never for
             /// a reconcile close the model itself initiated). The
             /// dismissal precedent: the window is already gone as an
@@ -1406,7 +1410,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = runtime,
                 .close_fn = effectsCloseWindowByLabel,
                 .minimize_fn = effectsMinimizeWindowByLabel,
+                .hide_fn = effectsHideWindowByLabel,
                 .show_fn = effectsShowWindowByLabel,
+                .dock_presence_fn = effectsSetDockPresence,
                 .quit_fn = effectsQuitApp,
             });
             if (runtime.options.session_recorder) |recorder| {
@@ -2695,6 +2701,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .always_on_top = descriptor.always_on_top,
                 .click_through = descriptor.click_through,
                 .activate_on_show = descriptor.activate_on_show,
+                .allows_fullscreen = descriptor.allows_fullscreen,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,
                 // Deterministic reopen: the descriptor is the geometry
@@ -6141,12 +6148,25 @@ fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) b
     return true;
 }
 
+fn effectsHideWindowByLabel(context: *anyopaque, window_label: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    runtime.hideWindow(window_id) catch return false;
+    return true;
+}
+
 fn effectsShowWindowByLabel(context: *anyopaque, window_label: []const u8) bool {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     // A policy-hidden window keeps `open` true, so the same live-window
     // resolution close/minimize use finds it.
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
     runtime.showWindow(window_id) catch return false;
+    return true;
+}
+
+fn effectsSetDockPresence(context: *anyopaque, visible: bool) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    runtime.options.platform.services.setDockPresence(visible) catch return false;
     return true;
 }
 

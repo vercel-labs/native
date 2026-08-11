@@ -39,6 +39,37 @@ static const uint32_t NativeSdkShortcutModifierCommand = 1u << 1;
 static const uint32_t NativeSdkShortcutModifierControl = 1u << 2;
 static const uint32_t NativeSdkShortcutModifierOption = 1u << 3;
 static const uint32_t NativeSdkShortcutModifierShift = 1u << 4;
+
+// SMAppService is resolved dynamically so the host keeps its existing
+// deployment target; older macOS releases simply report unavailable.
+static id NativeSdkMainAppService(void) {
+    Class serviceClass = NSClassFromString(@"SMAppService");
+    SEL selector = NSSelectorFromString(@"mainApp");
+    if (!serviceClass || ![serviceClass respondsToSelector:selector]) return nil;
+    IMP implementation = [serviceClass methodForSelector:selector];
+    return ((id (*)(id, SEL))implementation)(serviceClass, selector);
+}
+
+static int NativeSdkLaunchAtLoginStatus(void) {
+    id service = NativeSdkMainAppService();
+    SEL selector = NSSelectorFromString(@"status");
+    if (!service || ![service respondsToSelector:selector]) return -1;
+    IMP implementation = [service methodForSelector:selector];
+    return (int)((NSInteger (*)(id, SEL))implementation)(service, selector);
+}
+
+static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
+    id service = NativeSdkMainAppService();
+    if (!service) return -1;
+    int before = NativeSdkLaunchAtLoginStatus();
+    if ((enabled && before == 1) || (!enabled && before == 0)) return before;
+    SEL selector = NSSelectorFromString(enabled ? @"registerAndReturnError:" : @"unregisterAndReturnError:");
+    if (![service respondsToSelector:selector]) return -1;
+    NSError *error = nil;
+    IMP implementation = [service methodForSelector:selector];
+    BOOL succeeded = ((BOOL (*)(id, SEL, NSError **))implementation)(service, selector, &error);
+    return succeeded ? NativeSdkLaunchAtLoginStatus() : -1;
+}
 static void *NativeSdkAppKitAppearanceObservationContext = &NativeSdkAppKitAppearanceObservationContext;
 /* KVO contexts for the app's single audio player: the AVPlayerItem's
  * load status (readyToPlay -> the LOADED acknowledgment; failed -> one
@@ -7729,6 +7760,12 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if ((windowFlags & (1u << 1)) != 0) window.level = NSFloatingWindowLevel;
     if ((windowFlags & (1u << 2)) != 0) window.ignoresMouseEvents = YES;
     if ((windowFlags & (1u << 3)) != 0) [self.passiveShowWindows addObject:key];
+    if ((windowFlags & (1u << 4)) != 0) {
+        NSWindowCollectionBehavior behavior = window.collectionBehavior;
+        behavior &= ~(NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorFullScreenAuxiliary);
+        window.collectionBehavior = behavior | NSWindowCollectionBehaviorFullScreenNone;
+        [window standardWindowButton:NSWindowZoomButton].enabled = NO;
+    }
     [window setTitle:(title.length > 0 ? title : self.appName)];
     if (titlebarStyle == 1 || titlebarStyle == 2) {
         window.titlebarAppearsTransparent = YES;
@@ -7818,12 +7855,14 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             [weakSelf showDeferredWindowIfPending:windowId reason:"fallback-deadline"];
         });
+    } else if (showPolicy == 2) {
+        [self.policyHiddenWindows addObject:key];
     }
     if (makeMain) {
         self.window = window;
         self.delegate = delegate;
         self.windowLabel = label.length > 0 ? label : @"main";
-    } else if (showPolicy != 1) {
+    } else if (showPolicy == 0) {
         [self orderWindowForImplicitShow:windowId];
     }
     return YES;
@@ -7912,6 +7951,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     // An explicit focus overrides a pending present-before-show defer:
     // the runtime asked for the window NOW.
     [self.deferredShowWindows removeObjectForKey:@(windowId)];
+    [self.policyHiddenWindows removeObject:@(windowId)];
     [NSApp activate];
     [window makeKeyAndOrderFront:nil];
     [self emitWindowFrameForWindowId:windowId open:YES];
@@ -9592,7 +9632,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     // Present-before-show: a deferred startup window stays ordered out
     // here and appears when its first canvas present lands (or the
     // create-time fallback deadline fires).
-    if (!self.deferredShowWindows[@1]) {
+    if (!self.deferredShowWindows[@1] && ![self.policyHiddenWindows containsObject:@1]) {
         [self orderWindowForImplicitShow:1];
     }
     if (!self.shortcutEventMonitor) {
@@ -12438,11 +12478,36 @@ int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t w
     return 1;
 }
 
+int native_sdk_appkit_hide_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object hideWindowWithId:window_id];
+    return 1;
+}
+
 int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object showWindowWithId:window_id];
     return 1;
+}
+
+int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visible) {
+    (void)host;
+    NSApplicationActivationPolicy policy = visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
+    BOOL changed = [NSApp setActivationPolicy:policy];
+    if (visible) [NSApp activate];
+    return changed || NSApp.activationPolicy == policy ? 1 : 0;
+}
+
+int native_sdk_appkit_launch_at_login_status(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return NativeSdkLaunchAtLoginStatus();
+}
+
+int native_sdk_appkit_set_launch_at_login(native_sdk_appkit_host_t *host, int enabled) {
+    (void)host;
+    return NativeSdkSetLaunchAtLogin(enabled != 0);
 }
 
 int native_sdk_appkit_set_window_close_policy(native_sdk_appkit_host_t *host, uint64_t window_id, int close_policy) {

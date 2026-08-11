@@ -43,6 +43,7 @@ typedef struct {
     double y;
     int open;
     int focused;
+    int hidden;
     const char *label;
     size_t label_len;
     const char *title;
@@ -217,6 +218,7 @@ void native_sdk_gtk_start_timer(native_sdk_gtk_host_t *host, uint64_t timer_id, 
 void native_sdk_gtk_cancel_timer(native_sdk_gtk_host_t *host, uint64_t timer_id);
 int native_sdk_gtk_focus_window(native_sdk_gtk_host_t *host, uint64_t window_id);
 int native_sdk_gtk_show_window(native_sdk_gtk_host_t *host, uint64_t window_id);
+int native_sdk_gtk_hide_window(native_sdk_gtk_host_t *host, uint64_t window_id);
 int native_sdk_gtk_close_window(native_sdk_gtk_host_t *host, uint64_t window_id);
 /* The real OS minimize verb (gtk_window_minimize), for app-drawn window
  * controls on chromeless windows. Returns 0 when the window id is

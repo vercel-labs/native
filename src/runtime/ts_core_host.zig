@@ -294,6 +294,12 @@
 //!                  activate (the tray "Open" consequence of the
 //!                  menu-bar-app loop). No result Msg; the window's own
 //!                  frame event carries the state.
+//!   window_hide -> `fx.hideWindow(label)` — retain the live window and
+//!                  its views while ordering it out; window_show is the
+//!                  inverse.
+//!   dock_presence -> `fx.setDockPresence(visible)` — macOS regular/
+//!                  accessory activation-policy switch; unsupported
+//!                  hosts safely ignore it.
 //!   quit_app    -> `fx.quitApp()` — the graceful terminate through the
 //!                  same shutdown path a last-window close takes.
 //!   show_notification -> `fx.showNotification` fire-and-forget; invalid or
@@ -1337,6 +1343,13 @@ pub fn TsCoreHost(comptime core: type) type {
                             .max_line_bytes = if (max_line_bytes == 0) runtime_effects.max_effect_line_bytes else max_line_bytes,
                         });
                     },
+                    // window_hide [op][label_len][label]
+                    0x21 => {
+                        const label = takeShortBytes(cmd, &at);
+                        fx.hideWindow(label);
+                    },
+                    // dock_presence [op][visible u8]
+                    0x22 => fx.setDockPresence(takeByte(cmd, &at) != 0),
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }

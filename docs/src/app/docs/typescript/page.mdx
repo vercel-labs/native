@@ -304,8 +304,16 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>The audio player: one event stream (<code>loaded</code>, <code>position</code>, <code>completed</code>, <code>failed</code>, <code>spectrum</code>, ...) until <code>audioStop</code> closes it</td>
     </tr>
     <tr>
-      <td><code>Cmd.showWindow(label)</code> / <code>Cmd.quitApp()</code></td>
-      <td>The menu-bar lifecycle verbs: un-hide + activate the labeled window (the tray "Open" consequence, the counterpart to <code>close_policy = "hide"</code>), and the real graceful terminate</td>
+      <td><code>Cmd.showWindow(label)</code> / <code>Cmd.hideWindow(label)</code> / <code>Cmd.quitApp()</code></td>
+      <td>The menu-bar lifecycle verbs: show or retain-but-hide the labeled window, and gracefully terminate the app</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.setDockPresence(visible)</code></td>
+      <td>Switch macOS between regular Dock/app-switcher presence and accessory/headless behavior; unsupported hosts ignore it</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.launchAtLoginStatus(route)</code> / <code>Cmd.setLaunchAtLogin(enabled, route)</code></td>
+      <td>Query or change the installed app bundle's <code>SMAppService</code> registration; the ok bytes name <code>enabled</code>, <code>disabled</code>, <code>requires_approval</code>, or <code>not_found</code></td>
     </tr>
     <tr>
       <td><code>Cmd.imageLoad(id, source, &#123; event &#125;)</code> + <code>imageCancel(id)</code>/<code>imageUnregister(id)</code></td>

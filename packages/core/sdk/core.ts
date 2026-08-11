@@ -229,6 +229,10 @@
 //                                "Open" consequence; also restores a
 //                                minimized window. An unknown label is a
 //                                no-op.
+//   Cmd.hideWindow(label)        order a live window out while retaining
+//                                its views; showWindow is the inverse.
+//   Cmd.setDockPresence(visible) show or remove the app from the macOS
+//                                Dock/app switcher.
 //   Cmd.quitApp()                graceful terminate, the tray "Quit"
 //                                consequence: the host quits through the
 //                                SAME shutdown path a last-window close
@@ -1048,6 +1052,8 @@ export type Cmd<M extends Msgish> =
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
+  | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
   | {
       readonly op: "image_load";
@@ -1433,6 +1439,31 @@ export const Cmd = {
   /// labels are declarations.
   showWindow(label: string): Cmd<never> {
     return { op: "window_show", label };
+  },
+
+  /// Hide a live window without closing it. Its views and native identity
+  /// remain intact; `showWindow` brings it back. Unknown labels no-op.
+  hideWindow(label: string): Cmd<never> {
+    return { op: "window_hide", label };
+  },
+
+  /// Control whether the app appears in the macOS Dock and app switcher.
+  /// Unsupported hosts ignore the command.
+  setDockPresence(visible: boolean): Cmd<never> {
+    return { op: "dock_presence", visible };
+  },
+
+  /// Query the installed bundle's launch-at-login registration. The ok
+  /// route receives UTF-8 bytes naming `enabled`, `disabled`,
+  /// `requires_approval`, or `not_found`; the err route receives a reason.
+  launchAtLoginStatus<M extends Msgish>(route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.launch-at-login.status", new Uint8Array(0), route);
+  },
+
+  /// Register or unregister the installed bundle for launch at login. The
+  /// ok and err payloads follow `launchAtLoginStatus`.
+  setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.launch-at-login.set", new Uint8Array([enabled ? 1 : 0]), route);
   },
 
   /// Quit the app for real — the graceful terminate, and the tray "Quit"

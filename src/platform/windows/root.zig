@@ -160,6 +160,7 @@ extern fn native_sdk_windows_cancel_timer(host: *WindowsHost, timer_id: u64) voi
 extern fn native_sdk_windows_focus_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64) c_int;
+extern fn native_sdk_windows_hide_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_show_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_close_policy(host: *WindowsHost, window_id: u64, close_policy: c_int) c_int;
 extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend_request: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
@@ -434,6 +435,7 @@ pub const WindowsPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
@@ -936,6 +938,7 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
         .on_first_present => 1,
+        .hidden => 2,
     };
 }
 
@@ -945,6 +948,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (options.always_on_top) flags |= 1 << 1;
     if (options.click_through) flags |= 1 << 2;
     if (!options.activate_on_show) flags |= 1 << 3;
+    if (!options.allows_fullscreen) flags |= 1 << 4;
     return flags;
 }
 
@@ -983,6 +987,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .scale_factor = 1,
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
+        .hidden = options.show == .hidden,
     };
 }
 
@@ -999,6 +1004,11 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_windows_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_windows_hide_window(self.host, window_id) == 0) return error.WindowNotFound;
 }
 
 fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {

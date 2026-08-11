@@ -358,6 +358,7 @@ typedef struct native_sdk_gtk_window {
     int click_through;
     int activate_on_show;
     int show_on_first_present;
+    int policy_hidden;
     int shown;
     /* One-second safety reveal for a canvas window whose first present
      * never arrives. Zero once cancelled/fired. */
@@ -2518,6 +2519,7 @@ static void native_sdk_emit_window_frame(native_sdk_gtk_host_t *host, native_sdk
         .scale = scale,
         .open = open,
         .focused = focused,
+        .hidden = open ? win->policy_hidden : 0,
         .label = win->label ? win->label : "",
         .label_len = win->label ? strlen(win->label) : 0,
         .title = win->title ? win->title : "",
@@ -3076,6 +3078,7 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     win->click_through = (window_flags & (1u << 2)) != 0;
     win->activate_on_show = (window_flags & (1u << 3)) == 0;
     win->show_on_first_present = show_policy == 1;
+    win->policy_hidden = show_policy == 2;
     if (!win->label || !win->title) {
         free(win->label);
         free(win->title);
@@ -3201,7 +3204,7 @@ static void on_activate(GtkApplication *app, gpointer data) {
         host->init_show_policy, host->init_window_flags);
     if (!win) return;
 
-    if (!win->show_on_first_present) native_sdk_show_window_implicit(win);
+    if (!win->show_on_first_present && !win->policy_hidden) native_sdk_show_window_implicit(win);
     native_sdk_emit_app_active_if_changed(host);
 
     native_sdk_emit(host, (native_sdk_gtk_event_t){ .kind = NATIVE_SDK_GTK_EVENT_START });
@@ -3772,7 +3775,7 @@ int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id
     free(label);
     if (!win) return 0;
 
-    if (!win->show_on_first_present) native_sdk_show_window_implicit(win);
+    if (!win->show_on_first_present && !win->policy_hidden) native_sdk_show_window_implicit(win);
     return 1;
 }
 
@@ -3943,6 +3946,7 @@ int native_sdk_gtk_focus_window(native_sdk_gtk_host_t *host, uint64_t window_id)
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->gtk_window) return 0;
     native_sdk_cancel_deferred_show(win);
+    win->policy_hidden = 0;
     gtk_window_present(win->gtk_window);
     win->shown = 1;
     native_sdk_emit_window_frame(host, win, 1);
@@ -3953,8 +3957,20 @@ int native_sdk_gtk_show_window(native_sdk_gtk_host_t *host, uint64_t window_id) 
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->gtk_window) return 0;
     native_sdk_cancel_deferred_show(win);
+    win->policy_hidden = 0;
     if (!win->activate_on_show) gtk_window_unminimize(win->gtk_window);
     native_sdk_show_window_implicit(win);
+    native_sdk_emit_window_frame(host, win, 1);
+    return 1;
+}
+
+int native_sdk_gtk_hide_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
+    native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    if (!win || !win->gtk_window) return 0;
+    native_sdk_cancel_deferred_show(win);
+    win->policy_hidden = 1;
+    win->shown = 0;
+    gtk_widget_set_visible(GTK_WIDGET(win->gtk_window), FALSE);
     native_sdk_emit_window_frame(host, win, 1);
     return 1;
 }

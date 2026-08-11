@@ -28,6 +28,8 @@ pub const Op = union(enum) {
     audio_play: struct { key: []const u8, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
     audio_ctl: struct { key: []const u8, verb: u8, value: f64 },
     window_show: struct { label: []const u8 },
+    window_hide: struct { label: []const u8 },
+    dock_presence: struct { visible: bool },
     quit_app,
     image_load: struct { id: f64, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
     image_cancel: struct { id: f64 },
@@ -436,6 +438,17 @@ pub const CmdIter = struct {
                     .body = body,
                 } };
             },
+            // window_hide [op 0x21][label_len u8][label].
+            0x21 => blk: {
+                const label = shortBytes(b, &off);
+                break :blk .{ .window_hide = .{ .label = label } };
+            },
+            // dock_presence [op 0x22][visible u8].
+            0x22 => blk: {
+                const visible = b[off] != 0;
+                off += 1;
+                break :blk .{ .dock_presence = .{ .visible = visible } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -553,6 +566,21 @@ test "window_show and quit_app decode, alone and inside a batch" {
     try std.testing.expect(second == .quit_app);
     const third = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 7), third.now.msg_tag);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "window_hide and dock_presence decode, alone and inside a batch" {
+    const hidden = findOp(&.{ 0x21, 4, 'm', 'a', 'i', 'n' }, .window_hide) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("main", hidden.label);
+
+    const dock = findOp(&.{ 0x22, 0 }, .dock_presence) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!dock.visible);
+
+    const batch = [_]u8{ 0x21, 3, 'h', 'u', 'd', 0x22, 1, 0x02, 9 };
+    var iter = CmdIter.init(&batch);
+    try std.testing.expectEqualStrings("hud", (iter.next() orelse return error.TestUnexpectedResult).window_hide.label);
+    try std.testing.expect((iter.next() orelse return error.TestUnexpectedResult).dock_presence.visible);
+    try std.testing.expectEqual(@as(u8, 9), (iter.next() orelse return error.TestUnexpectedResult).now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
 

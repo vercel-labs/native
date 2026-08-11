@@ -217,6 +217,8 @@ pub const WindowMetadata = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
     close_policy: []const u8 = "quit",
@@ -259,6 +261,8 @@ pub const ShellWindowMetadata = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
     close_policy: []const u8 = "quit",
@@ -719,6 +723,8 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = window.min_width,
             .min_height = window.min_height,
             .close_policy = try allocator.dupe(u8, window.close_policy),
@@ -776,6 +782,8 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = window.min_width,
             .min_height = window.min_height,
             .close_policy = try allocator.dupe(u8, window.close_policy),
@@ -980,6 +988,8 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = try parseWindowMinSize(window.min_width),
             .min_height = try parseWindowMinSize(window.min_height),
             .close_policy = try parseClosePolicy(window.close_policy),
@@ -1024,6 +1034,8 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = min_width,
             .min_height = min_height,
             .close_policy = close_policy,
@@ -2529,13 +2541,13 @@ test "manifest parser reads window titlebar styles" {
         \\  .name = "example",
         \\  .version = "1.2.3",
         \\  .windows = .{
-        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false },
+        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .initially_hidden = true, .allows_fullscreen = false },
         \\    .{ .label = "tall", .titlebar = "hidden_inset_tall" },
         \\    .{ .label = "skinned", .titlebar = "chromeless" },
         \\  },
         \\  .shell = .{
         \\    .windows = .{
-        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .initially_hidden = true, .allows_fullscreen = false, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
         \\    },
         \\  },
         \\}
@@ -2548,6 +2560,8 @@ test "manifest parser reads window titlebar styles" {
     try std.testing.expect(metadata.windows[0].always_on_top);
     try std.testing.expect(metadata.windows[0].click_through);
     try std.testing.expect(!metadata.windows[0].activate_on_show);
+    try std.testing.expect(metadata.windows[0].initially_hidden);
+    try std.testing.expect(!metadata.windows[0].allows_fullscreen);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.windows[1].titlebar);
     try std.testing.expectEqualStrings("chromeless", metadata.windows[2].titlebar);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.shell.windows[0].titlebar);
@@ -2560,6 +2574,8 @@ test "manifest parser reads window titlebar styles" {
     try std.testing.expect(windows[0].always_on_top);
     try std.testing.expect(windows[0].click_through);
     try std.testing.expect(!windows[0].activate_on_show);
+    try std.testing.expect(windows[0].initially_hidden);
+    try std.testing.expect(!windows[0].allows_fullscreen);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, windows[1].titlebar);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.chromeless, windows[2].titlebar);
 
@@ -2570,6 +2586,8 @@ test "manifest parser reads window titlebar styles" {
     try std.testing.expect(shell.windows[0].always_on_top);
     try std.testing.expect(shell.windows[0].click_through);
     try std.testing.expect(!shell.windows[0].activate_on_show);
+    try std.testing.expect(shell.windows[0].initially_hidden);
+    try std.testing.expect(!shell.windows[0].allows_fullscreen);
 }
 
 test "manifest parser reads window min sizes" {

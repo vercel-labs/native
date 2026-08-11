@@ -366,7 +366,8 @@ typedef void (*native_sdk_appkit_bridge_callback_t)(void *context, uint64_t wind
 // the first canvas present (present-before-show: the window is created
 // ordered-out and `makeKeyAndOrderFront` runs after the first
 // gpu-surface present lands, with a short fallback deadline so a wedged
-// first frame cannot leave the window invisible).
+// first frame cannot leave the window invisible), 2 = explicitly hidden
+// until a show/focus request.
 //
 // display_name is the human-facing app name (empty = fall back to
 // app_name): it drives the application menu title and its About/Hide/
@@ -425,11 +426,20 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
 // window controls on chromeless windows. Returns 0 when the window id
 // is unknown.
 int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// Order a live window out without closing it. `show_window` is the inverse.
+int native_sdk_appkit_hide_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 // The show verb: bring the window back to the glass and activate the
 // app (deminiaturize + makeKeyAndOrderFront) — the counterpart to a
 // close_policy .hide hide, and the tray-menu "Open" consequence.
 // Returns 0 when the window id is unknown.
 int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// Change the process activation policy: visible = regular (Dock/app
+// switcher), hidden = accessory. Returns 1 when applied.
+int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visible);
+// SMAppService.mainApp status values: 0 not registered, 1 enabled,
+// 2 requires approval, 3 not found; -1 when unavailable.
+int native_sdk_appkit_launch_at_login_status(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_set_launch_at_login(native_sdk_appkit_host_t *host, int enabled);
 // What the user's close affordance does to this window: 0 = quit (the
 // default: really close; last close follows app exit semantics),
 // 1 = hide (order out and keep running — the menu-bar-app shape).

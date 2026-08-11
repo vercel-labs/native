@@ -49,6 +49,18 @@ Canvas windows are created hidden and become visible after their first completed
 
 On macOS these map to an alpha-capable floating `NSWindow`, ignored mouse events, and passive `orderFront`. The system WebView engine can participate in that alpha window; the Chromium engine rejects `transparent` because its windowed CEF browser cannot expose alpha to the parent window. Windows uses a layered topmost window with per-pixel alpha, transparent hit testing, a non-activating initial reveal, and normal activation if the user later clicks an interactive overlay. Its layered presenter composites multiple canvas surfaces in layer order. Because Win32 cannot redirect non-client chrome or child surfaces into the top-level alpha bitmap, a transparent Windows window must use `titlebar = .chromeless`, cannot be combined with application menus, and rejects WebViews and other native views. Linux provides transparency, input regions, and passive show on GTK; topmost is honored on X11 through `_NET_WM_STATE_ABOVE`. Wayland intentionally gives the compositor—not clients—control of topmost placement, so the GTK host reports that limitation and cannot guarantee `always_on_top` there.
 
+## macOS menu-bar and login-item hooks
+
+A TypeScript app does not need an AppKit sidecar for the usual menu-bar-app lifecycle:
+
+- Set `initially_hidden = true` on the startup window to create its native host window ordered out. Unlike canvas present-before-show, no fallback deadline reveals it; `Cmd.showWindow(label)` or an explicit focus is required.
+- Set `allows_fullscreen = false` on a settings window to keep ordinary resizing while removing macOS native-fullscreen participation and disabling the green fullscreen/zoom affordance. The flag is fixed when the window is created and is available on `app.zon` windows and `UiApp.WindowDescriptor`.
+- Use `Cmd.hideWindow(label)` and `Cmd.showWindow(label)` to hide and restore a live window without destroying its views.
+- Use `Cmd.setDockPresence(false)` for an accessory/headless Dock policy and `Cmd.setDockPresence(true)` to return to a regular Dock/app-switcher app.
+- Use `Cmd.launchAtLoginStatus(route)` and `Cmd.setLaunchAtLogin(enabled, route)` for `SMAppService.mainApp`. The ok arm receives UTF-8 bytes containing `enabled`, `disabled`, `requires_approval`, or `not_found`; the err arm receives `unsupported`, `failed`, or `invalid_request`. `not_found` normally means the executable is not running from an installed app bundle, while `requires_approval` means the user must approve the item in System Settings.
+
+The login-item calls are keyed effects, so their results record and replay like `Cmd.request`; Dock and window visibility changes are fire-and-forget commands. Older macOS versions without `SMAppService` report `unsupported` instead of requiring weak-linked application code.
+
 ## Creating windows from Zig
 
 ```zig

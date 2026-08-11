@@ -3785,7 +3785,10 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go":
       if (msg.which === 0) return [model, Cmd.showWindow("player")];
-      if (msg.which === 1) return [model, Cmd.batch([Cmd.showWindow("player"), Cmd.quitApp()])];
+      if (msg.which === 1) return [model, Cmd.batch([Cmd.hideWindow("player"), Cmd.setDockPresence(false)])];
+      if (msg.which === 2) return [model, Cmd.launchAtLoginStatus({ key: "login-status", ok: "line", err: "failed" })];
+      if (msg.which === 3) return [model, Cmd.setLaunchAtLogin(true, { key: "login-set", ok: "line", err: "failed" })];
+      if (msg.which === 4) return [model, Cmd.batch([Cmd.showWindow("player"), Cmd.quitApp()])];
       return [model, Cmd.quitApp()];
 ${streamTail}
 `,

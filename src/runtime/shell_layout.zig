@@ -233,6 +233,7 @@ pub fn shellClosePolicy(policy: app_manifest.WindowClosePolicy) platform.WindowC
 /// user never sees a blank window while the first frame renders. Webview
 /// windows keep immediate visibility — their engine owns first paint.
 pub fn shellWindowShowMode(shell_window: app_manifest.ShellWindow) platform.WindowShowMode {
+    if (shell_window.initially_hidden) return .hidden;
     for (shell_window.views) |view| {
         if (view.kind == .gpu_surface) return .on_first_present;
     }

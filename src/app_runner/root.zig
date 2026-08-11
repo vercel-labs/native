@@ -98,6 +98,7 @@ pub const RunOptions = struct {
             info.main_window.always_on_top = manifestShellStartupBool("always_on_top", false);
             info.main_window.click_through = manifestShellStartupBool("click_through", false);
             info.main_window.activate_on_show = manifestShellStartupBool("activate_on_show", true);
+            info.main_window.allows_fullscreen = manifestShellStartupBool("allows_fullscreen", true);
             // Min-size floors ride the create call like the titlebar:
             // the scene re-applies size/title later, but the window's
             // enforced floor is host state from the first frame on.
@@ -164,10 +165,12 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
         .titlebar = windowTitlebarStyle(window),
+        .show = if (windowBool(window, "initially_hidden", false)) .hidden else .immediate,
         .transparent = windowBool(window, "transparent", false),
         .always_on_top = windowBool(window, "always_on_top", false),
         .click_through = windowBool(window, "click_through", false),
         .activate_on_show = windowBool(window, "activate_on_show", true),
+        .allows_fullscreen = windowBool(window, "allows_fullscreen", true),
         .min_width = windowMinSize(window, "min_width"),
         .min_height = windowMinSize(window, "min_height"),
         .close_policy = windowClosePolicy(window),
@@ -259,6 +262,7 @@ fn manifestShellStartupShowMode() native_sdk.WindowShowMode {
     if (comptime !@hasField(@TypeOf(shell), "windows")) return .immediate;
     if (comptime shell.windows.len == 0) return .immediate;
     const window = shell.windows[0];
+    if (comptime windowBool(window, "initially_hidden", false)) return .hidden;
     if (comptime !@hasField(@TypeOf(window), "views")) return .immediate;
     inline for (window.views) |view| {
         if (comptime @hasField(@TypeOf(view), "kind")) {

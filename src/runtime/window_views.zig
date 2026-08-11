@@ -146,6 +146,24 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             try self.options.platform.services.minimizeWindow(window_id);
         }
 
+        /// Keep a live window and its views, but order it offscreen until
+        /// `showWindow` brings it back. This is an app-driven hide, not a
+        /// close, so identity and rendered state are retained.
+        pub fn hideWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            if (!self.windows[index].info.open) return error.WindowNotFound;
+            const was_hidden = self.windows[index].info.hidden;
+            const was_focused = self.windows[index].info.focused;
+            self.windows[index].info.hidden = true;
+            self.windows[index].info.focused = false;
+            self.options.platform.services.hideWindow(window_id) catch |err| {
+                self.windows[index].info.hidden = was_hidden;
+                self.windows[index].info.focused = was_focused;
+                return err;
+            };
+            self.invalidated = true;
+        }
+
         /// The real OS show verb: unhide and order front — the counterpart
         /// to a `close_policy = .hide` hide, and what a tray "Open"
         /// action resolves to. Like `closeWindow`, the runtime flag
@@ -232,6 +250,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .always_on_top = shell_window.always_on_top,
                 .click_through = shell_window.click_through,
                 .activate_on_show = shell_window.activate_on_show,
+                .allows_fullscreen = shell_window.allows_fullscreen,
                 .min_width = shell_window.min_width,
                 .min_height = shell_window.min_height,
                 .close_policy = shell_layout.shellClosePolicy(shell_window.close_policy),

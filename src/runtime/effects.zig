@@ -269,7 +269,9 @@ pub const WindowActionBinding = struct {
     context: *anyopaque,
     close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    hide_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     show_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    dock_presence_fn: *const fn (context: *anyopaque, visible: bool) bool,
     quit_fn: *const fn (context: *anyopaque) bool,
 };
 
@@ -308,7 +310,10 @@ pub const max_window_action_label = 64;
 pub const WindowActionState = struct {
     close_count: u32 = 0,
     minimize_count: u32 = 0,
+    hide_count: u32 = 0,
     show_count: u32 = 0,
+    dock_presence_count: u32 = 0,
+    dock_visible: bool = true,
     quit_count: u32 = 0,
     last_label_buffer: [max_window_action_label]u8 = @splat(0),
     last_label_len: usize = 0,
@@ -7578,12 +7583,13 @@ pub fn Effects(comptime Msg: type) type {
         pub fn hostRequest(self: *Self, options: HostRequestOptions) void {
             self.reclaimSlots();
             const fake = self.executor == .fake;
+            const native_request = isNativeHostRequestName(options.name);
             if (options.name.len == 0 or options.name.len > max_effect_host_name_bytes or
                 options.payload.len > max_effect_host_payload_bytes)
             {
                 return self.rejectHost(options.key, options.on_result);
             }
-            if (!fake and self.host_calls == null) return self.rejectHost(options.key, options.on_result);
+            if (!fake and self.host_calls == null and !native_request) return self.rejectHost(options.key, options.on_result);
             // A staged non-regenerating image terminal holds the key
             // exactly like the slot windows below (see
             // `stagedImageOccupiesKey`): under replay that image
@@ -7678,8 +7684,54 @@ pub fn Effects(comptime Msg: type) type {
             // Fake mode (tests and session replay) parks here: the feed
             // is the only terminal source.
             if (fake) return;
+            if (native_request) {
+                self.performNativeHostRequest(slot.hostName(), options.key, slot.fetchPayload());
+                return;
+            }
             const binding = self.host_calls.?;
             binding.request_fn(binding.context, slot.hostName(), options.key, slot.fetchPayload());
+        }
+
+        fn isNativeHostRequestName(name: []const u8) bool {
+            return std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
+                std.mem.eql(u8, name, "native-sdk.launch-at-login.set");
+        }
+
+        fn performNativeHostRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            const services = self.services orelse {
+                self.feedHostResult(key, false, "unsupported") catch {};
+                return;
+            };
+            if (std.mem.eql(u8, name, "native-sdk.launch-at-login.status")) {
+                if (payload.len != 0) {
+                    self.feedHostResult(key, false, "invalid_request") catch {};
+                    return;
+                }
+                const status = services.launchAtLoginStatus() catch {
+                    self.feedHostResult(key, false, "unsupported") catch {};
+                    return;
+                };
+                self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
+                return;
+            }
+            if (payload.len != 1 or payload[0] > 1) {
+                self.feedHostResult(key, false, "invalid_request") catch {};
+                return;
+            }
+            const status = services.setLaunchAtLogin(payload[0] == 1) catch {
+                self.feedHostResult(key, false, "failed") catch {};
+                return;
+            };
+            self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
+        }
+
+        fn launchAtLoginStatusName(status: platform.LaunchAtLoginStatus) []const u8 {
+            return switch (status) {
+                .disabled => "disabled",
+                .enabled => "enabled",
+                .requires_approval => "requires_approval",
+                .not_found => "not_found",
+            };
         }
 
         /// Drop the in-flight host request with `key` without
@@ -8041,6 +8093,16 @@ pub fn Effects(comptime Msg: type) type {
             _ = binding.minimize_fn(binding.context, window_label);
         }
 
+        /// Hide a live window by its declared label while retaining its
+        /// native identity and views. `showWindow` is the inverse.
+        pub fn hideWindow(self: *Self, window_label: []const u8) void {
+            self.window_action_state.hide_count += 1;
+            self.window_action_state.record(window_label);
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.hide_fn(binding.context, window_label);
+        }
+
         /// Show a window by its declared label: unhide + order front,
         /// activating by default and remaining passive for an
         /// `activate_on_show = false` overlay. It is the counterpart to
@@ -8055,6 +8117,17 @@ pub fn Effects(comptime Msg: type) type {
             if (self.executor == .fake) return;
             const binding = self.window_actions orelse return;
             _ = binding.show_fn(binding.context, window_label);
+        }
+
+        /// Control the app's Dock/app-switcher presence. On macOS this
+        /// switches between regular and accessory activation policies;
+        /// unsupported hosts safely ignore it.
+        pub fn setDockPresence(self: *Self, visible: bool) void {
+            self.window_action_state.dock_presence_count += 1;
+            self.window_action_state.dock_visible = visible;
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.dock_presence_fn(binding.context, visible);
         }
 
         /// Quit the app for real — the graceful terminate, and the tray

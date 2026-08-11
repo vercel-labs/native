@@ -356,6 +356,8 @@ export type CmdData =
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
+  | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
   | {
       readonly op: "image_load";
@@ -631,6 +633,22 @@ export const Cmd = {
 
   showWindow(label: string): CmdData {
     return { op: "window_show", label };
+  },
+
+  hideWindow(label: string): CmdData {
+    return { op: "window_hide", label };
+  },
+
+  setDockPresence(visible: boolean): CmdData {
+    return { op: "dock_presence", visible };
+  },
+
+  launchAtLoginStatus(route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return Cmd.request("native-sdk.launch-at-login.status", new Uint8Array(0), route);
+  },
+
+  setLaunchAtLogin(enabled: boolean, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return Cmd.request("native-sdk.launch-at-login.set", new Uint8Array([enabled ? 1 : 0]), route);
   },
 
   quitApp(): CmdData {

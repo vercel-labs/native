@@ -164,10 +164,14 @@ Four effect families deliver MANY results from one command — a keyed stream th
 
 ### The window verbs
 
-The menu-bar lifecycle pair — fire-and-forget, no routing and no result Msg (the window's own frame event carries the resulting state):
+The menu-bar lifecycle verbs are fire-and-forget, with no result Msg (the window's own frame event carries visibility state):
 
 - `Cmd.showWindow(label)` — un-hide + activate the window with the declared label (a string literal — window labels are declarations, in `app.zon` or a `windows_fn` descriptor): the counterpart to a `close_policy = "hide"` close and the tray "Open" consequence; also restores a minimized window. An unknown label is a no-op.
+- `Cmd.hideWindow(label)` — order a live window out without closing it; native identity and views remain, and `showWindow` is the inverse.
+- `Cmd.setDockPresence(visible)` — on macOS, switch between a regular Dock/app-switcher app and accessory/headless behavior; unsupported hosts ignore it.
 - `Cmd.quitApp()` — the graceful terminate, and the tray "Quit" consequence: the host quits through the SAME shutdown path a last-window close takes, so the stop hook runs exactly once and a recording session seals its journal.
+
+Launch at Login uses keyed routed effects: `Cmd.launchAtLoginStatus({ key?, ok, err })` queries `SMAppService.mainApp`, and `Cmd.setLaunchAtLogin(enabled, { key?, ok, err })` registers/unregisters it. The ok arm has one `Uint8Array` field containing UTF-8 `enabled`, `disabled`, `requires_approval`, or `not_found`; err carries `unsupported`, `failed`, or `invalid_request`. The result journals and replays exactly like `Cmd.request`. In `app.zon`, set `initially_hidden = true` on the startup window to prevent any launch flash, and `allows_fullscreen = false` on settings windows to retain resizing while disabling macOS native fullscreen.
 
 ### Model-derived menu-bar status items
 

@@ -44,6 +44,35 @@ static const uint32_t NativeSdkShortcutModifierCommand = 1u << 1;
 static const uint32_t NativeSdkShortcutModifierControl = 1u << 2;
 static const uint32_t NativeSdkShortcutModifierOption = 1u << 3;
 static const uint32_t NativeSdkShortcutModifierShift = 1u << 4;
+
+static id NativeSdkMainAppService(void) {
+    Class serviceClass = NSClassFromString(@"SMAppService");
+    SEL selector = NSSelectorFromString(@"mainApp");
+    if (!serviceClass || ![serviceClass respondsToSelector:selector]) return nil;
+    IMP implementation = [serviceClass methodForSelector:selector];
+    return ((id (*)(id, SEL))implementation)(serviceClass, selector);
+}
+
+static int NativeSdkLaunchAtLoginStatus(void) {
+    id service = NativeSdkMainAppService();
+    SEL selector = NSSelectorFromString(@"status");
+    if (!service || ![service respondsToSelector:selector]) return -1;
+    IMP implementation = [service methodForSelector:selector];
+    return (int)((NSInteger (*)(id, SEL))implementation)(service, selector);
+}
+
+static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
+    id service = NativeSdkMainAppService();
+    if (!service) return -1;
+    int before = NativeSdkLaunchAtLoginStatus();
+    if ((enabled && before == 1) || (!enabled && before == 0)) return before;
+    SEL selector = NSSelectorFromString(enabled ? @"registerAndReturnError:" : @"unregisterAndReturnError:");
+    if (![service respondsToSelector:selector]) return -1;
+    NSError *error = nil;
+    IMP implementation = [service methodForSelector:selector];
+    BOOL succeeded = ((BOOL (*)(id, SEL, NSError **))implementation)(service, selector, &error);
+    return succeeded ? NativeSdkLaunchAtLoginStatus() : -1;
+}
 static const char *NativeSdkCefBridgeScript();
 static NSRect NativeSdkConstrainFrame(NSRect frame);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
@@ -957,6 +986,12 @@ static const char *NativeSdkCefBridgeScript() {
     if ((windowFlags & (1u << 1)) != 0) window.level = NSFloatingWindowLevel;
     if ((windowFlags & (1u << 2)) != 0) window.ignoresMouseEvents = YES;
     if ((windowFlags & (1u << 3)) != 0) [self.passiveShowWindows addObject:key];
+    if ((windowFlags & (1u << 4)) != 0) {
+        NSWindowCollectionBehavior behavior = window.collectionBehavior;
+        behavior &= ~(NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorFullScreenAuxiliary);
+        window.collectionBehavior = behavior | NSWindowCollectionBehaviorFullScreenNone;
+        [window standardWindowButton:NSWindowZoomButton].enabled = NO;
+    }
     [window setTitle:title.length > 0 ? title : @"native-sdk"];
     if (!restoreFrame) {
         [window center];
@@ -1026,6 +1061,7 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)focusWindowWithId:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
+    [self.policyHiddenWindows removeObject:@(windowId)];
     [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self emitWindowFrameForWindowId:windowId open:YES];
@@ -1150,7 +1186,7 @@ static const char *NativeSdkCefBridgeScript() {
         NSApp.delegate = reopenDelegate;
     }
 
-    [self orderWindowForImplicitShow:1];
+    if (![self.policyHiddenWindows containsObject:@1]) [self orderWindowForImplicitShow:1];
     if (!self.shortcutEventMonitor) {
         __weak NativeSdkChromiumHost *weakSelf = self;
         self.shortcutEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
@@ -2185,6 +2221,12 @@ static void NativeSdkApplyOverlayWindowFlags(NativeSdkChromiumHost *host, uint64
     if ((window_flags & (1u << 1)) != 0) window.level = NSFloatingWindowLevel;
     if ((window_flags & (1u << 2)) != 0) window.ignoresMouseEvents = YES;
     if ((window_flags & (1u << 3)) != 0) [host.passiveShowWindows addObject:@(window_id)];
+    if ((window_flags & (1u << 4)) != 0) {
+        NSWindowCollectionBehavior behavior = window.collectionBehavior;
+        behavior &= ~(NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorFullScreenAuxiliary);
+        window.collectionBehavior = behavior | NSWindowCollectionBehaviorFullScreenNone;
+        [window standardWindowButton:NSWindowZoomButton].enabled = NO;
+    }
 }
 
 native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
@@ -2198,9 +2240,10 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         // hosts webviews only (gpu-surface presents are unsupported on
         // this engine), so the policy is accepted for ABI parity and
         // windows show immediately — the web engine owns first paint.
+        // Policy 2 is different: it is an explicit initially-hidden
+        // lifecycle request and is honored below.
         // has_web_content is likewise ABI parity: this host always
         // hosts web content, and its menus already assume it.
-        (void)show_policy;
         (void)has_web_content;
         (void)bundle_id;
         (void)bundle_id_len;
@@ -2222,6 +2265,7 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         }
         NativeSdkApplyHiddenInsetTitlebar(host.window, titlebar_style, host.delegates[@1]);
         NativeSdkApplyOverlayWindowFlags(host, 1, window_flags);
+        if (show_policy == 2) [host.policyHiddenWindows addObject:@1];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
     }
 }
@@ -2468,8 +2512,6 @@ void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char 
 }
 
 int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
-    // Accepted for ABI parity; see native_sdk_appkit_create.
-    (void)show_policy;
     if ((window_flags & (1u << 0)) != 0) return 0;
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"native-sdk";
@@ -2478,7 +2520,11 @@ int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t win
     NativeSdkApplyHiddenInsetTitlebar(object.windows[@(window_id)], titlebar_style, object.delegates[@(window_id)]);
     // Apply chrome and overlay presentation while still hidden, then
     // reveal once so a secondary window cannot flash its default frame.
-    [object orderWindowForImplicitShow:window_id];
+    if (show_policy == 2) {
+        [object.policyHiddenWindows addObject:@(window_id)];
+    } else {
+        [object orderWindowForImplicitShow:window_id];
+    }
     return 1;
 }
 
@@ -2503,6 +2549,13 @@ int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t w
     return 1;
 }
 
+int native_sdk_appkit_hide_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object hideWindowWithId:window_id];
+    return 1;
+}
+
 int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     if (!object.windows[@(window_id)]) return 0;
@@ -2512,6 +2565,24 @@ int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t windo
     // still-queued show.
     [object showWindowWithId:window_id];
     return 1;
+}
+
+int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visible) {
+    (void)host;
+    NSApplicationActivationPolicy policy = visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
+    BOOL changed = [NSApp setActivationPolicy:policy];
+    if (visible) [NSApp activateIgnoringOtherApps:YES];
+    return changed || NSApp.activationPolicy == policy ? 1 : 0;
+}
+
+int native_sdk_appkit_launch_at_login_status(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return NativeSdkLaunchAtLoginStatus();
+}
+
+int native_sdk_appkit_set_launch_at_login(native_sdk_appkit_host_t *host, int enabled) {
+    (void)host;
+    return NativeSdkSetLaunchAtLogin(enabled != 0);
 }
 
 int native_sdk_appkit_set_window_close_policy(native_sdk_appkit_host_t *host, uint64_t window_id, int close_policy) {

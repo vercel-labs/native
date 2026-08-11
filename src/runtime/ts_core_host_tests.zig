@@ -325,6 +325,8 @@ const mini_core = struct {
         stream_over_get, // 91: streaming fetch collides with buffered fetch "get"
         get_over_stream, // 92: buffered fetch collides with streaming fetch "events"
         fill_streams, // 93: seventeen distinct streams exceed the bridge table
+        hide_win, // 94: window_hide "player"
+        dock_off, // 95: dock_presence false
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -652,6 +654,8 @@ const mini_core = struct {
             .drop_get => return .{ .model = model, .cmd = cmdCancel("get") },
             .drop_paste => return .{ .model = model, .cmd = cmdCancel("paste") },
             .open_win => return .{ .model = model, .cmd = cmdWindowShow("player") },
+            .hide_win => return .{ .model = model, .cmd = cmdWindowHide("player") },
+            .dock_off => return .{ .model = model, .cmd = cmdDockPresence(false) },
             .quit_app => return .{ .model = model, .cmd = cmdQuitApp() },
             .open_chan => return .{ .model = model, .cmd = cmdChannelOpen(41, 47) },
             .close_chan => return .{ .model = model, .cmd = cmdChannelClose(41) },
@@ -1070,6 +1074,21 @@ const mini_core = struct {
         out[0] = 0x10;
         out[1] = @intCast(label.len);
         @memcpy(out[2..][0..label.len], label);
+        return out;
+    }
+
+    fn cmdWindowHide(label: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + label.len);
+        out[0] = 0x21;
+        out[1] = @intCast(label.len);
+        @memcpy(out[2..][0..label.len], label);
+        return out;
+    }
+
+    fn cmdDockPresence(visible: bool) []const u8 {
+        const out = rt.frameAlloc(u8, 2);
+        out[0] = 0x22;
+        out[1] = if (visible) 1 else 0;
         return out;
     }
 
@@ -2518,6 +2537,14 @@ test "window verbs bridge to the effects channel's label-addressed verbs" {
     Host.dispatch(fx, .open_win);
     try std.testing.expectEqual(@as(u32, 1), fx.windowActionState().show_count);
     try std.testing.expectEqualStrings("player", fx.windowActionState().lastLabel());
+
+    Host.dispatch(fx, .hide_win);
+    try std.testing.expectEqual(@as(u32, 1), fx.windowActionState().hide_count);
+    try std.testing.expectEqualStrings("player", fx.windowActionState().lastLabel());
+
+    Host.dispatch(fx, .dock_off);
+    try std.testing.expectEqual(@as(u32, 1), fx.windowActionState().dock_presence_count);
+    try std.testing.expect(!fx.windowActionState().dock_visible);
 
     // quit_app decodes onto fx.quitApp — the graceful terminate request.
     Host.dispatch(fx, .quit_app);

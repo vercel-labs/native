@@ -178,6 +178,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             self.windows[index].info.frame = native_info.frame;
             self.windows[index].info.scale_factor = native_info.scale_factor;
             self.windows[index].info.open = native_info.open;
+            self.windows[index].info.hidden = native_info.hidden;
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, native_info.frame.width, native_info.frame.height);
             }

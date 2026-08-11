@@ -85,6 +85,8 @@ fn shellWindowFrom(comptime window: anytype) types.ShellWindow {
     if (@hasField(@TypeOf(window), "always_on_top")) out.always_on_top = window.always_on_top;
     if (@hasField(@TypeOf(window), "click_through")) out.click_through = window.click_through;
     if (@hasField(@TypeOf(window), "activate_on_show")) out.activate_on_show = window.activate_on_show;
+    if (@hasField(@TypeOf(window), "initially_hidden")) out.initially_hidden = window.initially_hidden;
+    if (@hasField(@TypeOf(window), "allows_fullscreen")) out.allows_fullscreen = window.allows_fullscreen;
     if (@hasField(@TypeOf(window), "min_width")) out.min_width = window.min_width;
     if (@hasField(@TypeOf(window), "min_height")) out.min_height = window.min_height;
     if (@hasField(@TypeOf(window), "close_policy")) {

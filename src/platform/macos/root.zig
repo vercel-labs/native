@@ -180,7 +180,11 @@ extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, windo
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_hide_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_show_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_set_dock_presence(host: *AppKitHost, visible: c_int) c_int;
+extern fn native_sdk_appkit_launch_at_login_status(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_set_launch_at_login(host: *AppKitHost, enabled: c_int) c_int;
 extern fn native_sdk_appkit_set_window_close_policy(host: *AppKitHost, window_id: u64, close_policy: c_int) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_window_chrome_insets(host: *AppKitHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -710,7 +714,11 @@ pub const MacPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
+                .set_dock_presence_fn = setDockPresence,
+                .launch_at_login_status_fn = launchAtLoginStatus,
+                .set_launch_at_login_fn = setLaunchAtLogin,
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
@@ -1248,6 +1256,7 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
         .on_first_present => 1,
+        .hidden => 2,
     };
 }
 
@@ -1257,6 +1266,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (options.always_on_top) flags |= 1 << 1;
     if (options.click_through) flags |= 1 << 2;
     if (!options.activate_on_show) flags |= 1 << 3;
+    if (!options.allows_fullscreen) flags |= 1 << 4;
     return flags;
 }
 
@@ -1307,6 +1317,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .scale_factor = 1,
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
+        .hidden = options.show == .hidden,
     };
 }
 
@@ -1325,9 +1336,39 @@ fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerr
     if (native_sdk_appkit_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
 }
 
+fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_hide_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
 fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_show_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn setDockPresence(context: ?*anyopaque, visible: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_dock_presence(self.host, if (visible) 1 else 0) == 0) return error.UnsupportedService;
+}
+
+fn launchAtLoginStatus(context: ?*anyopaque) anyerror!platform_mod.LaunchAtLoginStatus {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    return launchAtLoginStatusFromInt(native_sdk_appkit_launch_at_login_status(self.host));
+}
+
+fn setLaunchAtLogin(context: ?*anyopaque, enabled: bool) anyerror!platform_mod.LaunchAtLoginStatus {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    return launchAtLoginStatusFromInt(native_sdk_appkit_set_launch_at_login(self.host, if (enabled) 1 else 0));
+}
+
+fn launchAtLoginStatusFromInt(value: c_int) anyerror!platform_mod.LaunchAtLoginStatus {
+    return switch (value) {
+        0 => .disabled,
+        1 => .enabled,
+        2 => .requires_approval,
+        3 => .not_found,
+        else => error.UnsupportedService,
+    };
 }
 
 /// The graceful quit: the same emitShutdown + stop the last-window
@@ -2654,6 +2695,7 @@ test "mac explicit focus activates before making the window key" {
         \\    // An explicit focus overrides a pending present-before-show defer:
         \\    // the runtime asked for the window NOW.
         \\    [self.deferredShowWindows removeObjectForKey:@(windowId)];
+        \\    [self.policyHiddenWindows removeObject:@(windowId)];
         \\    [NSApp activate];
         \\    [window makeKeyAndOrderFront:nil];
     ) != null);
@@ -2977,4 +3019,23 @@ test "mac appearance event carries accessibility preferences" {
     try std.testing.expectEqual(platform_mod.ColorScheme.dark, appKitColorScheme(event.color_scheme));
     try std.testing.expect(event.reduce_motion != 0);
     try std.testing.expect(event.high_contrast != 0);
+}
+
+test "both mac hosts carry the menu-bar lifecycle and fullscreen hooks" {
+    const hosts = [_][]const u8{
+        @embedFile("appkit_host.m"),
+        @embedFile("cef_host.mm"),
+    };
+    for (hosts) |host_source| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_hide_window") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_set_dock_presence") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_launch_at_login_status") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_set_launch_at_login") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "registerAndReturnError:") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "unregisterAndReturnError:") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NSWindowCollectionBehaviorFullScreenNone") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "standardWindowButton:NSWindowZoomButton") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "1u << 4") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "policyHiddenWindows") != null);
+    }
 }
