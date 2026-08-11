@@ -116,6 +116,7 @@ const TrayPresentation = types.TrayPresentation;
 const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
+const TrayCommandEvent = types.TrayCommandEvent;
 const TimerEvent = types.TimerEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
@@ -1531,6 +1532,7 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.tray_title = undefined;
         self.tray_title_len = (try copyInto(&self.tray_title, title)).len;
+        self.tray_presentation.title = self.tray_title[0..self.tray_title_len];
         self.tray_title_update_count += 1;
     }
 

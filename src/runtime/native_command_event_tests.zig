@@ -307,6 +307,48 @@ test "runtime dispatches tray item commands" {
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .label = "Missing id", .command = "app.missing-id" }}));
 }
 
+test "runtime dispatches named tray lifecycle commands with tray source" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+        last_name: []const u8 = "",
+        last_source: CommandSource = .runtime,
+        last_window_id: platform.WindowId = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "tray-lifecycle-command", .source = platform.WebViewSource.html("<p>Tray</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .command => |command| {
+                    self.command_count += 1;
+                    self.last_name = command.name;
+                    self.last_source = command.source;
+                    self.last_window_id = command.window_id;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_command = .{
+        .name = "app.refresh",
+        .window_id = 3,
+    } });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+    try std.testing.expectEqualStrings("app.refresh", app_state.last_name);
+    try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
+    try std.testing.expectEqual(@as(platform.WindowId, 3), app_state.last_window_id);
+}
+
 test "runtime dispatches file drop events to app and window bridge" {
     const TestApp = struct {
         drop_count: u32 = 0,

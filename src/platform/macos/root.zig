@@ -42,6 +42,7 @@ const AppKitEventKind = enum(c_int) {
     audio = 20,
     video = 21,
     view_focused = 22,
+    tray_command = 23,
 };
 
 const AppKitEvent = extern struct {
@@ -953,6 +954,10 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .view_label = event.view_label[0..event.view_label_len],
         } }),
         .menu_command => state.emit(.{ .menu_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
+        } }),
+        .tray_command => state.emit(.{ .tray_command = .{
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
@@ -2567,6 +2572,35 @@ test "mac status agent rows recognize decorated states and stay actionable" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "label.textColor = configured ? successColor : warning ? warningColor : NSColor.secondaryLabelColor;") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "button.tag = itemIds[index];") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "button.enabled = enabled[index].boolValue;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "button.keyEquivalent = NativeSdkMenuKeyEquivalent(key);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "button.keyEquivalentModifierMask = NativeSdkMenuModifierFlags(modifiers[index].unsignedIntValue);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "item.keyEquivalent = @\"\";") != null);
+}
+
+test "mac title-only tray updates preserve the applied presentation" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationWidth = width;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationTone = tone;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationIconOpacity = iconOpacity;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationMonospaced = monospaced;") != null);
+        const update_at = std.mem.indexOf(u8, host_source, "void native_sdk_appkit_update_tray_title(") orelse return error.TestExpectedEqual;
+        const update_tail = host_source[update_at..];
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationWidth,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationTone,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationIconOpacity,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationMonospaced") != null);
+    }
+}
+
+test "mac status lifecycle hooks emit tray commands" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        const emit_at = std.mem.indexOf(u8, host_source, "- (void)emitStatusCommand:(NSString *)command {") orelse return error.TestExpectedEqual;
+        const emit_tail = host_source[emit_at..];
+        const emit_end = std.mem.indexOf(u8, emit_tail, "- (void)statusItemActivated:") orelse return error.TestExpectedEqual;
+        const emit_source = emit_tail[0..emit_end];
+        try std.testing.expect(std.mem.indexOf(u8, emit_source, "NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND") != null);
+        try std.testing.expect(std.mem.indexOf(u8, emit_source, "NATIVE_SDK_APPKIT_EVENT_MENU_COMMAND") == null);
+    }
 }
 
 test "mac status menu updates preserve the menu being opened" {

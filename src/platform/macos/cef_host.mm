@@ -565,6 +565,10 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSImage *statusItemBaseImage;
 @property(nonatomic, strong) NSMenu *statusMenu;
+@property(nonatomic, assign) double statusPresentationWidth;
+@property(nonatomic, assign) int statusPresentationTone;
+@property(nonatomic, assign) double statusPresentationIconOpacity;
+@property(nonatomic, assign) BOOL statusPresentationMonospaced;
 @property(nonatomic, strong) NSString *statusActivationCommand;
 @property(nonatomic, strong) NSString *statusAlternateActivationCommand;
 @property(nonatomic, strong) NSString *statusOpenCommand;
@@ -1929,7 +1933,7 @@ static const char *NativeSdkCefBridgeScript() {
     if (command.length == 0) return;
     const char *bytes = command.UTF8String;
     [self emitEvent:(native_sdk_appkit_event_t){
-        .kind = NATIVE_SDK_APPKIT_EVENT_MENU_COMMAND,
+        .kind = NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND,
         .window_id = 1,
         .command_name = bytes,
         .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
@@ -3307,6 +3311,10 @@ static NSImage *NativeSdkCefTrayImageWithOpacity(NSImage *source, double opacity
 
 static void NativeSdkCefApplyTrayPresentation(NativeSdkChromiumHost *object, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
     if (!object.statusItem) return;
+    object.statusPresentationWidth = width;
+    object.statusPresentationTone = tone;
+    object.statusPresentationIconOpacity = iconOpacity;
+    object.statusPresentationMonospaced = monospaced;
     NSString *title = requestedTitle ?: @"";
     if (!object.statusItemBaseImage && title.length == 0) title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
     NSFont *font = monospaced ? [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular] : [NSFont systemFontOfSize:11];
@@ -3428,7 +3436,14 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
     @autoreleasepool {
         if (!object.statusItem) return;
         NSString *value = title && title_len > 0 ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        NativeSdkCefApplyTrayPresentation(object, value, 0, 0, 1, NO);
+        NativeSdkCefApplyTrayPresentation(
+            object,
+            value,
+            object.statusPresentationWidth,
+            object.statusPresentationTone,
+            object.statusPresentationIconOpacity,
+            object.statusPresentationMonospaced
+        );
     }
 }
 

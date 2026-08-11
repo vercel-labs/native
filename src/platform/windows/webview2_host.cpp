@@ -134,6 +134,7 @@ enum EventKind {
     kAudio = 18,
     kContextMenuAction = 19,
     kViewFocused = 20,
+    kTrayCommand = 21,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -1571,7 +1572,7 @@ static bool emitStatusCommand(Host *host, HWND hwnd, const std::string &command)
     const Window *window = windowForHwnd(host, hwnd);
     if (!window) return false;
     WindowsEvent event = {};
-    event.kind = kMenuCommand;
+    event.kind = kTrayCommand;
     event.window_id = window->id;
     event.command_name = command.c_str();
     event.command_name_len = command.size();

@@ -40,6 +40,7 @@ const WindowsEventKind = enum(c_int) {
     audio = 18,
     context_menu_action = 19,
     view_focused = 20,
+    tray_command = 21,
 };
 
 const WindowsEvent = extern struct {
@@ -669,6 +670,10 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .window_id = event.window_id,
         } }),
         .tray_action => state.emit(.{ .tray_action = event.tray_item_id }),
+        .tray_command => state.emit(.{ .tray_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
+        } }),
         .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = gpuSurfaceFrameEventFromWindowsEvent(event) }),
         .gpu_surface_resize => state.emit(.{ .gpu_surface_resized = .{
             .window_id = event.window_id,
@@ -2091,6 +2096,12 @@ test "windows tray carries lifecycle commands rich rows and key equivalents into
     try std.testing.expect(std.mem.indexOf(u8, host_source, "emitStatusCommand(host, hwnd, host->tray_alternate_activation_command);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "emitStatusCommand(host, hwnd, host->tray_activation_command);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "emitStatusCommand(host, hwnd, host->tray_open_command);") != null);
+    const emit_at = std.mem.indexOf(u8, host_source, "static bool emitStatusCommand(") orelse return error.TestExpectedEqual;
+    const emit_tail = host_source[emit_at..];
+    const emit_end = std.mem.indexOf(u8, emit_tail, "static void showTrayMenu(") orelse return error.TestExpectedEqual;
+    const emit_source = emit_tail[0..emit_end];
+    try std.testing.expect(std.mem.indexOf(u8, emit_source, "event.kind = kTrayCommand;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emit_source, "event.kind = kMenuCommand;") == null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "item.detail = slice(details[index], detail_lens[index]);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "item.key = lowerAscii(slice(keys[index], key_lens[index]));") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "item.modifiers = modifiers[index];") != null);

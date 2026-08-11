@@ -929,6 +929,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSImage *statusItemBaseImage;
 @property(nonatomic, strong) NSMenu *statusMenu;
+@property(nonatomic, assign) double statusPresentationWidth;
+@property(nonatomic, assign) int statusPresentationTone;
+@property(nonatomic, assign) double statusPresentationIconOpacity;
+@property(nonatomic, assign) BOOL statusPresentationMonospaced;
 @property(nonatomic, strong) NSString *statusActivationCommand;
 @property(nonatomic, strong) NSString *statusAlternateActivationCommand;
 @property(nonatomic, strong) NSString *statusOpenCommand;
@@ -11848,7 +11852,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     if (command.length == 0) return;
     const char *bytes = command.UTF8String;
     [self emitEvent:(native_sdk_appkit_event_t){
-        .kind = NATIVE_SDK_APPKIT_EVENT_MENU_COMMAND,
+        .kind = NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND,
         .window_id = [self activeCommandWindowId],
         .command_name = bytes,
         .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
@@ -12908,6 +12912,10 @@ static NSImage *NativeSdkTrayImageWithOpacity(NSImage *source, double opacity) {
 
 static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
     if (!object.statusItem) return;
+    object.statusPresentationWidth = width;
+    object.statusPresentationTone = tone;
+    object.statusPresentationIconOpacity = iconOpacity;
+    object.statusPresentationMonospaced = monospaced;
     NSString *title = requestedTitle ?: @"";
     if (!object.statusItemBaseImage && title.length == 0) {
         title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
@@ -13057,7 +13065,7 @@ static NSView *NativeSdkTrayHeroView(NSString *headline, NSString *quota) {
     return view;
 }
 
-static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32_t *itemIds, NSArray<NSString *> *labels, NSArray<NSString *> *states, NSArray<NSNumber *> *enabled) {
+static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32_t *itemIds, NSArray<NSString *> *labels, NSArray<NSString *> *states, NSArray<NSNumber *> *enabled, NSArray<NSString *> *keys, NSArray<NSNumber *> *modifiers) {
     NSStackView *row = [[NSStackView alloc] initWithFrame:NSMakeRect(0, 0, 320, 32)];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.alignment = NSLayoutAttributeCenterY;
@@ -13087,6 +13095,11 @@ static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32
         button.bordered = NO;
         button.transparent = YES;
         button.enabled = enabled[index].boolValue;
+        NSString *key = keys[index];
+        if (key.length > 0) {
+            button.keyEquivalent = NativeSdkMenuKeyEquivalent(key);
+            button.keyEquivalentModifierMask = NativeSdkMenuModifierFlags(modifiers[index].unsignedIntValue);
+        }
         button.translatesAutoresizingMaskIntoConstraints = NO;
         button.accessibilityLabel = title;
         [control addSubview:label];
@@ -13218,19 +13231,28 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
                 NSMutableArray<NSString *> *agentLabels = [NSMutableArray array];
                 NSMutableArray<NSString *> *agentStates = [NSMutableArray array];
                 NSMutableArray<NSNumber *> *agentEnabled = [NSMutableArray array];
+                NSMutableArray<NSString *> *agentKeys = [NSMutableArray array];
+                NSMutableArray<NSNumber *> *agentModifiers = [NSMutableArray array];
                 uint32_t agentIds[32] = {0};
                 size_t agentCount = 0;
                 while (i < count && roles[i] == NativeSdkTrayRoleAgent && agentCount < 32) {
                     [agentLabels addObject:(labels[i] ? [[NSString alloc] initWithBytes:labels[i] length:label_lens[i] encoding:NSUTF8StringEncoding] : @"")];
                     [agentStates addObject:(details[i] ? [[NSString alloc] initWithBytes:details[i] length:detail_lens[i] encoding:NSUTF8StringEncoding] : @"")];
                     [agentEnabled addObject:@(enabled_flags[i] != 0)];
+                    [agentKeys addObject:(keys[i] ? ([[NSString alloc] initWithBytes:keys[i] length:key_lens[i] encoding:NSUTF8StringEncoding] ?: @"") : @"")];
+                    [agentModifiers addObject:@(modifiers[i])];
                     agentIds[agentCount++] = item_ids[i];
                     i++;
                 }
                 i--;
                 item.action = NULL;
                 item.target = nil;
-                item.view = NativeSdkTrayAgentsView(object, agentIds, agentLabels, agentStates, agentEnabled);
+                // The custom buttons own every agent equivalent. Leaving the
+                // first row's equivalent on this actionless wrapper would let
+                // NSMenu consume it before the button can dispatch its id.
+                item.keyEquivalent = @"";
+                item.keyEquivalentModifierMask = 0;
+                item.view = NativeSdkTrayAgentsView(object, agentIds, agentLabels, agentStates, agentEnabled, agentKeys, agentModifiers);
                 [menu addItem:item];
                 continue;
             }
@@ -13267,7 +13289,14 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
     @autoreleasepool {
         if (!object.statusItem) return;
         NSString *value = title && title_len > 0 ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        NativeSdkApplyTrayPresentation(object, value, 0, 0, 1, NO);
+        NativeSdkApplyTrayPresentation(
+            object,
+            value,
+            object.statusPresentationWidth,
+            object.statusPresentationTone,
+            object.statusPresentationIconOpacity,
+            object.statusPresentationMonospaced
+        );
     }
 }
 

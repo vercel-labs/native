@@ -1425,6 +1425,14 @@ pub const MenuCommandEvent = struct {
     window_id: WindowId = 1,
 };
 
+/// A named command emitted by status-item lifecycle hooks (activation,
+/// alternate activation, or menu open). Unlike `tray_action`, this command
+/// does not identify a menu row, but its source is still the tray.
+pub const TrayCommandEvent = struct {
+    name: []const u8,
+    window_id: WindowId = 1,
+};
+
 /// Timer ids at or above this value are reserved for the framework's own
 /// internal timers (for example the ui-app markup watch poll). Application
 /// code must pick ids below this value when calling `startTimer`.
@@ -2370,6 +2378,7 @@ pub const Event = union(enum) {
     shortcut: ShortcutEvent,
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
+    tray_command: TrayCommandEvent,
     timer: TimerEvent,
     /// A cross-thread nudge posted through `PlatformServices.wake_fn`:
     /// worker threads (effect executors) ask the platform loop to deliver
@@ -2407,6 +2416,7 @@ pub const Event = union(enum) {
             .shortcut => "shortcut",
             .native_command => "native_command",
             .menu_command => "menu_command",
+            .tray_command => "tray_command",
             .timer => "timer",
             .wake => "wake",
             .files_dropped => "files_dropped",

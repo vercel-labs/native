@@ -111,6 +111,7 @@ const TrayOptions = types.TrayOptions;
 const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
+const TrayCommandEvent = types.TrayCommandEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
 const GpuSurfaceFrameEvent = types.GpuSurfaceFrameEvent;
@@ -227,6 +228,12 @@ test "null platform preserves the tray title when presentation styles are set" {
     try std.testing.expectEqualStrings("Jobs", presentation.title);
     try std.testing.expectEqual(@as(f32, 60), presentation.width);
     try std.testing.expectEqual(types.TrayTone.warning, presentation.tone);
+
+    try null_platform.platform().services.updateTrayTitle("Builds");
+    const retitled = null_platform.lastTrayPresentation();
+    try std.testing.expectEqualStrings("Builds", retitled.title);
+    try std.testing.expectEqual(@as(f32, 60), retitled.width);
+    try std.testing.expectEqual(types.TrayTone.warning, retitled.tone);
 }
 
 test "null platform records OS actions" {

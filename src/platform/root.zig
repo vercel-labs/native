@@ -132,6 +132,7 @@ pub const TrayMenuItem = types.TrayMenuItem;
 pub const TrayItemRole = types.TrayItemRole;
 pub const NativeCommandEvent = types.NativeCommandEvent;
 pub const MenuCommandEvent = types.MenuCommandEvent;
+pub const TrayCommandEvent = types.TrayCommandEvent;
 pub const reserved_timer_id_base = types.reserved_timer_id_base;
 pub const press_hold_timer_id = types.press_hold_timer_id;
 pub const TimerEvent = types.TimerEvent;

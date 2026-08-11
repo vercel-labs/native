@@ -444,6 +444,13 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         .window_id = command.window_id,
                     });
                 },
+                .tray_command => |command| {
+                    try dispatchCommand(self, app, .{
+                        .name = command.name,
+                        .source = .tray,
+                        .window_id = command.window_id,
+                    });
+                },
                 .timer => |timer_event| {
                     try dispatchEvent(self, app, .{ .timer = timer_event });
                 },

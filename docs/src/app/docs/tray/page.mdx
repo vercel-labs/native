@@ -162,7 +162,7 @@ export function statusItem(model: Model): StatusItemState {
 }
 ```
 
-`iconPath`, `tooltip`, `activationCommand`, `alternateActivationCommand`, and `openCommand` are captured when the item installs. A normal click emits `activationCommand` and opens the menu; an Option-click emits `alternateActivationCommand` without opening it. Every menu open emits `openCommand`, which is useful for an on-demand refresh while the background cadence stays slow. Empty commands disable those hooks.
+`iconPath`, `tooltip`, `activationCommand`, `alternateActivationCommand`, and `openCommand` are captured when the item installs. A normal click emits `activationCommand` and opens the menu; an Option-click emits `alternateActivationCommand` without opening it. Every menu open emits `openCommand`, which is useful for an on-demand refresh while the background cadence stays slow. These lifecycle hooks dispatch with `source = .tray`; empty commands disable them.
 
 Rows use the exact `StatusItemMenuItem` record. `role` is `command`, `info`, `header`, `hero`, `agent`, or `context`; capable macOS hosts render the readout roles as native rich content while simpler hosts degrade them to text. `detail` carries secondary readout content, and `key` plus the five explicit `modifiers` fields declares a menu equivalent. Actionable rows need unique non-zero ids; separators conventionally use id 0 and empty byte fields. The menu may contain at most 32 rows. Map every row/click/open command to an ordinary message with `commandMsg(name): Msg | null`; no Zig `status_item_fn` glue is needed.
 

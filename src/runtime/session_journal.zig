@@ -184,6 +184,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "shortcut=" ++ layout_fingerprint.describe(platform.ShortcutEvent) ++ "\n" ++
             "native_command=" ++ layout_fingerprint.describe(platform.NativeCommandEvent) ++ "\n" ++
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
+            "tray_command=" ++ layout_fingerprint.describe(platform.TrayCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
             "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
@@ -464,6 +465,7 @@ const EventTag = enum(u8) {
     audio = 24,
     video = 25,
     view_focused = 26,
+    tray_command = 27,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -602,6 +604,11 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
         },
         .menu_command => |command| {
             try cursor.writeEnum(EventTag.menu_command);
+            try cursor.writeStr(command.name);
+            try cursor.writeInt(u64, command.window_id);
+        },
+        .tray_command => |command| {
+            try cursor.writeEnum(EventTag.tray_command);
             try cursor.writeStr(command.name);
             try cursor.writeInt(u64, command.window_id);
         },
@@ -826,6 +833,13 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
         .menu_command => blk: {
             const name = try cursor.readStr();
             break :blk .{ .menu_command = .{
+                .name = name,
+                .window_id = try cursor.readInt(u64),
+            } };
+        },
+        .tray_command => blk: {
+            const name = try cursor.readStr();
+            break :blk .{ .tray_command = .{
                 .name = name,
                 .window_id = try cursor.readInt(u64),
             } };
@@ -1580,6 +1594,11 @@ test "event codec round-trips every payload variant" {
     {
         const decoded = try roundTripEvent(.{ .menu_command = .{ .name = "app.about", .window_id = 1 } });
         try testing.expectEqualStrings("app.about", decoded.menu_command.name);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .tray_command = .{ .name = "app.refresh", .window_id = 3 } });
+        try testing.expectEqualStrings("app.refresh", decoded.tray_command.name);
+        try testing.expectEqual(@as(platform.WindowId, 3), decoded.tray_command.window_id);
     }
     {
         const decoded = try roundTripEvent(.{ .tray_action = 9 });
