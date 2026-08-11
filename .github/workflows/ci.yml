@@ -95,8 +95,8 @@ jobs:
         with:
           version: 0.16.0
       # Percentile perf check: 5 cold launches asserting p90
-      # first-frame latency under NATIVE_SDK_PERF_BUDGET_MS, then 5 steady-state
-      # widget clicks asserting p90 input latency under NATIVE_SDK_PERF_INPUT_BUDGET_MS.
+      # first-frame latency, 5 steady-state widget clicks asserting p90 input
+      # latency, then a reset-scoped retained-animation cadence sample.
       # Its own job so a shared-runner slowdown is visible in isolation and
       # never blocks the correctness smokes.
       # Shared macos-14 runners are far noisier than a dev box (first CI run
@@ -107,6 +107,13 @@ jobs:
         env:
           NATIVE_SDK_PERF_BUDGET_MS: "1500"
           NATIVE_SDK_PERF_INPUT_BUDGET_MS: "500"
+          # The virtual display is commonly 25-35 Hz even though AppKit
+          # reports the window visible. Keep physical/dev defaults at the
+          # strict 60 Hz-class 45/20/34; this hosted job remains a
+          # step-function regression sentinel rather than a display gate.
+          NATIVE_SDK_PERF_ANIMATION_MIN_FRAMES: "30"
+          NATIVE_SDK_PERF_ANIMATION_P90_MS: "50"
+          NATIVE_SDK_PERF_ANIMATION_MAX_MS: "100"
 
   linux-webkitgtk:
     name: Linux WebKitGTK

@@ -216,6 +216,7 @@ export interface NativeSdkViewInfo {
   gpuFrame: number;
   gpuTimestampNs: number;
   gpuFrameIntervalNs: number;
+  gpuInputCount: number;
   gpuInputTimestampNs: number;
   gpuInputLatencyNs: number;
   gpuInputLatencyBudgetNs: number;
@@ -226,6 +227,7 @@ export interface NativeSdkViewInfo {
   gpuFirstFrameLatencyBudgetExceededCount: number;
   gpuFirstFrameLatencyBudgetOk: boolean;
   gpuNonblank: boolean;
+  gpuOccluded: boolean;
   gpuSampleColor: number;
   gpuBackend: NativeSdkGpuSurfaceBackend;
   gpuPixelFormat: NativeSdkGpuSurfacePixelFormat;
