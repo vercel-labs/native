@@ -20,7 +20,7 @@
 ** The content in this amalgamation comes from Fossil check-in
 ** bf7c7f30031888f4e796e429ab3978879485 with changes in files:
 **
-**
+**    
 */
 #ifndef SQLITE_AMALGAMATION
 #define SQLITE_CORE 1
