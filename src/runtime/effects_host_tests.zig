@@ -534,6 +534,55 @@ test "host journal records carry the route in code and mark rejections regenerab
     try std.testing.expectEqual(effects_mod.EffectExitReason.rejected, Capture.records[2].exit_reason);
 }
 
+test "Zig persistence restore is a staged, journaled Msg and replay ignores live storage" {
+    const PersistMsg = union(enum) { restored: effects_mod.EffectPersistResult };
+    const PersistEffects = effects_mod.Effects(PersistMsg);
+    const Capture = struct {
+        var count: usize = 0;
+        var outcome: effects_mod.EffectPersistOutcome = .none;
+        var bytes: [32]u8 = undefined;
+        var bytes_len: usize = 0;
+
+        fn note(_: *anyopaque, record: effects_mod.EffectResultRecord) void {
+            count += 1;
+            outcome = record.persist_outcome;
+            bytes_len = record.payload.len;
+            @memcpy(bytes[0..bytes_len], record.payload);
+        }
+    };
+
+    Capture.count = 0;
+    var context: u8 = 0;
+    var live = PersistEffects.init(std.testing.allocator);
+    defer live.deinit();
+    live.bindJournal(.{ .context = &context, .record_fn = Capture.note });
+    var source = [_]u8{ 's', 'n', 'a', 'p' };
+    live.deliverPersistRestore(.ok, &source, PersistEffects.persistMsg(.restored));
+    @memset(&source, 'x');
+
+    const live_msg = live.takeMsg() orelse return error.TestExpectedMsg;
+    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.ok, live_msg.restored.outcome);
+    try std.testing.expectEqualStrings("snap", live_msg.restored.bytes);
+    try std.testing.expectEqual(@as(usize, 1), Capture.count);
+    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.ok, Capture.outcome);
+    try std.testing.expectEqualStrings("snap", Capture.bytes[0..Capture.bytes_len]);
+
+    Capture.count = 0;
+    var replay = PersistEffects.init(std.testing.allocator);
+    defer replay.deinit();
+    replay.bindJournal(.{ .context = &context, .record_fn = Capture.note });
+    replay.armReplay();
+    var replay_source = "recorded".*;
+    try replay.pushReplayPersist(.ok, &replay_source);
+    @memset(&replay_source, 'x');
+    replay.deliverPersistRestore(.ok, "live bytes must lose", PersistEffects.persistMsg(.restored));
+    const replay_msg = replay.takeMsg() orelse return error.TestExpectedMsg;
+    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.ok, replay_msg.restored.outcome);
+    try std.testing.expectEqualStrings("recorded", replay_msg.restored.bytes);
+    try std.testing.expectEqual(@as(usize, 0), Capture.count);
+    try replay.settleReplayFeeds();
+}
+
 // ------------------------------------------------------------ real executor
 
 test "real-mode host calls ride the binding and answer through the feed" {

@@ -11,6 +11,7 @@ import { resolveModuleGraph } from "./modules.ts";
 import { TypeTable } from "./types.ts";
 import { IntInference } from "./infer.ts";
 import { SubsetChecker } from "./checker.ts";
+import type { PersistRoutes } from "./checker.ts";
 import { emitContractSidecar, ContractError } from "./contract.ts";
 import { emitServiceContract } from "./service_contract.ts";
 import { makeDiagnostic, formatDiagnostic, type SubsetDiagnostic } from "./diagnostics.ts";
@@ -26,6 +27,18 @@ export interface FrontendOptions {
   /// surface is analyzed whenever src/services exists because core request
   /// names validate against it; this flag records emission intent.
   readonly servicesContract?: boolean;
+  /// app.zon capabilities supplied by the build/check launcher. The core
+  /// frontend stays manifest-format agnostic; it needs only declared names
+  /// for capability-backed effect diagnostics.
+  readonly capabilities?: readonly string[];
+  /// Manifest schema version for engine-owned model persistence. When a
+  /// state path is also supplied, the frontend remembers the last accepted
+  /// version/fingerprint pair and warns if a shape moves without a bump.
+  readonly persistVersion?: number;
+  readonly persistStatePath?: string;
+  /// app.zon's persistence restore routes, projected without manifest syntax
+  /// so the frontend can validate them against the core's Msg union.
+  readonly persistRoutes?: PersistRoutes;
 }
 
 export interface FrontendResult {
@@ -37,8 +50,8 @@ export interface FrontendResult {
   /// src/services modules (and on any failed check).
   readonly servicesContract: string | null;
   readonly diagnostics: SubsetDiagnostic[];
-  /// Non-fatal teaching notices (NS1028 today): surfaced as warnings,
-  /// never failing the check.
+  /// Non-fatal capability and persistence-contract teaching notices:
+  /// surfaced as warnings, never failing the check.
   readonly warnings: SubsetDiagnostic[];
   /// Provider (tsc-semantics) diagnostics, already formatted.
   readonly typeErrors: string[];
@@ -74,6 +87,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   const fileByPath = new Map(files.map((file) => [path.resolve(file.fileName), file]));
   const coreFiles = graph.coreFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
   const serviceFiles = graph.serviceFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
+  const serviceHostFiles = graph.serviceHostFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
 
   const typeErrors: string[] = [];
   // The core keeps the pinned in-process provider verdict. Services are
@@ -92,7 +106,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     return { ok: false, contract: null, servicesContract: null, diagnostics: [], warnings: [], typeErrors: [...new Set(typeErrors)], inputs: [...graph.files] };
   }
 
-  const serviceSurface = emitServiceContract(tast, serviceFiles, path.dirname(path.resolve(entry)));
+  const serviceSurface = emitServiceContract(tast, serviceFiles, serviceHostFiles, path.dirname(path.resolve(entry)));
   if (serviceSurface.diagnostics.length > 0) {
     return { ok: false, contract: null, servicesContract: null, diagnostics: [...serviceSurface.diagnostics], warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
@@ -101,7 +115,14 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   const serviceOps = serviceSurface.contract === null
     ? null
     : new Set(serviceSurface.operations.map((op) => op.name));
-  const checker = new SubsetChecker(tast, table, coreFiles, serviceOps);
+  const checker = new SubsetChecker(
+    tast,
+    table,
+    coreFiles,
+    serviceOps,
+    options.capabilities ?? [],
+    options.persistRoutes,
+  );
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {
     return { ok: false, contract: null, servicesContract: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
@@ -127,11 +148,17 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   try {
     // The contract sidecar emits from the SAME checked analysis, so a
     // contract-bearing run keeps every check-time teaching.
-    const contract =
-      options.contractEntry !== undefined
-        ? emitContractSidecar({ tast, table, infer, checkResult, files: coreFiles, entry: options.contractEntry })
+    const emittedContract =
+      options.contractEntry !== undefined || options.persistVersion !== undefined
+        ? emitContractSidecar({ tast, table, infer, checkResult, files: coreFiles, entry: options.contractEntry ?? "src/core.ts" })
         : null;
-    return { ok: true, contract, servicesContract: serviceSurface.contract, diagnostics: [], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+    const warnings = [...checkResult.warnings];
+    if (emittedContract !== null && options.persistVersion !== undefined && options.persistStatePath !== undefined) {
+      const fingerprint = (JSON.parse(emittedContract) as { model_fingerprint: string }).model_fingerprint;
+      warnings.push(...checkPersistSchemaState(coreFiles[0], options.persistStatePath, options.persistVersion, fingerprint));
+    }
+    const contract = options.contractEntry !== undefined ? emittedContract : null;
+    return { ok: true, contract, servicesContract: serviceSurface.contract, diagnostics: [], warnings, typeErrors: [], inputs: [...graph.files] };
   } catch (e) {
     if (e instanceof ContractError) {
       const file = e.node.getSourceFile();
@@ -141,6 +168,62 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     }
     throw e;
   }
+}
+
+interface PersistSchemaState {
+  readonly version: number;
+  readonly model_fingerprint: string;
+}
+
+/// Cache the last accepted schema pair outside authored source. A same-version
+/// shape edit deliberately does not replace the baseline, so every subsequent
+/// check keeps teaching until the manifest version advances.
+function checkPersistSchemaState(
+  entry: ts.SourceFile,
+  statePath: string,
+  version: number,
+  fingerprint: string,
+): SubsetDiagnostic[] {
+  let previous: PersistSchemaState | null = null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as Partial<PersistSchemaState>;
+    if (Number.isSafeInteger(parsed.version) && typeof parsed.model_fingerprint === "string") {
+      previous = { version: parsed.version!, model_fingerprint: parsed.model_fingerprint };
+    }
+  } catch {
+    // Missing or damaged generated state is a cold check, never a build gate.
+  }
+
+  const { line, column } = lineColumn(entry, entry.getStart());
+  if (previous !== null && version < previous.version) {
+    return [makeDiagnostic(
+      "NS1068",
+      `app.zon's persistence version moved backward from ${previous.version} to ${version}.`,
+      entry.fileName,
+      line,
+      column,
+    )];
+  }
+  if (previous !== null && version === previous.version && fingerprint !== previous.model_fingerprint) {
+    return [makeDiagnostic(
+      "NS1068",
+      `The checked Model shape changed while app.zon's persistence version stayed at ${version}.`,
+      entry.fileName,
+      line,
+      column,
+    )];
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    const tmp = `${statePath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify({ version, model_fingerprint: fingerprint }, null, 2)}\n`);
+    fs.renameSync(tmp, statePath);
+  } catch {
+    // This cache improves teaching only; runtime fingerprint validation stays
+    // the hard safety gate when a filesystem is read-only.
+  }
+  return [];
 }
 
 export function checkSource(source: string, name = "core.ts", options: FrontendOptions = {}): FrontendResult {

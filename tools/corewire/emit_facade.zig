@@ -25,7 +25,8 @@
 //!   subscribing contract — coreSubscriptions), whose return shapes
 //!   restate init_returns_cmd/update_returns_cmd/has_subscriptions;
 //! - the ABI dispatch surface (boot_cmd, the nine dispatch entries, the
-//!   wired channel entries, abi_subscriptions, model_snapshot, helper_call),
+//!   wired channel entries, abi_subscriptions, model_snapshot,
+//!   persist_snapshot, restore_model, helper_call),
 //!   decoding inbound payloads with the generated wire codec below and
 //!   encoding results byte-identically to the transpiler lane;
 //! - provable ingress everywhere a wire value crosses into an
@@ -109,10 +110,10 @@ const fixed_exports = [_][]const u8{
     "init",                  "coreUpdate",        "coreSubscriptions", "boot_cmd",
     "dispatch_void",         "dispatch_bytes",    "dispatch_number",   "dispatch_number_bytes",
     "dispatch_bool",         "dispatch_enum",     "dispatch_record",   "dispatch_text_input",
-    "dispatch_scroll_state", "abi_subscriptions", "model_snapshot",    "helper_call",
-    "abi_command_msg",       "abi_frame_msg",     "abi_key_msg",       "abi_pinch_msg",
-    "abi_drop_msg",          "appearanceMsg",     "chromeMsg",         "envMsgs",
-    "viewUnbound",
+    "dispatch_scroll_state", "abi_subscriptions", "model_snapshot",    "persist_snapshot",
+    "restore_model",         "migrate_model",     "helper_call",       "abi_command_msg",
+    "abi_frame_msg",         "abi_key_msg",       "abi_pinch_msg",     "abi_drop_msg",
+    "appearanceMsg",         "chromeMsg",         "envMsgs",           "viewUnbound",
 };
 
 /// Ambient VALUE bindings generated code calls directly. A model helper is
@@ -763,6 +764,7 @@ const FacadeEmitter = struct {
         var values: std.ArrayListUnmanaged([]const u8) = .empty;
         try values.append(self.arena, "initialModel as nscfInitialModel");
         try values.append(self.arena, "update as nscfUpdate");
+        if (self.sidecar.has_migrate) try values.append(self.arena, "migrate as nscfMigrate");
         if (self.sidecar.has_subscriptions) try values.append(self.arena, "subscriptions as nscfSubscriptions");
         if (self.sidecar.channels.command_msg) try values.append(self.arena, "commandMsg as nscfChanCommandMsg");
         if (self.sidecar.channels.frame_msg) try values.append(self.arena, "frameMsg as nscfChanFrameMsg");
@@ -1809,23 +1811,132 @@ const FacadeEmitter = struct {
                 \\
             );
         }
+        const model = sidecar_mod.findStruct(self.sidecar.types, self.sidecar.model) orelse {
+            self.diags.flag("model", "the model does not name a tabled record", .{});
+            return;
+        };
         self.use(.sink);
+        self.use(.w_u32);
+        self.use(.w_bytes);
         try self.needRecordWriter(self.sidecar.model);
         try self.print(
             \\
-            \\// The canonical committed-model encoding (snapshot format {d}): the
-            \\// model record's fields in declaration order, enums as u32 member
-            \\// indices, optionals as a one-byte present flag plus the inner value
-            \\// when present, records inline, slices as u32 count + elements — the
-            \\// same bytes the transpiler lane's canonical encoder emits for this
-            \\// model.
+            \\// The positional committed-model encoding used only by the
+            \\// core/shim mirror ABI. Keep this stable with shim_rt.decodeSnapshot;
+            \\// durable persistence has its own tagged export below.
             \\export function model_snapshot(): Uint8Array {{
             \\  const sink = nscfNewSink();
             \\  nscfWrite{s}(sink, nscfCommitted);
             \\  return nscfFinish(sink);
             \\}}
             \\
-        , .{ self.sidecar.abi.snapshot_format, self.sidecar.model });
+        , .{self.sidecar.model});
+        try self.print(
+            \\
+            \\// The canonical committed-model encoding (snapshot format {d}): the
+            \\// root record is a u32 field count followed by tagged fields
+            \\// [u32 declaration-index][u32 payload-length][payload]. Each payload
+            \\// uses the command dialect's little-endian canonical value encoding.
+            \\function nscfSnapshot{s}(value: {s}): Uint8Array {{
+            \\  const sink = nscfNewSink();
+            \\  nscfWU32(sink, {d});
+            \\
+        , .{ self.sidecar.abi.snapshot_format, self.sidecar.model, self.sidecar.model, model.fields.len });
+        self.temp_counter = 0;
+        for (model.fields, 0..) |field, index| {
+            try self.print("  {{\n    const nscfFieldSink{d} = nscfNewSink();\n    {{\n      const sink = nscfFieldSink{d};\n", .{ index, index });
+            try self.fieldWriteStatements(field.type, try tsAccess(self.arena, "value", field.name), model.name, field.name, 3);
+            try self.print("    }}\n    nscfWU32(sink, {d});\n    nscfWBytes(sink, nscfFinish(nscfFieldSink{d}));\n  }}\n", .{ index, index });
+        }
+        try self.print(
+            \\
+            \\  return nscfFinish(sink);
+            \\}}
+            \\
+            \\export function persist_snapshot(): Uint8Array {{
+            \\  return nscfSnapshot{s}(nscfCommitted);
+            \\}}
+            \\
+        , .{self.sidecar.model});
+
+        // The per-field lengths are authoritative: strip the tagged root into
+        // the existing positional dialect, then run one whole-Model decoder.
+        // Keeping the Model construction inside that decoder also preserves
+        // scriptc's exact-integer proofs for optional and nested integer slots.
+        try self.print("\nfunction nscfDecodeSnapshot{s}(bytes: Uint8Array): {s} {{\n", .{ self.sidecar.model, self.sidecar.model });
+        var model_decode = RecordDecode{ .emitter = self, .buf = "bytes", .indent = 1 };
+        try model_decode.run(model);
+        self.use(.assert_consumed);
+        try self.print("  nscfAssertConsumed(bytes, {s});\n", .{model_decode.offsetText()});
+        const construction = try model_decode.constructionText(model);
+        if (model_decode.guards.items.len > 0) {
+            try self.print("  if ({s}) return {s};\n  nscfTrap(\"a restored integer value is NaN or outside its attested exact-integer range — the snapshot cannot represent this Model\");\n", .{ model_decode.guards.items, construction });
+            self.use(.trap);
+        } else {
+            try self.print("  return {s};\n", .{construction});
+        }
+        try self.raw("}\n");
+
+        try self.raw(
+            \\
+            \\function nscfSnapshotPayloads(snapshot: Uint8Array): Uint8Array {
+            \\  let nscfAt = 0;
+            \\  const sink = nscfNewSink();
+        );
+        self.use(.read_u32);
+        self.use(.read_bytes_body);
+        self.use(.trap);
+        try self.print("  const nscfFieldCount = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  if (nscfFieldCount !== {d}) nscfTrap(\"a model snapshot carries the wrong field count for this Model\");\n", .{model.fields.len});
+        for (model.fields, 0..) |_, index| {
+            try self.print("  const nscfFieldTag{d} = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  if (nscfFieldTag{d} !== {d}) nscfTrap(\"a model snapshot field tag does not match this Model\");\n  const nscfFieldLen{d} = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  const nscfFieldBytes{d} = nscfReadBytesBody(snapshot, nscfAt, nscfFieldLen{d});\n  nscfAt += nscfFieldLen{d};\n  for (let nscfFieldAt{d} = 0; nscfFieldAt{d} < nscfFieldBytes{d}.length; nscfFieldAt{d}++) sink.push(nscfFieldBytes{d}[nscfFieldAt{d}]!);\n", .{ index, index, index, index, index, index, index, index, index, index, index, index, index });
+        }
+        try self.raw(
+            \\  nscfAssertConsumed(snapshot, nscfAt);
+            \\  return nscfFinish(sink);
+            \\}
+            \\
+            \\// Replace the committed root from the same canonical encoding
+            \\// persist_snapshot emits. The ABI result is intentionally empty:
+            \\// restore is a boot mutation owned by the host, not an app Cmd.
+            \\
+        );
+        try self.print(
+            \\export function restore_model(snapshot: Uint8Array): Uint8Array {{
+            \\  nscfCommitted = nscfDecodeSnapshot{s}(nscfSnapshotPayloads(snapshot));
+            \\  return new Uint8Array(0);
+            \\}}
+            \\
+        , .{self.sidecar.model});
+
+        if (self.sidecar.has_migrate) {
+            try self.print(
+                \\
+                \\// Pure schema migration. A one-byte status prefix keeps an
+                \\// empty Model snapshot distinguishable from failure.
+                \\export function migrate_model(snapshot: Uint8Array, fromVersion: number): Uint8Array {{
+                \\  try {{
+                \\    const migrated = nscfMigrate(snapshot, fromVersion);
+                \\    const body = nscfSnapshot{s}(migrated);
+                \\    const out = new Uint8Array(body.length + 1);
+                \\    out[0] = 1;
+                \\    for (let i = 0; i < body.length; i++) out[i + 1] = body[i]!;
+                \\    return out;
+                \\  }} catch {{
+                \\    return new Uint8Array(1);
+                \\  }}
+                \\}}
+                \\
+            , .{self.sidecar.model});
+        } else {
+            try self.raw(
+                \\
+                \\// This core declares no migration hook.
+                \\export function migrate_model(snapshot: Uint8Array, fromVersion: number): Uint8Array {
+                \\  return new Uint8Array(1);
+                \\}
+                \\
+            );
+        }
     }
 
     fn helperCall(self: *FacadeEmitter) Error!void {
@@ -3453,12 +3564,17 @@ test "facade emission is deterministic and carries the adapter surface" {
     try testing.expect(std.mem.indexOf(u8, first, "const nscfTag_bump = 0;") != null);
     try testing.expect(std.mem.indexOf(u8, first, "if (tag === nscfTag_bump) return nscfCommit(coreUpdate(nscfCommitted, { kind: \"bump\" }));") != null);
     try testing.expect(std.mem.indexOf(u8, first, "if (tag === nscfTag_label_set) return nscfCommit(coreUpdate(nscfCommitted, { kind: \"label_set\", value: payload }));") != null);
-    // Post-cycle: the snapshot rides the generated model writer with
-    // the attested integer class.
+    // Post-cycle: the snapshot is a tagged, length-delimited root record;
+    // each field payload rides the generated canonical writer with its
+    // attested integer class.
     try testing.expect(std.mem.indexOf(u8, first, "nscfWI64(sink, value.count);") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "function nscfSnapshotModel(value: Model): Uint8Array {") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "nscfWU32(sink, 2);") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "nscfWBytes(sink, nscfFinish(nscfFieldSink0));") != null);
     try testing.expect(std.mem.indexOf(u8, first, "export function abi_subscriptions(): Uint8Array {") != null);
     try testing.expect(std.mem.indexOf(u8, first, "export function subscriptions(): Uint8Array {") == null);
     try testing.expect(std.mem.indexOf(u8, first, "export function model_snapshot(): Uint8Array {") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "export function persist_snapshot(): Uint8Array {") != null);
     // The unbound list restates the author's markings.
     try testing.expect(std.mem.indexOf(u8, first, "export const viewUnbound = [\n  \"label_set\",\n];") != null);
     // Unwired channels stay out of the module.
@@ -3471,6 +3587,20 @@ test "facade emission is deterministic and carries the adapter surface" {
     try testing.expect(std.mem.indexOf(u8, first, "import type { Cmd as nscfCmd }") != null);
     try testing.expect(std.mem.indexOf(u8, first, "NscfSink") == null);
     try testing.expect(std.mem.indexOf(u8, first, "NSCF_TAG_") == null);
+}
+
+test "migration hooks produce a closed status-prefixed snapshot seam" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"has_migrate\": false", "\"has_migrate\": true");
+    const generated = try facadeFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "migrate as nscfMigrate,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "export function migrate_model(snapshot: Uint8Array, fromVersion: number): Uint8Array {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "const migrated = nscfMigrate(snapshot, fromVersion);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "const body = nscfSnapshotModel(migrated);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "out[0] = 1;") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "catch {") != null);
 }
 
 test "member facts spell the author's payload property names" {
@@ -3754,6 +3884,20 @@ test "a helper taking a fixed export's name refuses" {
         sidecar_mod.minimal_valid_json,
         "\"model_helpers\": []",
         "\"model_helpers\": [{\"name\": \"dispatch_void\", \"params\": [], \"returns\": {\"kind\": \"bytes\"}, \"arena\": false}]",
+    );
+    try expectFacadeRefusal(arena, source, "collides with a declaration the generated facade itself must export");
+}
+
+test "a helper cannot shadow the generated frame channel export" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"abi_frame_msg\", \"params\": [], \"returns\": {\"kind\": \"bytes\"}, \"arena\": false}]",
     );
     try expectFacadeRefusal(arena, source, "collides with a declaration the generated facade itself must export");
 }

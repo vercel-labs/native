@@ -74,6 +74,7 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateIcons(manifest.icons);
     try validatePermissions(manifest.permissions);
     try validateCapabilities(manifest.capabilities);
+    try validatePersist(manifest.persist, manifest.capabilities);
     try validateBridge(manifest.bridge);
     if (manifest.frontend) |frontend| try validateFrontend(frontend);
     try validateSecurity(manifest.security);
@@ -541,6 +542,23 @@ pub fn validateCapabilities(capabilities: []const Capability) ValidationError!vo
             }
         }
     }
+}
+
+pub fn validatePersist(config: ?types.PersistConfig, capabilities: []const Capability) ValidationError!void {
+    var declared = false;
+    for (capabilities) |capability| {
+        if (capability == .persist) declared = true;
+    }
+    if (declared != (config != null)) return error.MissingRequiredField;
+    const persist = config orelse return;
+    if (persist.version == 0 or persist.version > 9_007_199_254_740_991) return error.InvalidVersion;
+    if (persist.debounce_ms > 60_000) return error.InvalidTimeout;
+    try validateName(persist.restore.ok);
+    try validateName(persist.restore.none);
+    try validateName(persist.restore.err);
+    if (std.mem.eql(u8, persist.restore.ok, persist.restore.none) or
+        std.mem.eql(u8, persist.restore.ok, persist.restore.err) or
+        std.mem.eql(u8, persist.restore.none, persist.restore.err)) return error.InvalidName;
 }
 
 pub fn validateBridge(bridge: BridgeConfig) ValidationError!void {

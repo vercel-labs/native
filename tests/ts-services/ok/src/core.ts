@@ -11,6 +11,7 @@ export type Msg =
   | { readonly kind: "parse" }
   | { readonly kind: "fail" }
   | { readonly kind: "hang" }
+  | { readonly kind: "replace_hang" }
   | { readonly kind: "quit" }
   | { readonly kind: "boot_parsed"; readonly bytes: Uint8Array }
   | { readonly kind: "parsed"; readonly bytes: Uint8Array }
@@ -29,6 +30,11 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, Cmd.request("feeds.fail", new Uint8Array(0), { key: "fail", ok: "parsed", err: "parse_failed" })];
     case "hang":
       return [model, Cmd.request("feeds.hang", new Uint8Array(0), { key: "hang", ok: "parsed", err: "parse_failed" })];
+    case "replace_hang":
+      return [model, Cmd.batch([
+        Cmd.cancel("hang"),
+        Cmd.request("feeds.parse", model.bytes, { key: "hang", ok: "parsed", err: "parse_failed" }),
+      ])];
     case "quit":
       return [model, Cmd.quitApp()];
     case "boot_parsed":
@@ -40,4 +46,4 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
   }
 }
 
-export const viewUnbound = ["boot_parsed", "hang", "successes", "failures"] as const;
+export const viewUnbound = ["boot_parsed", "hang", "replace_hang", "successes", "failures"] as const;

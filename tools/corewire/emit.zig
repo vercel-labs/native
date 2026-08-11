@@ -235,10 +235,12 @@ const Emitter = struct {
     fn validateEmissionNames(self: *Emitter) Error!void {
         var reserved: std.ArrayListUnmanaged([]const u8) = .empty;
         try reserved.appendSlice(self.arena, &.{
-            "std",           "shim_rt",         "core_abi",         "abi",
-            "rt",            "msg_tags",        "boot",             "initialModel",
-            "update",        "commitModelRoot", "sidecar_build_id", "sidecar_abi_version",
-            "deterministic", "async_free",      "snapshotModel",    "referenceAttestedExports",
+            "std",                      "shim_rt",                 "core_abi",            "abi",
+            "rt",                       "msg_tags",                "boot",                "initialModel",
+            "update",                   "commitModelRoot",         "sidecar_build_id",    "sidecar_model_fingerprint",
+            "sidecar_abi_version",      "sidecar_snapshot_format", "deterministic",       "async_free",
+            "snapshotModel",            "modelSnapshot",           "persistenceSnapshot", "restoreModel",
+            "referenceAttestedExports",
         });
         // Parameter and local names the generated bodies bind: a
         // module-level type under any of them would be shadowed, which
@@ -536,7 +538,9 @@ const Emitter = struct {
             \\/// fence (the out-of-graph backstop: a cached or hand-copied core
             \\/// must never dispatch against another build's tag order).
             \\pub const sidecar_build_id: u64 = 0x{x:0>16};
+            \\pub const sidecar_model_fingerprint: u64 = 0x{x:0>16};
             \\pub const sidecar_abi_version: u32 = {d};
+            \\pub const sidecar_snapshot_format: u32 = {d};
             \\
             \\/// The compiler's module-graph attestations, restated so host
             \\/// policy can gate on them: record/replay arms only against a
@@ -571,14 +575,15 @@ const Emitter = struct {
             \\        shim_rt.resetAll();
             \\    }}
             \\}};
-            \\
         , .{
             try commentText(self.arena, self.sidecar.entry),
             try commentText(self.arena, self.sidecar.compiler_version),
             self.sidecar.build_id,
             std.zig.fmtString(self.sidecar.abi.prefix),
             self.sidecar.build_id,
+            self.sidecar.model_fingerprint,
             self.sidecar.abi_version,
+            self.sidecar.abi.snapshot_format,
             self.sidecar.deterministic,
             self.sidecar.async_free,
         });
@@ -942,12 +947,16 @@ const Emitter = struct {
                 \\
                 \\pub const InitResult = struct {{ model: *const {s}, cmd: rt.Cmd }};
                 \\
-                \\pub fn initialModel() InitResult {{
-                \\    boot();
+                \\pub fn bootCommand() rt.Cmd {{
                 \\    var cmd_ptr: [*]const u8 = undefined;
                 \\    var cmd_len: usize = 0;
                 \\    abi.boot_cmd(&cmd_ptr, &cmd_len);
-                \\    return .{{ .model = snapshotModel(), .cmd = cmd_ptr[0..cmd_len] }};
+                \\    return cmd_ptr[0..cmd_len];
+                \\}}
+                \\
+                \\pub fn initialModel() InitResult {{
+                \\    boot();
+                \\    return .{{ .model = snapshotModel(), .cmd = bootCommand() }};
                 \\}}
                 \\
             , .{model_name});
@@ -1307,19 +1316,58 @@ const Emitter = struct {
     fn snapshotPlumbing(self: *Emitter) Error!void {
         try self.print(
             \\
-            \\/// Decode the committed model from the core's snapshot buffer
-            \\/// (canonical value encoding of the root record, snapshot format
-            \\/// {d}). The decoded mirror lives in the shim's model arena until
-            \\/// the next snapshot — it must survive frame resets, exactly as the
-            \\/// transpiler lane's committed heap does.
-            \\fn snapshotModel() *const {f} {{
+            \\/// Borrow the compiled core's positional model-mirror bytes.
+            \\/// Valid until the next core ABI call.
+            \\pub fn modelSnapshot() []const u8 {{
             \\    var snap_ptr: [*]const u8 = undefined;
             \\    var snap_len: usize = 0;
             \\    abi.model_snapshot(&snap_ptr, &snap_len);
-            \\    return shim_rt.decodeSnapshot({f}, snap_ptr[0..snap_len]);
+            \\    return snap_ptr[0..snap_len];
             \\}}
             \\
-        , .{ self.sidecar.abi.snapshot_format, ident(self.sidecar.model), ident(self.sidecar.model) });
+            \\/// Borrow the tagged, length-delimited durable snapshot
+            \\/// (persistence snapshot format {d}). Valid until the next core
+            \\/// ABI call.
+            \\pub fn persistenceSnapshot() []const u8 {{
+            \\    var snap_ptr: [*]const u8 = undefined;
+            \\    var snap_len: usize = 0;
+            \\    abi.persist_snapshot(&snap_ptr, &snap_len);
+            \\    return snap_ptr[0..snap_len];
+            \\}}
+            \\
+            \\/// Decode the committed model into the shim read arena.
+            \\fn snapshotModel() *const {f} {{
+            \\    return shim_rt.decodeSnapshot({f}, modelSnapshot());
+            \\}}
+            \\
+            \\/// Replace the compiled core's committed model, then refresh the
+            \\/// read-arena mirror returned to the host.
+            \\pub fn restoreModel(snapshot: []const u8) *const {f} {{
+            \\    var out_ptr: [*]const u8 = undefined;
+            \\    var out_len: usize = 0;
+            \\    abi.restore_model(snapshot.ptr, snapshot.len, &out_ptr, &out_len);
+            \\    if (out_len != 0) @panic("core_shim: restore_model returned bytes; ABI version 2 requires an empty result");
+            \\    return snapshotModel();
+            \\}}
+            \\
+            \\
+            \\/// Run the app's pure migration hook and copy the resulting
+            \\/// current-format snapshot out of the core result arena. Null is
+            \\/// the hook's closed failure result (including no hook).
+            \\pub fn migrateModel(snapshot: []const u8, from_version: u64, allocator: std.mem.Allocator) ?[]u8 {{
+            \\    var out_ptr: [*]const u8 = undefined;
+            \\    var out_len: usize = 0;
+            \\    abi.migrate_model(snapshot.ptr, snapshot.len, @floatFromInt(from_version), &out_ptr, &out_len);
+            \\    if (out_len < 1 or out_ptr[0] != 1) return null;
+            \\    return allocator.dupe(u8, out_ptr[1..out_len]) catch null;
+            \\}}
+            \\
+        , .{
+            self.sidecar.abi.snapshot_format,
+            ident(self.sidecar.model),
+            ident(self.sidecar.model),
+            ident(self.sidecar.model),
+        });
     }
 };
 
@@ -1551,6 +1599,17 @@ test "emission is deterministic and carries the mirror surface" {
     // A bare-model init emits the pointer-returning shape.
     try testing.expect(std.mem.indexOf(u8, first, "pub fn initialModel() *const Model {") != null);
     try testing.expect(std.mem.indexOf(u8, first, "pub const UpdateResult = struct { model: *const Model, cmd: rt.Cmd };") != null);
+
+    const command_init_source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"init_returns_cmd\": false",
+        "\"init_returns_cmd\": true",
+    );
+    const command_init = try emitFromJson(arena, command_init_source);
+    try testing.expect(std.mem.indexOf(u8, command_init, "pub fn bootCommand() rt.Cmd {") != null);
+    try testing.expect(std.mem.indexOf(u8, command_init, ".cmd = bootCommand()") != null);
 }
 
 test "u64-attested slots generate the unsigned twin; i64 and f64 slots are untouched" {
@@ -1699,9 +1758,9 @@ test "a u64 attestation on chrome geometry refuses at check time" {
     // class cannot carry.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 3, "abi_version": 1,
+        \\  "format": 1, "wire_version": 3, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
-        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface",
+        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {
         \\    "structs": [
         \\      {"name": "Model", "fields": [{"name": "chromeTop", "type": {"kind": "f64"}}]},
@@ -1725,14 +1784,14 @@ test "a u64 attestation on chrome geometry refuses at check time" {
         \\  "msg": {"name": "Msg", "arms": [
         \\    {"name": "chrome_changed", "payload": {"kind": "record", "name": "Msg_chrome_changed"}}
         \\  ], "unbound": []},
-        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
+        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false, "has_migrate": false,
         \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false, "drop_msg": false,
         \\    "appearance_msg": null, "chrome_msg": "chrome_changed", "env_msgs": []},
         \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
         \\    "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
         \\    "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-        \\    "helper_call"], "snapshot_format": 1},
+        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call"], "snapshot_format": 1},
         \\  "integer_slots": [{"slot": "Buttons.x", "class": "u64"}],
         \\  "deterministic": true, "async_free": true
         \\}
@@ -1839,7 +1898,8 @@ test "the empty integer_slots list decodes nothing differently" {
     // (the identity constants' own u64 plumbing is not a mirror slot).
     try testing.expect(std.mem.indexOf(u8, generated, "exactF64") == null);
     try testing.expect(std.mem.indexOf(u8, generated, ": i64,") == null);
-    try testing.expect(std.mem.indexOf(u8, generated, ": u64,") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "count: u64,") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "picked: u64,") == null);
 }
 
 test "the emitted shim parses as Zig" {
@@ -1879,9 +1939,9 @@ test "a shared authored type spelling like a synthesized name stays a top-level 
     // first site would leave the second dangling.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 3, "abi_version": 1,
+        \\  "format": 1, "wire_version": 3, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
-        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface",
+        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {
         \\    "structs": [
         \\      {"name": "Model_user", "fields": [{"name": "id", "type": {"kind": "f64"}}]},
@@ -1894,14 +1954,14 @@ test "a shared authored type spelling like a synthesized name stays a top-level 
         \\  },
         \\  "model": "Model", "model_helpers": [], "model_unbound": [],
         \\  "msg": {"name": "Msg", "arms": [{"name": "bump", "payload": {"kind": "void"}}], "unbound": []},
-        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
+        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false, "has_migrate": false,
         \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false, "drop_msg": false,
         \\    "appearance_msg": null, "chrome_msg": null, "env_msgs": []},
         \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
         \\    "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
         \\    "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-        \\    "helper_call"], "snapshot_format": 1},
+        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call"], "snapshot_format": 1},
         \\  "integer_slots": [], "deterministic": true, "async_free": true
         \\}
     ;
@@ -2315,9 +2375,9 @@ test "a chrome arm holding its insets by reference refuses" {
     // node (by-reference) insets record cannot take that construction.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 3, "abi_version": 1,
+        \\  "format": 1, "wire_version": 3, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
-        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface",
+        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {
         \\    "structs": [
         \\      {"name": "Model", "fields": [{"name": "chromeTop", "type": {"kind": "f64"}}]},
@@ -2341,14 +2401,14 @@ test "a chrome arm holding its insets by reference refuses" {
         \\  "msg": {"name": "Msg", "arms": [
         \\    {"name": "chrome_changed", "payload": {"kind": "record", "name": "Msg_chrome_changed"}}
         \\  ], "unbound": []},
-        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
+        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false, "has_migrate": false,
         \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false, "drop_msg": false,
         \\    "appearance_msg": null, "chrome_msg": "chrome_changed", "env_msgs": []},
         \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
         \\    "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
         \\    "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-        \\    "helper_call"], "snapshot_format": 1},
+        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call"], "snapshot_format": 1},
         \\  "integer_slots": [], "deterministic": true, "async_free": true
         \\}
     ;

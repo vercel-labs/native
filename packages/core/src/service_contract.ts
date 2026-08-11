@@ -93,9 +93,30 @@ function pinnedScriptcVersion(): string {
   return pin;
 }
 
+function sourceGraphHash(files: readonly ts.SourceFile[], srcRoot: string): string {
+  const facts = files.map((file) => ({
+    module: path.relative(srcRoot, file.fileName).split(path.sep).join("/"),
+    hash: crypto.createHash("sha256").update(fs.readFileSync(file.fileName)).digest("hex"),
+  })).sort((a, b) => a.module.localeCompare(b.module));
+  const graph = crypto.createHash("sha256");
+  graph.update("native-sdk.services.sources.v1\0");
+  for (const fact of facts) {
+    graph.update(fact.module);
+    graph.update("\0");
+    graph.update(fact.hash);
+    graph.update("\0");
+  }
+  return graph.digest("hex");
+}
+
+function supportedOperationIdentifier(name: string): boolean {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name);
+}
+
 export function emitServiceContract(
   tast: TypedAst,
   files: readonly ts.SourceFile[],
+  hostFiles: readonly ts.SourceFile[],
   srcRoot: string,
 ): ServiceSurfaceResult {
   if (files.length === 0) return { operations: [], diagnostics: [], contract: null };
@@ -104,11 +125,11 @@ export function emitServiceContract(
   const operations: ServiceOperation[] = [];
   const names = new Set<string>();
   const namespaceClaims = new Map<string, ts.Node>();
+  const sourceHash = sourceGraphHash(hostFiles, srcRoot);
   for (const file of files) {
     const relative = path.relative(srcRoot, file.fileName).split(path.sep).join("/");
     const module = relative.replace(/^services\//, "").replace(/\.ts$/, "");
     const moduleName = path.posix.basename(module);
-    const sourceHash = crypto.createHash("sha256").update(fs.readFileSync(file.fileName)).digest("hex");
     for (const stmt of file.statements) {
       const claim = (name: ts.Identifier): void => {
         if (name.text.startsWith("__nativeSdk")) {
@@ -155,6 +176,13 @@ export function emitServiceContract(
         diagnostics.push(report("A service exports an unnamed function.", stmt));
         continue;
       }
+      if (!supportedOperationIdentifier(stmt.name.text)) {
+        diagnostics.push(report(
+          `\`${stmt.name.text}\` is outside the service contract's portable identifier set (ASCII letters, digits, \`_\`, and \`$\`).`,
+          stmt.name,
+        ));
+        continue;
+      }
       const opName = `${moduleName}.${stmt.name.text}`;
       if (names.has(opName)) {
         diagnostics.push(report(`The operation name \`${opName}\` is declared more than once (module basenames form the public prefix).`, stmt.name));
@@ -184,19 +212,19 @@ export function emitServiceContract(
         source_hash: sourceHash,
       });
     }
-
-    const visitThrows = (node: ts.Node): void => {
-      if (ts.isThrowStatement(node) && node.expression) {
-        if (!explicitThrowIsKindTagged(tast, node.expression)) {
-          diagnostics.push(report("An explicit service throw is not an inline `{ kind, message: string }` shape.", node));
-        } else if (throwIsLexicallyCaught(node)) {
-          diagnostics.push(report("A tagged service throw is caught inside the service instead of escaping through the operation boundary.", node));
-        }
-      }
-      ts.forEachChild(node, visitThrows);
-    };
-    visitThrows(file);
   }
+
+  const visitThrows = (node: ts.Node): void => {
+    if (ts.isThrowStatement(node) && node.expression) {
+      if (!explicitThrowIsKindTagged(tast, node.expression)) {
+        diagnostics.push(report("An explicit service throw is not an inline `{ kind, message: string }` shape.", node));
+      } else if (throwIsLexicallyCaught(node)) {
+        diagnostics.push(report("A tagged service throw is caught inside the service instead of escaping through the operation boundary.", node));
+      }
+    }
+    ts.forEachChild(node, visitThrows);
+  };
+  for (const file of hostFiles) visitThrows(file);
 
   if (operations.length === 0 && diagnostics.length === 0) {
     diagnostics.push(report("The service tree exports no callable operations.", files[0]));

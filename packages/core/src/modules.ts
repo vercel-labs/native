@@ -25,6 +25,11 @@ export interface ModuleGraph {
   readonly coreFiles: readonly string[];
   /// Author files under src/services/. The SubsetChecker never visits these.
   readonly serviceFiles: readonly string[];
+  /// Author files that can enter the service executable: every service root
+  /// plus its runtime-relative dependencies, including shared core-class
+  /// modules. Throw validation and the service source fingerprint use this
+  /// set rather than only the files physically under src/services/.
+  readonly serviceHostFiles: readonly string[];
   readonly sdkFiles: ReadonlySet<string>;
   readonly diagnostics: SubsetDiagnostic[];
 }
@@ -80,6 +85,7 @@ export function resolveModuleGraph(entry: string): ModuleGraph {
   const coreFiles: string[] = [];
   const serviceFiles: string[] = [];
   const sdkFiles = new Set<string>();
+  const runtimeEdges = new Map<string, string[]>();
   const done = new Set<string>();
   const visiting = new Set<string>();
 
@@ -96,6 +102,11 @@ export function resolveModuleGraph(entry: string): ModuleGraph {
     from: string,
     trail: string[],
   ): void => {
+    if (!edge.typeOnly) {
+      const targets = runtimeEdges.get(from) ?? [];
+      targets.push(target);
+      runtimeEdges.set(from, targets);
+    }
     if (visiting.has(target)) {
       if (!edge.typeOnly) {
         const names = [...trail, from, target].map((p) => path.basename(p));
@@ -181,8 +192,20 @@ export function resolveModuleGraph(entry: string): ModuleGraph {
     done.add(filePath);
   };
 
-  if (!fs.existsSync(entryPath)) return { files: [], coreFiles, serviceFiles, sdkFiles, diagnostics };
+  if (!fs.existsSync(entryPath)) return { files: [], coreFiles, serviceFiles, serviceHostFiles: [], sdkFiles, diagnostics };
   visit(entryPath, []);
-  for (const serviceRoot of tsFilesUnder(servicesBoundary)) visit(serviceRoot, []);
-  return { files, coreFiles, serviceFiles, sdkFiles, diagnostics };
+  const serviceRoots = tsFilesUnder(servicesBoundary);
+  for (const serviceRoot of serviceRoots) visit(serviceRoot, []);
+
+  const serviceReachable = new Set<string>();
+  const markServiceReachable = (filePath: string): void => {
+    if (serviceReachable.has(filePath)) return;
+    serviceReachable.add(filePath);
+    for (const target of runtimeEdges.get(filePath) ?? []) markServiceReachable(target);
+  };
+  for (const serviceRoot of serviceRoots) markServiceReachable(serviceRoot);
+  const serviceHostFiles = files.filter((filePath) =>
+    serviceReachable.has(filePath) && insideBoundary(filePath, boundary, true)
+  );
+  return { files, coreFiles, serviceFiles, serviceHostFiles, sdkFiles, diagnostics };
 }

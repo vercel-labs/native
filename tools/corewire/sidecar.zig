@@ -38,7 +38,7 @@ pub const supported_wire_version: i64 = 3;
 
 /// The C-ABI generation of the core entry points this generator binds
 /// (core_abi.zig `abi_version`).
-pub const supported_abi_version: i64 = 1;
+pub const supported_abi_version: i64 = 2;
 
 /// The snapshot-encoding generation the generated decoder implements.
 pub const supported_snapshot_format: i64 = 1;
@@ -190,6 +190,9 @@ pub const Sidecar = struct {
     entry: []const u8,
     source_hash: u64,
     build_id: u64,
+    /// Hash of the Model-reachable type graph only. Unlike build_id, Msg,
+    /// channel, and helper-only edits do not move this persistence fence.
+    model_fingerprint: u64,
     types: Types,
     model: []const u8,
     model_helpers: []const Helper,
@@ -205,6 +208,7 @@ pub const Sidecar = struct {
     init_returns_bare: bool = false,
     update_returns_bare: bool = false,
     has_subscriptions: bool,
+    has_migrate: bool,
     channels: Channels,
     abi: Abi,
     integer_slots: []const IntegerSlot,
@@ -214,7 +218,7 @@ pub const Sidecar = struct {
 
 // ----------------------------------------------------- ABI vocabulary
 
-/// The unconditional export suffixes of ABI version 1, in the NORMATIVE
+/// The unconditional export suffixes of ABI version 2, in the NORMATIVE
 /// canonical order the sidecar's `abi.exports` must list them: the two
 /// identity getters, then the mode-provided entries (sink registration,
 /// init, collect, result reset), then the program's entry-point map
@@ -240,6 +244,9 @@ pub const unconditional_exports = [_][]const u8{
     "dispatch_scroll_state",
     "subscriptions",
     "model_snapshot",
+    "persist_snapshot",
+    "restore_model",
+    "migrate_model",
     "helper_call",
 };
 
@@ -476,11 +483,11 @@ const Mapper = struct {
 
     fn mapRoot(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }!Sidecar {
         const top = try self.members(value, "", &.{
-            "format",              "wire_version",      "abi_version",      "compiler_version",   "entry",
-            "source_hash",         "build_id",          "types",            "model",              "model_helpers",
-            "model_unbound",       "msg",               "init_returns_cmd", "update_returns_cmd", "init_returns_bare",
-            "update_returns_bare", "has_subscriptions", "channels",         "abi",                "integer_slots",
-            "deterministic",       "async_free",
+            "format",            "wire_version",        "abi_version",       "compiler_version", "entry",
+            "source_hash",       "build_id",            "model_fingerprint", "types",            "model",
+            "model_helpers",     "model_unbound",       "msg",               "init_returns_cmd", "update_returns_cmd",
+            "init_returns_bare", "update_returns_bare", "has_subscriptions", "has_migrate",      "channels",
+            "abi",               "integer_slots",       "deterministic",     "async_free",
         });
         top.warnUnknown();
 
@@ -501,6 +508,7 @@ const Mapper = struct {
             .entry = try self.nonEmptyString(try top.get("entry"), "entry"),
             .source_hash = try self.hash64(try top.get("source_hash"), "source_hash"),
             .build_id = try self.hash64(try top.get("build_id"), "build_id"),
+            .model_fingerprint = try self.hash64(try top.get("model_fingerprint"), "model_fingerprint"),
             .types = try self.mapTypes(try top.get("types")),
             .model = try self.nonEmptyString(try top.get("model"), "model"),
             .model_helpers = try self.mapHelpers(try top.get("model_helpers")),
@@ -511,6 +519,7 @@ const Mapper = struct {
             .init_returns_bare = try self.optionalBoolean(top.map, "init_returns_bare", "", false),
             .update_returns_bare = try self.optionalBoolean(top.map, "update_returns_bare", "", false),
             .has_subscriptions = try self.boolean(try top.get("has_subscriptions"), "has_subscriptions"),
+            .has_migrate = try self.boolean(try top.get("has_migrate"), "has_migrate"),
             .channels = channels,
             .abi = abi,
             .integer_slots = try self.mapIntegerSlots(try top.get("integer_slots")),
@@ -1824,11 +1833,12 @@ pub const minimal_valid_json =
     \\{
     \\  "format": 1,
     \\  "wire_version": 3,
-    \\  "abi_version": 1,
+    \\  "abi_version": 2,
     \\  "compiler_version": "0.0.1",
     \\  "entry": "src/core.ts",
     \\  "source_hash": "00000000c0ffee00",
     \\  "build_id": "00000000b01dface",
+    \\  "model_fingerprint": "00000000a11ce001",
     \\  "types": {
     \\    "structs": [
     \\      {"name": "Model", "fields": [
@@ -1853,6 +1863,7 @@ pub const minimal_valid_json =
     \\  "init_returns_cmd": false,
     \\  "update_returns_cmd": true,
     \\  "has_subscriptions": false,
+    \\  "has_migrate": false,
     \\  "channels": {
     \\    "command_msg": false,
     \\    "frame_msg": false,
@@ -1869,7 +1880,7 @@ pub const minimal_valid_json =
     \\      "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
     \\      "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
     \\      "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-    \\      "helper_call"],
+    \\      "persist_snapshot", "restore_model", "migrate_model", "helper_call"],
     \\    "snapshot_format": 1
     \\  },
     \\  "integer_slots": [
@@ -1888,7 +1899,7 @@ test "drop_msg infers from the ABI export for older format-1 emitters" {
     // The pinned external compiler predates the additive channel flag but
     // preserves profile-declared exports in the authoritative ABI list.
     var source = try std.mem.replaceOwned(u8, arena, minimal_valid_json, "    \"drop_msg\": false,\n", "");
-    source = try std.mem.replaceOwned(u8, arena, source, "      \"helper_call\"]", "      \"helper_call\", \"drop_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"drop_msg\"]");
     var diags = Diagnostics{ .arena = arena };
     const parsed = try read(arena, source, &diags);
     try std.testing.expect(parsed.channels.drop_msg);
@@ -2385,7 +2396,7 @@ test "V11: an unknown export suffix refuses" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"mystery_entry\"]");
-    try expectRefusal(source, "abi.exports[19]", "not an export suffix of ABI version 1");
+    try expectRefusal(source, "abi.exports[22]", "not an export suffix of ABI version 2");
 }
 
 test "V11: a missing unconditional export refuses with the expected suffix" {

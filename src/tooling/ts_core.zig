@@ -403,21 +403,58 @@ pub fn ensureResolvedTranspiler(allocator: std.mem.Allocator, io: std.Io, framew
     return transpilerDepsMissing(resolved);
 }
 
-/// `native check` over a TypeScript core: run the frontend in
-/// check-only mode on src/core.ts — and, through it, the core's whole
-/// import graph under src/ — and surface its NS diagnostics verbatim —
-/// they are the teaching layer, nothing wraps them (each diagnostic
-/// carries the owning module's path). Exit 0 = typechecked,
-/// subset-clean.
-pub fn checkCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8) !void {
+pub const PersistRoutes = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
+};
+
+/// Run the TypeScript frontend in check-only mode on src/core.ts — and,
+/// through it, the core's whole import graph under src/ — and surface its NS
+/// diagnostics verbatim. Manifest-owned routes ride into the same typed Msg
+/// contract the watched dev host invokes on each of its own restarts.
+pub fn checkCore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    base_env: *std.process.Environ.Map,
+    framework_root: []const u8,
+    capabilities: []const []const u8,
+    persist_version: ?u64,
+    persist_routes: ?PersistRoutes,
+) !void {
     const cli_path = try transpilerPath(allocator, io, framework_root, "src/cli.ts");
     defer allocator.free(cli_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
     try ensureResolvedTranspiler(allocator, io, framework_root);
 
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    var persist_version_arg: ?[]u8 = null;
+    defer if (persist_version_arg) |value| allocator.free(value);
+    try argv.appendSlice(allocator, &.{ "node", runner_path, cli_path, "src/core.ts" });
+    for (capabilities) |capability| try argv.appendSlice(allocator, &.{ "--capability", capability });
+    if (persist_version) |version| {
+        persist_version_arg = try std.fmt.allocPrint(allocator, "{d}", .{version});
+        try argv.appendSlice(allocator, &.{
+            "--persist-version",
+            persist_version_arg.?,
+            "--persist-state",
+            ".native/cache/persist-schema.json",
+        });
+    }
+    if (persist_routes) |routes| {
+        try argv.appendSlice(allocator, &.{
+            "--persist-ok",
+            routes.ok,
+            "--persist-none",
+            routes.none,
+            "--persist-err",
+            routes.err,
+        });
+    }
     var child = std.process.spawn(io, .{
-        .argv = &.{ "node", runner_path, cli_path, "src/core.ts" },
+        .argv = argv.items,
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -470,6 +507,7 @@ pub const DevHostOptions = struct {
     /// Re-run the harness whenever any module of the core changes.
     /// Requires a script (a re-run replays it against the edited core).
     watch: bool = false,
+    persist_routes: ?PersistRoutes = null,
 };
 
 /// `native dev --core`: the node dev-harness over src/core.ts — the
@@ -503,6 +541,16 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     try argv.append(allocator, "src/core.ts");
     if (options.script) |script| {
         try argv.appendSlice(allocator, &.{ "--script", script });
+    }
+    if (options.persist_routes) |routes| {
+        try argv.appendSlice(allocator, &.{
+            "--persist-ok",
+            routes.ok,
+            "--persist-none",
+            routes.none,
+            "--persist-err",
+            routes.err,
+        });
     }
 
     std.debug.print("native dev --core: the core-logic loop under node (update/effects, virtual clock) - not a renderer; `native dev` runs the app\n", .{});

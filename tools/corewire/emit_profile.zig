@@ -66,6 +66,9 @@ const export_signatures = [_]ExportSignature{
     .{ .suffix = "dispatch_scroll_state", .params = &.{ "u8", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64" }, .returns = "bytes" },
     .{ .suffix = "subscriptions", .export_name = "abi_subscriptions", .params = &.{}, .returns = "bytes" },
     .{ .suffix = "model_snapshot", .params = &.{}, .returns = "bytes" },
+    .{ .suffix = "persist_snapshot", .params = &.{}, .returns = "bytes" },
+    .{ .suffix = "restore_model", .params = &.{"bytes"}, .returns = "bytes" },
+    .{ .suffix = "migrate_model", .params = &.{ "bytes", "f64" }, .returns = "bytes" },
     .{ .suffix = "helper_call", .params = &.{ "u32", "bytes" }, .returns = "bytes" },
     // The wire-shaped conditional channel entries (present exactly when
     // the sidecar wires the channel): host-event params in, the channel
@@ -445,6 +448,7 @@ test "the profile tracks the contract's prefix and generations" {
     // Export names keep the facade's own function spellings; only the
     // symbols take the contract's prefix.
     try testing.expect(std.mem.indexOf(u8, generated, "{ \"export\": \"model_snapshot\", \"symbol\": \"app2_model_snapshot\"") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "{ \"export\": \"persist_snapshot\", \"symbol\": \"app2_persist_snapshot\"") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "\"export\": \"app2_") == null);
     try testing.expect(std.mem.indexOf(u8, generated, "\"build_id_symbol\": \"app2_build_id\"") != null);
 }

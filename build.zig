@@ -491,6 +491,7 @@ pub fn build(b: *std.Build) void {
     if (ts_core_e2e_tests) |ts_core_artifacts| {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
+        const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
         const soundboard_e2e_run = b.addRunArtifact(ts_core_artifacts.soundboard);
@@ -524,6 +525,7 @@ pub fn build(b: *std.Build) void {
             contracts_step.dependOn(&b.addInstallFileWithDir(contract.profile, dir, "core_profile.json").step);
         }
         ts_core_e2e_step.dependOn(&host_e2e_run.step);
+        ts_core_e2e_step.dependOn(&persist_e2e_run.step);
         ts_core_e2e_step.dependOn(&markup_e2e_run.step);
         ts_core_e2e_step.dependOn(&kanban_e2e_run.step);
         ts_core_e2e_step.dependOn(&soundboard_e2e_run.step);
@@ -532,6 +534,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&ai_chat_e2e_run.step);
         ts_core_e2e_step.dependOn(&services_e2e_run.step);
         test_step.dependOn(&host_e2e_run.step);
+        test_step.dependOn(&persist_e2e_run.step);
         test_step.dependOn(&markup_e2e_run.step);
         test_step.dependOn(&kanban_e2e_run.step);
         test_step.dependOn(&soundboard_e2e_run.step);
@@ -2763,6 +2766,7 @@ fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
 /// installed dependency (`npm ci` in packages/core) is missing.
 const TsCoreE2eArtifacts = struct {
     host: *std.Build.Step.Compile,
+    persist: *std.Build.Step.Compile,
     /// The markup battery is its own binary: the compiled-core symbol
     /// set is a fixed-prefix C ABI, so one process carries ONE archive
     /// — every fixture battery links exactly its own core.
@@ -2859,6 +2863,17 @@ fn tsCoreE2eArtifact(
         .f64_slots = &.{"Model.pastBytes"},
     });
     const fixture_mod = host_fixture.module;
+    const persist_src = b.addWriteFiles();
+    _ = persist_src.addCopyFile(b.path("tests/ts-core/persist_fixture.ts"), "persist_fixture.ts");
+    const persist_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/persist_fixture.ts",
+        .src_dir = persist_src.getDirectory(),
+        .name = "persist_fixture_core",
+        .persist_capability = true,
+    });
+    const persist_mod = module(b, target, optimize, "tests/ts-core/persist_e2e_tests.zig");
+    persist_mod.addImport("native_sdk", desktop_mod);
+    persist_mod.addImport("ts_persist_core", persist_fixture.module);
     const markup_src = b.addWriteFiles();
     _ = markup_src.addCopyFile(b.path("tests/ts-core/markup_fixture.ts"), "markup_fixture.ts");
     const markup_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
@@ -3069,6 +3084,7 @@ fn tsCoreE2eArtifact(
 
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
+        .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
         .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
@@ -3245,6 +3261,8 @@ const ExternalCoreFixtureSpec = struct {
     src_dir: std.Build.LazyPath,
     /// The archive's symbol-safe stem (`lib<name>.a`).
     name: []const u8,
+    /// The fixture stands in for an app whose manifest declares Tier 1.
+    persist_capability: bool = false,
     /// Attested integer slots the compiled projection carries as f64
     /// (values that reach the f64-exact boundary have no honest i64
     /// declaration on that side) — corewire's --f64-slot demotions,
@@ -3284,6 +3302,7 @@ fn externalCoreFixtureModule(
         check.addArg("--services-contract");
         break :services check.addOutputFileArg("services.contract.json");
     } else null;
+    if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{
@@ -3334,6 +3353,8 @@ fn externalCoreFixtureModule(
     compile.addArgs(&.{ "--name", spec.name });
     compile.addArg("--manifest");
     compile.addFileArg(b.path("packages/core/package.json"));
+    compile.addArg("--frontend-sidecar");
+    compile.addFileArg(contract);
     compile.addArg("--out-archive");
     const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{spec.name}));
     compile.addArg("--out-sidecar");

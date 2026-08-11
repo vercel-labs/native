@@ -74,6 +74,7 @@ pub fn ServiceHost(comptime Registry: type) type {
         child_reaping: bool = false,
         request_timeout_ms: u32 = default_request_timeout_ms,
         active_request_id: ?u32 = null,
+        active_cancelled: bool = false,
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -156,8 +157,18 @@ pub fn ServiceHost(comptime Registry: type) type {
                     self.allocator.free(removed.payload);
                 } else index += 1;
             }
+            index = 0;
+            while (index < self.results.items.len) {
+                if (self.results.items[index].key == key) {
+                    const removed = self.results.orderedRemove(index);
+                    self.allocator.free(removed.bytes);
+                } else index += 1;
+            }
             const kill = self.active_key != null and self.active_key.? == key;
-            if (kill) self.killPublishedChildLocked();
+            if (kill) {
+                self.active_cancelled = true;
+                self.killPublishedChildLocked();
+            }
             self.mutex.unlock(self.io);
         }
 
@@ -287,22 +298,42 @@ pub fn ServiceHost(comptime Registry: type) type {
                 const work = self.requests.orderedRemove(0);
                 self.active_key = if (work.answer) work.key else null;
                 self.active_request_id = work.request_id;
+                self.active_cancelled = false;
                 self.mutex.unlock(self.io);
 
+                var completion: ?Result = null;
                 const response = self.exchange(&child, work) catch |err| response: {
-                    if (work.answer) self.stageStatic(work.key, false, if (err == error.ServiceTimedOut) timeout_error else transport_error);
+                    if (work.answer) {
+                        const bytes = if (err == error.ServiceTimedOut) timeout_error else transport_error;
+                        if (self.allocator.dupe(u8, bytes)) |copy| {
+                            completion = .{ .key = work.key, .ok = false, .bytes = copy };
+                        } else |_| {}
+                    }
                     break :response null;
                 };
                 if (work.answer) {
-                    if (response) |result| self.stageOwned(.{ .key = work.key, .ok = result.ok, .bytes = result.bytes });
+                    if (response) |result| completion = .{ .key = work.key, .ok = result.ok, .bytes = result.bytes };
                 } else if (response) |result| {
                     self.allocator.free(result.bytes);
                 }
                 self.allocator.free(work.payload);
                 self.mutex.lockUncancelable(self.io);
+                const cancelled = self.active_request_id == work.request_id and self.active_cancelled;
                 self.active_key = null;
                 self.active_request_id = null;
+                self.active_cancelled = false;
+                var services: ?platform.PlatformServices = null;
+                if (completion) |result| {
+                    if (cancelled or self.shutting_down) {
+                        self.allocator.free(result.bytes);
+                    } else if (self.results.append(self.allocator, result)) |_| {
+                        services = self.services;
+                    } else |_| {
+                        self.allocator.free(result.bytes);
+                    }
+                }
                 self.mutex.unlock(self.io);
+                if (services) |bound| bound.wake() catch {};
                 if (response == null) self.retireChild(&child);
             }
         }

@@ -1,0 +1,78 @@
+# Model Persistence
+
+Model persistence stores the TypeScript core's committed `Model` without giving `update` filesystem access or making the app own a serialization loop. Declare the capability and its monotonic schema version in `app.zon`:
+
+```zig:app.zon
+.capabilities = .{ "persist" },
+.persist = .{
+  .version = 1,
+  .debounce_ms = 500,
+  .restore = .{
+    .ok = "restored",
+    .none = "fresh_boot",
+    .err = "restore_failed",
+  },
+},
+```
+
+The three route names refer to `Msg` arms. `ok` and `none` are void arms; `err` carries one `Uint8Array` field containing one closed reason: `corrupt`, `version_unknown`, `migrate_failed`, `io_failed`, or `rejected`.
+
+```ts:src/core.ts
+import { Cmd } from "@native-sdk/core";
+
+export interface Model {
+  readonly draft: Uint8Array;
+  readonly saves: number;
+}
+
+export type Msg =
+  | { readonly kind: "edited"; readonly draft: Uint8Array }
+  | { readonly kind: "restored" }
+  | { readonly kind: "fresh_boot" }
+  | { readonly kind: "restore_failed"; readonly reason: Uint8Array };
+
+export const viewUnbound = ["restored", "fresh_boot", "restore_failed"] as const;
+
+export function initialModel(): Model {
+  return { draft: new Uint8Array(0), saves: 0 };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "edited":
+      return [{ ...model, draft: msg.draft, saves: model.saves + 1 }, Cmd.persist()];
+    case "restored":
+    case "fresh_boot":
+    case "restore_failed":
+      return model;
+  }
+}
+```
+
+`Cmd.persist()` snapshots the model from that committed update. The command carries no model bytes; the compiled core exposes its generated canonical encoder to the host. The host coalesces requests on a trailing edge, performs filesystem work off the update thread, keeps at most one write in flight, and force-flushes the pending tail during backgrounding and graceful shutdown. A failed write dispatches the configured `err` route, just like a failed boot restore. The default debounce is 500 ms; `debounce_ms` accepts 0–60,000.
+
+Snapshots live in the platform app-data directory as `snapshot.nsd`. Installation is atomic: the engine writes and syncs a temporary file, renames it over the primary, and keeps one structurally valid prior generation as `snapshot.nsd.bak`. A corrupt or torn primary falls back to that backup. The generated body is little-endian and uses tagged, length-delimited Model fields; snapshot bodies are bounded at 16 MiB, independently of the raw file-effect limits.
+
+## Boot and replay
+
+Before the first frame, the engine restores the canonical model and dispatches exactly one configured route. `restored` observes the restored model; `fresh_boot` means neither generation exists. Restore and migration failures leave the initial model in place and dispatch `restore_failed` with the reason bytes.
+
+The restore result crosses the ordinary effect journal boundary. Recording stores non-empty snapshot bytes in the session blob store; replay feeds those bytes back without reading or writing the live app-data directory. `Cmd.persist()` remains on the replay command stream for fingerprint parity, but its host binding is a no-op.
+
+## Schema versions and migration
+
+Increase `.persist.version` whenever the `Model` shape changes, and never reuse a version. `native check` verifies that the configured `ok` and `none` routes name void `Msg` arms and `err` names a one-`Uint8Array`-field arm; `native dev --core` runs the same fence before starting its virtual host. Check also remembers the last accepted version/fingerprint pair under `.native/cache` and reports NS1068 when the shape changes without a bump or the version moves backward. The snapshot header carries that app version, the generated model-only shape fingerprint, and the compiler's snapshot-format version, so a cold checkout still fails closed at runtime: a same-version shape mismatch reports `corrupt`, and a snapshot from a future app version reports `version_unknown`. That older binary also refuses subsequent writes with `version_unknown`, preserving the newer snapshot across a rollback.
+
+To accept an older version, export the pure migration hook from `src/core.ts`:
+
+```typescript
+export function migrate(snapshot: Uint8Array, fromVersion: number): Model {
+  // Decode the versioned legacy bytes and construct the current Model.
+  // Throw a subset value when the legacy bytes cannot be migrated.
+  return decodeLegacyModel(snapshot, fromVersion);
+}
+```
+
+The checker requires the exact `(Uint8Array, number) => Model` shape. A successful migration is encoded in the current format, installed as the new snapshot, restored before delivery, and journaled as an ordinary successful restore. A thrown value, missing hook, or invalid result reports `migrate_failed`.
+
+Version 1 persists the whole model. Do not put tokens or passwords in it; credentials belong in an OS keychain-backed effect. Raw `Cmd.readFile` and `Cmd.writeFile` remain the escape hatch for user-visible files, exports, and blobs—not the default model store.

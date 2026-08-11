@@ -47,6 +47,7 @@ fn command(name: []const u8) ?core.Msg {
     if (std.mem.eql(u8, name, "service.parse")) return .parse;
     if (std.mem.eql(u8, name, "service.fail")) return .fail;
     if (std.mem.eql(u8, name, "service.hang")) return .hang;
+    if (std.mem.eql(u8, name, "service.replace-hang")) return .replace_hang;
     return null;
 }
 
@@ -248,6 +249,21 @@ test "kill during a request fails it and the next request starts a fresh host" {
     try h.waitPending();
     try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 2), Bridge.model().successes);
+    try std.testing.expect(!Bridge.model().failed);
+}
+
+test "cancelling an active request cannot complete a replacement with the same key" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.hang");
+    try h.waitForHangMarker();
+    try h.menu("service.replace-hang");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 2), Bridge.model().successes);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().failures), 0), Bridge.model().failures);
     try std.testing.expect(!Bridge.model().failed);
 }
 

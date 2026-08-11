@@ -1,5 +1,5 @@
 //! A link-time stand-in for a compiled core: exports every symbol of
-//! core ABI version 1 under the canonical prefix so the conformance
+//! core ABI version 2 under the canonical prefix so the conformance
 //! suite can force FULL semantic analysis and codegen of the generated
 //! shims (dispatch stubs, snapshot decoder, channel forwarders, helper
 //! methods) and still link.
@@ -19,7 +19,7 @@ const std = @import("std");
 pub var stub_build_id: u64 = 0;
 
 export fn nsc_core_abi_version() u32 {
-    return 1;
+    return 2;
 }
 
 export fn nsc_core_build_id() u64 {
@@ -139,6 +139,29 @@ export fn nsc_core_frame_reset() void {}
 export fn nsc_core_model_snapshot(snap: *[*]const u8, snap_len: *usize) void {
     snap.* = &empty;
     snap_len.* = 0;
+    noCore();
+}
+
+export fn nsc_core_persist_snapshot(snap: *[*]const u8, snap_len: *usize) void {
+    snap.* = &empty;
+    snap_len.* = 0;
+    noCore();
+}
+
+export fn nsc_core_restore_model(snapshot: [*]const u8, snapshot_len: usize, out: *[*]const u8, out_len: *usize) void {
+    _ = snapshot;
+    _ = snapshot_len;
+    out.* = &empty;
+    out_len.* = 0;
+    noCore();
+}
+
+export fn nsc_core_migrate_model(snapshot: [*]const u8, snapshot_len: usize, from_version: f64, out: *[*]const u8, out_len: *usize) void {
+    _ = snapshot;
+    _ = snapshot_len;
+    _ = from_version;
+    out.* = &empty;
+    out_len.* = 0;
     noCore();
 }
 

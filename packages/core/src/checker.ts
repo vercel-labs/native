@@ -416,8 +416,8 @@ function thrownUnionOf(
 
 export interface CheckResult {
   readonly diagnostics: SubsetDiagnostic[];
-  /// Teaching notices that do NOT stop the build (today: NS1028, the
-  /// not-yet-host-backed persist op). Same shape as diagnostics, surfaced
+  /// Teaching notices that do NOT stop the build (today: capability and
+  /// persistence-contract lints). Same shape as diagnostics, surfaced
   /// as warnings by the CLI.
   readonly warnings: SubsetDiagnostic[];
   /// Local names bound to the SDK `Cmd` surface (import from
@@ -427,6 +427,15 @@ export interface CheckResult {
   /// Local names bound to the SDK `Sub` surface, lowered onto the rt
   /// subscription builders the same way.
   readonly subNames: Set<string>;
+}
+
+/// Manifest-owned boot routes for engine model persistence. The frontend
+/// receives these as plain strings so it stays independent of app.zon's file
+/// format while still checking the cross-file Msg contract.
+export interface PersistRoutes {
+  readonly ok: string;
+  readonly none: string;
+  readonly err: string;
 }
 
 export class SubsetChecker {
@@ -448,12 +457,17 @@ export class SubsetChecker {
   /// Null means the app has no service registry. An empty set is distinct:
   /// service files exist, but none exported a callable operation.
   private readonly serviceOps: ReadonlySet<string> | null;
+  private readonly capabilities: Set<string>;
+  private readonly persistRoutes: PersistRoutes | undefined;
+  private usesPersist = false;
 
   constructor(
     tast: TypedAst,
     table: TypeTable,
     files: readonly ts.SourceFile[] | ts.SourceFile,
     serviceOps: ReadonlySet<string> | null = null,
+    capabilities: readonly string[] = [],
+    persistRoutes?: PersistRoutes,
   ) {
     this.tast = tast;
     this.table = table;
@@ -461,6 +475,8 @@ export class SubsetChecker {
     this.entry = this.files[0];
     this.fileSet = new Set(this.files);
     this.serviceOps = serviceOps;
+    this.capabilities = new Set(capabilities);
+    this.persistRoutes = persistRoutes;
   }
 
   check(): CheckResult {
@@ -468,6 +484,7 @@ export class SubsetChecker {
     this.checkServiceCalls();
     for (const file of this.files) this.checkModuleShape(file);
     this.checkEntryContract();
+    this.checkPersistRoutes();
     this.checkNameCollisions();
     this.checkGeneratedMetadataNames();
     this.checkModelHoldsData();
@@ -475,12 +492,16 @@ export class SubsetChecker {
     this.checkCmdPurity();
     this.checkSubPurity();
     this.checkModelBindingSurface();
+    this.checkMigrationHook();
     this.checkThemePackHelper();
     this.checkStatusItemHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
     for (const file of this.files) this.walk(file);
+    if (this.capabilities.has("persist") && !this.usesPersist) {
+      this.warn("NS1028", "app.zon declares the `persist` capability, but this core has no `Cmd.persist()` call.", this.entry);
+    }
     this.checkExceptions();
     return {
       diagnostics: this.diagnostics,
@@ -516,6 +537,44 @@ export class SubsetChecker {
       ts.forEachChild(node, visit);
     };
     for (const file of this.files) visit(file);
+  }
+
+  /// app.zon owns these names, while the TypeScript core owns Msg. Validate
+  /// the seam in the frontend so `native check` and the node dev host fail at
+  /// the authoring boundary instead of waiting for generated Zig to compile.
+  private checkPersistRoutes(): void {
+    const routes = this.persistRoutes;
+    if (routes === undefined) return;
+    const msg = this.table.unions.get("Msg");
+    if (msg === undefined) return; // NS1062 owns the missing-root teaching.
+
+    const checks = [
+      { role: "ok", route: routes.ok, payload: "void" },
+      { role: "none", route: routes.none, payload: "void" },
+      { role: "err", route: routes.err, payload: "bytes" },
+    ] as const;
+    for (const check of checks) {
+      const arm = msg.arms.find((candidate) => candidate.tag === check.route);
+      if (arm === undefined) {
+        this.report(
+          "NS1033",
+          `app.zon persistence restore route \`${check.route}\` (${check.role}) names no Msg arm.`,
+          msg.decl.name,
+        );
+        continue;
+      }
+      const valid =
+        check.payload === "void"
+          ? arm.fields.length === 0
+          : arm.fields.length === 1 && arm.fields[0].type.k === "bytes";
+      if (!valid) {
+        this.report(
+          "NS1033",
+          `app.zon persistence restore route \`${check.route}\` (${check.role}) has the wrong Msg payload; ok/none must be void and err must carry one Uint8Array field.`,
+          arm.fields[0]?.decl ?? msg.decl.name,
+        );
+      }
+    }
   }
 
   private report(id: RuleId, site: string, node: ts.Node): void {
@@ -756,6 +815,46 @@ export class SubsetChecker {
         "NS1033",
         "`themePack` does not return exactly the built-in `\"house\" | \"geist\"` theme-pack union.",
         decl.type,
+      );
+    }
+  }
+
+  /// Persistence migration is a pure entry hook, not a model helper. It
+  /// receives the previous canonical snapshot and monotonic schema version;
+  /// returning the current Model succeeds, while throwing closes as
+  /// `migrate_failed` at the host boundary.
+  private checkMigrationHook(): void {
+    let decl: ts.FunctionDeclaration | null = null;
+    for (const stmt of this.entry.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === "migrate" && hasExportModifier(stmt)) {
+        decl = stmt;
+        break;
+      }
+    }
+    if (decl === null) {
+      for (const binding of exportListBindings(this.tast, this.entry)) {
+        if (
+          binding.exportedName === "migrate" &&
+          binding.target !== null &&
+          binding.target !== undefined &&
+          ts.isFunctionDeclaration(binding.target) &&
+          binding.target.getSourceFile() === this.entry
+        ) {
+          decl = binding.target;
+          break;
+        }
+      }
+    }
+    if (decl === null) return;
+    const params = decl.parameters;
+    const snapshot = params[0]?.type === undefined ? null : this.table.resolveTypeNode(params[0].type);
+    const version = params[1]?.type === undefined ? null : this.table.resolveTypeNode(params[1].type);
+    const returns = decl.type === undefined ? null : this.table.resolveTypeNode(decl.type);
+    if (params.length !== 2 || snapshot?.k !== "bytes" || version?.k !== "number" || returns?.k !== "struct" || returns.name !== "Model") {
+      this.report(
+        "NS1033",
+        "`migrate` must be declared exactly as `export function migrate(snapshot: Uint8Array, fromVersion: number): Model`; throw to report `migrate_failed`.",
+        decl.name ?? decl,
       );
     }
   }
@@ -1306,7 +1405,7 @@ export class SubsetChecker {
   /// the host-event channels from src/core.ts only. Imports may FEED those
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
-    "update", "initialModel", "subscriptions",
+    "update", "initialModel", "subscriptions", "migrate",
     "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
@@ -2376,9 +2475,8 @@ export class SubsetChecker {
         }
       }
 
-      // NS1028 — persist compiles and stays on the wire, but no shipping
-      // host performs it yet; teach the writeFile path without stopping
-      // the build.
+      // NS1028 — the reserved verb compiles either way, but a shipping app
+      // binds its host service only when app.zon declares the capability.
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
@@ -2387,7 +2485,10 @@ export class SubsetChecker {
         this.cmdNames.has(node.expression.expression.text) &&
         this.isSdkReference(node.expression.expression)
       ) {
-        this.warn("NS1028", "`Cmd.persist()` asks for a host service no shipping host provides yet.", node);
+        this.usesPersist = true;
+        if (!this.capabilities.has("persist")) {
+          this.warn("NS1028", "`Cmd.persist()` requires the `persist` capability in app.zon.", node);
+        }
       }
 
       // NS1001/NS1022/NS1051 — mutation stays inside local ownership:

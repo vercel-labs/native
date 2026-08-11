@@ -365,6 +365,8 @@ fn tsCoreStage(
     target: std.Build.ResolvedTarget,
     app_root: []const u8,
     app_name: []const u8,
+    persist_capability: bool,
+    persist_version: ?u64,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
@@ -396,6 +398,11 @@ fn tsCoreStage(
         check.addArg("--services-contract");
         break :services_contract check.addOutputFileArg("services.contract.json");
     } else null;
+    if (persist_capability) check.addArgs(&.{ "--capability", "persist" });
+    if (persist_version) |version| {
+        check.addArgs(&.{ "--persist-version", b.fmt("{d}", .{version}) });
+        check.addArgs(&.{ "--persist-state", appPath(b, app_root, ".native/cache/persist-schema.json") });
+    }
     addTsDirInputs(b, dep.builder, check, "packages/core/sdk");
     addAppTsDirInputs(b, check, appPath(b, app_root, "src"));
     for (frontend_sources) |source| {
@@ -497,6 +504,8 @@ fn tsCoreStage(
     compile.addArgs(&.{ "--name", symbol_name });
     compile.addArg("--manifest");
     compile.addFileArg(dep.path("packages/core/package.json"));
+    compile.addArg("--frontend-sidecar");
+    compile.addFileArg(contract);
     compile.addArg("--out-archive");
     const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{symbol_name}));
     compile.addArg("--out-sidecar");
@@ -781,7 +790,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
     }
     const ts_stage: ?TsCoreStage = if (core_tree == .ts)
-        tsCoreStage(b, dep, target, app_options.app_root, app_options.name)
+        tsCoreStage(b, dep, target, app_options.app_root, app_options.name, app_config.persist_capability, app_config.persist_version)
     else
         null;
 
@@ -1530,16 +1539,18 @@ const AppManifestBuildConfig = struct {
     webview_layer: WebLayerOption = .auto,
     microphone_permission: bool = false,
     system_audio_permission: bool = false,
+    persist_capability: bool = false,
+    persist_version: ?u64 = null,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
     /// NOT web intent — it is the default in many canvas manifests.
     web_declaration: ?web_layer_contract.Declaration = null,
 };
 
-/// The lenient app.zon shape the build graph parses for inference: only
-/// the fields that decide the web layer and the web engine; everything
-/// else is ignored. Full schema validation stays with `native validate`
-/// and the runner's comptime import.
+/// The lenient app.zon shape the build graph parses for inference: web
+/// inclusion, permissions, and the persistence capability/version handed to
+/// the TypeScript checker. Everything else is ignored. Full schema validation
+/// stays with `native validate` and the runner's comptime import.
 const InferenceManifest = struct {
     capabilities: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
@@ -1551,6 +1562,9 @@ const InferenceManifest = struct {
         auto_install: bool = false,
     } = .{},
     frontend: ?struct {} = null,
+    persist: ?struct {
+        version: u64,
+    } = null,
     shell: struct {
         windows: []const struct {
             views: []const struct {
@@ -1599,6 +1613,8 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .webview_layer = web_layer_contract.parseWebViewLayer(raw.webview_layer) orelse @panic("app.zon .webview_layer must be \"auto\", \"include\", or \"exclude\""),
         .microphone_permission = hasManifestPermission(raw.permissions, "microphone"),
         .system_audio_permission = hasManifestPermission(raw.permissions, "system_audio"),
+        .persist_capability = hasManifestCapability(raw.capabilities, "persist"),
+        .persist_version = if (raw.persist) |persist| persist.version else null,
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };
 }
@@ -1606,6 +1622,13 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
 fn hasManifestPermission(permissions: []const []const u8, expected: []const u8) bool {
     for (permissions) |permission| {
         if (std.mem.eql(u8, permission, expected)) return true;
+    }
+    return false;
+}
+
+fn hasManifestCapability(capabilities: []const []const u8, expected: []const u8) bool {
+    for (capabilities) |capability| {
+        if (std.mem.eql(u8, capability, expected)) return true;
     }
     return false;
 }

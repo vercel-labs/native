@@ -116,14 +116,18 @@ pub fn main(init: std.process.Init) !void {
         .cache,
         &cache_dir_buffer,
     ) catch "";
-    // The durable per-app data directory, resolved by the same platform
-    // convention as Zig-core apps. TS cores request it through the
-    // ordinary journaled envMsgs boundary under `app_data_dir_env`; it
-    // is framework-provided rather than trusted from the ambient
-    // environment, so package launch cwd and env differences disappear.
+    // The durable per-app data directory, resolved by the platform app-data
+    // convention and keyed by the manifest's stable bundle identity. TS cores
+    // request it through the ordinary journaled envMsgs boundary under
+    // `app_data_dir_env`; it is framework-provided rather than trusted from
+    // the ambient environment, so package launch cwd and env differences
+    // disappear.
     var data_dir_buffer: [512]u8 = undefined;
     const app_data_dir = native_sdk.app_dirs.resolveOne(
-        .{ .name = manifest.name },
+        // Durable state follows the reverse-DNS bundle identity, not the
+        // mutable short machine name. Two installed apps may share a name;
+        // their manifest ids are the stable isolation boundary.
+        .{ .name = manifest.id },
         native_sdk.app_dirs.currentPlatform(),
         native_sdk.debug.envFromMap(init.environ_map),
         .data,
@@ -186,6 +190,65 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // Model persistence is a build-time capability: without `"persist"`
+    // this branch (store, paths, binding) is not analyzed into the app. A
+    // replay launch never reads the live snapshot; its journal feeds the
+    // recorded restore result before the installing app-start event.
+    var persist_store_value: native_sdk.PersistStore = undefined;
+    var persist_coordinator_value: native_sdk.persist_store.Coordinator = undefined;
+    var persist_coordinator_started = false;
+    var persist_host_value: PersistHost = .{};
+    var persist_outcome_handle: native_sdk.ChannelHandle = .{};
+    var persist_restore_value: native_sdk.persist_store.RestoreResult = .{ .outcome = .none };
+    var persist_options: ?Adapter.PersistOptions = null;
+    if (comptime manifestDeclaresPersist()) {
+        const config = comptime manifestPersistConfig();
+        comptime Adapter.validatePersistRoutes(.{
+            .ok = config.restore.ok,
+            .none = config.restore.none,
+            .err = config.restore.err,
+        });
+        const replay = init.environ_map.get("NATIVE_SDK_SESSION_REPLAY") != null;
+        persist_store_value = native_sdk.PersistStore.init(init.io, std.heap.page_allocator, app_data_dir, .{
+            .schema_version = config.version,
+            .model_fingerprint = core.sidecar_model_fingerprint,
+            .snapshot_format = core.sidecar_snapshot_format,
+        });
+        persist_host_value.outcome_handle = &persist_outcome_handle;
+        if (!replay) {
+            persist_restore_value = persist_store_value.restore();
+            if (persist_restore_value.used_backup) {
+                std.log.warn("model persistence: primary snapshot unavailable or corrupt; restored snapshot.nsd.bak", .{});
+            }
+            try persist_coordinator_value.startWithOutcomeHandler(
+                persist_store_value,
+                manifestPersistDebounce(config),
+                .{ .context = &persist_host_value, .report_fn = PersistHost.reportOutcome },
+            );
+            persist_coordinator_started = true;
+            persist_host_value.coordinator = &persist_coordinator_value;
+        }
+        persist_options = .{
+            // Replay binds the same named service to a no-op host. The
+            // command remains on the wire for fingerprint parity but can
+            // never mutate the live snapshot.
+            .binding = persist_host_value.binding(),
+            .routes = .{
+                .ok = config.restore.ok,
+                .none = config.restore.none,
+                .err = config.restore.err,
+            },
+            .restore = .{
+                .outcome = persist_restore_value.outcome,
+                .bytes = persist_restore_value.bytes,
+                .migration_from_version = persist_restore_value.migration_from_version,
+            },
+            .outcome_handle = &persist_outcome_handle,
+        };
+    }
+    defer if (comptime manifestDeclaresPersist()) persist_restore_value.deinit(std.heap.page_allocator);
+    defer if (persist_coordinator_started) persist_coordinator_value.deinit();
+
     // The app struct (and any real model) is multi-MB: `create`
     // heap-allocates and constructs in place, so neither rides the stack.
     const app_state = try Adapter.create(std.heap.page_allocator, .{
@@ -197,6 +260,7 @@ pub fn main(init: std.process.Init) !void {
         .boot_images = boot_images_buffer[0..boot_image_count],
         .env_values = env_values_buffer[0..env_value_count],
         .host_calls = if (comptime services.enabled) service_transport.binding() else null,
+        .persist = persist_options,
     }, options);
     defer app_state.destroy();
 
@@ -222,6 +286,49 @@ fn siblingServiceHostPath(io: std.Io, buffer: []u8) []const u8 {
     const suffix = if (@import("builtin").os.tag == .windows) ".exe" else "";
     return std.fmt.bufPrint(buffer, "{s}/{s}_services{s}", .{ dir, manifest.name, suffix }) catch "";
 }
+
+const PersistHost = struct {
+    coordinator: ?*native_sdk.persist_store.Coordinator = null,
+    outcome_handle: ?*native_sdk.ChannelHandle = null,
+
+    fn binding(self: *PersistHost) native_sdk.HostCallBinding {
+        return .{ .context = self, .send_fn = send, .request_fn = request };
+    }
+
+    fn send(context: *anyopaque, name: []const u8, snapshot: []const u8) void {
+        const self: *PersistHost = @ptrCast(@alignCast(context));
+        const coordinator = self.coordinator orelse return;
+        if (std.mem.eql(u8, name, "core.persist.flush")) {
+            coordinator.flush();
+            return;
+        }
+        if (!std.mem.eql(u8, name, "core.persist")) return;
+        const outcome = coordinator.enqueue(snapshot);
+        if (outcome != .ok) reportOutcome(context, outcome);
+    }
+
+    fn reportOutcome(context: *anyopaque, outcome: native_sdk.persist_store.Outcome) void {
+        if (outcome == .ok) return;
+        const self: *PersistHost = @ptrCast(@alignCast(context));
+        const handle = self.outcome_handle orelse {
+            std.log.err("model persistence write failed before its result channel installed: {s}", .{@tagName(outcome)});
+            return;
+        };
+        switch (handle.post(@tagName(outcome))) {
+            .accepted => {},
+            .dropped_full, .dropped_oversized, .closed => {
+                std.log.err("model persistence write failed after its result channel closed: {s}", .{@tagName(outcome)});
+            },
+        }
+    }
+
+    fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
+        _ = context;
+        _ = name;
+        _ = key;
+        _ = payload;
+    }
+};
 
 /// The startup window title: the scene's first window title, else the
 /// manifest display name, else the app name.
@@ -287,6 +394,68 @@ fn manifestStringList(comptime m: anytype, comptime field: []const u8) []const [
         }
         return out;
     }
+}
+
+fn manifestDeclaresPersist() bool {
+    comptime {
+        for (manifestStringList(manifest, "capabilities")) |capability| {
+            if (std.mem.eql(u8, capability, "persist")) {
+                if (!@hasField(@TypeOf(manifest), "persist")) {
+                    @compileError("app.zon declares the persist capability but has no .persist = .{ .version, .restore = .{ .ok, .none, .err } } configuration");
+                }
+                return true;
+            }
+        }
+        if (@hasField(@TypeOf(manifest), "persist")) {
+            @compileError("app.zon configures .persist but does not declare \"persist\" in .capabilities");
+        }
+        return false;
+    }
+}
+
+fn ManifestPersistType() type {
+    if (@hasField(@TypeOf(manifest), "persist")) return @TypeOf(manifest.persist);
+    return void;
+}
+
+fn manifestPersistConfig() ManifestPersistType() {
+    comptime {
+        if (!manifestDeclaresPersist()) unreachable;
+        if (manifest.persist.version == 0 or manifest.persist.version > 9_007_199_254_740_991) {
+            @compileError("app.zon .persist.version must be a positive exact integer and monotonically increased for every Model shape change");
+        }
+        if (@hasField(@TypeOf(manifest.persist), "debounce_ms") and manifest.persist.debounce_ms > 60_000) {
+            @compileError("app.zon .persist.debounce_ms must be at most 60000");
+        }
+        validatePersistRoutes(manifest.persist.restore);
+        return manifest.persist;
+    }
+}
+
+fn manifestPersistDebounce(comptime config: anytype) u32 {
+    if (@hasField(@TypeOf(config), "debounce_ms")) return config.debounce_ms;
+    return 500;
+}
+
+fn validatePersistRoutes(comptime routes: anytype) void {
+    if (!persistRouteMatches(routes.ok, void)) {
+        @compileError("app.zon .persist.restore.ok must name a void Msg arm in src/core.ts");
+    }
+    if (!persistRouteMatches(routes.none, void)) {
+        @compileError("app.zon .persist.restore.none must name a void Msg arm in src/core.ts");
+    }
+    if (!persistRouteMatches(routes.err, []const u8)) {
+        @compileError("app.zon .persist.restore.err must name a one-Uint8Array-field Msg arm in src/core.ts");
+    }
+}
+
+fn persistRouteMatches(comptime name: []const u8, comptime Payload: type) bool {
+    const info = @typeInfo(core.Msg);
+    if (info != .@"union") return false;
+    inline for (info.@"union".fields) |field| {
+        if (std.mem.eql(u8, field.name, name)) return field.type == Payload;
+    }
+    return false;
 }
 
 fn manifestAllowedOrigins() []const []const u8 {

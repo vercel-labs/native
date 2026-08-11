@@ -19,6 +19,8 @@
 //!                        arms' declaration-order indices)
 //!   core.initialModel()  `*const Model`, or `InitResult{ model, cmd }`
 //!                        for a boot command
+//!   core.bootCommand()   the boot `Cmd` without reinitializing the core,
+//!                        required when `initialModel` returns `InitResult`
 //!   core.update(m, msg)  `*const Model`, or `UpdateResult{ model, cmd }`
 //!   core.commitModelRoot the frame-end commit walker
 //!   core.subscriptions   optional: `fn (*const Model) []const u8`
@@ -36,9 +38,10 @@
 //! command and subscription bytes are frame-arena resident and must be
 //! consumed before the reset. Wire records map onto the engine as:
 //!
-//!   persist     -> `fx.hostSend("core.persist", "")` — the host-
-//!                  snapshot verb is a named host service like any
-//!                  other; hosts that implement persistence bind it.
+//!   persist     -> `fx.hostSend("core.persist", core.persistenceSnapshot())`
+//!                  — no model bytes ride the Cmd wire; the host asks
+//!                  the already-committed core for canonical bytes while
+//!                  walking the command.
 //!   now         -> `fx.wallMs()` (the journaled clock read) captured
 //!                  during the walk; the named arm dispatches with that
 //!                  time SYNCHRONOUSLY — immediately after the issuing
@@ -751,15 +754,13 @@ pub fn TsCoreHost(comptime core: type) type {
 
         /// The effects half of `init`: perform the boot command and
         /// reconcile the initial subscriptions against the committed
-        /// boot model. The command bytes are re-derived by re-running
-        /// the PURE `initialModel` (they were frame-resident and did not
-        /// survive `boot`'s frame reset; the duplicate model value is
-        /// frame-transient garbage) — purity is the app-core subset's
-        /// own guarantee, so the bytes are identical by construction.
+        /// boot model. The generated shim re-materializes only the boot
+        /// command through `bootCommand`; calling `initialModel` here would
+        /// reinitialize the compiled core and discard a model restored
+        /// between `boot` and `performBoot`.
         pub fn performBoot(fx: *Fx) void {
             if (comptime init_returns_cmd) {
-                const again = core.initialModel();
-                finishCycle(fx, again.cmd, 0);
+                finishCycle(fx, core.bootCommand(), 0);
             } else {
                 finishCycle(fx, "", 0);
             }
@@ -768,6 +769,26 @@ pub fn TsCoreHost(comptime core: type) type {
         /// The committed model root (valid until the next dispatch).
         pub fn model() *const Model {
             return model_root;
+        }
+
+        /// Replace the committed core model from canonical snapshot bytes and
+        /// refresh the host mirror. Generated external cores expose the inverse
+        /// of `modelSnapshot`; hand-written test cores intentionally do not.
+        pub fn restoreSnapshot(snapshot: []const u8) void {
+            if (comptime !@hasDecl(core, "restoreModel")) {
+                @panic("ts core host: this core exposes no restoreModel entry - regenerate it with core ABI version 2");
+            } else {
+                model_root = core.restoreModel(snapshot);
+            }
+        }
+
+        /// Run the generated pure migration seam. The returned bytes are a
+        /// host-owned current-format snapshot and must be freed by `allocator`.
+        pub fn migrateSnapshot(snapshot: []const u8, from_version: u64, allocator: std.mem.Allocator) ?[]u8 {
+            if (comptime @hasDecl(core, "migrateModel")) {
+                return core.migrateModel(snapshot, from_version, allocator);
+            }
+            return null;
         }
 
         /// Configure the caches directory audio-cache derivation uses.
@@ -903,7 +924,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 at += 1;
                 switch (op) {
                     // persist [op]
-                    0x01 => fx.hostSend("core.persist", ""),
+                    0x01 => {
+                        const snapshot = if (comptime @hasDecl(core, "persistenceSnapshot")) core.persistenceSnapshot() else "";
+                        fx.hostSend("core.persist", snapshot);
+                    },
                     // now [op][msg_tag]
                     0x02 => {
                         const tag = takeByte(cmd, &at);

@@ -49,6 +49,21 @@ export function parse(payload: Uint8Array): Uint8Array {
   assert.match(contract.operations[0].source_hash, /^[0-9a-f]{64}$/);
 });
 
+test("service source hashes cover transitive shared modules", () => {
+  const check = (body: string) => checkFiles({
+    "core.ts": serviceCore,
+    "shared.ts": `export function helper(bytes: Uint8Array): Uint8Array { ${body} }`,
+    "services/feeds.ts": `import { helper } from "../shared.ts"; export function parse(bytes: Uint8Array): Uint8Array { return helper(bytes); }`,
+  });
+  const before = check("return bytes;");
+  const after = check("return bytes.slice(0, 1);");
+  assert.equal(before.ok, true, JSON.stringify(before.diagnostics));
+  assert.equal(after.ok, true, JSON.stringify(after.diagnostics));
+  const beforeHash = JSON.parse(before.servicesContract!).operations[0].source_hash;
+  const afterHash = JSON.parse(after.servicesContract!).operations[0].source_hash;
+  assert.notEqual(beforeHash, afterHash);
+});
+
 test("the same ambient module stays refused when it is moved into the core class", () => {
   const result = checkFiles({
     "core.ts": `
@@ -121,6 +136,13 @@ test("NS1067 validates operation signatures, throws, and core service call names
     "services/feeds.ts": `export function parse(bytes: Uint8Array): Uint8Array { throw new Error("bad"); }`,
   });
   assert.ok(badThrow.diagnostics.some((d) => d.id === "NS1067"), JSON.stringify(badThrow.diagnostics));
+
+  const badSharedThrow = checkFiles({
+    "core.ts": serviceCore,
+    "shared.ts": `export function fail(): Uint8Array { throw 1; }`,
+    "services/feeds.ts": `import { fail } from "../shared.ts"; export function parse(): Uint8Array { return fail(); }`,
+  });
+  assert.ok(badSharedThrow.diagnostics.some((d) => d.id === "NS1067"), JSON.stringify(badSharedThrow.diagnostics));
 
   const taggedThrow = checkFiles({
     "core.ts": serviceCore,
@@ -197,6 +219,13 @@ test("NS1067 validates operation signatures, throws, and core service call names
     "services/feeds.ts": `export function parse(bytes: Uint8Array): Uint8Array { return bytes; }`,
   });
   assert.equal(knownHost.ok, true, JSON.stringify(knownHost.diagnostics));
+
+  const dollarExport = checkFiles({
+    "core.ts": serviceCore.replace("feeds.parse", "feeds.$parse"),
+    "services/feeds.ts": `export function $parse(bytes: Uint8Array): Uint8Array { return bytes; }`,
+  });
+  assert.equal(dollarExport.ok, true, JSON.stringify(dollarExport.diagnostics));
+  assert.equal(JSON.parse(dollarExport.servicesContract!).operations[0].name, "feeds.$parse");
 });
 
 test("service byte aliases resolve through legal shared modules", () => {

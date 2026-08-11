@@ -340,6 +340,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Capture <code>microphone</code> or <code>system</code> audio as bounded, timestamped, interleaved signed-16 LE PCM chunks. The stream reports <code>started</code>, <code>data</code>, <code>failed</code>, <code>stopped</code>, and <code>rejected</code>, with observable drop counters</td>
     </tr>
     <tr>
+      <td><code>Cmd.persist()</code></td>
+      <td>Snapshot the just-committed Model through the engine-owned, capability-gated atomic store; restore arrives through the manifest's configured boot Msg route — see <a href="/docs/persistence">Model Persistence</a></td>
+    </tr>
+    <tr>
       <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
       <td>App-defined host commands by literal name: fire-and-forget, or routed with exactly one result Msg back</td>
     </tr>
@@ -350,53 +354,11 @@ The runtime interprets the command after the model commits and dispatches any re
   </tbody>
 </table>
 
-Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires and a streaming fetch's terminal status, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, buffered named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. Live `Cmd.spawn` and streaming-fetch keys reject a duplicate (`err` gets `rejected`) so two sources can never splice into one stream; cancel either first, and that cancel is loud (`err` gets `cancelled`). A streaming fetch whose line is cut or dropped also ends loudly with `err: truncated`, never a misleading successful status. Every `err` arm receives a machine-readable reason, so failure is never silence. Persistence today is `Cmd.writeFile` + a boot-time `Cmd.readFile` — the pattern every real app uses.
+Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires and a streaming fetch's terminal status, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, buffered named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. Live `Cmd.spawn` and streaming-fetch keys reject a duplicate (`err` gets `rejected`) so two sources can never splice into one stream; cancel either first, and that cancel is loud (`err` gets `cancelled`). A streaming fetch whose line is cut or dropped also ends loudly with `err: truncated`, never a misleading successful status. Every routed `err` arm receives a machine-readable reason, so failure is never silence.
 
 Platform state stays on the same effect boundary. `Cmd.openExternalUrl(url)` enforces [`security.navigation.external_links`](/docs/security#external-links) before entering the browser; `Cmd.revealPath(path)` uses the desktop file manager. Credential operations take byte `service` and `account` identifiers plus the standard `{ key?, ok, err }` route: set/delete return empty bytes on `ok`, get returns the secret, and a missing item routes `not_found`. `Cmd.formatLocalTime(timestampMs, "date" | "time" | "datetime", route)` returns localized UTF-8 bytes using the current host locale and time zone. That formatting is deliberately a Cmd—not a pure helper—so session recording captures the observed text and replay never re-reads ambient locale or timezone state.
 
-For durable packaged-app paths, request the framework-provided app data directory through `envMsgs` and join filenames below it. The runner synthesizes `NATIVE_SDK_APP_DATA_DIR` from the platform convention (`~/Library/Application Support/<app>` on macOS and `%LOCALAPPDATA%\<app>\Data` on Windows), then dispatches it as the same journaled one-`Uint8Array`-field message as an ambient value. This keeps a Finder- or Explorer-launched app independent of its process working directory.
-
-The debounced-autosave shape, in full — edits re-arm a one-shot; one write lands after the pause:
-
-```ts:src/core.ts
-import { Cmd, asciiBytes } from "@native-sdk/core";
-
-export interface Model {
-  readonly draft: Uint8Array;
-  readonly dirty: boolean;
-}
-
-export type Msg =
-  | { readonly kind: "draft_edit"; readonly text: Uint8Array }
-  | { readonly kind: "save_now"; readonly at: number }
-  | { readonly kind: "saved" }
-  | { readonly kind: "save_failed"; readonly reason: Uint8Array };
-
-export const viewUnbound = ["save_now", "saved", "save_failed", "dirty"] as const;
-
-export function initialModel(): Model {
-  return { draft: new Uint8Array(0), dirty: false };
-}
-
-export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
-  switch (msg.kind) {
-    case "draft_edit":
-      return [
-        { ...model, draft: msg.text, dirty: true },
-        Cmd.delay("autosave", 800, "save_now"),
-      ];
-    case "save_now":
-      return [
-        model,
-        Cmd.writeFile(asciiBytes("draft.bin"), model.draft, { key: "save", ok: "saved", err: "save_failed" }),
-      ];
-    case "saved":
-      return { ...model, dirty: false };
-    case "save_failed":
-      return model;
-  }
-}
-```
+Durable in-memory state uses `Cmd.persist()`: declare the `persist` capability, configure the boot routes and schema version, then return the command beside the committed model. The engine owns canonical serialization, trailing-edge coalescing, atomic app-data placement, backup recovery, migration, and journal/replay. See [Model Persistence](/docs/persistence) for the complete setup. `Cmd.readFile` and `Cmd.writeFile` remain for user-visible files, exports, and blobs; when using them, request the framework-provided app-data directory through `envMsgs` instead of depending on process cwd.
 
 External sources — sockets, file watchers, native worker threads — reach `update` through a channel. `Cmd.channelOpen(key, { event })` opens a long-lived stream under an app-chosen numeric key, and every event dispatches the one `event` arm as a five-field record; `state` must be a named string-literal-union alias carrying exactly the three members — a narrower union would silently drop states the host emits, so the build refuses it. Posting is not a TS verb: compiled cores are single-threaded by design, so the posting handle lives on the native side (`Effects.channelHandle(key)`), where embedders and platform-services extensions post bytes from their own threads. Back-pressure is honest — posts the native handle refused count into `droppedPending`/`droppedTotal` on the next delivered event, never silence — and a duplicate open on a live key dispatches `rejected`. `Cmd.channelClose(key)` ends the stream: staged posts flush, exactly one `closed` event carries the final totals, and the key frees.
 

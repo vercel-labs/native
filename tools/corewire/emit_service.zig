@@ -187,9 +187,9 @@ test "service projection derives host dispatch and registry from one contract" {
             .source_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
         .{
-            .name = "feeds.refresh",
+            .name = "feeds.$refresh",
             .module = "src/services/feeds.ts",
-            .@"export" = "refresh",
+            .@"export" = "$refresh",
             .payload = .none,
             .result = .bytes,
             .source_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -207,6 +207,7 @@ test "service projection derives host dispatch and registry from one contract" {
     defer std.testing.allocator.free(host);
     try std.testing.expect(std.mem.indexOf(u8, host, "serviceOp0(payload)") != null);
     try std.testing.expect(std.mem.indexOf(u8, host, "serviceOp1()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host, "import { $refresh as serviceOp1 }") != null);
     try std.testing.expect(std.mem.indexOf(u8, host, "PROTOCOL_VERSION = 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, host, "CONTRACT_FINGERPRINT = new Uint8Array([") != null);
 

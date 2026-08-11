@@ -63,11 +63,12 @@ test("a small core's contract carries types, arms, slots, and channels", () => {
   const doc = contractOf(smallCore);
   assert.equal(doc.format, 1);
   assert.equal(doc.wire_version, 3);
-  assert.equal(doc.abi_version, 1);
+  assert.equal(doc.abi_version, 2);
   assert.equal(doc.entry, "src/core.ts");
   assert.equal(doc.model, "Model");
   assert.match(doc.source_hash as string, /^[0-9a-f]{16}$/);
   assert.match(doc.build_id as string, /^[0-9a-f]{16}$/);
+  assert.match(doc.model_fingerprint as string, /^[0-9a-f]{16}$/);
 
   const types = doc.types as { structs: any[]; enums: any[]; unions: any[] };
   // Reach order: Model first (DFS through its fields), then arm payloads.
@@ -120,6 +121,9 @@ test("a small core's contract carries types, arms, slots, and channels", () => {
   assert.equal(abi.prefix, "nsc_core_");
   assert.ok(!abi.exports.includes("command_msg"));
   assert.ok(abi.exports.includes("drop_msg"));
+  assert.ok(abi.exports.includes("model_snapshot"));
+  assert.ok(abi.exports.includes("persist_snapshot"));
+  assert.ok(abi.exports.includes("restore_model"));
 });
 
 test("multi-field arm payloads table under the synthesized record name", () => {
@@ -229,6 +233,59 @@ test("re-runs reproduce the identity fields exactly, and edits move them", () =>
   assert.equal(a.build_id, b.build_id);
   const edited = contractOf(smallCore.replace("APP_TITLE", "APP_NAME"));
   assert.notEqual(a.build_id, edited.build_id);
+  assert.equal(a.model_fingerprint, edited.model_fingerprint, "channel-only edits do not invalidate snapshots");
+  const reshaped = contractOf(smallCore.replaceAll("nextId", "nextCounter"));
+  assert.notEqual(a.model_fingerprint, reshaped.model_fingerprint, "Model shape edits move the persistence fence");
+});
+
+test("a migration hook is an attested entry seam, not a model helper", () => {
+  const doc = contractOf(`${smallCore}
+export function migrate(snapshot: Uint8Array, fromVersion: number): Model {
+  return { turns: [], nextId: 1, title: asciiBytes("migrated") };
+}
+`);
+  assert.equal(doc.has_migrate, true);
+  assert.equal((doc.model_helpers as any[]).some((helper) => helper.name === "migrate"), false);
+  assert.ok((doc.abi as { exports: string[] }).exports.includes("migrate_model"));
+});
+
+test("persistence schema state warns until a Model shape change advances the manifest version", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-persist-schema-"));
+  try {
+    const entry = path.join(dir, "core.ts");
+    const state = path.join(dir, ".native", "cache", "persist-schema.json");
+    const source = (extra: boolean) => `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number;${extra ? " readonly enabled: boolean;" : ""} }
+export type Msg = { readonly kind: "add" } | { readonly kind: "noop" };
+export function initialModel(): Model { return { count: 0${extra ? ", enabled: true" : ""} }; }
+export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "add": return [{ ...model, count: model.count + 1 }, Cmd.persist()];
+    case "noop": return [model, Cmd.none];
+  }
+}
+`;
+    const run = (body: string, version: number) => {
+      fs.writeFileSync(entry, body);
+      return checkFile(entry, {
+        capabilities: ["persist"],
+        persistVersion: version,
+        persistStatePath: state,
+      });
+    };
+
+    assert.equal(run(source(false), 1).warnings.some((d) => d.id === "NS1068"), false);
+    const stale = run(source(true), 1).warnings.find((d) => d.id === "NS1068");
+    assert.ok(stale);
+    assert.match(stale.message, /stayed at 1/);
+    assert.equal(run(source(true), 2).warnings.some((d) => d.id === "NS1068"), false);
+    const reused = run(source(false), 1).warnings.find((d) => d.id === "NS1068");
+    assert.ok(reused);
+    assert.match(reused.message, /moved backward from 2 to 1/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("wyhash matches the reference test vectors", () => {

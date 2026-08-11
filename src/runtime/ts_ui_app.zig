@@ -68,7 +68,9 @@
 const std = @import("std");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
+const runtime_core = @import("core.zig");
 const runtime_effects = @import("effects.zig");
+const persist_store = @import("persist_store.zig");
 const ui_app = @import("ui_app.zig");
 const ts_core_host = @import("ts_core_host.zig");
 
@@ -84,6 +86,10 @@ pub fn TsUiApp(comptime core: type) type {
         pub const Options = App.Options;
         pub const Effects = App.Effects;
         pub const Ui = App.Ui;
+
+        /// Internal keyed-channel namespace for persistence write failures
+        /// ("TSPR"). It never shares an app-authored TS bridge index.
+        const persist_outcome_channel_key: u64 = 0x5453_5052_0000_0001;
 
         /// One boot-registered image: the wiring reads the encoded bytes
         /// (app.zon's `.assets.images` paths) and the adapter registers
@@ -107,6 +113,125 @@ pub fn TsUiApp(comptime core: type) type {
             msg: []const u8,
             value: []const u8,
         };
+
+        pub const PersistRoutes = struct {
+            ok: []const u8,
+            none: []const u8,
+            err: []const u8,
+        };
+
+        pub const PersistRestore = struct {
+            outcome: persist_store.Outcome,
+            bytes: []const u8 = "",
+            migration_from_version: ?u64 = null,
+        };
+
+        pub const PersistOptions = struct {
+            binding: runtime_effects.HostCallBinding,
+            routes: PersistRoutes,
+            restore: PersistRestore,
+            /// Runner-owned slot populated during install. The store worker
+            /// posts failed writes through it, gaining ordinary effect wake,
+            /// ordering, journaling, and replay semantics.
+            outcome_handle: ?*runtime_effects.ChannelHandle = null,
+        };
+
+        /// One effects host binding must carry both app services and the
+        /// framework-owned persistence verbs when an app enables both. The
+        /// reserved persistence names route to that binding; every other
+        /// command and the worker completion lifecycle stay with the app
+        /// service carrier.
+        const HostCallMux = struct {
+            primary: runtime_effects.HostCallBinding,
+            persist: runtime_effects.HostCallBinding,
+
+            fn binding(self: *HostCallMux) runtime_effects.HostCallBinding {
+                return .{
+                    .context = self,
+                    .send_fn = send,
+                    .request_fn = request,
+                    .cancel_fn = cancel,
+                    .reject_duplicate_keys = self.primary.reject_duplicate_keys,
+                    .poll_fn = poll,
+                    .pending_fn = pending,
+                    .bind_services_fn = bindServices,
+                    .shutdown_fn = shutdown,
+                };
+            }
+
+            fn persistenceName(name: []const u8) bool {
+                return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
+            }
+
+            fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const target = if (persistenceName(name)) self.persist else self.primary;
+                target.send_fn(target.context, name, payload);
+            }
+
+            fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const target = if (persistenceName(name)) self.persist else self.primary;
+                target.request_fn(target.context, name, key, payload);
+            }
+
+            fn cancel(context: *anyopaque, key: u64) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                if (self.primary.cancel_fn) |cancel_fn| cancel_fn(self.primary.context, key);
+            }
+
+            fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const poll_fn = self.primary.poll_fn orelse return null;
+                return poll_fn(self.primary.context);
+            }
+
+            fn pending(context: *anyopaque) bool {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                const pending_fn = self.primary.pending_fn orelse return false;
+                return pending_fn(self.primary.context);
+            }
+
+            fn bindServices(context: *anyopaque, services: *const platform.PlatformServices) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                if (self.primary.bind_services_fn) |bind_fn| bind_fn(self.primary.context, services);
+                if (self.persist.bind_services_fn) |bind_fn| bind_fn(self.persist.context, services);
+            }
+
+            fn shutdown(context: *anyopaque) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                if (self.primary.shutdown_fn) |shutdown_fn| shutdown_fn(self.primary.context);
+                if (self.persist.shutdown_fn) |shutdown_fn| shutdown_fn(self.persist.context);
+            }
+        };
+
+        /// Build-time manifest/wire fence for the three persistence routes.
+        /// The generated runner calls this with app.zon's comptime strings so
+        /// a typo or payload mismatch fails during `native build`, before a
+        /// first boot can reach the dynamic dispatch path below.
+        pub fn validatePersistRoutes(comptime routes: PersistRoutes) void {
+            validatePersistRoute(routes.ok, void, "ok");
+            validatePersistRoute(routes.none, void, "none");
+            validatePersistRoute(routes.err, []const u8, "err");
+        }
+
+        fn validatePersistRoute(comptime route: []const u8, comptime Payload: type, comptime role: []const u8) void {
+            inline for (@typeInfo(Msg).@"union".fields) |arm| {
+                if (comptime std.mem.eql(u8, arm.name, route)) {
+                    if (arm.type != Payload) {
+                        @compileError(std.fmt.comptimePrint(
+                            "persistence restore route `{s}` ({s}) has the wrong Msg payload; ok/none must be void and err must carry one Uint8Array field",
+                            .{ route, role },
+                        ));
+                    }
+                    return;
+                }
+            }
+            @compileError(std.fmt.comptimePrint(
+                "persistence restore route `{s}` ({s}) names no Msg arm",
+                .{ route, role },
+            ));
+        }
 
         /// Adapter-owned configuration — the knobs that exist because
         /// the core is TypeScript, kept separate from `App.Options` so
@@ -137,6 +262,7 @@ pub fn TsUiApp(comptime core: type) type {
             /// Generated service registry/carrier for Cmd.host/request. Null
             /// preserves the existing embedding-host behavior.
             host_calls: ?runtime_effects.HostCallBinding = null,
+            persist: ?PersistOptions = null,
         };
 
         /// Construct the UiApp over the committed TS model. `options`
@@ -172,6 +298,10 @@ pub fn TsUiApp(comptime core: type) type {
         var boot_images_store: []const BootImage = &.{};
         var env_values_store: []const EnvValue = &.{};
         var host_calls_store: ?runtime_effects.HostCallBinding = null;
+        var persist_options_store: ?PersistOptions = null;
+        var host_call_mux_store: ?HostCallMux = null;
+        var lifecycle_store: ?*const fn (event: runtime_core.LifecycleEvent) ?Msg = null;
+        var lifecycle_flush_after_update = false;
 
         fn applyCoreOptions(core_options: CoreOptions) void {
             Host.setAudioCacheDir(core_options.audio_cache_dir);
@@ -179,8 +309,16 @@ pub fn TsUiApp(comptime core: type) type {
             boot_images_store = core_options.boot_images;
             env_values_store = core_options.env_values;
             host_calls_store = core_options.host_calls;
+            persist_options_store = core_options.persist;
+            host_call_mux_store = if (core_options.host_calls != null and core_options.persist != null) .{
+                .primary = core_options.host_calls.?,
+                .persist = core_options.persist.?.binding,
+            } else null;
             if (core_options.env_values.len > 0 and comptime !@hasDecl(core, "envMsgs")) {
                 @panic("TsUiApp received env_values but the core exports no envMsgs channel - declare `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` in core.ts");
+            }
+            if (core_options.persist != null and comptime !@hasDecl(core, "restoreModel")) {
+                @panic("TsUiApp received persistence wiring but the generated core exposes no restoreModel entry - rebuild with core ABI version 2");
             }
         }
 
@@ -195,6 +333,9 @@ pub fn TsUiApp(comptime core: type) type {
                 @panic("TsUiApp does not support Options.sync: a committed model cannot be mutated in place - echo widget state through on-change/on-scroll Msgs instead");
             }
             var stamped = options;
+            lifecycle_store = stamped.on_lifecycle;
+            lifecycle_flush_after_update = false;
+            stamped.on_lifecycle = lifecycleAdapter;
             stamped.init_fx = initFx;
             stamped.update_fx = updateFx;
             // A TypeScript core can select a built-in pack from ordinary
@@ -264,6 +405,26 @@ pub fn TsUiApp(comptime core: type) type {
                 stamped.on_chrome = chromeMsgAdapter;
             }
             return stamped;
+        }
+
+        fn lifecycleAdapter(event: runtime_core.LifecycleEvent) ?Msg {
+            const mapped = if (lifecycle_store) |map| map(event) else null;
+            if (event != .deactivate and event != .stop) return mapped;
+            if (mapped != null) {
+                // UiApp dispatches the mapped Msg after this callback returns.
+                // Delay the flush until updateFx has committed that cycle, so
+                // a Cmd.persist issued by the lifecycle update is included.
+                lifecycle_flush_after_update = true;
+            } else {
+                flushPersistence();
+            }
+            return mapped;
+        }
+
+        fn flushPersistence() void {
+            if (persist_options_store) |persist| {
+                persist.binding.send_fn(persist.binding.context, "core.persist.flush", "");
+            }
         }
 
         fn themePackAdapter(model: *const Model) canvas.ThemePack {
@@ -496,16 +657,111 @@ pub fn TsUiApp(comptime core: type) type {
         /// the launch environment overrides as ordinary journaled Msgs,
         /// then refresh the app-held root.
         fn initFx(model: *Model, fx: *Effects) void {
-            if (host_calls_store) |binding| fx.bindHostCalls(binding);
+            if (host_call_mux_store) |*mux| {
+                fx.bindHostCalls(mux.binding());
+            } else if (host_calls_store) |binding| {
+                fx.bindHostCalls(binding);
+            } else if (persist_options_store) |persist| {
+                fx.bindHostCalls(persist.binding);
+            }
             for (boot_images_store) |image| {
                 // Registration is synchronous; a failed decode leaves the
                 // views on their fallback (avatar initials) — a bad asset
                 // never breaks presentation (the Zig apps' convention).
                 _ = fx.registerImageBytes(image.id, image.bytes) catch continue;
             }
+            if (persist_options_store) |persist| {
+                if (persist.outcome_handle) |handle| {
+                    handle.* = fx.openChannel(.{
+                        .key = persist_outcome_channel_key,
+                        .on_event = persistOutcomeMsg,
+                        .max_pending = 8,
+                    });
+                }
+            }
+            const persist_outcome = preparePersistRestore(fx);
             Host.performBoot(fx);
+            if (persist_outcome) |outcome| dispatchPersistOutcome(fx, outcome);
             dispatchEnvValues(fx);
             model.* = Host.model().*;
+        }
+
+        /// Resolve the boot snapshot entirely at the effect boundary. Live
+        /// launches journal the runner-provided result; replay consumes the
+        /// recorded result and never consults the current app-data directory.
+        fn preparePersistRestore(fx: *Effects) ?persist_store.Outcome {
+            const persist = persist_options_store orelse return null;
+            const restore = if (fx.replay) fx.takeReplayPersist() orelse return null else blk: {
+                if (persist.restore.migration_from_version) |from_version| {
+                    if (Host.migrateSnapshot(persist.restore.bytes, from_version, std.heap.page_allocator)) |migrated| {
+                        defer std.heap.page_allocator.free(migrated);
+                        if (migrated.len > persist_store.max_snapshot_bytes) {
+                            fx.journalPersistRestore(.rejected, "");
+                            return .rejected;
+                        }
+                        Host.restoreSnapshot(migrated);
+                        persist.binding.send_fn(persist.binding.context, "core.persist", migrated);
+                        fx.journalPersistRestore(.ok, migrated);
+                        return .ok;
+                    }
+                    fx.journalPersistRestore(.migrate_failed, "");
+                    return .migrate_failed;
+                }
+                fx.journalPersistRestore(persist.restore.outcome, persist.restore.bytes);
+                break :blk runtime_effects.ReplayPersistEntry{ .outcome = persist.restore.outcome, .bytes = persist.restore.bytes };
+            };
+            if (restore.outcome == .ok) Host.restoreSnapshot(restore.bytes);
+            return restore.outcome;
+        }
+
+        fn dispatchPersistOutcome(fx: *Effects, outcome: persist_store.Outcome) void {
+            const routes = persist_options_store.?.routes;
+            switch (outcome) {
+                .ok => dispatchPersistVoid(fx, routes.ok),
+                .none => dispatchPersistVoid(fx, routes.none),
+                .corrupt, .version_unknown, .migrate_failed, .io_failed, .rejected => dispatchPersistError(fx, routes.err, @tagName(outcome)),
+            }
+        }
+
+        fn persistOutcomeMsg(event: runtime_effects.EffectChannelEvent) Msg {
+            const reason: []const u8 = switch (event.kind) {
+                .data => event.bytes,
+                .rejected => "rejected",
+                .closed => "io_failed",
+            };
+            const route = persist_options_store.?.routes.err;
+            inline for (@typeInfo(Msg).@"union".fields) |arm| {
+                if (comptime arm.type == []const u8) {
+                    if (std.mem.eql(u8, arm.name, route)) return @unionInit(Msg, arm.name, reason);
+                }
+            }
+            @panic("TsUiApp persistence err route does not name a one-Uint8Array-field Msg arm");
+        }
+
+        fn dispatchPersistVoid(fx: *Effects, route: []const u8) void {
+            inline for (@typeInfo(Msg).@"union".fields) |arm| {
+                if (comptime arm.type == void) {
+                    if (std.mem.eql(u8, arm.name, route)) {
+                        Host.dispatch(fx, @unionInit(Msg, arm.name, {}));
+                        return;
+                    }
+                }
+            }
+            @panic("TsUiApp persistence route does not name a void Msg arm");
+        }
+
+        fn dispatchPersistError(fx: *Effects, route: []const u8, reason: []const u8) void {
+            inline for (@typeInfo(Msg).@"union".fields) |arm| {
+                if (comptime arm.type == []const u8) {
+                    if (std.mem.eql(u8, arm.name, route)) {
+                        const copy = core.rt.frameAlloc(u8, reason.len);
+                        @memcpy(copy, reason);
+                        Host.dispatch(fx, @unionInit(Msg, arm.name, copy));
+                        return;
+                    }
+                }
+            }
+            @panic("TsUiApp persistence err route does not name a one-Uint8Array-field Msg arm");
         }
 
         /// The `envMsgs` channel's delivery: each launch-resolved value
@@ -855,6 +1111,10 @@ pub fn TsUiApp(comptime core: type) type {
         fn updateFx(model: *Model, msg: Msg, fx: *Effects) void {
             Host.dispatch(fx, msg);
             model.* = Host.model().*;
+            if (lifecycle_flush_after_update) {
+                lifecycle_flush_after_update = false;
+                flushPersistence();
+            }
         }
     };
 }

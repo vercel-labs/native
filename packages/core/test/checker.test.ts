@@ -19,6 +19,57 @@ test("clean core passes the checker", () => {
   assert.deepEqual(ruleIds(checkOnly(core)), []);
 });
 
+test("NS1033 validates app.zon persistence restore routes against Msg", () => {
+  const source = `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg =
+  | { readonly kind: "save" }
+  | { readonly kind: "restored" }
+  | { readonly kind: "fresh_boot" }
+  | { readonly kind: "restore_failed"; readonly reason: Uint8Array }
+  | { readonly kind: "wrong_ok"; readonly reason: Uint8Array }
+  | { readonly kind: "wrong_err" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "save": return [model, Cmd.persist()];
+    case "restored":
+    case "fresh_boot":
+    case "restore_failed":
+    case "wrong_ok":
+    case "wrong_err": return model;
+  }
+}
+`;
+  const options = {
+    capabilities: ["persist"],
+    persistRoutes: { ok: "restored", none: "fresh_boot", err: "restore_failed" },
+  } as const;
+  assert.equal(check(source, options).ok, true);
+
+  const missing = check(source, {
+    ...options,
+    persistRoutes: { ...options.persistRoutes, none: "typo" },
+  });
+  assert.equal(missing.ok, false);
+  assert.ok(missing.diagnostics.some((d) => d.id === "NS1033" && d.message.includes("names no Msg arm")));
+
+  const wrongOk = check(source, {
+    ...options,
+    persistRoutes: { ...options.persistRoutes, ok: "wrong_ok" },
+  });
+  assert.equal(wrongOk.ok, false);
+  assert.ok(wrongOk.diagnostics.some((d) => d.id === "NS1033" && d.message.includes("wrong Msg payload")));
+
+  const wrongErr = check(source, {
+    ...options,
+    persistRoutes: { ...options.persistRoutes, err: "wrong_err" },
+  });
+  assert.equal(wrongErr.ok, false);
+  assert.ok(wrongErr.diagnostics.some((d) => d.id === "NS1033" && d.message.includes("wrong Msg payload")));
+});
+
 test("NS1038 reserves generated contract metadata names", () => {
   const moduleName = checkOnly(`${core}\nexport const type_origins = 1;`);
   assert.ok(ruleIds(moduleName).includes("NS1038"), `got ${ruleIds(moduleName)}`);
@@ -886,6 +937,28 @@ export function themePack(): ThemePack { return "house"; }
 export function update(model: Model, msg: Msg): Model { return model; }
 `);
   assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+});
+
+test("NS1033 validates migrate hooks exported through an export list", () => {
+  const valid = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function migrate(snapshot: Uint8Array, fromVersion: number): Model { return { count: fromVersion }; }
+export { migrate };
+`);
+  assert.ok(!ruleIds(valid).includes("NS1033"), `got ${ruleIds(valid)}`);
+
+  const malformed = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function migrate(snapshot: string, fromVersion: number): Model { return { count: fromVersion }; }
+export { migrate };
+`);
+  assert.ok(ruleIds(malformed).includes("NS1033"), `got ${ruleIds(malformed)}`);
 });
 
 test("NS1033 statusItem is the exact model-derived presentation and menu helper", () => {

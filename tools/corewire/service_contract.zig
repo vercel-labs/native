@@ -109,8 +109,8 @@ fn nameMatchesDeclaration(op: Operation) bool {
 }
 
 fn identifier(value: []const u8) bool {
-    if (value.len == 0 or !(std.ascii.isAlphabetic(value[0]) or value[0] == '_')) return false;
-    for (value[1..]) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '_')) return false;
+    if (value.len == 0 or !(std.ascii.isAlphabetic(value[0]) or value[0] == '_' or value[0] == '$')) return false;
+    for (value[1..]) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '$')) return false;
     return true;
 }
 
@@ -131,6 +131,14 @@ test "service contract validates the byte seam and authority attestation" {
     const contract = try read(arena, good, &writer);
     try std.testing.expectEqual(@as(usize, 1), contract.operations.len);
     try std.testing.expectEqualStrings("feeds.parse", contract.operations[0].name);
+
+    const dollar =
+        \\{"format":1,"protocol_version":1,"compiler_version":"0.0.22","deterministic":false,"operations":[{"name":"feeds.$parse","module":"src/services/feeds.ts","export":"$parse","payload":"bytes","result":"bytes","source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+    ;
+    var dollar_diagnostics: [512]u8 = undefined;
+    var dollar_writer = std.Io.Writer.fixed(&dollar_diagnostics);
+    const dollar_contract = try read(arena, dollar, &dollar_writer);
+    try std.testing.expectEqualStrings("$parse", dollar_contract.operations[0].@"export");
 
     const bad =
         \\{"format":1,"protocol_version":1,"compiler_version":"0.0.22","deterministic":true,"operations":[{"name":"feeds.parse","module":"src/services/feeds.ts","export":"parse","payload":"bytes","result":"bytes","source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
