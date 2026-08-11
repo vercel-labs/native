@@ -1,0 +1,13 @@
+# Git for Windows installs with core.autocrlf=true, so without this file a
+# Windows checkout smudges CRLF into every text file. This repository reads
+# its own sources byte-exactly in more places than most — the external-core
+# stager's staged tree, the compiled-core batteries that pin staged output
+# byte-identical to the transpiler lane, the pinned goldens, and the POSIX
+# shell the gate and CI scripts run under — so a CRLF working tree does not
+# fail loudly, it changes build output. Normalize to LF in the repository
+# and on checkout, on every platform.
+* text=auto eol=lf
+
+# Vendored third-party sources keep their upstream bytes verbatim; the
+# WebView2 headers Microsoft ships are CRLF and are committed that way.
+third_party/** -text
