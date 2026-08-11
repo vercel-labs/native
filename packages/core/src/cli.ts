@@ -4,7 +4,7 @@
 // this CLI is the frontend — the subset's teaching surface and the
 // contract source.
 //
-//   native-core <entry.ts> [--contract <out.contract.json>] [--contract-entry <spelling>]
+//   native-core <entry.ts> [--contract <out.contract.json>] [--services-contract <services.contract.json>]
 //
 // --contract writes the contract sidecar (core.contract.json, schema
 // format 1) emitted directly from the checked program — the document the
@@ -22,10 +22,13 @@ function main(argv: string[]): number {
   const args = argv.slice(2);
   let entry: string | null = null;
   let contractOut: string | null = null;
+  let servicesContractOut: string | null = null;
   let contractEntry: string | null = null;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--contract") {
       contractOut = args[++i] ?? null;
+    } else if (args[i] === "--services-contract") {
+      servicesContractOut = args[++i] ?? null;
     } else if (args[i] === "--contract-entry") {
       contractEntry = args[++i] ?? null;
     } else if (args[i] === "-o" || args[i] === "--out") {
@@ -42,7 +45,7 @@ function main(argv: string[]): number {
   }
   if (!entry) {
     console.error(
-      "usage: native-core <entry.ts> [--contract <out.contract.json>] [--contract-entry <spelling>]",
+      "usage: native-core <entry.ts> [--contract <out.contract.json>] [--services-contract <services.contract.json>] [--contract-entry <spelling>]",
     );
     return 2;
   }
@@ -50,6 +53,7 @@ function main(argv: string[]): number {
     // The document's entry spelling defaults to the argument's own,
     // POSIX separators (the sidecar/facade contract is platform-free).
     contractEntry: contractOut !== null ? (contractEntry ?? entry.split("\\").join("/")) : undefined,
+    servicesContract: servicesContractOut !== null,
   };
   const result = checkFile(entry, options);
   for (const e of result.typeErrors) console.error(e);
@@ -63,6 +67,13 @@ function main(argv: string[]): number {
       return 1;
     }
     fs.writeFileSync(contractOut, result.contract);
+  }
+  if (servicesContractOut !== null) {
+    if (result.servicesContract === null) {
+      console.error("the app has no src/services/**/*.ts modules, so there is no service contract to emit");
+      return 1;
+    }
+    fs.writeFileSync(servicesContractOut, result.servicesContract);
   }
   return 0;
 }

@@ -68,6 +68,7 @@
 const std = @import("std");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
+const runtime_effects = @import("effects.zig");
 const ui_app = @import("ui_app.zig");
 const ts_core_host = @import("ts_core_host.zig");
 
@@ -133,6 +134,9 @@ pub fn TsUiApp(comptime core: type) type {
             /// meaningful for cores exporting `envMsgs`. The slices must
             /// outlive install.
             env_values: []const EnvValue = &.{},
+            /// Generated service registry/carrier for Cmd.host/request. Null
+            /// preserves the existing embedding-host behavior.
+            host_calls: ?runtime_effects.HostCallBinding = null,
         };
 
         /// Construct the UiApp over the committed TS model. `options`
@@ -167,12 +171,14 @@ pub fn TsUiApp(comptime core: type) type {
         /// installing frame.
         var boot_images_store: []const BootImage = &.{};
         var env_values_store: []const EnvValue = &.{};
+        var host_calls_store: ?runtime_effects.HostCallBinding = null;
 
         fn applyCoreOptions(core_options: CoreOptions) void {
             Host.setAudioCacheDir(core_options.audio_cache_dir);
             Host.setImageCacheDir(core_options.image_cache_dir);
             boot_images_store = core_options.boot_images;
             env_values_store = core_options.env_values;
+            host_calls_store = core_options.host_calls;
             if (core_options.env_values.len > 0 and comptime !@hasDecl(core, "envMsgs")) {
                 @panic("TsUiApp received env_values but the core exports no envMsgs channel - declare `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` in core.ts");
             }
@@ -490,6 +496,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// the launch environment overrides as ordinary journaled Msgs,
         /// then refresh the app-held root.
         fn initFx(model: *Model, fx: *Effects) void {
+            if (host_calls_store) |binding| fx.bindHostCalls(binding);
             for (boot_images_store) |image| {
                 // Registration is synchronous; a failed decode leaves the
                 // views on their fallback (avatar initials) — a bad asset

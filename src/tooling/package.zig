@@ -66,6 +66,10 @@ pub const PackageOptions = struct {
     /// as a custom DMG background. The CLI derives it from --manifest.
     project_dir: []const u8 = ".",
     binary_path: ?[]const u8 = null,
+    /// Phase-1 TypeScript service host. Desktop packages place this next
+    /// to the app executable so the generated runner can resolve it by
+    /// sibling name and both executables enter the signing boundary.
+    service_binary_path: ?[]const u8 = null,
     assets_dir: []const u8 = "assets",
     frontend: ?manifest_tool.FrontendMetadata = null,
     web_engine: WebEngine = .system,
@@ -256,6 +260,12 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
     } else {
         try writeFile(package_dir, io, "Contents/MacOS/README.txt", "No app binary was supplied for this local package.\n");
     }
+    if (options.service_binary_path) |service_binary_path| {
+        const service_subpath = try std.fmt.allocPrint(allocator, "Contents/MacOS/{s}_services", .{executable_name});
+        defer allocator.free(service_subpath);
+        try copyFileToDir(allocator, io, package_dir, service_binary_path, service_subpath);
+        try makeExecutable(package_dir, io, service_subpath);
+    }
 
     const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name);
     defer allocator.free(info_plist);
@@ -360,6 +370,13 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try writeFile(dir, io, "bin/README.txt", "Build the app binary separately and place it here for this target, together with the WebView2Loader.dll for its architecture (vendored in the SDK under third_party/webview2/).\n");
     } else {
         try writeFile(dir, io, "bin/README.txt", "Build the app binary separately and place it here for this target.\n");
+    }
+    if (options.service_binary_path) |service_binary_path| {
+        const service_suffix: []const u8 = if (options.target == .windows) ".exe" else "";
+        const service_subpath = try std.fmt.allocPrint(allocator, "bin/{s}_services{s}", .{ options.metadata.name, service_suffix });
+        defer allocator.free(service_subpath);
+        try copyFileToDir(allocator, io, dir, service_binary_path, service_subpath);
+        try makeExecutable(dir, io, service_subpath);
     }
 
     const assets_output = try assetOutputPath(allocator, options.output_path, "resources", options);
@@ -3298,6 +3315,42 @@ test "macOS app executable is marked executable" {
     defer executable.close(std.testing.io);
     const permissions = (try executable.stat(std.testing.io)).permissions;
     try std.testing.expect((permissions.toMode() & 0o111) != 0);
+}
+
+test "desktop packages place the TypeScript service host beside the app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-service-host";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = "app" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/service", .data = "service" });
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.service", .name = "service-demo", .version = "1.0.0" };
+    _ = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/linux",
+        .binary_path = root ++ "/app",
+        .service_binary_path = root ++ "/service",
+        .assets_dir = root ++ "/assets",
+    });
+    var linux_dir = try cwd.openDir(std.testing.io, root ++ "/linux", .{});
+    defer linux_dir.close(std.testing.io);
+    var linux_service = try linux_dir.openFile(std.testing.io, "bin/service-demo_services", .{});
+    linux_service.close(std.testing.io);
+
+    _ = try createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Service.app",
+        .binary_path = root ++ "/app",
+        .service_binary_path = root ++ "/service",
+        .assets_dir = root ++ "/assets",
+    });
+    var mac_dir = try cwd.openDir(std.testing.io, root ++ "/Service.app", .{});
+    defer mac_dir.close(std.testing.io);
+    var mac_service = try mac_dir.openFile(std.testing.io, "Contents/MacOS/service-demo_services", .{});
+    mac_service.close(std.testing.io);
 }
 
 test "desktop chromium packages are rejected before CEF layout checks" {

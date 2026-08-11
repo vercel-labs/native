@@ -1,0 +1,12 @@
+<column padding="24" gap="16" background="background">
+  <text size="heading">The Service Seam</text>
+  <text wrap="true">{bytes}</text>
+  <if test="{failed}">
+    <text foreground="destructive">The service returned its typed error path.</text>
+  </if>
+  <row gap="8">
+    <button variant="primary" on-press="parse">Parse in service</button>
+    <button variant="outline" on-press="fail">Throw in service</button>
+    <button variant="ghost" on-press="quit">Quit</button>
+  </row>
+</column>

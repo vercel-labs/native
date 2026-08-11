@@ -12,6 +12,7 @@ import { TypeTable } from "./types.ts";
 import { IntInference } from "./infer.ts";
 import { SubsetChecker } from "./checker.ts";
 import { emitContractSidecar, ContractError } from "./contract.ts";
+import { emitServiceContract } from "./service_contract.ts";
 import { makeDiagnostic, formatDiagnostic, type SubsetDiagnostic } from "./diagnostics.ts";
 import path from "node:path";
 import fs from "node:fs";
@@ -21,6 +22,10 @@ export interface FrontendOptions {
   /// schema format 1) from the checked program — the entry spelling the
   /// document states (never a filesystem-absolute leak).
   readonly contractEntry?: string;
+  /// Ask the CLI/API caller to consume services.contract.json. The service
+  /// surface is analyzed whenever src/services exists because core request
+  /// names validate against it; this flag records emission intent.
+  readonly servicesContract?: boolean;
 }
 
 export interface FrontendResult {
@@ -28,6 +33,9 @@ export interface FrontendResult {
   /// The contract sidecar JSON, when options.contractEntry asked for it
   /// (null otherwise, and on any failed check).
   readonly contract: string | null;
+  /// The non-deterministic service registry, or null when the app has no
+  /// src/services modules (and on any failed check).
+  readonly servicesContract: string | null;
   readonly diagnostics: SubsetDiagnostic[];
   /// Non-fatal teaching notices (NS1028 today): surfaced as warnings,
   /// never failing the check.
@@ -45,26 +53,33 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   // otherwise surface as a raw resolution error.
   const graph = resolveModuleGraph(entry);
   if (graph.diagnostics.length > 0) {
-    return { ok: false, contract: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
 
-  const program = createSubsetProgram(entry);
+  const program = createSubsetProgram(entry, graph.files);
   const tast = new TypedAst(program);
   const byPath = new Map(program.getSourceFiles().map((f) => [path.resolve(f.fileName), f]));
   const files: ts.SourceFile[] = [];
   for (const p of graph.files) {
     const file = byPath.get(path.resolve(p));
     if (!file) {
-      return { ok: false, contract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${p}`], inputs: [...graph.files] };
+      return { ok: false, contract: null, servicesContract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${p}`], inputs: [...graph.files] };
     }
     files.push(file);
   }
   if (files.length === 0) {
-    return { ok: false, contract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${entry}`], inputs: [] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${entry}`], inputs: [] };
   }
 
+  const fileByPath = new Map(files.map((file) => [path.resolve(file.fileName), file]));
+  const coreFiles = graph.coreFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
+  const serviceFiles = graph.serviceFiles.map((p) => fileByPath.get(path.resolve(p))!).filter(Boolean);
+
   const typeErrors: string[] = [];
-  for (const file of files) {
+  // The core keeps the pinned in-process provider verdict. Services are
+  // judged by scriptc's TS7 frontend in the service compile/coverage lane;
+  // this provider intentionally has no Node builtin declaration universe.
+  for (const file of coreFiles) {
     for (const d of tast.fileDiagnostics(file)) {
       if (d.category !== ts.DiagnosticCategory.Error) continue;
       const where = d.file && d.start !== undefined ? lineColumn(d.file, d.start) : null;
@@ -74,17 +89,22 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     }
   }
   if (typeErrors.length > 0) {
-    return { ok: false, contract: null, diagnostics: [], warnings: [], typeErrors: [...new Set(typeErrors)], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: [], warnings: [], typeErrors: [...new Set(typeErrors)], inputs: [...graph.files] };
   }
 
-  const table = new TypeTable(tast, files);
-  const checker = new SubsetChecker(tast, table, files);
+  const serviceSurface = emitServiceContract(tast, serviceFiles, path.dirname(path.resolve(entry)));
+  if (serviceSurface.diagnostics.length > 0) {
+    return { ok: false, contract: null, servicesContract: null, diagnostics: [...serviceSurface.diagnostics], warnings: [], typeErrors: [], inputs: [...graph.files] };
+  }
+
+  const table = new TypeTable(tast, coreFiles);
+  const checker = new SubsetChecker(tast, table, coreFiles, new Set(serviceSurface.operations.map((op) => op.name)));
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {
-    return { ok: false, contract: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
   }
 
-  const infer = new IntInference(tast, table, files);
+  const infer = new IntInference(tast, table, coreFiles);
   if (infer.conflicts.length > 0) {
     // R2 consistency: an edge the inference fixed point could not make
     // same-typed is the author's to resolve, taught at check time.
@@ -99,22 +119,22 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
         column,
       );
     });
-    return { ok: false, contract: null, diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
   }
   try {
     // The contract sidecar emits from the SAME checked analysis, so a
     // contract-bearing run keeps every check-time teaching.
     const contract =
       options.contractEntry !== undefined
-        ? emitContractSidecar({ tast, table, infer, checkResult, files, entry: options.contractEntry })
+        ? emitContractSidecar({ tast, table, infer, checkResult, files: coreFiles, entry: options.contractEntry })
         : null;
-    return { ok: true, contract, diagnostics: [], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: true, contract, servicesContract: serviceSurface.contract, diagnostics: [], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
   } catch (e) {
     if (e instanceof ContractError) {
       const file = e.node.getSourceFile();
       const { line, column } = lineColumn(file, e.node.getStart());
       const d = makeDiagnostic("NS1063", `${e.message[0].toUpperCase()}${e.message.slice(1)}.`, file.fileName, line, column);
-      return { ok: false, contract: null, diagnostics: [d], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+      return { ok: false, contract: null, servicesContract: null, diagnostics: [d], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
     }
     throw e;
   }

@@ -20,7 +20,7 @@ native skills get native-ui
 native skills get ts-core
 ```
 
-Use `native skills get core` for initial orientation. For the default app-authoring path, load **both** `native-ui` (views, bindings, the app loop) and `ts-core` (the TypeScript subset, effects, subscriptions, and modules) before implementing. Use `native skills get core --full` when work reaches lower-level runtime wiring, WebViews, bridge/security, native capabilities, packaging, or debugging. Use `native skills get automation` when testing a running app, taking snapshots, requesting reloads, or using the built-in automation server. Use `native skills get zig` only for an existing Zig core, a toolkit extension, SDK implementation work, or a Zig 0.16 compile error.
+Use `native skills get core` for initial orientation. For the default app-authoring path, load **both** `native-ui` (views, bindings, the app loop) and `ts-core` (the TypeScript subset, effects, subscriptions, and modules) before implementing. Load `ts-services` too when the tree has `src/services/` or ordinary TypeScript needs filesystem/process/JSON/regex/Map/Date/class work behind `Cmd.request`. Use `native skills get core --full` when work reaches lower-level runtime wiring, WebViews, bridge/security, native capabilities, packaging, or debugging. Use `native skills get automation` when testing a running app, taking snapshots, requesting reloads, or using the built-in automation server. Use `native skills get zig` only for an existing Zig core, a toolkit extension, SDK implementation work, or a Zig 0.16 compile error.
 
 ## Quick orientation
 

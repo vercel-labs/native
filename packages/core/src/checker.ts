@@ -445,17 +445,25 @@ export class SubsetChecker {
   private readonly files: readonly ts.SourceFile[];
   private readonly entry: ts.SourceFile;
   private readonly fileSet: Set<ts.SourceFile>;
+  private readonly serviceOps: ReadonlySet<string>;
 
-  constructor(tast: TypedAst, table: TypeTable, files: readonly ts.SourceFile[] | ts.SourceFile) {
+  constructor(
+    tast: TypedAst,
+    table: TypeTable,
+    files: readonly ts.SourceFile[] | ts.SourceFile,
+    serviceOps: ReadonlySet<string> = new Set(),
+  ) {
     this.tast = tast;
     this.table = table;
     this.files = Array.isArray(files) ? files : [files as ts.SourceFile];
     this.entry = this.files[0];
     this.fileSet = new Set(this.files);
+    this.serviceOps = serviceOps;
   }
 
   check(): CheckResult {
     for (const file of this.files) this.findCmdNames(file);
+    this.checkServiceRequests();
     for (const file of this.files) this.checkModuleShape(file);
     this.checkEntryContract();
     this.checkNameCollisions();
@@ -478,6 +486,33 @@ export class SubsetChecker {
       cmdNames: this.cmdNames,
       subNames: this.subNames,
     };
+  }
+
+  /// NS1067 — once an app declares a service registry, every generic
+  /// Cmd.request literal must resolve either to that registry or to the
+  /// SDK-reserved native family. This keeps a typo from reaching the
+  /// runtime's stale/skew rejection path.
+  private checkServiceRequests(): void {
+    if (this.serviceOps.size === 0 || this.cmdNames.size === 0) return;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "request" &&
+        ts.isIdentifier(node.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression)
+      ) {
+        const name = node.arguments[0];
+        if (!name || !ts.isStringLiteral(name)) {
+          this.report("NS1067", "A service request name is not a string literal from the generated registry.", name ?? node);
+        } else if (!name.text.startsWith("native-sdk.") && !this.serviceOps.has(name.text)) {
+          this.report("NS1067", `\`${name.text}\` names no operation in services.contract.json.`, name);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    for (const file of this.files) visit(file);
   }
 
   private report(id: RuleId, site: string, node: ts.Node): void {

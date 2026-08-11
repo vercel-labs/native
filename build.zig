@@ -209,6 +209,8 @@ pub fn build(b: *std.Build) void {
     const corewire_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit.zig"));
     const corewire_facade_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_facade.zig"));
     const corewire_profile_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_profile.zig"));
+    const corewire_service_contract_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/service_contract.zig"));
+    const corewire_service_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_service.zig"));
     const corewire_shim_rt_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/shim_rt.zig"));
 
     // TypeScript-core end-to-end suite: each fixture core is compiled
@@ -482,7 +484,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(corewire_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_facade_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_profile_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_service_contract_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_service_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
+    const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run the real out-of-process TypeScript service carrier, crash recovery, timeout, and replay suites");
     if (ts_core_e2e_tests) |ts_core_artifacts| {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
@@ -495,6 +500,8 @@ pub fn build(b: *std.Build) void {
         // no build inputs/outputs to hash, so always run it.
         scaffold_ide_e2e_run.has_side_effects = true;
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
+        const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
+        ts_services_e2e_step.dependOn(&services_e2e_run.step);
         const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
         const sidecar_conformance_step = b.step("sidecar-conformance", "Validate corewire-generated mirrors over every fixture's frontend-emitted contract (requires node)");
         sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
@@ -523,6 +530,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&monitor_e2e_run.step);
         ts_core_e2e_step.dependOn(&scaffold_ide_e2e_run.step);
         ts_core_e2e_step.dependOn(&ai_chat_e2e_run.step);
+        ts_core_e2e_step.dependOn(&services_e2e_run.step);
         test_step.dependOn(&host_e2e_run.step);
         test_step.dependOn(&markup_e2e_run.step);
         test_step.dependOn(&kanban_e2e_run.step);
@@ -530,6 +538,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&monitor_e2e_run.step);
         test_step.dependOn(&scaffold_ide_e2e_run.step);
         test_step.dependOn(&ai_chat_e2e_run.step);
+        test_step.dependOn(&services_e2e_run.step);
         test_step.dependOn(&sidecar_conformance_run.step);
     }
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
@@ -1436,6 +1445,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-channel-monitor", "Run channel monitor example tests", "examples/channel-monitor", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-bar", "Run menu-bar lifecycle example tests", "examples/menu-bar", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-service-feed-reader", "Run TypeScript service feed-reader example tests", "examples/service-feed-reader", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };
@@ -2765,6 +2775,9 @@ const TsCoreE2eArtifacts = struct {
     /// paths, and builds keep working with node_modules deleted.
     scaffold_ide: *std.Build.Step.Compile,
     ai_chat: *std.Build.Step.Compile,
+    /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
+    /// service executable driven through the out-of-process carrier.
+    services: *std.Build.Step.Compile,
     /// Sidecar-shim conformance (tests/sidecar): every fixture's
     /// generated mirror validated over its frontend-emitted contract
     /// (plus the hand-written ground-truth sidecars), and every shim
@@ -2955,6 +2968,35 @@ fn tsCoreE2eArtifact(
     ai_chat_mod.addImport("native_sdk", desktop_mod);
     ai_chat_mod.addImport("ts_ai_chat_core", ai_chat_core_mod);
 
+    // Phase-1 TypeScript services, end to end: the frontend emits BOTH
+    // sidecars from one checked two-class program; corewire derives the
+    // registry/host only from the service sidecar; plain scriptc compiles the
+    // child executable; and the Zig battery drives that executable through
+    // the production ServiceHost + effects/session boundary.
+    const services_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-services/ok/src/core.ts",
+        .src_dir = b.path("tests/ts-services/ok/src"),
+        .name = "services_fixture_core",
+        .emit_services = true,
+    });
+    const service_host_fixture = externalServiceFixture(
+        b,
+        target,
+        optimize,
+        node,
+        corewire_exe,
+        b.path("tests/ts-services/ok/src"),
+        services_fixture.services_contract.?,
+        "ts_services_fixture_services",
+    );
+    const services_e2e_mod = module(b, target, optimize, "tests/ts-services/service_e2e_tests.zig");
+    services_e2e_mod.addImport("native_sdk", desktop_mod);
+    services_e2e_mod.addImport("ts_services_core", services_fixture.module);
+    services_e2e_mod.addImport("ts_services_registry", service_host_fixture.registry);
+    const service_test_options = b.addOptions();
+    service_test_options.addOptionPath("service_executable", service_host_fixture.executable);
+    services_e2e_mod.addOptions("ts_services_options", service_test_options);
+
     // Sidecar-shim conformance: a corewire-generated mirror per corpus
     // fixture. The markup fixture's sidecar is the committed
     // hand-written one (independent ground truth for the schema); the
@@ -3033,9 +3075,81 @@ fn tsCoreE2eArtifact(
         .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
+        .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
         .core_contracts = core_contracts.toOwnedSlice(b.allocator) catch @panic("OOM"),
+    };
+}
+
+const ExternalServiceFixture = struct {
+    executable: std.Build.LazyPath,
+    registry: *std.Build.Module,
+};
+
+/// Compile one fixture's service class through the production phase-1 lane:
+/// service sidecar -> corewire host/registry -> ordinary source stage (plus
+/// the pinned compiler's tagged-throw compatibility lowering) -> exact pinned
+/// plain-scriptc executable. No author source is re-read for dispatch facts
+/// after the sidecar emission.
+fn externalServiceFixture(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    node: []const u8,
+    corewire_exe: *std.Build.Step.Compile,
+    src_dir: std.Build.LazyPath,
+    contract: std.Build.LazyPath,
+    name: []const u8,
+) ExternalServiceFixture {
+    const project = b.addRunArtifact(corewire_exe);
+    project.addArg("--services-sidecar");
+    project.addFileArg(contract);
+    project.addArg("--service-host-main");
+    const host_main = project.addOutputFileArg("service_host_main.ts");
+    project.addArg("--service-registry");
+    const registry_source = project.addOutputFileArg("services.zig");
+
+    const stage = b.addSystemCommand(&.{node});
+    stage.addFileArg(b.path("packages/core/scripts/stage_external_services.mjs"));
+    stage.addArg("--src");
+    stage.addDirectoryArg(src_dir);
+    stage.addArg("--host-main");
+    stage.addFileArg(host_main);
+    stage.addArg("--out");
+    const stage_dir = stage.addOutputDirectoryArg("services-stage");
+    // A LazyPath directory records only its producer dependency; source-tree
+    // content does not otherwise participate in Run's cache key. Service
+    // files are discovered recursively by the staging script, so rerun this
+    // cheap copy step whenever the lane is requested rather than risk a stale
+    // compiled host after an author edits a nested service module.
+    stage.has_side_effects = true;
+
+    const compile = b.addSystemCommand(&.{node});
+    compile.addFileArg(b.path("packages/core/scripts/run_external_service_compiler.mjs"));
+    compile.addArg("--stage");
+    compile.addDirectoryArg(stage_dir);
+    compile.addArg("--manifest");
+    compile.addFileArg(b.path("packages/core/package.json"));
+    compile.addArg("--contract");
+    compile.addFileArg(contract);
+    compile.addArg("--out-exe");
+    const suffix = if (b.graph.host.result.os.tag == .windows) ".exe" else "";
+    const executable = compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
+    if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
+        compile.addArgs(&.{ "--compiler", override });
+    } else {
+        compile.addArg("--compiler-js");
+        compile.addFileArg(b.path("packages/core/node_modules/scriptc/dist/main.js"));
+    }
+
+    return .{
+        .executable = executable,
+        .registry = b.createModule(.{
+            .root_source_file = registry_source,
+            .target = target,
+            .optimize = optimize,
+        }),
     };
 }
 
@@ -3115,6 +3229,9 @@ const ExternalCoreFixture = struct {
     /// The archive's OWN co-emitted contract sidecar — the document its
     /// mirror must generate from (the boot identity fence pairs them).
     sidecar: std.Build.LazyPath,
+    /// Present only for a two-class fixture that asks the frontend to emit the
+    /// service registry sidecar from the same checked program.
+    services_contract: ?std.Build.LazyPath,
 };
 
 const ExternalCoreFixtureSpec = struct {
@@ -3131,6 +3248,7 @@ const ExternalCoreFixtureSpec = struct {
     /// declaration on that side) — corewire's --f64-slot demotions,
     /// applied to the compile profile and every downstream projection.
     f64_slots: []const []const u8 = &.{},
+    emit_services: bool = false,
 };
 
 /// Compile one TS fixture core through the external core compiler at
@@ -3160,10 +3278,14 @@ fn externalCoreFixtureModule(
     const contract = check.addOutputFileArg("core.contract.json");
     check.addArg("--contract-entry");
     check.addArg(spec.entry);
+    const services_contract: ?std.Build.LazyPath = if (spec.emit_services) services: {
+        check.addArg("--services-contract");
+        break :services check.addOutputFileArg("services.contract.json");
+    } else null;
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{
-        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
     };
     for (frontend_sources) |source| {
         check.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));
@@ -3247,6 +3369,7 @@ fn externalCoreFixtureModule(
         .contract = contract,
         .archive = archive,
         .sidecar = compiled_sidecar,
+        .services_contract = services_contract,
     };
 }
 

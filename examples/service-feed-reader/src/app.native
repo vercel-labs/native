@@ -1,0 +1,20 @@
+<column padding="24" gap="18" background="background">
+  <column gap="6">
+    <text size="heading">The Service Seam</text>
+    <text wrap="true" foreground="text_muted">The core sends bytes as a Cmd.request. An ordinary TypeScript service uses fs, a class, regex, Map, Date, and JSON, then returns bytes as a Msg.</text>
+  </column>
+  <panel padding="18" background="surface" radius="lg" grow="1">
+    <column gap="10">
+      <text size="sm" foreground="text_muted">Service result</text>
+      <text wrap="true">{output}</text>
+      <if test="{failed}">
+        <text size="sm" foreground="destructive">The service returned its typed error route.</text>
+      </if>
+    </column>
+  </panel>
+  <row>
+    <button variant="primary" on-press="parse">Parse sample feed</button>
+    <spacer grow="1" />
+    <text size="sm" foreground="text_muted">src/services/feeds.ts</text>
+  </row>
+</column>
