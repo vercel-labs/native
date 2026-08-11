@@ -1072,8 +1072,8 @@ static const char *NativeSdkCefBridgeScript() {
     if ([self.passiveShowWindows containsObject:@(windowId)]) {
         [window orderFront:nil];
     } else {
-        [window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
+        [window makeKeyAndOrderFront:nil];
     }
 }
 
@@ -1081,8 +1081,8 @@ static const char *NativeSdkCefBridgeScript() {
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
     [self.policyHiddenWindows removeObject:@(windowId)];
-    [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    [window makeKeyAndOrderFront:nil];
     [self emitWindowFrameForWindowId:windowId open:YES];
 }
 
@@ -2590,7 +2590,6 @@ int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visi
     (void)host;
     NSApplicationActivationPolicy policy = visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
     BOOL changed = [NSApp setActivationPolicy:policy];
-    if (visible) [NSApp activateIgnoringOtherApps:YES];
     return changed || NSApp.activationPolicy == policy ? 1 : 0;
 }
 

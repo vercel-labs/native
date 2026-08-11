@@ -2663,15 +2663,15 @@ test "mac webview presses report the focused child label" {
 }
 
 test "mac active implicit show activates before making the window key" {
-    const host_source = @embedFile("appkit_host.m");
-    try std.testing.expect(std.mem.indexOf(u8, host_source,
-        \\    if ([self.passiveShowWindows containsObject:@(windowId)]) {
-        \\        [window orderFront:nil];
-        \\    } else {
-        \\        [NSApp activateIgnoringOtherApps:YES];
-        \\        [window makeKeyAndOrderFront:nil];
-        \\    }
-    ) != null);
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        const show_at = std.mem.indexOf(u8, host_source, "- (void)orderWindowForImplicitShow:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const show_tail = host_source[show_at..];
+        const show_end = std.mem.indexOf(u8, show_tail, "- (void)focusWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const show_body = show_tail[0..show_end];
+        const activate_at = std.mem.indexOf(u8, show_body, "[NSApp activateIgnoringOtherApps:YES];") orelse return error.TestExpectedEqual;
+        const make_key_at = std.mem.indexOf(u8, show_body, "[window makeKeyAndOrderFront:nil];") orelse return error.TestExpectedEqual;
+        try std.testing.expect(activate_at < make_key_at);
+    }
 }
 
 test "mac unrestored secondary windows cascade within the active screen" {
@@ -2688,18 +2688,26 @@ test "mac unrestored secondary windows cascade within the active screen" {
 }
 
 test "mac explicit focus activates before making the window key" {
-    const host_source = @embedFile("appkit_host.m");
-    try std.testing.expect(std.mem.indexOf(u8, host_source,
-        \\- (void)focusWindowWithId:(uint64_t)windowId {
-        \\    NSWindow *window = self.windows[@(windowId)];
-        \\    if (!window) return;
-        \\    // An explicit focus overrides a pending present-before-show defer:
-        \\    // the runtime asked for the window NOW.
-        \\    [self.deferredShowWindows removeObjectForKey:@(windowId)];
-        \\    [self.policyHiddenWindows removeObject:@(windowId)];
-        \\    [NSApp activateIgnoringOtherApps:YES];
-        \\    [window makeKeyAndOrderFront:nil];
-    ) != null);
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        const focus_at = std.mem.indexOf(u8, host_source, "- (void)focusWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const focus_tail = host_source[focus_at..];
+        const focus_end = std.mem.indexOf(u8, focus_tail, "- (void)closeWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const focus_body = focus_tail[0..focus_end];
+        const activate_at = std.mem.indexOf(u8, focus_body, "[NSApp activateIgnoringOtherApps:YES];") orelse return error.TestExpectedEqual;
+        const make_key_at = std.mem.indexOf(u8, focus_body, "[window makeKeyAndOrderFront:nil];") orelse return error.TestExpectedEqual;
+        try std.testing.expect(activate_at < make_key_at);
+    }
+}
+
+test "mac dock presence changes policy without activating the app" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        const dock_at = std.mem.indexOf(u8, host_source, "int native_sdk_appkit_set_dock_presence(") orelse return error.TestExpectedEqual;
+        const dock_tail = host_source[dock_at..];
+        const dock_end = std.mem.indexOf(u8, dock_tail, "int native_sdk_appkit_launch_at_login_status(") orelse return error.TestExpectedEqual;
+        const dock_body = dock_tail[0..dock_end];
+        try std.testing.expect(std.mem.indexOf(u8, dock_body, "[NSApp setActivationPolicy:policy]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dock_body, "[NSApp activate") == null);
+    }
 }
 
 test "mac transparent raw frames are premultiplied exactly once before Metal upload" {

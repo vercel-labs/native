@@ -12515,7 +12515,6 @@ int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visi
     (void)host;
     NSApplicationActivationPolicy policy = visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
     BOOL changed = [NSApp setActivationPolicy:policy];
-    if (visible) [NSApp activateIgnoringOtherApps:YES];
     return changed || NSApp.activationPolicy == policy ? 1 : 0;
 }
 
