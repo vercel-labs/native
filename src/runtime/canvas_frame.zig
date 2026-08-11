@@ -1198,9 +1198,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 if (self.views[index].pruneCompletedNoopCanvasRenderAnimations(frame_options.timestamp_ns)) {
                     self.views[index].compactCanvasFrameRenderOverrideNoops();
                 }
-                if (self.views[index].canvasRenderAnimationsActive(frame_options.timestamp_ns)) {
-                    self.invalidateFor(.state, self.views[index].frame);
-                }
+                const render_animation_active = self.views[index].canvasRenderAnimationsActive(frame_options.timestamp_ns);
                 // An armed tooltip show delay — and a running anchor-gap
                 // transit grace — only fire on a presented frame's
                 // timestamp, so frames must keep coming while either is
@@ -1213,8 +1211,17 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // requested). Settled shown tooltips and the warm
                 // window need no pump: both step on journaled input
                 // timestamps.
-                if (self.views[index].canvasTooltipIntentArmed()) {
+                const tooltip_intent_armed = self.views[index].canvasTooltipIntentArmed();
+                if (render_animation_active or tooltip_intent_armed) {
                     self.invalidateFor(.state, self.views[index].frame);
+                    // Invalidation keeps snapshots/diagnostics honest but
+                    // does not itself wake an idle retained surface. The
+                    // current completion consumed its one-shot request, so
+                    // explicitly arm the next one while time-based pixels
+                    // still have work. Without this leg animations render
+                    // their click endpoints and then park until unrelated
+                    // input happens to wake the view.
+                    try requestCanvasFrameForView(self, index);
                 }
             } else {
                 self.views[index].recordCanvasFrame(canvas_frame);
@@ -1380,15 +1387,15 @@ const CanvasPacketPatchStats = struct {
 };
 
 /// Stamp `gpu_input_latency` at the RESPONDING present's completion:
-/// the present call above just returned synchronously, so the wall
-/// clock NOW (the domain every host and automation input timestamp
-/// uses) is the moment the input's pixels reached the swapchain. The
-/// paced completion event that used to stamp this arrives up to a
-/// frame interval later and measured the pacing channel, not the
-/// glass; it remains the fallback for inputs that present nothing.
+/// the present call above just returned synchronously, so monotonic NOW
+/// (the domain every host and automation input timestamp uses) is the
+/// moment the input's pixels reached the swapchain. The paced completion
+/// event that used to stamp this arrives up to a frame interval later and
+/// measured the pacing channel, not the glass; it remains the fallback for
+/// inputs that present nothing.
 fn recordCanvasPresentInputLatency(view: anytype) void {
     if (view.gpu_pending_input_timestamp_ns == 0) return;
-    view.recordGpuSurfaceInputLatencyForFrame(runtime_clock.timestampToU64(runtime_clock.nowNanoseconds()));
+    view.recordGpuSurfaceInputLatencyForFrame(runtime_clock.monotonicNanoseconds());
 }
 
 /// Build the frame's CURRENT keyed command list — every supported render

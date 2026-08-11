@@ -237,6 +237,7 @@ test "runtime schedules canvas render animations without display list rebuild" {
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
+    const frame_requests_before_mid = harness.null_platform.gpu_surface_frame_request_count;
     const mid_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
         .frame_index = 2,
         .timestamp_ns = start_ns + 500_000_000,
@@ -249,9 +250,11 @@ test "runtime schedules canvas render animations without display list rebuild" {
     try std.testing.expectEqualDeep(canvas.Affine.translate(5, 0), mid_frame.render_plan.commands[0].transform);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 16, 11), mid_frame.dirty_bounds.?);
     try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(frame_requests_before_mid + 1, harness.null_platform.gpu_surface_frame_request_count);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
+    const frame_requests_before_final = harness.null_platform.gpu_surface_frame_request_count;
     const final_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
         .frame_index = 3,
         .timestamp_ns = start_ns + 1_000_000_000,
@@ -261,6 +264,7 @@ test "runtime schedules canvas render animations without display list rebuild" {
     try std.testing.expectEqualDeep(canvas.Affine.identity(), final_frame.render_plan.commands[0].transform);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 16, 11), final_frame.dirty_bounds.?);
     try std.testing.expect(!harness.runtime.invalidated);
+    try std.testing.expectEqual(frame_requests_before_final, harness.null_platform.gpu_surface_frame_request_count);
     try std.testing.expectEqual(@as(usize, 0), (try harness.runtime.canvasRenderAnimations(1, "canvas")).len);
     try std.testing.expectEqual(@as(usize, 0), runtimeViewCanvasFrameRenderOverrides(&harness.runtime.views[0]).len);
 

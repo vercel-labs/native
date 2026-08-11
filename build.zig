@@ -2234,7 +2234,8 @@ pub fn build(b: *std.Build) void {
     // numbers only mean something on a controlled machine. Runs via
     // `scripts/gate.sh full --perf` locally and a dedicated macos-14 CI job.
     // Knobs: NATIVE_SDK_PERF_LAUNCHES, NATIVE_SDK_PERF_INTERACTIONS, NATIVE_SDK_PERF_BUDGET_MS,
-    // NATIVE_SDK_PERF_INPUT_BUDGET_MS — see scripts/perf-gpu-dashboard.sh.
+    // NATIVE_SDK_PERF_INPUT_BUDGET_MS, and NATIVE_SDK_PERF_ANIMATION_* — see
+    // scripts/perf-gpu-dashboard.sh.
     const gpu_dashboard_perf_step = b.step("test-gpu-dashboard-perf", "Run macOS GPU dashboard percentile performance check (N launches; slow)");
     const gpu_dashboard_perf_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_dashboard_perf_build.setCwd(b.path("examples/gpu-dashboard"));

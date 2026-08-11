@@ -14,6 +14,8 @@
 #      series' p90 under its budget:
 #        NATIVE_SDK_PERF_BUDGET_MS        first-frame p90 budget, default 300
 #        NATIVE_SDK_PERF_INPUT_BUDGET_MS  input-latency p90 budget, default 100
+#   4. Starts one harness-controlled retained animation and requires a 60 Hz-class
+#      completion stream (frame count plus p90/max interval budgets).
 #      Defaults are deliberately generous (2x+ the smoke's 150 ms first-frame
 #      budget): this check exists to catch step-function regressions on shared
 #      CI/dev machines, not 10% drift on an idle box.
@@ -48,10 +50,16 @@ launches="${NATIVE_SDK_PERF_LAUNCHES:-5}"
 interactions="${NATIVE_SDK_PERF_INTERACTIONS:-5}"
 first_frame_budget_ms="${NATIVE_SDK_PERF_BUDGET_MS:-300}"
 input_budget_ms="${NATIVE_SDK_PERF_INPUT_BUDGET_MS:-100}"
+animation_min_frames="${NATIVE_SDK_PERF_ANIMATION_MIN_FRAMES:-45}"
+animation_p90_budget_ms="${NATIVE_SDK_PERF_ANIMATION_P90_MS:-20}"
+animation_max_budget_ms="${NATIVE_SDK_PERF_ANIMATION_MAX_MS:-34}"
 require_positive_int NATIVE_SDK_PERF_LAUNCHES "$launches"
 require_positive_int NATIVE_SDK_PERF_INTERACTIONS "$interactions"
 require_positive_int NATIVE_SDK_PERF_BUDGET_MS "$first_frame_budget_ms"
 require_positive_int NATIVE_SDK_PERF_INPUT_BUDGET_MS "$input_budget_ms"
+require_positive_int NATIVE_SDK_PERF_ANIMATION_MIN_FRAMES "$animation_min_frames"
+require_positive_int NATIVE_SDK_PERF_ANIMATION_P90_MS "$animation_p90_budget_ms"
+require_positive_int NATIVE_SDK_PERF_ANIMATION_MAX_MS "$animation_max_budget_ms"
 first_frame_budget_ns=$((first_frame_budget_ms * 1000000))
 input_budget_ns=$((input_budget_ms * 1000000))
 
@@ -71,12 +79,30 @@ stop_app() {
   pid=""
 }
 
+bring_app_to_front() {
+  # A performance sample from an AppKit window deliberately throttled as
+  # occluded says nothing about visible animation quality. Dedicated macOS
+  # runners launch this script from ssh/CI, so make the measured app frontmost
+  # in the logged-in desktop when WindowServer permits it. Activation failure
+  # is non-fatal here; the explicit occlusion check below owns that diagnostic.
+  [ "$(uname -s)" = Darwin ] || return 0
+  /usr/bin/osascript -e "tell application \"System Events\" to set frontmost of first application process whose unix id is $pid to true" >/dev/null 2>&1 || true
+}
+
 read_snapshot() {
   snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
 }
 
 canvas_field() { # field-name -> value of gpu_<field>=N on the dashboard-canvas line, or empty
   printf '%s\n' "$snapshot" | sed -n "s/.*view @w1\\/dashboard-canvas kind=gpu_surface.* $1=\\([0-9][0-9]*\\).*/\\1/p"
+}
+
+canvas_bool_field() { # field-name -> true/false on the dashboard-canvas line
+  printf '%s\n' "$snapshot" | sed -n "s/.*view @w1\\/dashboard-canvas kind=gpu_surface.* $1=\\([a-z][a-z]*\\).*/\\1/p"
+}
+
+profile_field() { # field-name -> value on the frame_profile line, or empty
+  printf '%s\n' "$snapshot" | sed -n "s/^frame_profile .* $1=\\([0-9][0-9]*\\).*/\\1/p"
 }
 
 ns_to_ms() { # ns -> ms with one decimal
@@ -89,6 +115,7 @@ launch_and_measure_first_frame() {
   pid=$!
   ready="$("$cli" automate wait 2>&1)"
   case "$ready" in *"ready=true"*) ;; *) echo "perf: gpu-dashboard automation snapshot was not ready" >&2; dump_diagnostics; exit 1 ;; esac
+  bring_app_to_front
   first_frame_latency=""
   attempts=0
   while [ "$attempts" -lt 100 ]; do
@@ -198,6 +225,40 @@ while [ "$i" -le "$interactions" ]; do
   i=$((i + 1))
 done
 
+# ---- retained animation: self-scheduled completion cadence -----------------
+# Reset immediately before the command so startup/interaction idle tails cannot
+# contaminate interval_max. The automation-only dashboard command installs a
+# harness-controlled loop even when the operator prefers reduced product
+# motion; after that command the app must keep requesting frames with no driver
+# input until the harness explicitly stops it.
+
+"$cli" automate profile off >/dev/null 2>&1
+"$cli" automate profile on >/dev/null 2>&1
+read_snapshot
+animation_start_frame="$(canvas_field gpu_frame)"
+case "$animation_start_frame" in ''|*[!0-9]*) echo "perf: animation start frame was missing" >&2; exit 1 ;; esac
+"$cli" automate native-command dashboard.perf-animation dashboard-canvas >/dev/null 2>&1
+sleep 1.2
+# GPU completions do not publish automation text on their own once their
+# observable facts settle. Re-sending `profile on` leaves the live window
+# intact (only off->on resets it) and wakes one publication carrying the
+# accumulated cadence and latest gpu_frame count.
+"$cli" automate profile on >/dev/null 2>&1
+read_snapshot
+animation_end_frame="$(canvas_field gpu_frame)"
+animation_p50_us="$(profile_field interval_p50_us)"
+animation_p90_us="$(profile_field interval_p90_us)"
+animation_max_us="$(profile_field interval_max_us)"
+animation_samples="$(profile_field interval_n)"
+animation_occluded="$(canvas_bool_field gpu_occluded)"
+for value in "$animation_end_frame" "$animation_p50_us" "$animation_p90_us" "$animation_max_us" "$animation_samples"; do
+  case "$value" in ''|*[!0-9]*) echo "perf: retained-animation telemetry was incomplete" >&2; dump_diagnostics; exit 1 ;; esac
+done
+animation_frames=$((animation_end_frame - animation_start_frame))
+animation_profiled_frames=$((animation_samples + 1))
+echo "perf: retained animation: profiled frames $animation_profiled_frames (frame-index delta $animation_frames), interval p50 $(ns_to_ms "$((animation_p50_us * 1000))") ms, p90 $(ns_to_ms "$((animation_p90_us * 1000))") ms, max $(ns_to_ms "$((animation_max_us * 1000))") ms"
+"$cli" automate native-command dashboard.perf-animation-stop dashboard-canvas >/dev/null 2>&1
+
 stop_app
 
 # ---- summary + assertions ---------------------------------------------------
@@ -205,5 +266,12 @@ stop_app
 failures=0
 report_series "first-frame latency" "$first_frame_samples" "$first_frame_budget_ns" "$first_frame_budget_ms" || failures=$((failures + 1))
 report_series "input latency" "$input_samples" "$input_budget_ns" "$input_budget_ms" || failures=$((failures + 1))
+if [ "$animation_occluded" = true ]; then
+  echo "perf: retained animation cadence skipped: host reports the test window is occluded"
+else
+  [ "$animation_profiled_frames" -ge "$animation_min_frames" ] || { echo "perf: retained animation produced $animation_profiled_frames reset-scoped profiled frames (minimum $animation_min_frames)" >&2; failures=$((failures + 1)); }
+  [ "$animation_p90_us" -le "$((animation_p90_budget_ms * 1000))" ] || { echo "perf: retained animation p90 exceeded $animation_p90_budget_ms ms" >&2; failures=$((failures + 1)); }
+  [ "$animation_max_us" -le "$((animation_max_budget_ms * 1000))" ] || { echo "perf: retained animation max exceeded $animation_max_budget_ms ms" >&2; failures=$((failures + 1)); }
+fi
 [ "$failures" -eq 0 ] || exit 1
 echo "gpu-dashboard perf ok"

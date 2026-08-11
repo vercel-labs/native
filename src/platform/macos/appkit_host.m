@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 @class NativeSdkAppKitHost;
 @class NativeSdkAudioCaptureTarget;
@@ -119,7 +120,10 @@ static BOOL NativeSdkAppKitHighContrastEnabled(void) {
 }
 
 static uint64_t NativeSdkTimestampNanoseconds(void) {
-    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000000000.0);
+    /* GPU input, frame pacing, and present-completion latency are duration
+     * math. CLOCK_MONOTONIC matches the runtime's monotonicNanoseconds seam
+     * and cannot jump when the wall clock is adjusted. */
+    return clock_gettime_nsec_np(CLOCK_MONOTONIC);
 }
 
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen) {

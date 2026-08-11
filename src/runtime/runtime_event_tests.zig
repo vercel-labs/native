@@ -505,6 +505,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuTimestampNs\":42") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuFrameIntervalNs\":16666667") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputTimestampNs\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputCount\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputLatencyNs\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputLatencyBudgetNs\":16666667") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuInputLatencyBudgetExceededCount\":0") != null);
@@ -514,6 +515,7 @@ test "runtime dispatches GPU surface events" {
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuFirstFrameLatencyBudgetExceededCount\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuFirstFrameLatencyBudgetOk\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuNonblank\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuOccluded\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuSampleColor\":4281558681") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuBackend\":\"metal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, view_json, "\"gpuPixelFormat\":\"bgra8_unorm\"") != null);
@@ -693,6 +695,7 @@ test "runtime dispatches GPU surface events" {
     const latency_json = try writeViewJson(latency_view, &latency_json_buffer);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuFrameIntervalNs\":8333333") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputTimestampNs\":50000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputCount\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyNs\":20000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyBudgetExceededCount\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, latency_json, "\"gpuInputLatencyBudgetOk\":false") != null);
@@ -768,6 +771,7 @@ test "runtime dispatches GPU surface events" {
         .occluded = true,
     } });
     const occluded_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
+    try std.testing.expect(harness.runtime.views[0].info().gpu_occluded);
     // The input's arrival is still recorded; only the latency stamp is
     // withheld, so the pre-occlusion measurement survives verbatim.
     try std.testing.expectEqual(@as(u64, 200_000_000), occluded_frame.input_timestamp_ns);
@@ -789,6 +793,7 @@ test "runtime dispatches GPU surface events" {
         .sample_color = 0xff336699,
     } });
     const revealed_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
+    try std.testing.expect(!harness.runtime.views[0].info().gpu_occluded);
     try std.testing.expectEqual(@as(u64, 20_000_000), revealed_frame.input_latency_ns);
     try std.testing.expectEqual(@as(usize, 0), revealed_frame.input_latency_budget_exceeded_count);
     try std.testing.expect(revealed_frame.input_latency_budget_ok);
@@ -818,6 +823,71 @@ test "runtime dispatches GPU surface events" {
     const measured_frame = try harness.runtime.gpuSurfaceFrame(1, "canvas");
     try std.testing.expectEqual(@as(u64, 2_300_000_000), measured_frame.input_timestamp_ns);
     try std.testing.expectEqual(@as(u64, 10_000_000), measured_frame.input_latency_ns);
+}
+
+test "frame profile intervals start with the first completion after profiling is enabled" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "profile-interval", .source = platform.WebViewSource.html("<h1>Profile</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    // This completion predates profiling and must never become its first
+    // interval (which used to make CLI/profile startup look like a stall).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(320, 180),
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    try harness.runtime.dispatchAutomationCommand(app, "profile on");
+    try std.testing.expect(harness.runtime.frame_profile.enabled);
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.frame_profile.stats(.interval).total);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(320, 180),
+        .frame_index = 2,
+        .timestamp_ns = 2_000_000_000,
+    } });
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.frame_profile.stats(.interval).total);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(320, 180),
+        .frame_index = 3,
+        .timestamp_ns = 2_016_667_000,
+    } });
+    const interval = harness.runtime.frame_profile.stats(.interval);
+    try std.testing.expectEqual(@as(u64, 1), interval.total);
+    try std.testing.expectEqual(@as(u64, 16_667), interval.p50_us);
+
+    try harness.runtime.dispatchAutomationCommand(app, "profile off");
+    try std.testing.expect(!harness.runtime.frame_profile.enabled);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(320, 180),
+        .frame_index = 4,
+        .timestamp_ns = 3_000_000_000,
+    } });
+    try harness.runtime.dispatchAutomationCommand(app, "profile on");
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.frame_profile.stats(.interval).total);
 }
 
 test "runtime starts, fires, and cancels platform timers" {

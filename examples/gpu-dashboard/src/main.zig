@@ -75,6 +75,11 @@ const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";
 const mode_command = "dashboard.mode";
+// Automation-only performance probe: unlike product motion it is explicit,
+// harness-controlled, and therefore can measure the retained frame pump without
+// changing or second-guessing the operator's reduce-motion preference.
+const perf_animation_command = "dashboard.perf-animation";
+const perf_animation_stop_command = "dashboard.perf-animation-stop";
 const dashboard_canvas_label = "dashboard-canvas";
 
 // Chrome display-list command ids. These live in the prefix that
@@ -173,6 +178,8 @@ pub const DashboardFrameStatus = struct {
 
 pub const Msg = union(enum) {
     refresh,
+    perf_animation,
+    perf_animation_stop,
     set_mode,
     toggle_live,
     select_nav: u8,
@@ -195,6 +202,7 @@ pub const Msg = union(enum) {
 
 pub const Model = struct {
     refresh_count: u32 = 0,
+    perf_animation_armed: bool = false,
     mode_count: u32 = 0,
     live_count: u32 = 0,
     nav_selection: u8 = 0,
@@ -241,6 +249,14 @@ pub fn update(model: *Model, msg: Msg) void {
         .refresh => {
             model.refresh_count += 1;
             model.setStatusFmt("Dashboard canvas refreshed. Count {d}.", .{model.refresh_count});
+        },
+        .perf_animation => {
+            model.perf_animation_armed = true;
+            model.setStatus("Retained animation performance probe armed.");
+        },
+        .perf_animation_stop => {
+            model.perf_animation_armed = false;
+            model.setStatus("Retained animation performance probe stopped.");
         },
         .set_mode => {
             model.mode_count += 1;
@@ -559,6 +575,8 @@ fn buildDashboardChrome(model: *const Model, builder: *canvas.Builder, size: geo
 fn dashboardCommand(name: []const u8) ?Msg {
     if (std.mem.eql(u8, name, refresh_command)) return .refresh;
     if (std.mem.eql(u8, name, mode_command)) return .set_mode;
+    if (std.mem.eql(u8, name, perf_animation_command)) return .perf_animation;
+    if (std.mem.eql(u8, name, perf_animation_stop_command)) return .perf_animation_stop;
     return null;
 }
 
@@ -581,7 +599,11 @@ fn dashboardChrome(chrome: native_sdk.WindowChrome) ?Msg {
 fn dashboardAnimations(model: *const Model, tree: *const DashboardApp.Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize {
     const live_button = findWidgetKindText(tree.root, .button, "Live render") orelse return 0;
     if (out.len < 2) return 0;
-    const motion = dashboardTokensFromModel(model).motion;
+    var motion = dashboardTokensFromModel(model).motion;
+    if (model.perf_animation_armed) {
+        motion.slow_ms = 900;
+        motion.easing = .emphasized;
+    }
     out[0] = motion.animation(.{
         .id = widgetPartCommandId(live_button.id, widget_fill_slot),
         .start_ns = start_ns,
@@ -600,6 +622,14 @@ fn dashboardAnimations(model: *const Model, tree: *const DashboardApp.Ui.Tree, s
         .from_transform = canvas.Affine.translate(0, -7),
         .to_transform = canvas.Affine.identity(),
     });
+    if (model.perf_animation_armed) {
+        // The UI app stamps animations from its last presented-frame clock.
+        // A one-shot probe launched after an idle spell could therefore be
+        // partly elapsed before its command-triggered frame. Loop until the
+        // harness explicitly stops us so the entire measured window is live.
+        out[0].loop = .wrap;
+        out[1].loop = .wrap;
+    }
     return 2;
 }
 
@@ -1136,6 +1166,8 @@ test "gpu dashboard typed messages drive the model" {
     try std.testing.expectEqual(Msg.set_mode, tree.msgForPointer(segmented.id, .up).?);
     try std.testing.expectEqual(Msg.set_mode, dashboardCommand(mode_command).?);
     try std.testing.expectEqual(Msg.refresh, dashboardCommand(refresh_command).?);
+    try std.testing.expectEqual(Msg.perf_animation, dashboardCommand(perf_animation_command).?);
+    try std.testing.expectEqual(Msg.perf_animation_stop, dashboardCommand(perf_animation_stop_command).?);
     try std.testing.expectEqual(@as(?Msg, null), dashboardCommand("dashboard.unknown"));
 
     // Selecting a nav row updates the selection and its id survives rebuild.

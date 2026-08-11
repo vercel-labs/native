@@ -73,6 +73,10 @@ using Microsoft::WRL::ComPtr;
 #include <mferror.h>
 #include <winhttp.h>
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
 /* WASAPI process-scoped loopback (the spectrum analysis capture below).
  * The activation-parameter declarations arrived with the Windows 10 2004
  * SDK in audioclientactivationparams.h; the mingw-w64 headers zig ships
@@ -452,14 +456,17 @@ struct NativeView {
      * producer that wants a frame event — runtime frame requests, pixel
      * presents (the completion analog), the pre-first-present placeholder
      * pump — funnels through gpuSurfaceScheduleFrameEmission, which keeps
-     * at most one emission in flight (a one-shot WM_TIMER) and fires it
-     * on the frame-interval grid anchored at gpu_last_emit_ns. Producers
-     * landing while one is queued fold into it: their facts (nonblank,
-     * sample color, buffer contents) are already view state when the
-     * emission fires. gpu_presented flips on the first present and
-     * retires the placeholder pump — from then on frames are
-     * demand-driven, so an idle surface emits ZERO frame events (the
-     * idle law the macOS host enforces). */
+     * at most one emission in flight. A process-owned high-resolution
+     * waitable timer wakes an idle loop; a one-shot WM_TIMER is retained as
+     * the compatibility fallback, and the outer message loop also drains due
+     * emissions after every dispatched message so sustained input cannot
+     * starve the lowest-priority WM_TIMER channel. Every path fires on the
+     * frame-interval grid anchored at gpu_last_emit_ns. Producers landing while one is queued
+     * fold into it: their facts (nonblank, sample color, buffer contents)
+     * are already view state when the emission fires. gpu_presented flips
+     * on the first present and retires the placeholder pump — from then on
+     * frames are demand-driven, so an idle surface emits ZERO frame events
+     * (the idle law the macOS host enforces). */
     bool gpu_emission_scheduled = false;
     bool gpu_presented = false;
     /* One-shot: the next scheduled emission must fire at grid
@@ -714,6 +721,10 @@ struct Host {
     /* Whether the CoInitializeEx in native_sdk_windows_create succeeded
      * and native_sdk_windows_destroy owes the balancing CoUninitialize. */
     bool com_initialized = false;
+    /* Earliest retained-canvas frame deadline. The handle is lazy and only
+     * armed while a surface has one emission in flight; MsgWait... folds it
+     * into the UI-thread message pump without a helper thread or callback. */
+    HANDLE gpu_frame_wake_timer = nullptr;
     AudioState audio;
     AudioSpectrumState spectrum;
     AudioCaptureState captures[2];
@@ -722,6 +733,8 @@ struct Host {
 };
 
 static std::string webViewKey(uint64_t window_id, const std::string &label);
+static void gpuSurfaceRefreshFrameWakeTimer(Host *host);
+static void gpuSurfaceDestroyFrameWakeTimer(Host *host);
 
 static std::string slice(const char *bytes, size_t len) {
     return bytes && len > 0 ? std::string(bytes, len) : std::string();
@@ -1947,6 +1960,7 @@ static void destroyNativeViewAndChildren(Host *host, const std::string &key) {
     for (const std::string &child : children) destroyNativeViewAndChildren(host, child);
     if (found->second.hwnd) DestroyWindow(found->second.hwnd);
     host->native_views.erase(found);
+    gpuSurfaceRefreshFrameWakeTimer(host);
 }
 
 static void destroyNativeViewsForWindow(Host *host, uint64_t window_id) {
@@ -1970,13 +1984,13 @@ static void destroyNativeViewsForWindow(Host *host, uint64_t window_id) {
  * buffer is still valid. Frame events are DEMAND-DRIVEN through one
  * scheduler per surface (the macOS host's design): runtime frame
  * requests and pixel presents each arm a single grid-anchored one-shot
- * WM_TIMER emission, so an armed animation loop sees one
+ * emission, so an armed animation loop sees one
  * gpu_surface_frame per frame interval and an idle surface sees none.
  * Until the first present lands, a placeholder 16 ms WM_TIMER pump arms
  * the same scheduler (the runtime's install choreography rides the
- * first frame events), then removes itself. WM_TIMER granularity
- * (~10-16 ms, coalesced under load) quantizes individual periods; the
- * grid-anchored clock turns that into jitter, never drift.
+ * first frame events), then removes itself. The scheduler's high-resolution
+ * waitable deadline avoids WM_TIMER's ~10-16 ms quantization while the
+ * grid-anchored clock still prevents drift.
  * gpu_surface_resize rides WM_SIZE/DPI changes plus each emission's
  * geometry sync. Mouse, wheel, and
  * key input map onto the same gpu_surface_input kinds the other hosts
@@ -2734,6 +2748,60 @@ static bool gpuSurfaceOccludedPacingActive(Host *host, const NativeView &view) {
     return root != nullptr && IsIconic(root);
 }
 
+/* SetTimer can round a nominal 16.67 ms frame delay onto the legacy system
+ * timer grid. A high-resolution waitable timer expresses the EARLIEST pending
+ * surface deadline directly and participates
+ * in the UI thread's MsgWaitForMultipleObjectsEx loop. The per-HWND WM_TIMER
+ * remains armed as a fallback for older Windows/builds that reject the high-
+ * resolution flag; it is not the normal cadence source.
+ *
+ * This is one process-owned handle, not one timer per surface. Refreshing
+ * scans the small native-view table and re-arms to the earliest single-flight
+ * deadline. Callback-driven view destruction is safe because no NativeView
+ * pointer crosses the wait. */
+static void gpuSurfaceRefreshFrameWakeTimer(Host *host) {
+    if (!host) return;
+    const uint64_t now = gpuTimestampNs();
+    uint64_t earliest_ns = UINT64_MAX;
+    for (const auto &entry : host->native_views) {
+        const NativeView &view = entry.second;
+        if (view.kind != kViewGpuSurface || !view.hwnd || !view.gpu_emission_scheduled) continue;
+        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+        const uint64_t due_ns = view.gpu_last_emit_ns == 0 ? now : view.gpu_last_emit_ns + pace_ns;
+        earliest_ns = std::min(earliest_ns, due_ns);
+    }
+
+    if (earliest_ns == UINT64_MAX) {
+        if (host->gpu_frame_wake_timer) CancelWaitableTimer(host->gpu_frame_wake_timer);
+        return;
+    }
+    if (!host->gpu_frame_wake_timer) {
+        host->gpu_frame_wake_timer = CreateWaitableTimerExW(
+            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_MODIFY_STATE | SYNCHRONIZE);
+        if (!host->gpu_frame_wake_timer) {
+            host->gpu_frame_wake_timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+        }
+        if (!host->gpu_frame_wake_timer) return;
+    }
+
+    const uint64_t wait_ns = earliest_ns > now ? earliest_ns - now : 1;
+    const uint64_t due_100ns = std::max<uint64_t>(1, (wait_ns + 99) / 100);
+    LARGE_INTEGER due = {};
+    due.QuadPart = -static_cast<LONGLONG>(std::min<uint64_t>(due_100ns, LLONG_MAX));
+    if (!SetWaitableTimer(host->gpu_frame_wake_timer, &due, 0, nullptr, nullptr, FALSE)) {
+        CloseHandle(host->gpu_frame_wake_timer);
+        host->gpu_frame_wake_timer = nullptr;
+    }
+}
+
+static void gpuSurfaceDestroyFrameWakeTimer(Host *host) {
+    if (!host || !host->gpu_frame_wake_timer) return;
+    CancelWaitableTimer(host->gpu_frame_wake_timer);
+    CloseHandle(host->gpu_frame_wake_timer);
+    host->gpu_frame_wake_timer = nullptr;
+}
+
 /* The single frame-event emission: view state (nonblank verdict, sample
  * color, buffer geometry) is the payload, so one event serves frame
  * requests and present completions alike. */
@@ -2788,8 +2856,8 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
  * is queued fold into it. Always fires through the message loop — a
  * request lands mid engine dispatch and a synchronous emission would
  * re-enter the engine — and the pacing clock's grid stamping keeps the
- * message hop out of the period. SetTimer clamps short delays up to its
- * ~10 ms floor; the clock absorbs that as jitter, not drift. */
+ * message hop out of the period. The waitable timer supplies the precise
+ * wake; SetTimer is only the compatibility fallback. */
 static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
     if (!view.hwnd || view.gpu_emission_scheduled) return;
     const uint64_t now = gpuTimestampNs();
@@ -2806,9 +2874,50 @@ static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
         delay_ns = view.gpu_last_emit_ns + pace_ns - now;
     }
     const UINT delay_ms = (UINT)((delay_ns + 500000ull) / 1000000ull);
-    if (SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
-        view.gpu_emission_scheduled = true;
+    view.gpu_emission_scheduled = true;
+    (void)SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr);
+    gpuSurfaceRefreshFrameWakeTimer(host);
+}
+
+/* WM_TIMER is generated only after higher-priority input/posted messages
+ * have drained. A trackpad or high-rate wheel can therefore keep the
+ * one-shot emit timer pending for hundreds of milliseconds even though the
+ * frame deadline passed. The outer GetMessage loop calls this after EVERY
+ * dispatched message: while the queue is busy, that dispatch becomes the
+ * wake source; while it is idle, the existing timer wakes it. Emission stays
+ * outside the platform callback that requested the frame, so the runtime is
+ * never re-entered, and the existing single-flight/grid clock still owns
+ * coalescing and pacing.
+ *
+ * Capture stable map keys before emitting. A frame callback may close its
+ * own view (or another due view), so each key is re-resolved immediately
+ * before use and no iterator/reference survives an engine callback. */
+static void gpuSurfaceDrainDueFrameEmissions(Host *host) {
+    if (!host) return;
+    const uint64_t now = gpuTimestampNs();
+    std::vector<std::string> due_keys;
+    for (const auto &entry : host->native_views) {
+        const NativeView &view = entry.second;
+        if (view.kind != kViewGpuSurface || !view.hwnd || !view.gpu_emission_scheduled) continue;
+        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+        if (view.gpu_last_emit_ns == 0 || now >= view.gpu_last_emit_ns + pace_ns) {
+            due_keys.push_back(entry.first);
+        }
     }
+    for (const std::string &key : due_keys) {
+        auto found = host->native_views.find(key);
+        if (found == host->native_views.end()) continue;
+        NativeView &view = found->second;
+        if (view.kind != kViewGpuSurface || !view.hwnd || !view.gpu_emission_scheduled) continue;
+        const uint64_t current_ns = gpuTimestampNs();
+        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+        if (view.gpu_last_emit_ns > 0 && current_ns < view.gpu_last_emit_ns + pace_ns) continue;
+        const HWND hwnd = view.hwnd;
+        KillTimer(hwnd, kGpuEmitTimerId);
+        view.gpu_emission_scheduled = false;
+        gpuSurfaceEmitFrame(host, view, hwnd);
+    }
+    gpuSurfaceRefreshFrameWakeTimer(host);
 }
 
 static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
@@ -3149,6 +3258,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                 KillTimer(hwnd, kGpuEmitTimerId);
                 view->gpu_emission_scheduled = false;
                 gpuSurfaceEmitFrame(host, *view, hwnd);
+                gpuSurfaceRefreshFrameWakeTimer(host);
                 return 0;
             }
             break;
@@ -6004,6 +6114,7 @@ void native_sdk_windows_destroy(Host *host) {
     audioReleaseSession(host, true);
     removeNotificationIcon(host);
     destroyAllWindows(host);
+    gpuSurfaceDestroyFrameWakeTimer(host);
     const bool com_initialized = host->com_initialized;
     delete host;
     if (com_initialized) CoUninitialize();
@@ -6025,9 +6136,23 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
         emit(host, entry.second, kWindowFrame);
     }
     MSG message = {};
-    while (host->running && GetMessageW(&message, nullptr, 0, 0) > 0) {
+    while (host->running) {
+        HANDLE handles[1] = {};
+        const DWORD handle_count = host->gpu_frame_wake_timer ? 1 : 0;
+        if (handle_count != 0) handles[0] = host->gpu_frame_wake_timer;
+        const DWORD wait_result = MsgWaitForMultipleObjectsEx(
+            handle_count, handles, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (wait_result == WAIT_FAILED) break;
+        if (handle_count != 0 && wait_result == WAIT_OBJECT_0) {
+            gpuSurfaceDrainDueFrameEmissions(host);
+            continue;
+        }
+        if (wait_result != WAIT_OBJECT_0 + handle_count) continue;
+        const BOOL received = GetMessageW(&message, nullptr, 0, 0);
+        if (received <= 0) break;
         TranslateMessage(&message);
         DispatchMessageW(&message);
+        gpuSurfaceDrainDueFrameEmissions(host);
     }
     WindowsEvent shutdown = {};
     shutdown.kind = kShutdown;

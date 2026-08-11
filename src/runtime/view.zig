@@ -203,7 +203,12 @@ pub const RuntimeView = struct {
     gpu_scale_factor: f32 = 1,
     gpu_frame_index: u64 = 0,
     gpu_timestamp_ns: u64 = 0,
+    /// Profiling-only completion stamp. Kept separate from gpu_timestamp_ns
+    /// so `profile on` can start an honest interval window without erasing
+    /// the live frame clock used by animation and diagnostics.
+    gpu_frame_profile_timestamp_ns: u64 = 0,
     gpu_frame_interval_ns: u64 = platform.default_gpu_frame_interval_ns,
+    gpu_input_event_count: u64 = 0,
     gpu_pending_input_timestamp_ns: u64 = 0,
     gpu_input_timestamp_ns: u64 = 0,
     gpu_input_latency_ns: u64 = 0,
@@ -218,6 +223,7 @@ pub const RuntimeView = struct {
     gpu_first_frame_latency_budget_ok: bool = true,
     gpu_first_frame_latency_recorded: bool = false,
     gpu_frame_nonblank: bool = false,
+    gpu_occluded: bool = false,
     gpu_sample_color: u32 = 0,
     /// Immutable creation-time backend request. `gpu_backend` below is
     /// completion state and changes to the concrete presenter reported by
@@ -1089,6 +1095,7 @@ pub const RuntimeView = struct {
             .gpu_frame_index = self.gpu_frame_index,
             .gpu_timestamp_ns = self.gpu_timestamp_ns,
             .gpu_frame_interval_ns = self.gpu_frame_interval_ns,
+            .gpu_input_event_count = self.gpu_input_event_count,
             .gpu_input_timestamp_ns = self.gpu_input_timestamp_ns,
             .gpu_input_latency_ns = self.gpu_input_latency_ns,
             .gpu_input_latency_budget_ns = self.gpu_input_latency_budget_ns,
@@ -1099,6 +1106,7 @@ pub const RuntimeView = struct {
             .gpu_first_frame_latency_budget_exceeded_count = self.gpu_first_frame_latency_budget_exceeded_count,
             .gpu_first_frame_latency_budget_ok = self.gpu_first_frame_latency_budget_ok,
             .gpu_frame_nonblank = self.gpu_frame_nonblank,
+            .gpu_occluded = self.gpu_occluded,
             .gpu_sample_color = self.gpu_sample_color,
             .gpu_backend = self.gpu_backend,
             .gpu_pixel_format = self.gpu_pixel_format,
@@ -1192,6 +1200,7 @@ pub const RuntimeView = struct {
     }
 
     pub fn recordGpuSurfaceInputTimestamp(self: *RuntimeView, timestamp_ns: u64) void {
+        self.gpu_input_event_count +|= 1;
         if (timestamp_ns == 0) return;
         self.gpu_pending_input_timestamp_ns = timestamp_ns;
         self.gpu_input_timestamp_ns = timestamp_ns;

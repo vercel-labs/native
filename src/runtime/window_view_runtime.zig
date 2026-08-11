@@ -26,8 +26,7 @@ const viewInfoFromWebView = bridge_responses.viewInfoFromWebView;
 const RuntimeWebView = runtime_state.RuntimeWebView;
 const FocusTraversalDirection = runtime_state.FocusTraversalDirection;
 const sourceWebViewUrl = runtime_state.sourceWebViewUrl;
-const nowNanoseconds = runtime_clock.nowNanoseconds;
-const timestampToU64 = runtime_clock.timestampToU64;
+const monotonicNanoseconds = runtime_clock.monotonicNanoseconds;
 const CommandSource = runtime_api.CommandSource;
 
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
@@ -492,7 +491,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .gpu_color_space = if (options.kind == .gpu_surface) options.gpu_surface.color_space else .none,
                 .gpu_vsync = options.kind == .gpu_surface and options.gpu_surface.vsync,
                 .gpu_status = if (options.kind == .gpu_surface) .ready else .unavailable,
-                .gpu_surface_created_timestamp_ns = if (options.kind == .gpu_surface) timestampToU64(nowNanoseconds()) else 0,
+                .gpu_surface_created_timestamp_ns = if (options.kind == .gpu_surface) monotonicNanoseconds() else 0,
                 .focused = false,
                 .keyboard_active = windowKeyboardActive(self, options.window_id),
                 .open = true,

@@ -45,10 +45,13 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // interval, useless for drop detection). Profiling-gated;
                 // a dropped frame shows as max >> p50 on this channel.
                 if (self.frame_profile.enabled) {
-                    const previous_timestamp_ns = self.views[index].gpu_timestamp_ns;
+                    const previous_timestamp_ns = self.views[index].gpu_frame_profile_timestamp_ns;
                     if (previous_timestamp_ns > 0 and frame_event.timestamp_ns > previous_timestamp_ns) {
                         self.frame_profile.recordNs(.interval, frame_event.timestamp_ns - previous_timestamp_ns);
                     }
+                    self.views[index].gpu_frame_profile_timestamp_ns = frame_event.timestamp_ns;
+                } else {
+                    self.views[index].gpu_frame_profile_timestamp_ns = 0;
                 }
                 self.views[index].gpu_timestamp_ns = frame_event.timestamp_ns;
                 self.views[index].recordGpuSurfaceFrameInterval(frame_event.frame_interval_ns);
@@ -106,12 +109,14 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // state 60 times a second.
                 const first_frame_latency_recorded = !first_frame_latency_was_recorded and self.views[index].gpu_first_frame_latency_recorded;
                 if (self.views[index].gpu_frame_nonblank != frame_event.nonblank or
+                    self.views[index].gpu_occluded != frame_event.occluded or
                     self.views[index].gpu_backend != frame_event.backend or
                     first_frame_latency_recorded)
                 {
                     self.invalidateFor(.state, self.views[index].frame);
                 }
                 self.views[index].gpu_frame_nonblank = frame_event.nonblank;
+                self.views[index].gpu_occluded = frame_event.occluded;
                 self.views[index].gpu_sample_color = frame_event.sample_color;
                 self.views[index].gpu_backend = frame_event.backend;
                 self.views[index].gpu_pixel_format = frame_event.pixel_format;

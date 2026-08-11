@@ -967,6 +967,10 @@ pub const ViewInfo = struct {
     gpu_frame_index: u64 = 0,
     gpu_timestamp_ns: u64 = 0,
     gpu_frame_interval_ns: u64 = default_gpu_frame_interval_ns,
+    /// GPU-surface input events accepted by the runtime for this view.
+    /// Monotonic for the view lifetime; automation uses deltas to separate
+    /// host/input-stack delivery from renderer frame coverage.
+    gpu_input_event_count: u64 = 0,
     gpu_input_timestamp_ns: u64 = 0,
     gpu_input_latency_ns: u64 = 0,
     gpu_input_latency_budget_ns: u64 = default_gpu_frame_interval_ns,
@@ -977,6 +981,9 @@ pub const ViewInfo = struct {
     gpu_first_frame_latency_budget_exceeded_count: usize = 0,
     gpu_first_frame_latency_budget_ok: bool = true,
     gpu_frame_nonblank: bool = false,
+    /// Whether the most recent host completion was an occluded logical
+    /// heartbeat rather than a presentation that reached the display.
+    gpu_occluded: bool = false,
     gpu_sample_color: u32 = 0,
     gpu_backend: GpuSurfaceBackend = .none,
     gpu_pixel_format: GpuSurfacePixelFormat = .none,

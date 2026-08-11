@@ -83,7 +83,7 @@ pub fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
     try json.writeString(writer, view.command);
     try writer.writeAll(",\"url\":");
     try json.writeString(writer, view.url);
-    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuFrameIntervalNs\":{d},\"gpuInputTimestampNs\":{d},\"gpuInputLatencyNs\":{d},\"gpuInputLatencyBudgetNs\":{d},\"gpuInputLatencyBudgetExceededCount\":{d},\"gpuInputLatencyBudgetOk\":{},\"gpuFirstFrameLatencyNs\":{d},\"gpuFirstFrameLatencyBudgetNs\":{d},\"gpuFirstFrameLatencyBudgetExceededCount\":{d},\"gpuFirstFrameLatencyBudgetOk\":{},\"gpuNonblank\":{},\"gpuSampleColor\":{d},\"gpuBackend\":", .{
+    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuFrameIntervalNs\":{d},\"gpuInputCount\":{d},\"gpuInputTimestampNs\":{d},\"gpuInputLatencyNs\":{d},\"gpuInputLatencyBudgetNs\":{d},\"gpuInputLatencyBudgetExceededCount\":{d},\"gpuInputLatencyBudgetOk\":{},\"gpuFirstFrameLatencyNs\":{d},\"gpuFirstFrameLatencyBudgetNs\":{d},\"gpuFirstFrameLatencyBudgetExceededCount\":{d},\"gpuFirstFrameLatencyBudgetOk\":{},\"gpuNonblank\":{},\"gpuOccluded\":{},\"gpuSampleColor\":{d},\"gpuBackend\":", .{
         view.frame.x,
         view.frame.y,
         view.frame.width,
@@ -99,6 +99,7 @@ pub fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.gpu_frame_index,
         view.gpu_timestamp_ns,
         view.gpu_frame_interval_ns,
+        view.gpu_input_event_count,
         view.gpu_input_timestamp_ns,
         view.gpu_input_latency_ns,
         view.gpu_input_latency_budget_ns,
@@ -109,6 +110,7 @@ pub fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.gpu_first_frame_latency_budget_exceeded_count,
         view.gpu_first_frame_latency_budget_ok,
         view.gpu_frame_nonblank,
+        view.gpu_occluded,
         view.gpu_sample_color,
     });
     try json.writeString(writer, @tagName(view.gpu_backend));

@@ -350,10 +350,9 @@ pub fn mobileTextRangeEnd(range: ?canvas.TextRange) isize {
     const value = range orelse return -1;
     return mobileOptionalIndex(value.end);
 }
-/// Wall-clock nanoseconds for embed input timestamps, through the
-/// runtime clock seam (which covers Windows via the NT precise system
-/// time and degrades to 0 only on targets without a readable clock).
+/// Monotonic nanoseconds for embed input and frame timestamps. These values
+/// participate in GPU latency and frame-interval subtraction, so they must
+/// share the duration clock used by desktop hosts and runtime presentation.
 pub fn nowNanoseconds() u64 {
-    const ns = runtime.nowNanoseconds();
-    return if (ns > 0) @intCast(ns) else 0;
+    return runtime.monotonicNanoseconds();
 }

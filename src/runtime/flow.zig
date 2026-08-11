@@ -1016,7 +1016,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.command_count += 1;
                     const enable = std.mem.eql(u8, command.value, "on");
                     if (!enable and !std.mem.eql(u8, command.value, "off")) return error.InvalidCommand;
-                    if (enable and !self.frame_profile.enabled) self.frame_profile.reset();
+                    if (enable and !self.frame_profile.enabled) {
+                        self.frame_profile.reset();
+                        for (self.views[0..self.view_count]) |*view| {
+                            view.gpu_frame_profile_timestamp_ns = 0;
+                        }
+                    }
                     self.frame_profile.enabled = enable;
                     self.invalidateFor(.command, null);
                 },

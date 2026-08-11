@@ -2384,6 +2384,56 @@ test "windows first-present windows have a fallback reveal deadline" {
     ) != null);
 }
 
+test "windows busy message loop drains due gpu frames outside input callbacks" {
+    // The waitable timer is the precise idle wake source, but queued input
+    // may win the message-loop race. Pin the complementary post-dispatch
+    // drain: it must run only after DispatchMessage returns (outside the
+    // runtime callback that requested the frame), and the helper must retire
+    // the one-shot before emitting so synchronous presentation can re-arm it.
+    const host_source = @embedFile("webview2_host.cpp");
+    const run_at = std.mem.indexOf(u8, host_source, "void native_sdk_windows_run(") orelse return error.TestExpectedEqual;
+    const run_tail = host_source[run_at..];
+    const dispatch_at = std.mem.indexOf(u8, run_tail, "DispatchMessageW(&message);") orelse return error.TestExpectedEqual;
+    const post_dispatch = run_tail[dispatch_at..];
+    try std.testing.expect(std.mem.indexOf(u8, post_dispatch, "gpuSurfaceDrainDueFrameEmissions(host);") != null);
+
+    const helper_at = std.mem.indexOf(u8, host_source, "static void gpuSurfaceDrainDueFrameEmissions(Host *host)") orelse return error.TestExpectedEqual;
+    const helper_tail = host_source[helper_at..];
+    const helper_end = std.mem.indexOf(u8, helper_tail, "static void paintGpuSurface(") orelse return error.TestExpectedEqual;
+    const helper = helper_tail[0..helper_end];
+    const kill_at = std.mem.indexOf(u8, helper, "KillTimer(hwnd, kGpuEmitTimerId);") orelse return error.TestExpectedEqual;
+    const clear_at = std.mem.indexOf(u8, helper, "view.gpu_emission_scheduled = false;") orelse return error.TestExpectedEqual;
+    const emit_at = std.mem.indexOf(u8, helper, "gpuSurfaceEmitFrame(host, view, hwnd);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(kill_at < clear_at);
+    try std.testing.expect(clear_at < emit_at);
+}
+
+test "windows gpu frame deadlines use a high resolution waitable timer" {
+    // A nominal 16.67 ms SetTimer is commonly rounded to the legacy timer
+    // grid. Pin the host's precise path: one process-owned high-resolution
+    // waitable timer follows the earliest scheduled surface, participates in
+    // the message loop, refreshes after an emission, and closes at teardown.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "CREATE_WAITABLE_TIMER_HIGH_RESOLUTION") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetWaitableTimer(host->gpu_frame_wake_timer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "MsgWaitForMultipleObjectsEx(") != null);
+
+    const schedule_at = std.mem.indexOf(u8, host_source, "static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view)") orelse return error.TestExpectedEqual;
+    const schedule_tail = host_source[schedule_at..];
+    const schedule_end = std.mem.indexOf(u8, schedule_tail, "static void gpuSurfaceDrainDueFrameEmissions(") orelse return error.TestExpectedEqual;
+    const schedule = schedule_tail[0..schedule_end];
+    const scheduled_at = std.mem.indexOf(u8, schedule, "view.gpu_emission_scheduled = true;") orelse return error.TestExpectedEqual;
+    const wake_at = std.mem.indexOf(u8, schedule, "gpuSurfaceRefreshFrameWakeTimer(host);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(scheduled_at < wake_at);
+
+    const timer_at = std.mem.indexOf(u8, host_source, "if (wparam == kGpuEmitTimerId)") orelse return error.TestExpectedEqual;
+    const timer_tail = host_source[timer_at..];
+    const emit_at = std.mem.indexOf(u8, timer_tail, "gpuSurfaceEmitFrame(host, *view, hwnd);") orelse return error.TestExpectedEqual;
+    const refresh_at = std.mem.indexOf(u8, timer_tail, "gpuSurfaceRefreshFrameWakeTimer(host);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(emit_at < refresh_at);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "gpuSurfaceDestroyFrameWakeTimer(host);") != null);
+}
+
 test "windows window focus includes focused native child views" {
     // This predicate lives in the C++ host, where the real HWND tree is
     // available. Pin the two parts of its contract textually: focus is
