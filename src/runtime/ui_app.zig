@@ -4739,7 +4739,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // `on_double_press` handler (falling back to the ordinary
             // press), while its first release already dispatched the
             // single press — select-then-act, the list convention.
-            if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
+            // The modifiers ride along too: an arm declaring the
+            // press-record shape hears what was held at click time, which
+            // is what makes cmd-click and shift-click expressible.
+            if (tree.msgForPointerClickModified(
+                target.id,
+                pointer_event.pointer.phase,
+                pointer_event.pointer.click_count,
+                pointer_event.pointer.modifiers,
+            )) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
         }

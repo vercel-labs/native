@@ -61,7 +61,11 @@ pub const ValueKind = expr.ValueKind;
 /// preview insertion/reordering on change and restore on cancellation.
 /// Version 6: live drag geometry requires floating-point fields so captured
 /// out-of-view coordinates cannot trap an integer conversion at dispatch.
-pub const format_version: u32 = 6;
+/// Version 7: `press` classifies the modifier-carrying press record and
+/// `MsgTag.press_payload` names the class of its authored field; a
+/// format-6 artifact calls the record unsupported and would reject a valid
+/// `on-press` binding.
+pub const format_version: u32 = 7;
 
 /// Where the app's build step writes the artifact, relative to the app
 /// directory (a build product lives under zig-out, not in durable state).
@@ -146,12 +150,17 @@ pub const Iterable = struct {
 /// cannot be built from markup at all. `legacy_scroll_state` is the
 /// RETIRED one-axis scroll record, recognized only so `on-scroll` can
 /// teach the two-axis migration by field name.
-pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, terminal_state, drag_drop, unsupported };
+pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, terminal_state, drag_drop, press, unsupported };
 
 pub const MsgTag = struct {
     name: []const u8,
     payload: PayloadClass = .none,
     payload_type: []const u8 = "",
+    /// For `.press` arms only: the class of the ONE authored field the
+    /// markup binding fills, or `.none` for the payload-less form. The
+    /// four modifier booleans are the runtime's to fill, so they never
+    /// appear here.
+    press_payload: PayloadClass = .none,
 };
 
 pub const Contract = struct {
@@ -327,6 +336,7 @@ fn describeMsgs(comptime Msg: type, comptime specials: Specials) []const MsgTag 
                 .name = field.name,
                 .payload = payloadClassOf(field.type, specials),
                 .payload_type = if (field.type == void) "" else @typeName(field.type),
+                .press_payload = pressPayloadClassOf(field.type, specials),
             }};
         }
         return tags;
@@ -356,6 +366,7 @@ fn payloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
     // resolution as both engines' terminalConstructor.
     if (reflect.declaredTerminalStateRecord(T)) return .terminal_state;
     if (reflect.declaredWidgetDragDropRecord(T)) return .drag_drop;
+    if (reflect.declaredWidgetPressRecord(T)) return .press;
     return switch (@typeInfo(T)) {
         .int => .integer,
         .float => .float,
@@ -364,6 +375,16 @@ fn payloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
         .pointer => |info| if (info.size == .slice and info.child == u8) .string else .unsupported,
         else => .unsupported,
     };
+}
+
+/// The class of a press arm's authored field, so `on-press="tag:{path}"`
+/// is kind-checked exactly like an ordinary payload. `.none` for any arm
+/// that is not a press record, and for the payload-less press form.
+fn pressPayloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
+    if (T == void) return .none;
+    if (!reflect.declaredWidgetPressRecord(T)) return .none;
+    const name = reflect.pressPayloadFieldName(T) orelse return .none;
+    return payloadClassOf(@FieldType(T, name), specials);
 }
 
 fn optOutNames(comptime T: type) []const []const u8 {
@@ -934,6 +955,25 @@ const Checker = struct {
             }
         }
         const found = tag orelse return self.failNamed(node, unknown_tag_message, expression.tag, .{ .msgs = self.contract });
+        // A press arm's four modifier booleans are the runtime's to fill;
+        // markup binds only the authored field, so the payload rules apply
+        // to THAT field's class rather than to the record.
+        if (found.payload == .press) {
+            if (found.press_payload == .none) {
+                if (expression.payload.len > 0) return self.failAttr(node, attribute, no_payload_message);
+                return;
+            }
+            if (expression.payload.len == 0) return self.failAttr(node, attribute, payload_required_message);
+            const press_resolved = try self.resolveBinding(node, expression.payload, true);
+            switch (found.press_payload) {
+                .integer => try self.requirePayloadKind(node, attribute, press_resolved, &.{.integer}, found),
+                .float => try self.requirePayloadKind(node, attribute, press_resolved, &.{ .float, .integer }, found),
+                .string, .enum_tag => try self.requirePayloadKind(node, attribute, press_resolved, &.{.string}, found),
+                .boolean => {},
+                else => return self.failPayloadType(node, attribute, press_resolved, found),
+            }
+            return;
+        }
         if (found.payload == .none) {
             if (expression.payload.len > 0) return self.failAttr(node, attribute, no_payload_message);
             return;
@@ -948,7 +988,7 @@ const Checker = struct {
             .boolean => {},
             // These payloads cannot be constructed from a markup binding
             // (input/scroll payloads bind through their own events).
-            .text_input, .scroll_state, .legacy_scroll_state, .terminal_state, .drag_drop, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
+            .text_input, .scroll_state, .legacy_scroll_state, .terminal_state, .drag_drop, .press, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
             .none => unreachable,
         }
     }

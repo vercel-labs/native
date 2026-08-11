@@ -37,6 +37,15 @@ pub const AutomationWidgetTarget = struct {
     id: canvas.ObjectId,
 };
 
+/// `widget-click <view> <id> [modifiers]`, where the optional third token
+/// spells a chord the way `widget-key` does (`cmd`, `shift`, `cmd+shift`).
+/// The modifiers ride the synthetic press so a press-modifier Msg arm can
+/// be driven from a test the same way a real click drives it.
+pub const AutomationWidgetClick = struct {
+    target: AutomationWidgetTarget,
+    modifiers: AutomationKeyModifiers = .{},
+};
+
 pub const AutomationWidgetWheel = struct {
     target: AutomationWidgetTarget,
     delta_y: f32,
@@ -222,6 +231,46 @@ pub const AutomationProvenanceTarget = struct {
     id: canvas.ObjectId = 0,
     point: ?geometry.PointF = null,
 };
+
+/// The modifier-only form of a key chord (`cmd`, `cmd+shift`), for verbs
+/// that carry modifiers without a key. Unknown names are refused so a
+/// typo reads as an invalid command instead of a silently plain click.
+fn parseAutomationModifierToken(token: []const u8) ?AutomationKeyModifiers {
+    var modifiers = AutomationKeyModifiers{};
+    var rest = token;
+    while (rest.len > 0) {
+        const separator = std.mem.indexOfScalar(u8, rest, '+') orelse rest.len;
+        const part = rest[0..separator];
+        if (part.len == 0) return null;
+        if (std.ascii.eqlIgnoreCase(part, "cmd") or std.ascii.eqlIgnoreCase(part, "meta") or std.ascii.eqlIgnoreCase(part, "super")) {
+            modifiers.command = true;
+            modifiers.primary = true;
+        } else if (std.ascii.eqlIgnoreCase(part, "ctrl") or std.ascii.eqlIgnoreCase(part, "control")) {
+            modifiers.control = true;
+        } else if (std.ascii.eqlIgnoreCase(part, "alt") or std.ascii.eqlIgnoreCase(part, "option")) {
+            modifiers.option = true;
+        } else if (std.ascii.eqlIgnoreCase(part, "shift")) {
+            modifiers.shift = true;
+        } else {
+            return null;
+        }
+        if (separator == rest.len) break;
+        rest = rest[separator + 1 ..];
+    }
+    return modifiers;
+}
+
+pub fn parseAutomationWidgetClick(value: []const u8) !AutomationWidgetClick {
+    const view = takeAutomationToken(value) orelse return error.InvalidCommand;
+    const id_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
+    const id = std.fmt.parseInt(canvas.ObjectId, id_part.token, 10) catch return error.InvalidCommand;
+    if (id == 0) return error.InvalidCommand;
+    const target = AutomationWidgetTarget{ .view_label = view.token, .id = id };
+    const modifier_part = takeAutomationToken(id_part.rest) orelse return .{ .target = target };
+    if (takeAutomationToken(modifier_part.rest) != null) return error.InvalidCommand;
+    const modifiers = parseAutomationModifierToken(modifier_part.token) orelse return error.InvalidCommand;
+    return .{ .target = target, .modifiers = modifiers };
+}
 
 pub fn parseAutomationProvenanceTarget(value: []const u8) !AutomationProvenanceTarget {
     const view = takeAutomationToken(value) orelse return error.InvalidCommand;

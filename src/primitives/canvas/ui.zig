@@ -1427,10 +1427,42 @@ pub fn Ui(comptime Msg: type) type {
             /// dispatcher the runtime pointer path uses; the two-argument
             /// form stays the single-click entry point.
             pub fn msgForPointerClick(self: Tree, target_id: ObjectId, phase: canvas.WidgetPointerPhase, click_count: u8) ?Msg {
+                return self.msgForPointerClickModified(target_id, phase, click_count, .{});
+            }
+
+            /// `msgForPointerClick` carrying the modifiers held at click
+            /// time. An arm declaring the press-record shape receives them;
+            /// every other arm resolves exactly as the three-argument form,
+            /// so this is the dispatcher the runtime pointer path uses.
+            pub fn msgForPointerClickModified(
+                self: Tree,
+                target_id: ObjectId,
+                phase: canvas.WidgetPointerPhase,
+                click_count: u8,
+                modifiers: canvas.WidgetKeyboardModifiers,
+            ) ?Msg {
                 if (phase == .up and click_count == 2) {
-                    if (self.msgFor(target_id, .double_press)) |msg| return msg;
+                    if (self.msgFor(target_id, .double_press)) |msg| return withPressModifiers(msg, modifiers);
                 }
-                return self.msgForPointer(target_id, phase);
+                const msg = self.msgForPointer(target_id, phase) orelse return null;
+                return withPressModifiers(msg, modifiers);
+            }
+
+            /// Fill the four modifier booleans on an arm that declared them,
+            /// leaving every other arm untouched. The authored payload is
+            /// already in place: markup built it, this only adds what only
+            /// the runtime knows.
+            pub fn withPressModifiers(msg: Msg, modifiers: canvas.WidgetKeyboardModifiers) Msg {
+                return switch (msg) {
+                    inline else => |payload, tag| if (comptime reflect.declaredWidgetPressRecord(@TypeOf(payload))) blk: {
+                        var out = payload;
+                        out.shift = modifiers.shift;
+                        out.control = modifiers.control;
+                        out.alt = modifiers.alt;
+                        out.super = modifiers.super;
+                        break :blk @unionInit(Msg, @tagName(tag), out);
+                    } else msg,
+                };
             }
 
             /// Typed dispatch for keyboard events: engine control intents

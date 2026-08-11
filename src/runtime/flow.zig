@@ -35,6 +35,7 @@ const nowNanoseconds = runtime_clock.nowNanoseconds;
 const canvasWidgetAccessibilityActionKindFromPlatform = widget_bridge.canvasWidgetAccessibilityActionKindFromPlatform;
 const parseAutomationCommandName = automation_commands.parseAutomationCommandName;
 const parseAutomationViewLabel = automation_commands.parseAutomationViewLabel;
+const parseAutomationWidgetClick = automation_commands.parseAutomationWidgetClick;
 const parseAutomationNativeCommand = automation_commands.parseAutomationNativeCommand;
 const parseAutomationWidgetAction = automation_commands.parseAutomationWidgetAction;
 const parseAutomationWidgetTarget = automation_commands.parseAutomationWidgetTarget;
@@ -959,7 +960,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     try AutomationWidgetMethods().dispatchAutomationWidgetAction(self, app, try parseAutomationWidgetAction(command.value));
                 },
                 .widget_click => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetClick(self, app, try parseAutomationWidgetTarget(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetClick(self, app, try parseAutomationWidgetClick(command.value));
                 },
                 .widget_hold => {
                     try AutomationWidgetMethods().dispatchAutomationWidgetHold(self, app, try parseAutomationWidgetTarget(command.value));

@@ -62,8 +62,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.E
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-action", value);
     } else if (std.mem.eql(u8, command, "widget-click")) {
-        if (args.len != 3) return usage();
-        const value = try std.fmt.allocPrint(allocator, "{s} {s}", .{ args[1], args[2] });
+        // The optional fourth argument is a modifier chord (`cmd`,
+        // `shift`, `cmd+shift`) held for the synthetic click.
+        if (args.len != 3 and args.len != 4) return usage();
+        const value = try std.mem.join(allocator, " ", args[1..]);
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-click", value);
     } else if (std.mem.eql(u8, command, "widget-hold")) {
@@ -447,7 +449,7 @@ fn printUsage() void {
         \\  menu-command <id>
         \\  native-command <id> [view-label]
         \\  widget-action <view-label> <widget-id> <action> [value]
-        \\  widget-click <view-label> <widget-id>   (ids are the bare number; snapshots print #id)
+        \\  widget-click <view-label> <widget-id> [modifiers]   (ids are the bare number; snapshots print #id; modifiers spell a chord: cmd, shift, cmd+shift)
         \\  widget-hold <view-label> <widget-id>   (press-and-hold: arms and fires the on_hold timer, release suppressed)
         \\  widget-context-press <view-label> <widget-id>   (right-click: context menu, or on_hold when the route has none)
         \\  widget-context-menu <view-label> <widget-id> <item-index>   (invoke a declared context-menu item; snapshots list them as context_menu=[...])
