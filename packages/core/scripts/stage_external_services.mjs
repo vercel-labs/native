@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Stage the phase-1 service executable: ordinary service TypeScript plus
 // corewire's generated service_host_main.ts. One narrow mechanical lowering
-// is required by scriptc 0.0.22: a boundary `throw { kind, message }` becomes
+// is required by scriptc 0.0.22: an escaping `throw { kind, message }` becomes
 // an Error subclass carrying kind in `.name`, the object form its reachable
-// static catch tier cannot inspect yet. Author source and Node behavior stay
-// untouched; the transport observes the same kind/message pair.
+// static catch tier cannot inspect yet. NS1067 rejects locally caught tagged
+// records; shared core-class modules receive the same transform in this
+// scratch tree so a throw crossing the service boundary keeps its pair.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -48,7 +49,7 @@ function lowerTaggedThrows(text, fileName) {
         replacements.push({
           start: node.expression.getStart(source),
           end: node.expression.end,
-          text: `new __NativeSdkTaggedError(${parts.kind.getText(source)}, ${parts.message.getText(source)})`,
+          text: `new __nativeSdkTaggedError(${parts.kind.getText(source)}, ${parts.message.getText(source)})`,
         });
       }
     }
@@ -65,7 +66,7 @@ function lowerTaggedThrows(text, fileName) {
   replacements.push({
     start: insertAt,
     end: insertAt,
-    text: `${insertAt === 0 ? "" : "\n"}\nclass __NativeSdkTaggedError extends Error {\n  constructor(kind: string, message: string) {\n    super(message);\n    this.name = kind;\n  }\n}\n`,
+    text: `${insertAt === 0 ? "" : "\n"}\nclass __nativeSdkTaggedError extends Error {\n  readonly kind: string;\n\n  constructor(kind: string, message: unknown) {\n    super(String(message));\n    this.kind = kind;\n    this.name = kind;\n  }\n}\n`,
   });
   replacements.sort((a, b) => b.start - a.start);
   for (const replacement of replacements) {
@@ -82,7 +83,7 @@ function copyTsTree(from, to, sub = "") {
       const destination = path.join(to, rel);
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       const source = fs.readFileSync(path.join(from, rel), "utf8");
-      fs.writeFileSync(destination, rel.startsWith("services/") ? lowerTaggedThrows(source, rel) : source);
+      fs.writeFileSync(destination, lowerTaggedThrows(source, rel));
     }
   }
 }

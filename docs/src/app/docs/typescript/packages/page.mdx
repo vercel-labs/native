@@ -45,7 +45,7 @@ The question behind "can I use npm?" is almost always one of these five:
 
 ## Compiled TypeScript services
 
-Put ordinary static-tier TypeScript under `src/services/` when the work needs Node built-ins, regexes, JSON, `Map`/`Set`, `Date`, classes, or ambient process authority. Each directly exported synchronous function becomes an operation named `<module-basename>.<export>` and takes zero arguments or one `Uint8Array`, returning `Uint8Array`. The core calls it with `Cmd.request`, so success and failure still arrive as Msgs and record/replay remains offline.
+Put ordinary static-tier TypeScript under `src/services/` when the work needs Node built-ins, regexes, JSON, `Map`/`Set`, `Date`, classes, or ambient process authority. Each directly exported, non-default named synchronous function becomes an operation named `<module-basename>.<export>` and takes zero arguments or one `Uint8Array`, returning `Uint8Array`. The core calls it with `Cmd.request`, so success and failure still arrive as Msgs and record/replay remains offline.
 
 This is compiled native code with no JavaScript engine. Phase 1 is vendored-source-only: bare package imports teach NS1066, so check the utility's source in under `src/services/`. The host is a lazily spawned sibling executable on desktop today; [TypeScript services](/docs/typescript#typescript-services) covers authority, crash recovery, packaging, and the mobile/in-process limitation.
 

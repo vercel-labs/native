@@ -9,5 +9,5 @@ scriptc version pinned by the SDK; no JavaScript runtime ships with the app.
 Run it from this directory:
 
 ```bash
-native run
+native dev
 ```

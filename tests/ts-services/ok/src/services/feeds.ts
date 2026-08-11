@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { sharedFailure } from "../shared.ts";
 
 export function parse(payload: Uint8Array): Uint8Array {
   const facts = new Map<string, number>();
@@ -12,7 +13,7 @@ export function parse(payload: Uint8Array): Uint8Array {
 }
 
 export function fail(): Uint8Array {
-  throw { kind: "fixture_failure", message: "requested failure" };
+  return sharedFailure();
 }
 
 export function hang(): Uint8Array {

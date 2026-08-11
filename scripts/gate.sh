@@ -149,7 +149,7 @@ while IFS= read -r file; do
     *) meta_changed=true ;;
   esac
   case "$file" in
-    */src/services/*|src/runtime/service_host.zig|src/app_runner/ts_core_main.zig|tests/ts-services/*|tools/corewire/emit_service.zig|tools/corewire/service_contract.zig|packages/core/src/service_contract.ts|packages/core/scripts/stage_external_services.mjs|packages/core/scripts/run_external_service_compiler.mjs|skill-data/ts-services/*|packages/native-sdk/*service_host*|build.zig|build/app.zig)
+    */src/services/*|src/runtime/service_host.zig|src/app_runner/ts_core_main.zig|tests/ts-services/*|tools/corewire/emit_service.zig|tools/corewire/service_contract.zig|packages/core/src/checker.ts|packages/core/src/cli.ts|packages/core/src/diagnostics.ts|packages/core/src/frontend.ts|packages/core/src/modules.ts|packages/core/src/service_contract.ts|packages/core/src/typed_ast.ts|packages/core/scripts/compiler_typecheck.mjs|packages/core/scripts/stage_external_services.mjs|packages/core/scripts/run_external_service_compiler.mjs|skill-data/ts-services/*|packages/native-sdk/*service_host*|build.zig|build/app.zig)
       service_seam_changed=true
       ;;
   esac

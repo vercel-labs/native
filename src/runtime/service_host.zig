@@ -24,11 +24,21 @@ pub const default_request_timeout_ms: u32 = 30_000;
 /// it beside the carrier prevents a generated-main copy from silently gaining
 /// an ambient variable when the runtime policy changes.
 pub fn environmentVariableAllowed(name: []const u8) bool {
-    const allowed = [_][]const u8{
+    return environmentVariableAllowedForOs(name, builtin.os.tag);
+}
+
+fn environmentVariableAllowedForOs(name: []const u8, os_tag: std.Target.Os.Tag) bool {
+    const portable = [_][]const u8{
         "PATH",          "HOME",         "USER",       "TMPDIR",      "TMP",      "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
         "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
     };
-    for (allowed) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
+    for (portable) |candidate| {
+        if (if (os_tag == .windows) std.ascii.eqlIgnoreCase(name, candidate) else std.mem.eql(u8, name, candidate)) return true;
+    }
+    if (os_tag == .windows) {
+        const windows = [_][]const u8{ "USERPROFILE", "USERNAME", "SystemRoot", "COMSPEC", "PATHEXT" };
+        for (windows) |candidate| if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
+    }
     return false;
 }
 
@@ -477,4 +487,15 @@ test "service environment allowlist exposes authority without SDK internals" {
     try std.testing.expect(!environmentVariableAllowed("NATIVE_SDK_PATH"));
     try std.testing.expect(!environmentVariableAllowed("NATIVE_SDK_CORE_COMPILER"));
     try std.testing.expect(!environmentVariableAllowed("AWS_SECRET_ACCESS_KEY"));
+}
+
+test "service environment allowlist honors Windows names and casing" {
+    try std.testing.expect(environmentVariableAllowedForOs("Path", .windows));
+    try std.testing.expect(environmentVariableAllowedForOs("USERPROFILE", .windows));
+    try std.testing.expect(environmentVariableAllowedForOs("username", .windows));
+    try std.testing.expect(environmentVariableAllowedForOs("SystemRoot", .windows));
+    try std.testing.expect(environmentVariableAllowedForOs("ComSpec", .windows));
+    try std.testing.expect(environmentVariableAllowedForOs("PATHEXT", .windows));
+    try std.testing.expect(!environmentVariableAllowedForOs("USERPROFILE", .linux));
+    try std.testing.expect(!environmentVariableAllowedForOs("NATIVE_SDK_PATH", .windows));
 }

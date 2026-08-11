@@ -1425,9 +1425,12 @@ export class SubsetChecker {
   /// module-level type-origin table and each union's payload-member table so
   /// a valid TypeScript name fails with a teaching instead of duplicate Zig.
   private checkGeneratedMetadataNames(): void {
-    const reportTypeOrigins = (name: ts.Identifier): void => {
+    const reportGeneratedName = (name: ts.Identifier): void => {
       if (name.text === "type_origins") {
         this.report("NS1038", "`type_origins` collides with the generated contract type-origin metadata declaration.", name);
+      }
+      if (this.serviceOps.size > 0 && name.text.startsWith("__nativeSdk")) {
+        this.report("NS1067", "A core declaration imported by the service host uses the reserved `__nativeSdk` transport-lowering prefix.", name);
       }
     };
     for (const file of this.files) {
@@ -1438,10 +1441,10 @@ export class SubsetChecker {
           ts.isClassDeclaration(stmt) ||
           ts.isFunctionDeclaration(stmt)
         ) {
-          if (stmt.name) reportTypeOrigins(stmt.name);
+          if (stmt.name) reportGeneratedName(stmt.name);
         } else if (ts.isVariableStatement(stmt)) {
           for (const decl of stmt.declarationList.declarations) {
-            if (ts.isIdentifier(decl.name)) reportTypeOrigins(decl.name);
+            if (ts.isIdentifier(decl.name)) reportGeneratedName(decl.name);
           }
         }
       }

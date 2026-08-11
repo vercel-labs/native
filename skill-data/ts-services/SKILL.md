@@ -16,7 +16,7 @@ The class line is hard:
 
 ## Operation surface
 
-Every directly exported function is a v1 operation. It must be synchronous, have a body, take zero parameters or one annotated `Uint8Array`, and explicitly return `Uint8Array`. Export lists, re-exports, overload-only declarations, generators, and async functions teach NS1067.
+Every directly exported, non-default named function is a v1 operation. It must be synchronous, have a body, take zero parameters or one annotated `Uint8Array`, and explicitly return `Uint8Array`. Default exports, export lists, re-exports, overload-only declarations, generators, and async functions teach NS1067.
 
 ```ts
 // src/services/feeds.ts -> operation "feeds.parse"
@@ -35,7 +35,7 @@ export function fail(): Uint8Array {
 
 Operation names are `<module-basename>.<export>`, so two same-basename modules cannot export the same function name. The generated `services.contract.json` carries the operation names, payload arity, source hash, protocol version, exact compiler pin, and `deterministic: false`. That sidecar is the only downstream fact channel.
 
-Explicit throws must be exactly inline kind-tagged `{ kind, message }` shapes. The host encodes that pair as UTF-8 JSON bytes and routes it through the request's error arm. Do not throw `new Error(...)` from the service surface. For the pinned scriptc 0.0.22 lane, staging mechanically lowers this boundary shape to a tagged `Error` in scratch code because imported catches cannot inspect record throws yet; author source and its Node behavior are unchanged.
+Explicit throws must be exactly inline kind-tagged `{ kind, message }` shapes with a string-valued message, and they must escape through the operation boundary rather than be caught locally. The host encodes that pair as UTF-8 JSON bytes and routes it through the request's error arm. Do not throw `new Error(...)` from the service surface. For the pinned scriptc 0.0.22 lane, staging mechanically lowers this boundary shape to a tagged `Error` in scratch code because imported catches cannot inspect record throws yet; author source and its Node behavior are unchanged.
 
 ## Call from the core
 
@@ -63,7 +63,7 @@ Results enter through the ordinary host-result effect queue and are journaled. D
 
 The phase-1 carrier is a plain-scriptc executable placed beside the desktop app and spawned lazily on the first live request. One worker thread owns it and its framed stdin/stdout protocol. A crash fails the interrupted request through its error arm; the next request starts a fresh host. `Cmd.host` can use the same generated registry for fire-and-forget operations.
 
-The service process runs with the app's privileges and uses the resolved app data directory as cwd. Its environment is rebuilt from an allowlist: `PATH`, `HOME`, `USER`, temp variables, locale/time-zone variables, certificate paths, and proxy variables. `NATIVE_SDK_*` internals are never inherited. Standard output belongs to the frame protocol; write diagnostics to standard error.
+The service process runs with the app's privileges and uses the resolved app data directory as cwd. Its environment is rebuilt from an allowlist: `PATH`, `HOME`, `USER`, temp variables, locale/time-zone variables, certificate paths, and proxy variables; Windows matches names case-insensitively and also carries `USERPROFILE`, `USERNAME`, `SystemRoot`, `COMSPEC`, and `PATHEXT`. `NATIVE_SDK_*` internals are never inherited. Standard output belongs to the frame protocol; write diagnostics to standard error.
 
 The current carrier means:
 

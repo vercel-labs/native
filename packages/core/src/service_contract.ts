@@ -60,13 +60,32 @@ function unwrapExpression(expr: ts.Expression): ts.Expression {
   return expr;
 }
 
-function explicitThrowIsKindTagged(expr: ts.Expression): boolean {
+function explicitThrowIsKindTagged(tast: TypedAst, expr: ts.Expression): boolean {
   const value = unwrapExpression(expr);
   if (!ts.isObjectLiteralExpression(value) || value.properties.length !== 2) return false;
   const [kind, message] = value.properties;
+  const messageType = ts.isPropertyAssignment(message) ? tast.typeOf(message.initializer) : null;
+  const messageIsString = messageType !== null && (
+    (messageType.flags & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) !== 0 ||
+    (messageType.isUnion() && messageType.types.every((member) => member.isStringLiteral())) ||
+    // The in-process checker deliberately has no Node declaration universe;
+    // defer an unresolved ambient expression to scriptc and stringify it in
+    // the scratch adapter rather than false-rejecting a real string result.
+    (messageType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+  );
   return ts.isPropertyAssignment(kind) && ts.isIdentifier(kind.name) && kind.name.text === "kind" &&
     ts.isStringLiteral(kind.initializer) && kind.initializer.text.length > 0 &&
-    ts.isPropertyAssignment(message) && ts.isIdentifier(message.name) && message.name.text === "message";
+    ts.isPropertyAssignment(message) && ts.isIdentifier(message.name) && message.name.text === "message" &&
+    messageIsString;
+}
+
+function throwIsLexicallyCaught(node: ts.ThrowStatement): boolean {
+  let child: ts.Node = node;
+  for (let parent = node.parent; parent; child = parent, parent = parent.parent) {
+    if (ts.isFunctionLike(parent)) return false;
+    if (ts.isTryStatement(parent) && parent.tryBlock === child && parent.catchClause) return true;
+  }
+  return false;
 }
 
 function pinnedScriptcVersion(): string {
@@ -86,10 +105,6 @@ export function emitServiceContract(
   files: readonly ts.SourceFile[],
   srcRoot: string,
 ): ServiceSurfaceResult {
-  // Keep the TypedAst parameter explicit: service surface emission belongs to
-  // the one checked frontend program even though v1's byte signatures are
-  // deliberately syntactic and do not depend on Node declaration packages.
-  void tast;
   if (files.length === 0) return { operations: [], diagnostics: [], contract: null };
 
   const diagnostics: SubsetDiagnostic[] = [];
@@ -141,6 +156,10 @@ export function emitServiceContract(
         continue;
       }
       if (!ts.isFunctionDeclaration(stmt) || !hasExportModifier(stmt)) continue;
+      if (stmt.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
+        diagnostics.push(report("A service operation is default-exported, but generated dispatch imports operations by their named exports.", stmt));
+        continue;
+      }
       if (!stmt.name) {
         diagnostics.push(report("A service exports an unnamed function.", stmt));
         continue;
@@ -176,8 +195,12 @@ export function emitServiceContract(
     }
 
     const visitThrows = (node: ts.Node): void => {
-      if (ts.isThrowStatement(node) && node.expression && !explicitThrowIsKindTagged(node.expression)) {
-        diagnostics.push(report("An explicit service throw is not an inline `{ kind, message }` shape.", node));
+      if (ts.isThrowStatement(node) && node.expression) {
+        if (!explicitThrowIsKindTagged(tast, node.expression)) {
+          diagnostics.push(report("An explicit service throw is not an inline `{ kind, message: string }` shape.", node));
+        } else if (throwIsLexicallyCaught(node)) {
+          diagnostics.push(report("A tagged service throw is caught inside the service instead of escaping through the operation boundary.", node));
+        }
       }
       ts.forEachChild(node, visitThrows);
     };
