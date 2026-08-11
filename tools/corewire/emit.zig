@@ -567,6 +567,12 @@ const Emitter = struct {
             \\    pub fn frameCreate(comptime T: type, value: T) *T {{
             \\        return shim_rt.frameCreate(T, value);
             \\    }}
+            \\    pub fn decodeExact(comptime T: type, bytes: []const u8) T {{
+            \\        return shim_rt.decodeExact(T, bytes, shim_rt.frameAllocator());
+            \\    }}
+            \\    pub fn copyServiceBytes(bytes: []const u8) []const u8 {{
+            \\        return shim_rt.frameAllocator().dupe(u8, bytes) catch @panic("service result allocation failed");
+            \\    }}
             \\    pub fn frameReset() void {{
             \\        shim_rt.frameReset();
             \\        abi.frame_reset();
@@ -1758,7 +1764,7 @@ test "a u64 attestation on chrome geometry refuses at check time" {
     // class cannot carry.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 3, "abi_version": 2,
+        \\  "format": 1, "wire_version": 4, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
         \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {
@@ -1939,7 +1945,7 @@ test "a shared authored type spelling like a synthesized name stays a top-level 
     // first site would leave the second dangling.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 3, "abi_version": 2,
+        \\  "format": 1, "wire_version": 4, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
         \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {
@@ -2375,7 +2381,7 @@ test "a chrome arm holding its insets by reference refuses" {
     // node (by-reference) insets record cannot take that construction.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 3, "abi_version": 2,
+        \\  "format": 1, "wire_version": 4, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
         \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {

@@ -84,6 +84,12 @@ export function utf8Bytes(s: string): Uint8Array {
 
 export type Msgish = { readonly kind: string };
 
+/** Cooperative cancellation capability supplied by generated service hosts. */
+export interface ServiceCancellation {
+  readonly cancelled: () => boolean;
+  readonly throwIfCancelled: () => void;
+}
+
 export interface EnvMsg<M extends Msgish> {
   readonly env: string;
   readonly msg: M["kind"];
@@ -118,6 +124,17 @@ export interface RequestRoute<M extends Msgish> {
   readonly key?: string;
   readonly ok: M["kind"];
   readonly err: M["kind"];
+}
+
+export interface ServiceRoute<M extends Msgish, P> {
+  readonly key?: string;
+  readonly ok: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface ServiceStreamRoute<M extends Msgish, P> extends ServiceRoute<M, P> {
+  readonly channelKey: number;
+  readonly event: M["kind"];
 }
 
 export interface WriteRoute<M extends Msgish> {
@@ -269,6 +286,7 @@ export type CmdData =
       readonly key: string;
       readonly okKind: string;
       readonly errKind: string;
+      readonly typedService: boolean;
       readonly payload: Uint8Array;
     }
   | { readonly op: "cancel"; readonly key: string }
@@ -372,7 +390,7 @@ export type CmdData =
     }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
-  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
+  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
   | { readonly op: "channel_close"; readonly key: number }
   | { readonly op: "audio_capture_start"; readonly key: number; readonly source: "microphone" | "system"; readonly sampleRate: number; readonly channels: number; readonly eventKind: string }
   | { readonly op: "audio_capture_stop"; readonly key: number }
@@ -430,6 +448,68 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
   return out;
 }
 
+function serviceU32(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  out[0] = value % 256;
+  out[1] = Math.floor(value / 256) % 256;
+  out[2] = Math.floor(value / 65536) % 256;
+  out[3] = Math.floor(value / 16777216) % 256;
+  return out;
+}
+
+export function serviceConcat(parts: readonly Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const part of parts) length += part.length;
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    for (let i = 0; i < part.length; i++) out[at + i] = part[i]!;
+    at += part.length;
+  }
+  return out;
+}
+
+export function serviceBoolBytes(value: boolean): Uint8Array {
+  return new Uint8Array([value ? 1 : 0]);
+}
+
+export function serviceF64Bytes(value: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const buf = Buffer.alloc(8);
+  buf.writeDoubleLE(Number.isNaN(value) ? Number.NaN : value, 0);
+  for (let i = 0; i < 8; i++) out[i] = buf[i]!;
+  return out;
+}
+
+export function serviceI64Bytes(value: number): Uint8Array {
+  const base = 4294967296;
+  let low = value % base;
+  if (low < 0) low += base;
+  let high = Math.floor(value / base);
+  if (high < 0) high += base;
+  return serviceConcat([serviceU32(low), serviceU32(high)]);
+}
+
+export function serviceBytes(value: Uint8Array): Uint8Array {
+  return serviceConcat([serviceU32(value.length), value]);
+}
+
+export function serviceEnumBytes(index: number): Uint8Array {
+  return serviceU32(index);
+}
+
+export function serviceUnionBytes(index: number): Uint8Array {
+  return new Uint8Array([index]);
+}
+
+export function serviceOptionalBytes(value: Uint8Array | null): Uint8Array {
+  return value === null ? new Uint8Array([0]) : serviceConcat([new Uint8Array([1]), value]);
+}
+
+export function serviceSliceBytes(values: readonly Uint8Array[]): Uint8Array {
+  return serviceConcat([serviceU32(values.length), ...values]);
+}
+
 /// A host command by name — the reference module's overloaded `host`
 /// restated as the raw-bytes form (the whole corpus's usage; overloads,
 /// rest-args, and the `Uint8Array | HostRecord` runtime discrimination
@@ -470,8 +550,46 @@ export const Cmd = {
       key: route.key ?? "",
       okKind: route.ok,
       errKind: route.err,
+      typedService: false,
       payload: payload,
     };
+  },
+
+  serviceRequest(
+    name: string,
+    payload: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    return {
+      op: "request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      payload,
+    };
+  },
+
+  serviceStreamRequest(
+    name: string,
+    channelKey: number,
+    payload: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string; readonly event: string },
+    maxPending: number,
+  ): CmdData {
+    return Cmd.batch([
+      { op: "channel_open", key: channelKey, eventKind: route.event, maxPending },
+      {
+        op: "request",
+        name,
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        typedService: true,
+        payload: serviceConcat([serviceF64Bytes(channelKey), payload]),
+      },
+    ]);
   },
 
   cancel(key: string): CmdData {
@@ -722,7 +840,7 @@ export const Cmd = {
   },
 
   channelOpen(key: number, route: { readonly event: string }): CmdData {
-    return { op: "channel_open", key, eventKind: route.event };
+    return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
   },
 
   channelClose(key: number): CmdData {

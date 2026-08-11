@@ -23,6 +23,7 @@ pub const Metadata = struct {
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
     persist: ?PersistMetadata = null,
+    service_packages: []const ServicePackageMetadata = &.{},
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
     /// Whether the app ships the embedded web layer: "auto" (default,
@@ -85,6 +86,12 @@ pub const Metadata = struct {
             allocator.free(persist.restore.none);
             allocator.free(persist.restore.err);
         }
+        for (self.service_packages) |package_entry| {
+            allocator.free(package_entry.name);
+            allocator.free(package_entry.version);
+            allocator.free(package_entry.content_hash);
+        }
+        if (self.service_packages.len > 0) allocator.free(self.service_packages);
         for (self.bridge_commands) |command| {
             allocator.free(command.name);
             for (command.permissions) |value| allocator.free(value);
@@ -201,6 +208,12 @@ pub const Metadata = struct {
         }
         if (self.dmg.items.len > 0) allocator.free(self.dmg.items);
     }
+};
+
+pub const ServicePackageMetadata = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
 };
 
 pub const PersistMetadata = struct {
@@ -476,6 +489,10 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app.zon capabilities are invalid" };
     defer allocator.free(capabilities);
     const persist = convertPersist(metadata.persist);
+    if (!validServicePackages(metadata.service_packages)) return .{
+        .ok = false,
+        .message = "app.zon service_packages must use safe npm names, exact X.Y.Z versions, unique names, and lowercase SHA-256 content hashes",
+    };
     const bridge_commands = parseBridgeCommands(allocator, metadata.bridge_commands) catch return .{ .ok = false, .message = "app.zon bridge commands are invalid" };
     defer {
         for (bridge_commands) |command| allocator.free(command.permissions);
@@ -596,6 +613,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .permissions = try duplicateStringList(allocator, raw.permissions),
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
         .persist = try duplicateRawPersist(allocator, raw.persist),
+        .service_packages = try duplicateRawServicePackages(allocator, raw.service_packages),
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
         .webview_layer = try allocator.dupe(u8, raw.webview_layer),
@@ -615,6 +633,53 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .url_schemes = try convertRawUrlSchemes(allocator, raw.url_schemes),
         .dmg = try convertRawDmg(allocator, raw.dmg),
     };
+}
+
+fn duplicateRawServicePackages(allocator: std.mem.Allocator, packages: []const raw_manifest.RawServicePackage) ![]const ServicePackageMetadata {
+    if (packages.len == 0) return &.{};
+    const out = try allocator.alloc(ServicePackageMetadata, packages.len);
+    for (packages, 0..) |package_entry, index| out[index] = .{
+        .name = try allocator.dupe(u8, package_entry.name),
+        .version = try allocator.dupe(u8, package_entry.version),
+        .content_hash = try allocator.dupe(u8, package_entry.content_hash),
+    };
+    return out;
+}
+
+fn validServicePackages(packages: []const ServicePackageMetadata) bool {
+    for (packages, 0..) |package_entry, index| {
+        if (!validNpmPackageName(package_entry.name) or !exactPackageVersion(package_entry.version) or package_entry.content_hash.len != 64) return false;
+        for (package_entry.content_hash) |byte| if (!(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'))) return false;
+        for (packages[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, package_entry.name)) return false;
+    }
+    return true;
+}
+
+fn validNpmPackageName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    const plain = struct {
+        fn valid(value: []const u8) bool {
+            if (value.len == 0) return false;
+            for (value) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '.' or byte == '_' or byte == '-')) return false;
+            return true;
+        }
+    }.valid;
+    if (name[0] != '@') return plain(name);
+    const slash = std.mem.indexOfScalar(u8, name, '/') orelse return false;
+    return slash > 1 and slash + 1 < name.len and
+        std.mem.indexOfScalar(u8, name[slash + 1 ..], '/') == null and
+        plain(name[1..slash]) and plain(name[slash + 1 ..]);
+}
+
+fn exactPackageVersion(version: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, version, '.');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        for (part) |byte| if (!std.ascii.isDigit(byte)) return false;
+        count += 1;
+    }
+    return count == 3;
 }
 
 fn convertRawDmg(allocator: std.mem.Allocator, dmg: RawDmg) !DmgMetadata {
@@ -2444,6 +2509,26 @@ test "manifest metadata parser carries model persistence configuration" {
     defer std.testing.allocator.free(capabilities);
     try app_manifest.validatePersist(convertPersist(metadata.persist), capabilities);
     try std.testing.expectError(error.MissingRequiredField, app_manifest.validatePersist(convertPersist(metadata.persist), &.{}));
+}
+
+test "manifest metadata carries exact hash-pinned service packages" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.services",
+        \\  .name = "services",
+        \\  .version = "1.0.0",
+        \\  .service_packages = .{
+        \\    .{ .name = "escape-string-regexp", .version = "5.0.0", .content_hash = "705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d" },
+        \\    .{ .name = "@scope/parser", .version = "1.2.3", .content_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expect(validServicePackages(metadata.service_packages));
+    try std.testing.expectEqual(@as(usize, 2), metadata.service_packages.len);
+    try std.testing.expectEqualStrings("@scope/parser", metadata.service_packages[1].name);
+    try std.testing.expect(!exactPackageVersion("1..2"));
+    try std.testing.expect(!validNpmPackageName("package@range"));
 }
 
 test "manifest metadata parser reads structured security policy" {

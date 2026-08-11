@@ -354,7 +354,7 @@ The runtime interprets the command after the model commits and dispatches any re
   </tbody>
 </table>
 
-Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires and a streaming fetch's terminal status, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, buffered named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. Live `Cmd.spawn` and streaming-fetch keys reject a duplicate (`err` gets `rejected`) so two sources can never splice into one stream; cancel either first, and that cancel is loud (`err` gets `cancelled`). A streaming fetch whose line is cut or dropped also ends loudly with `err: truncated`, never a misleading successful status. Every routed `err` arm receives a machine-readable reason, so failure is never silence.
+Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for raw host results and errors, a generated service result record, one number field for timer fires and a streaming fetch's terminal status, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — raw `Cmd.request`, buffered named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. Live `Cmd.spawn`, streaming-fetch, and streaming-service keys reject a duplicate (`err` gets `rejected`) so two sources can never splice into one stream; cancel one first, and that cancel is loud (`err` gets `cancelled`). A streaming fetch whose line is cut or dropped also ends loudly with `err: truncated`, never a misleading successful status. Every routed `err` arm receives a machine-readable reason, so failure is never silence.
 
 Platform state stays on the same effect boundary. `Cmd.openExternalUrl(url)` enforces [`security.navigation.external_links`](/docs/security#external-links) before entering the browser; `Cmd.revealPath(path)` uses the desktop file manager. Credential operations take byte `service` and `account` identifiers plus the standard `{ key?, ok, err }` route: set/delete return empty bytes on `ok`, get returns the secret, and a missing item routes `not_found`. `Cmd.formatLocalTime(timestampMs, "date" | "time" | "datetime", route)` returns localized UTF-8 bytes using the current host locale and time zone. That formatting is deliberately a Cmd—not a pure helper—so session recording captures the observed text and replay never re-reads ambient locale or timezone state.
 
@@ -532,46 +532,89 @@ pub fn parseSample(bytes: []const u8) ?Sample { ... }
 
 ## TypeScript services
 
-A service operation is a directly exported, non-default named synchronous function under `src/services/`. Phase 1 keeps the boundary deliberately small: zero arguments or one `Uint8Array` payload, and a `Uint8Array` result. The operation name is `<module-basename>.<export>`; `native check` emits `services.contract.json` internally and rejects unknown literal names before the build.
+A service operation is a directly exported, non-default named synchronous function under `src/services/`. It takes zero or one explicitly typed request and declares a contract-encodable result: booleans, numbers, proven integer-class fields, bytes, optionals, readonly slices, and named records/enums/kind-unions. Put crossing shapes in an exported, subset-legal module outside `src/services/` so the core and service import one declaration. The operation name is `<module-basename>.<export>`; `native check` projects its complete type table into `services.contract.json`, checks both classes, and generates the core client.
+
+```ts:src/shared.ts
+export type ParseRequest = {
+  readonly source: Uint8Array;
+  readonly caseSensitive: boolean;
+};
+
+export type ParseResult = {
+  readonly bytes: Uint8Array;
+  readonly matches: boolean;
+};
+```
 
 ```ts:src/services/feeds.ts
 import * as fs from "node:fs";
+import escapeStringRegexp from "escape-string-regexp";
+import type { ServiceCancellation } from "@native-sdk/core";
+import type { ParseRequest, ParseResult } from "../shared.ts";
 
-export function parse(payload: Uint8Array): Uint8Array {
+export function parse(request: ParseRequest): ParseResult {
   const seen = new Map<string, number>();
   seen.set("parsedAt", Date.now());
-  const source = new TextDecoder().decode(payload);
-  return new TextEncoder().encode(JSON.stringify({
-    matches: /feed/i.test(source),
+  const source = new TextDecoder().decode(request.source);
+  const matches = request.caseSensitive ? /feed/.test(source) : /feed/i.test(source);
+  return { bytes: new TextEncoder().encode(JSON.stringify({
+    escaped: escapeStringRegexp(source),
+    matches,
     cwdExists: fs.existsSync("."),
     facts: seen.size,
-  }));
+  })), matches };
 }
 ```
 
 ```ts:src/core.ts
+import { feedsParse } from "@native-sdk/services";
+
 case "parse":
   return [
     model,
-    Cmd.request("feeds.parse", model.source, {
+    feedsParse({ source: model.source, caseSensitive: false }, {
       key: "parse",
-      ok: "parsed",       // one Uint8Array field
+      ok: "parsed",       // one ParseResult field
       err: "parse_failed", // one Uint8Array field
     }),
   ];
 ```
 
-The core never receives a synchronous handle. Its update returns a command, the service result crosses back as the named Msg arm, and the runtime journals that result like every other effect. Replay parks the request and feeds the recorded bytes without launching the service executable.
+`@native-sdk/services` is generated from the sidecar. Its constructor encodes the request and conditionally proves that `ok` names the one Msg arm carrying `ParseResult`; a stale field or wrong route is a `native check` type error. The generated source lives only in build/dev scratch space and the ignored editor package under `node_modules`, never in authored `src/`. Raw `Cmd.request` remains the low-level bytes form.
 
-Service modules are ordinary TypeScript on scriptc's static tier: Node built-ins such as `fs`, `path`, `process`, `os`, and `child_process`, plus `fetch`, regexes, JSON, `Map`/`Set`, `Date`, and classes are available when the pinned compiler supports them. They may import other vendored service files and subset-legal core-class files. Bare package specifiers remain NS1066 in this phase — check source in under `src/services/`; hermetic npm sources arrive in a later phase. Async functions and record payloads also wait for the typed-boundary phase.
+The core never receives a synchronous handle. Its update returns a command, the typed result crosses back as the named Msg arm, and the runtime journals that result like every other effect. Replay parks the request and feeds the recorded result without launching the service executable.
+
+Service modules are ordinary TypeScript on scriptc's static tier: Node built-ins such as `fs`, `path`, `process`, `os`, and `child_process`, plus `fetch`, regexes, JSON, `Map`/`Set`, `Date`, and classes are available when the pinned compiler supports them. They may import local service files, shared core-class data declarations, and exact vendored packages. Run `native vendor . escape-string-regexp@5.0.0` (always an exact `X.Y.Z`): it resolves with package scripts disabled, copies the flattened graph and license files into `src/services/vendor/`, and writes app.zon's exact name/version/tree-hash facts. Commit both. Every build re-hashes those offline bytes and gives scriptc an explicit `--npm-static` allowlist; anything below 100% static coverage fails `native check` with scriptc's coverage note preserved verbatim and a remediation. `auto` and `--dynamic` are never used. The pinned 0.0.22 calibration checked five small exact-version candidates: `escape-string-regexp` and the comma/space token parsers cleared 100%; `nanoid` (76%) and `micromark` (92%) were refused. npm support is selective—`native check` is the verdict for the package bytes you vendor.
+
+For incremental work, declare a final typed emit capability. The generated client opens an external channel, each `emit(chunk)` arrives through its channel-event Msg arm, and the function's return remains the one typed terminal result:
+
+```ts
+/**
+ * @deadlineMs 5000
+ * @streamBuffer 8
+ */
+export function parseLarge(
+  request: ParseRequest,
+  emit: (chunk: ParseChunk) => void,
+  cancellation: ServiceCancellation,
+): ParseResult {
+  for (let index = 0; index < request.source.length; index += 4096) {
+    cancellation.throwIfCancelled();
+    emit({ bytes: request.source.slice(index, index + 4096), index });
+  }
+  return parse(request);
+}
+```
+
+The generated route adds `channelKey` and `event`. A terminal closes the channel after all accepted chunks. A final `ServiceCancellation` parameter opts the operation into cooperative cancellation; poll `cancelled()` or call `throwIfCancelled()` at bounded intervals. `Cmd.cancel(key)` is loud for a service stream: it flips that token, closes the channel, routes `cancelled` to `err`, and drops every later chunk. A declared deadline flips the same token but routes JSON with `kind: "timeout"`. The subprocess gets a short grace period to unwind and remains alive when it cooperates; an operation that ignores its token is hard-killed and the next request starts a clean host. `@streamBuffer` is a 1–64 in-flight contract cap.
 
 The authority difference is intentional. A service runs with the app's privileges, its working directory is the app data directory, and it receives only an explicit environment allowlist: `PATH`, home/user/temp variables, locale/time-zone variables, certificate locations, and proxy variables. Windows matches environment names case-insensitively and carries its corresponding user/profile, system-root, command-shell, and executable-extension names. `NATIVE_SDK_*` internals are removed. Standard output carries the framed transport, so service diagnostics belong on standard error. An explicit throw must be exactly an inline kind-tagged shape such as `throw { kind: "parse", message: "bad feed" }`, with a string-valued message, and it must escape through the operation boundary rather than be caught locally; its encoded kind and message arrive through the error Msg. The pinned compiler's scratch stage mechanically lowers that boundary value to a tagged native `Error` because scriptc 0.0.22 cannot inspect an imported record throw in a catch; your checked-in source—and its behavior under Node—does not change.
 
-Today the carrier is a lazily started second executable placed next to the app executable. Startup verifies both the protocol version and a fingerprint of the generated operation registry, so a stale or mismatched sibling is rejected before an operation index is dispatched. It restarts after a crash; the request interrupted by the crash receives its error arm, and the next request starts a fresh host. This makes TypeScript services desktop-only and adds a process hop plus two payload copies. The current compiler emits the service executable only for the build host, so cross-target service builds fail with a teaching instead of packaging an executable for the wrong OS or architecture. The future in-process carrier keeps the same contract and app API; no JavaScript engine is used in either form.
+Today the carrier is a lazily started second executable placed next to the app executable. Startup verifies both the protocol version and a fingerprint of the generated operation/type/package registry, so a stale or mismatched sibling is rejected before an operation index is dispatched. It restarts after a crash or after a cancellation/deadline that ignores the cooperative grace period. This makes TypeScript services desktop-only and adds a process hop plus copies at the encoded boundary. The current compiler emits the service executable only for the build host, so cross-target service builds fail with a teaching instead of packaging an executable for the wrong OS or architecture. The future in-process carrier keeps the same contract and app API; no JavaScript engine is used in either form. Async service entry points wait for that later compiler/runtime phase.
 
 ## The dev loop
 
-`native dev --core` is the fastest loop for logic work: the core runs under node with a virtual host — dispatch Msgs as JSON lines (`{"kind":"add"}`, `{"$bytes":"…"}` for bytes payloads), advance a virtual clock (`{"advance":1000}`) to fire timers deterministically, and watch the committed model and effect transcript. Effects the virtual host does not perform — including service requests — print as `cmd ...` lines; feed their results back yourself as ordinary Msg lines. Pair `--script msgs.ndjson` with `--watch` to replay a scenario on every edit. `native dev` runs compiled services for real beside the native app. Full service simulation in the virtual devhost is a later phase. [Quick Start](/docs/quick-start#the-fastest-loop-the-core-under-node) shows a full transcript.
+`native dev --core` is the fastest loop for logic work: the core runs under Node with a virtual host — dispatch Msgs as JSON lines (`{"kind":"add"}`, `{"$bytes":"…"}` for bytes payloads), advance a virtual clock (`{"advance":1000}`) to fire timers deterministically, and watch the committed model and effect transcript. Service requests run in an isolated Node worker through the same generated contract: vendored hashes are verified, request/results use the same codecs and error arms, cooperative cancellation/deadlines interrupt CPU-bound work, and stream chunks use the same channel-event shape. Pair `--script msgs.ndjson` with `--watch` to replay a scenario on every edit. The devhost also consumes `NATIVE_SDK_SESSION_RECORD`/`NATIVE_SDK_SESSION_REPLAY` (the environment set by `native automate record|replay`): it writes the native journal format, and replay starts no service worker. A journal recorded here replays in the packaged runtime, and a packaged recording replays here. `native dev` runs compiled services for real beside the native app. [Quick Start](/docs/quick-start#the-fastest-loop-the-core-under-node) shows a full transcript.
 
 `native dev` keeps markup instant — `.native` edits hot-reload into the running window — but a `src/core.ts` edit rebuilds the core through the external core compiler and restarts the app: seconds per rebuild (roughly 3-6s warm), not sub-second. The core loop in the real window is restart-shaped; keep logic iteration under `native dev --core` and rebuild when you want to see it live.
 
@@ -579,7 +622,7 @@ Today the carrier is a lazily started second executable placed next to the app e
 
 ## Editor support
 
-Editor support is stock tsc — no extension, no plugin. The scaffold ships `package.json` and `tsconfig.json` as the editor-and-versioning surface: the tsconfig mirrors the compiler options the checker itself builds its program with (strict, `moduleResolution: "bundler"`, `verbatimModuleSyntax`, `exactOptionalPropertyTypes`, …), so what your editor flags is what `native check` flags, and `@native-sdk/core` (plus subpaths like `@native-sdk/core/text`) resolves through `node_modules` like any package. Until `@native-sdk/core` is published to npm, the CLI materializes that `node_modules` copy itself — exactly the files the published package will contain — and `native check`/`dev`/`build` keep it fresh against the SDK (`native doctor` reports skew). After the publish, a plain `npm install` writes identical content and takes over. None of it is build truth: builds check and compile against the SDK the CLI ships with and never read `node_modules` — delete it and every `native` verb still works.
+Editor support is stock tsc — no extension, no plugin. The scaffold ships `package.json` and `tsconfig.json` as the editor-and-versioning surface: the tsconfig mirrors the compiler options the checker itself builds its program with (strict, `moduleResolution: "bundler"`, `verbatimModuleSyntax`, `exactOptionalPropertyTypes`, …), so what your editor flags is what `native check` flags, and `@native-sdk/core` (plus subpaths like `@native-sdk/core/text`) resolves through `node_modules` like any package. Apps with services also receive an ignored `node_modules/@native-sdk/services` editor package whenever `native check` or `native dev --core` regenerates the typed client; authored `src/` stays clean. Until `@native-sdk/core` is published to npm, the CLI materializes that package copy itself — exactly the files the published artifact will contain — and `native check`/`dev`/`build` keep it fresh against the SDK (`native doctor` reports skew). After the publish, a plain `npm install` writes identical core content and takes over. None of it is build truth: builds check and compile against the SDK the CLI ships with and never read `node_modules` — delete it and every `native` verb still works.
 
 ## Outgrowing the subset
 
@@ -591,4 +634,4 @@ The deterministic core tier owns app state and decisions. The service tier owns 
 
 ## Reference
 
-The complete core guide ships as `native skills get ts-core`; the service contract, authority posture, and phase-1 limitations ship as `native skills get ts-services`. Both are written for AI agents and precise enough for humans.
+The complete core guide ships as `native skills get ts-core`; typed service contracts, vendored npm, streaming, authority, and transport limits ship as `native skills get ts-services`. Both are written for AI agents and precise enough for humans.

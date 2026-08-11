@@ -2650,6 +2650,7 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.key);
             \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
             \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU8(sink, cmd.typedService ? 1 : 0);
             \\      nscfWBytes(sink, cmd.payload);
             \\      return;
             \\    case "cancel":
@@ -2776,6 +2777,7 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, 0x15);
             \\      nscfWF64(sink, cmd.key);
             \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      nscfWU8(sink, cmd.maxPending);
             \\      return;
             \\    case "channel_close":
             \\      nscfWU8(sink, 0x16);

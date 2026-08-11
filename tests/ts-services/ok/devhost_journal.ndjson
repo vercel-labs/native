@@ -1,0 +1,5 @@
+{"settle":true}
+{"command":"service.parse"}
+{"settle":true}
+{"command":"service.stream"}
+{"settle":true}

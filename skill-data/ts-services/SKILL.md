@@ -1,76 +1,124 @@
 ---
 name: ts-services
-description: Authoring guide for Native SDK TypeScript services under src/services: ordinary scriptc static-tier TypeScript reached from a deterministic core through Cmd.request, including the byte operation contract, imports, kind-tagged failures, authority, replay, desktop subprocess transport, and phase-1 limitations. Use when adding or modifying src/services modules, moving Node/JSON/regex/Map/Date/class work out of a core, or fixing NS1065-NS1067.
+description: Authoring guide for Native SDK TypeScript services under src/services: ordinary scriptc static-tier TypeScript reached through generated typed Cmd clients, shared record shapes, hermetic vendored npm, streaming, deadlines, cancellation, devhost simulation, authority, replay, and the desktop subprocess transport. Use when adding or modifying src/services modules, moving Node/JSON/regex/Map/Date/class work out of a core, or fixing NS1065-NS1067.
 ---
 
 # Author TypeScript services behind the effect boundary
 
-Use `src/services/**/*.ts` for imperative application work that needs ordinary TypeScript beyond the deterministic core subset: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, JSON, `Map`/`Set`, `Date`, and classes supported by the pinned scriptc static tier. Both core and services compile with the exact scriptc version in `packages/core/package.json`; neither uses `--dynamic` or ships a JavaScript engine.
+Use `src/services/**/*.ts` for imperative work that needs ordinary TypeScript beyond the deterministic core subset: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, JSON, `Map`/`Set`, `Date`, and classes supported by the pinned scriptc static tier. Both classes compile with the exact scriptc version in `packages/core/package.json`; neither enables `--dynamic` or ships a JavaScript engine.
 
 The class line is hard:
 
-- `src/core.ts` and its imports outside `src/services/` stay under NS1001–NS1064 and keep the deterministic attestation.
-- The core must not import a service, even type-only (NS1065). It calls a literal operation name with `Cmd.request`.
-- Services may import relative vendored service files and subset-legal core-class files. Bare package specifiers teach NS1066 in phase 1; check source in under `src/services/`.
-- Runtime cycles, missing modules, and names colliding within one class keep their normal module diagnostics. Names do not collide merely because one is core-class and one is service-class.
+- `src/core.ts` and its imports outside `src/services/` retain NS1001–NS1064 and `deterministic: true`.
+- The core never imports a service file, even type-only (NS1065). It imports generated command constructors from `@native-sdk/services`.
+- A service may import shared, subset-legal declarations from the core class. Put every boundary record, enum, or union there so one declaration is authoritative on both sides.
+- A service may import compiler-supported Node built-ins and exact packages declared by app.zon. Undeclared bare imports teach NS1066.
 
-## Operation surface
+## Typed operation surface
 
-Every directly exported, non-default named function is a v1 operation. It must be synchronous, have a body, take zero parameters or one annotated `Uint8Array`, and explicitly return `Uint8Array`. Default exports, export lists, re-exports, overload-only declarations, generators, and async functions teach NS1067.
+Every directly exported, non-default named function is an operation named `<module-basename>.<export>`. It must be synchronous, have a body, take zero or one explicitly annotated request, and explicitly return a contract-encodable result. Boundary data may use booleans, numbers, integer-class numbers, bytes, optionals, readonly slices, and named records/enums/kind-unions. Functions and behavior-bearing classes do not cross.
 
 ```ts
-// src/services/feeds.ts -> operation "feeds.parse"
-import * as fs from "node:fs";
+// src/shared.ts — core-class file, imported by both classes
+export type ParseRequest = {
+  readonly source: Uint8Array;
+  readonly caseSensitive: boolean;
+};
 
-export function parse(payload: Uint8Array): Uint8Array {
-  const parsedAt = Date.now();
-  const matches = /feed/i.test(new TextDecoder().decode(payload));
-  return new TextEncoder().encode(JSON.stringify({ parsedAt, matches, cwd: fs.existsSync(".") }));
-}
+export type ParseResult = {
+  readonly bytes: Uint8Array;
+  readonly matched: boolean;
+};
 
-export function fail(): Uint8Array {
-  throw { kind: "feed_parse", message: "invalid feed" };
+// src/services/feeds.ts
+import type { ParseRequest, ParseResult } from "../shared.ts";
+
+export function parse(request: ParseRequest): ParseResult {
+  const text = new TextDecoder().decode(request.source);
+  const matched = request.caseSensitive ? /feed/.test(text) : /feed/i.test(text);
+  return { bytes: new TextEncoder().encode(JSON.stringify({ matched })), matched };
 }
 ```
 
-Operation names are `<module-basename>.<export>`, so two same-basename modules cannot export the same function name. The generated `services.contract.json` carries the operation names, payload arity, source hash, protocol version, exact compiler pin, and `deterministic: false`. That sidecar is the only downstream fact channel.
+`services.contract.json` carries the complete type table, operation names, exact compiler pin, source hashes, package facts, deadlines, streaming declarations, and `deterministic: false`. Generated host codecs, the Zig registry/result decoders, and the typed client consume that sidecar; none re-read source to infer a second truth.
 
-Explicit throws must be exactly inline kind-tagged `{ kind, message }` shapes with a string-valued message, and they must escape through the operation boundary rather than be caught locally. The host encodes that pair as UTF-8 JSON bytes and routes it through the request's error arm. Do not throw `new Error(...)` from the service surface. For the pinned scriptc 0.0.22 lane, staging mechanically lowers this boundary shape to a tagged `Error` in scratch code because imported catches cannot inspect record throws yet; author source and its Node behavior are unchanged.
+Explicit boundary throws must be exactly inline `{ kind, message }` shapes with a string-valued message and must escape the operation. They arrive as UTF-8 JSON bytes on the error arm. Do not throw `new Error(...)` from the exported surface.
 
-## Call from the core
+## Call through the generated client
 
-The core learns no new synchronous API. Add success and failure Msg arms with exactly one `Uint8Array` field and return a request command:
+Import from `@native-sdk/services`; `native check` derives this virtual module, and build/dev stage the same projection without writing `src/services.gen.ts` into the author tree. The editor copy lives under ignored `node_modules/@native-sdk/services`.
 
 ```ts
+import { feedsParse } from "@native-sdk/services";
+import type { ParseRequest, ParseResult } from "./shared.ts";
+
 export type Msg =
-  | { readonly kind: "parse" }
-  | { readonly kind: "parsed"; readonly bytes: Uint8Array }
+  | { readonly kind: "parse"; readonly request: ParseRequest }
+  | { readonly kind: "parsed"; readonly result: ParseResult }
   | { readonly kind: "parse_failed"; readonly error: Uint8Array };
 
 case "parse":
-  return [model, Cmd.request("feeds.parse", model.source, {
+  return [model, feedsParse(msg.request, {
     key: "feed-parse",
     ok: "parsed",
     err: "parse_failed",
   })];
 ```
 
-`native check` validates literal request names against the emitted service contract. A service request key shares the engine effect-key space; a duplicate live service key rejects the new request without replacing the first. `Cmd.cancel(key)` kills or removes the carrier request and drops its result silently, matching the core command contract.
+The generated route type proves that `ok` names the one Msg arm carrying exactly the declared result and `err` names a one-bytes-field arm. Raw `Cmd.request(name, bytes, route)` remains available as the low-level byte seam.
 
-Results enter through the ordinary host-result effect queue and are journaled. During replay the request parks under the fake executor and the journal feeds its recorded terminal; the service host is never spawned and need not exist on disk.
+Keys share the engine effect-key space. Duplicate live service keys reject loudly. Terminal results and stream events are journaled; replay feeds the recorded events without starting the service host.
 
-## Authority and process contract
+## Hermetic npm
 
-The phase-1 carrier is a plain-scriptc executable placed beside the desktop app and spawned lazily on the first live request. One worker thread owns it and its framed stdin/stdout protocol. The startup hello carries the protocol version and a SHA-256 fingerprint of the operation registry; a stale or mismatched sibling fails before numeric dispatch. A crash fails the interrupted request through its error arm; the next request starts a fresh host. `Cmd.host` can use the same generated registry for fire-and-forget operations.
+Resolve packages only with an explicit author action:
 
-The service process runs with the app's privileges and uses the resolved app data directory as cwd. Its environment is rebuilt from an allowlist: `PATH`, `HOME`, `USER`, temp variables, locale/time-zone variables, certificate paths, and proxy variables; Windows matches names case-insensitively and also carries `USERPROFILE`, `USERNAME`, `SystemRoot`, `COMSPEC`, and `PATHEXT`. `NATIVE_SDK_*` internals are never inherited. Standard output belongs to the frame protocol; write diagnostics to standard error.
+```bash
+native vendor . escape-string-regexp@5.0.0
+```
 
-The current carrier means:
+The command installs with lifecycle scripts disabled in a temporary directory, copies the flattened package graph into `src/services/vendor/`, retains package/license files, computes canonical tree hashes, and rewrites app.zon's `service_packages` with exact names, `X.Y.Z` versions, and hashes. Check those bytes and manifest facts into source control.
 
-- desktop only; there is no iOS/Android subprocess path;
-- service executables compile for the build host only; cross-target service builds are rejected until the compiler can emit the requested desktop target;
-- one extra signed executable in the bundle/package;
-- one process hop and two payload copies per request;
-- bytes-only request/results, no streaming, npm, or async service entry points yet.
+Builds never run npm or use the network. They verify package identity and every vendored byte, stage only declared packages, and invoke scriptc with `--npm-static <explicit-list>`. `auto`, dynamic-island fallback, and `--dynamic` are refused. Anything below 100% static coverage fails: `native check` preserves the coverage note verbatim and names the three options—choose another exact package, port/vendor a suitable implementation, or wait for compiler support. The checked-in 0.0.22 spike (`tests/ts-services/npm-static-spike.json`) passed three of five deliberately small candidates and refused `nanoid` and `micromark`; npm support is selective.
 
-Keep storage on engine-owned effects; a service is not a backdoor database tier. Custom widgets, rasterizer work, platform integration, and new engine capabilities remain Zig toolkit extensions.
+## Streaming, cancellation, and deadlines
+
+A last `emit` capability declares a stream. Each typed chunk becomes canonical bytes on the existing external channel; the operation still returns one typed terminal result.
+
+```ts
+import type { ServiceCancellation } from "@native-sdk/core";
+
+export type ParseChunk = { readonly bytes: Uint8Array; readonly index: number };
+
+/**
+ * @deadlineMs 5000
+ * @streamBuffer 8
+ */
+export function parseLarge(
+  request: ParseRequest,
+  emit: (chunk: ParseChunk) => void,
+  cancellation: ServiceCancellation,
+): ParseResult {
+  for (let index = 0; index < request.source.length; index += 4096) {
+    cancellation.throwIfCancelled();
+    emit({ bytes: request.source.slice(index, index + 4096), index });
+  }
+  return parse(request);
+}
+```
+
+Import `ServiceCancellation` as a type from `@native-sdk/core`; it is legal only as the final capability parameter. The generated client route additionally requires `channelKey` and a channel-event Msg arm. `@streamBuffer` is a 1–64 in-flight contract cap (default 8); `@deadlineMs` is a 1–86400000 operation deadline. A terminal result closes the channel after its interim frames. `Cmd.cancel(key)` flips the token, closes a streaming channel, sends `cancelled` through `err`, and drops every later chunk. Deadline expiry flips the same token and sends JSON with `kind: "timeout"`. Poll `cancelled()` or call `throwIfCancelled()` at bounded intervals; the subprocess receives a short cooperative grace period and remains alive after a clean unwind. Ignoring the token causes a hard kill, after which the next request lazily starts a clean host.
+
+## Dev loop, authority, and current limits
+
+`native dev --core` imports service modules in an isolated Node worker, verifies the same package hashes, decodes the same request contract, cooperatively interrupts cancellation/deadline work, maps errors through the same arms, and emits stream chunks through the same channel-event shape. Use `--script scenario.ndjson --watch` for repeatable logic iterations. The devhost reads `NATIVE_SDK_SESSION_RECORD`/`NATIVE_SDK_SESSION_REPLAY`, writes the native journal format, and starts no service worker during replay; recordings cross between it and the packaged runtime. `native dev` runs the compiled service executable beside the real app.
+
+The service process runs with the app's privileges and app-data cwd. It receives an explicit environment allowlist (path, user/home/temp, locale/time zone, certificate, and proxy variables; platform equivalents on Windows); `NATIVE_SDK_*` internals are stripped. Stdout belongs to framed transport, so diagnostics go to stderr. This authority is why service work never runs synchronously inside `update`.
+
+Current limits:
+
+- desktop and build-host target only; the carrier is a lazily spawned sibling executable;
+- synchronous static-tier operations only—async services wait for the next compiler/runtime phase;
+- no JavaScript engine or dynamic npm fallback;
+- storage remains engine-owned effects, not a service-layer database shortcut;
+- custom widgets, renderers, platform integration, and new engine capabilities remain Zig toolkit extensions.

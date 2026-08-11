@@ -41,11 +41,16 @@ export function parse(payload: Uint8Array): Uint8Array {
   const coreContract = JSON.parse(result.contract!);
   assert.equal(coreContract.deterministic, true);
   const contract = JSON.parse(result.servicesContract!);
-  assert.equal(contract.format, 1);
-  assert.equal(contract.protocol_version, 1);
+  assert.equal(contract.format, 3);
+  assert.equal(contract.protocol_version, 3);
   assert.equal(contract.compiler_version, "0.0.22");
   assert.equal(contract.deterministic, false);
+  assert.deepEqual(contract.packages, []);
+  assert.deepEqual(contract.types, { records: [], enums: [], unions: [] });
   assert.deepEqual(contract.operations.map((op: { name: string }) => op.name), ["feeds.parse"]);
+  assert.deepEqual(contract.operations[0].request, { kind: "bytes" });
+  assert.deepEqual(contract.operations[0].result, { kind: "bytes" });
+  assert.equal(contract.operations[0].client, "feedsParse");
   assert.match(contract.operations[0].source_hash, /^[0-9a-f]{64}$/);
 });
 
@@ -101,18 +106,205 @@ test("NS1065 refuses a core-to-service import, including type-only edges", () =>
   }
 });
 
-test("NS1066 refuses phase-1 npm imports but permits compiler-shipped Node builtins", () => {
+test("NS1066 permits only manifest-declared npm imports and compiler-shipped Node builtins", () => {
   const npm = checkFiles({
     "core.ts": serviceCore,
     "services/feeds.ts": `import thing from "left-pad"; export function parse(bytes: Uint8Array): Uint8Array { void thing; return bytes; }`,
   });
   assert.ok(npm.diagnostics.some((d) => d.id === "NS1066"), JSON.stringify(npm.diagnostics));
 
+  const declared = checkFiles({
+    "core.ts": serviceCore,
+    "services/feeds.ts": `import thing from "left-pad"; export function parse(bytes: Uint8Array): Uint8Array { void thing; return bytes; }`,
+  }, { servicePackages: [{ name: "left-pad", version: "1.3.0", content_hash: "a".repeat(64) }] });
+  assert.equal(declared.ok, true, JSON.stringify(declared.diagnostics));
+  assert.deepEqual(JSON.parse(declared.servicesContract!).packages, [{
+    name: "left-pad",
+    version: "1.3.0",
+    content_hash: "a".repeat(64),
+  }]);
+
   const builtin = checkFiles({
     "core.ts": serviceCore,
     "services/feeds.ts": `import * as path from "node:path"; export function parse(bytes: Uint8Array): Uint8Array { void path; return bytes; }`,
   });
   assert.equal(builtin.ok, true, JSON.stringify(builtin.diagnostics));
+});
+
+test("record service shapes generate a typed client and stale implementations fail during check", () => {
+  const core = `
+import { Cmd } from "@native-sdk/core";
+import { feedsParse } from "@native-sdk/services";
+import type { ParseRequest, ParseResult } from "./shared.ts";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go"; readonly request: ParseRequest }
+  | { readonly kind: "parsed"; readonly result: ParseResult }
+  | { readonly kind: "failed"; readonly error: Uint8Array };
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, feedsParse(msg.request, { key: "parse", ok: "parsed", err: "failed" })];
+    case "parsed": return { bytes: msg.result.bytes };
+    case "failed": return model;
+  }
+}`;
+  const shared = `
+export type ParseRequest = { readonly source: Uint8Array; readonly strict: boolean; };
+export type ParseResult = { readonly bytes: Uint8Array; readonly valid: boolean; };`;
+  const good = checkFiles({
+    "core.ts": core,
+    "shared.ts": shared,
+    "services/feeds.ts": `import type { ParseRequest, ParseResult } from "../shared.ts"; export function parse(req: ParseRequest): ParseResult { return { bytes: req.source, valid: req.strict }; }`,
+  }, { contractEntry: "src/core.ts", servicesContract: true });
+  assert.equal(good.ok, true, JSON.stringify([...good.diagnostics, ...good.typeErrors]));
+  assert.match(good.servicesClient!, /export function feedsParse\(request: ParseRequest/);
+  const contract = JSON.parse(good.servicesContract!);
+  assert.deepEqual(contract.operations[0].request, { kind: "record", name: "ParseRequest" });
+  assert.deepEqual(contract.operations[0].result, { kind: "record", name: "ParseResult" });
+
+  const staleService = checkFiles({
+    "core.ts": core,
+    "shared.ts": shared,
+    "services/feeds.ts": `import type { ParseRequest, ParseResult } from "../shared.ts"; export function parse(req: ParseRequest): ParseResult { return { bytes: req.source }; }`,
+  });
+  assert.equal(staleService.ok, false);
+  assert.ok(staleService.typeErrors.some((message) => /valid/.test(message)), JSON.stringify(staleService.typeErrors));
+
+  const staleCore = checkFiles({
+    "core.ts": core.replace("readonly result: ParseResult }", "readonly result: Uint8Array }"),
+    "shared.ts": shared,
+    "services/feeds.ts": `import type { ParseRequest, ParseResult } from "../shared.ts"; export function parse(req: ParseRequest): ParseResult { return { bytes: req.source, valid: req.strict }; }`,
+  });
+  assert.equal(staleCore.ok, false);
+  assert.ok(staleCore.typeErrors.length > 0, JSON.stringify(staleCore));
+});
+
+test("the service contract carries every supported nested boundary shape", () => {
+  const result = checkFiles({
+    "core.ts": `
+import { Cmd } from "@native-sdk/core";
+import { shapesRoundTrip } from "@native-sdk/services";
+import type { BoundaryRecord } from "./shared.ts";
+export interface Model { readonly accepted: boolean; }
+export type Msg =
+  | { readonly kind: "go"; readonly request: BoundaryRecord }
+  | { readonly kind: "done"; readonly result: BoundaryRecord }
+  | { readonly kind: "failed"; readonly error: Uint8Array };
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, shapesRoundTrip(msg.request, { ok: "done", err: "failed" })];
+    case "done": return { accepted: msg.result.enabled };
+    case "failed": return model;
+  }
+}`,
+    "shared.ts": `
+export type Count = 0 | 300;
+export type Flavor = "plain" | "rich";
+export type Choice =
+  | { readonly kind: "kept"; readonly bytes: Uint8Array }
+  | { readonly kind: "skipped"; readonly count: Count };
+export type BoundaryRecord = {
+  readonly enabled: boolean;
+  readonly ratio: number;
+  readonly count: Count;
+  readonly bytes: Uint8Array;
+  readonly maybe: Uint8Array | null;
+  readonly parts: readonly Uint8Array[];
+  readonly flavor: Flavor;
+  readonly choice: Choice;
+};`,
+    "services/shapes.ts": `
+import type { BoundaryRecord } from "../shared.ts";
+export function roundTrip(request: BoundaryRecord): BoundaryRecord { return request; }`,
+  });
+  assert.equal(result.ok, true, JSON.stringify([...result.diagnostics, ...result.typeErrors]));
+  const contract = JSON.parse(result.servicesContract!);
+  assert.deepEqual(contract.operations[0].request, { kind: "record", name: "BoundaryRecord" });
+  assert.deepEqual(contract.operations[0].result, { kind: "record", name: "BoundaryRecord" });
+  assert.deepEqual(contract.types.enums.map((type: { name: string }) => type.name), ["Flavor"]);
+  assert.deepEqual(contract.types.unions.map((type: { name: string }) => type.name), ["Choice"]);
+  assert.deepEqual(contract.types.records[0].fields.map((field: { type: unknown }) => field.type), [
+    { kind: "bool" },
+    { kind: "f64" },
+    { kind: "i64" },
+    { kind: "bytes" },
+    { kind: "optional", inner: { kind: "bytes" } },
+    { kind: "slice", elem: { kind: "bytes" } },
+    { kind: "enum", name: "Flavor" },
+    { kind: "union", name: "Choice" },
+  ]);
+  assert.match(result.servicesClient!, /serviceBoolBytes/);
+  assert.match(result.servicesClient!, /serviceF64Bytes/);
+  assert.match(result.servicesClient!, /serviceI64Bytes/);
+  assert.match(result.servicesClient!, /serviceOptionalBytes/);
+  assert.match(result.servicesClient!, /serviceSliceBytes/);
+  assert.match(result.servicesClient!, /serviceEnumBytes/);
+  assert.match(result.servicesClient!, /serviceUnionBytes/);
+});
+
+test("stream and deadline declarations are carried by the typed contract", () => {
+  const result = checkFiles({
+    "core.ts": serviceCore,
+    "shared.ts": `export type Chunk = { readonly bytes: Uint8Array; readonly index: number; };`,
+    "services/feeds.ts": `
+import type { Chunk } from "../shared.ts";
+/**
+ * @deadlineMs 1250
+ * @streamBuffer 4
+ */
+export function parse(bytes: Uint8Array, emit: (chunk: Chunk) => void): Uint8Array { emit({ bytes, index: 0 }); return bytes; }`,
+  });
+  assert.equal(result.ok, true, JSON.stringify([...result.diagnostics, ...result.typeErrors]));
+  const operation = JSON.parse(result.servicesContract!).operations[0];
+  assert.equal(operation.deadline_ms, 1250);
+  assert.deepEqual(operation.stream, { chunk: { kind: "record", name: "Chunk" }, in_flight: 4 });
+  assert.match(result.servicesClient!, /Cmd\.serviceStreamRequest\("feeds\.parse", route\.channelKey, [\s\S]+, route, 4\)/);
+});
+
+test("cooperative cancellation is a generated final service capability", () => {
+  const result = checkFiles({
+    "core.ts": serviceCore,
+    "shared.ts": `export type Chunk = { readonly bytes: Uint8Array; readonly index: number; };`,
+    "services/feeds.ts": `
+import type { ServiceCancellation } from "@native-sdk/core";
+import type { Chunk } from "../shared.ts";
+export function parse(bytes: Uint8Array, emit: (chunk: Chunk) => void, cancel: ServiceCancellation): Uint8Array {
+  cancel.throwIfCancelled();
+  emit({ bytes, index: 0 });
+  return cancel.cancelled() ? new Uint8Array(0) : bytes;
+}`,
+  });
+  assert.equal(result.ok, true, JSON.stringify([...result.diagnostics, ...result.typeErrors]));
+  assert.equal(JSON.parse(result.servicesContract!).operations[0].cancellable, true);
+
+  const misplaced = checkFiles({
+    "core.ts": serviceCore,
+    "services/feeds.ts": `
+import type { ServiceCancellation } from "@native-sdk/core";
+export function parse(cancel: ServiceCancellation, bytes: Uint8Array): Uint8Array { return bytes; }`,
+  });
+  assert.ok(misplaced.diagnostics.some((diagnostic) => diagnostic.id === "NS1067" && /must be last/.test(diagnostic.message)), JSON.stringify(misplaced.diagnostics));
+});
+
+test("the staged client also materializes an ignored editor declaration package", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-editor-"));
+  try {
+    const src = path.join(root, "src");
+    fs.mkdirSync(path.join(src, "services"), { recursive: true });
+    fs.writeFileSync(path.join(src, "core.ts"), serviceCore);
+    fs.writeFileSync(path.join(src, "shared.ts"), "export type Payload = { readonly bytes: Uint8Array; };\n");
+    fs.writeFileSync(path.join(src, "services", "feeds.ts"), `import type { Payload } from "../shared.ts"; export function parse(value: Payload): Payload { return value; }\n`);
+    const editor = path.join(root, "node_modules", "@native-sdk", "services", "index.ts");
+    const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
+    const result = spawnSync(process.execPath, [cli, path.join(src, "core.ts"), "--services-editor-client", editor], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(editor, "utf8"), /from "\.\.\/\.\.\/\.\.\/src\/shared\.ts"/);
+    assert.match(fs.readFileSync(path.join(path.dirname(editor), "index.d.ts"), "utf8"), /feedsParse/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(path.dirname(editor), "package.json"), "utf8")).types, "./index.d.ts");
+    assert.equal(fs.existsSync(path.join(src, "services.gen.ts")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("NS1067 validates operation signatures, throws, and core service call names", () => {
@@ -273,6 +465,30 @@ test("service staging lowers tagged throws across the service-host graph", () =>
   }
 });
 
+test("service staging refuses tampered vendored package bytes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-hash-"));
+  try {
+    const src = path.join(root, "src");
+    const packageDir = path.join(src, "services", "vendor", "tiny-package");
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(path.join(src, "core.ts"), "export const core = 1;\n");
+    fs.writeFileSync(path.join(src, "services", "feeds.ts"), "export function parse(bytes: Uint8Array): Uint8Array { return bytes; }\n");
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "tiny-package", version: "1.0.0" }));
+    fs.writeFileSync(path.join(packageDir, "index.js"), "export default 1;\n");
+    const hostMain = path.join(root, "service_host_main.ts");
+    fs.writeFileSync(hostMain, "// host\n");
+    const contract = path.join(root, "services.contract.json");
+    fs.writeFileSync(contract, JSON.stringify({ packages: [{ name: "tiny-package", version: "1.0.0", content_hash: "0".repeat(64) }] }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "stage_external_services.mjs");
+    const result = spawnSync(process.execPath, [script, "--src", src, "--host-main", hostMain, "--contract", contract, "--out", path.join(root, "out")], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /hashes to [0-9a-f]{64}, expected 0{64}/);
+    assert.match(result.stderr, /re-run native vendor or restore the checked-in package bytes/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("service and core module-scope names do not collide across the class boundary", () => {
   const result = checkFiles({
     "core.ts": `${serviceCore}\nexport interface SharedName { readonly value: number; }`,
@@ -336,6 +552,88 @@ test("the service compile lane refuses a target that differs from the build host
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /currently compile only for the build host/);
     assert.match(result.stderr, /x86_64-windows-gnu/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the service compile lane passes an explicit npm-static allowlist and preserves coverage refusals", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-static-refusal-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.22" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({
+      compiler_version: "0.0.22",
+      packages: [{ name: "dynamic-only", version: "1.0.0", content_hash: "a".repeat(64) }],
+    }));
+    const compiler = path.join(root, "compiler.mjs");
+    fs.writeFileSync(compiler, `
+if (process.argv.includes("-v")) { console.log("0.0.22"); process.exit(0); }
+const at = process.argv.indexOf("--npm-static");
+if (at < 0 || process.argv[at + 1] !== "dynamic-only" || process.argv.includes("auto") || process.argv.includes("--dynamic")) {
+  console.error("wrong npm policy: " + process.argv.slice(2).join(" ")); process.exit(9);
+}
+console.error("SC-NPM-STATIC dynamic-only: static coverage 42%; dynamic island fallback required");
+process.exit(7);
+`);
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-exe", path.join(root, "service-host"),
+      "--host-platform", "test-test-test",
+      "--target-platform", "test-test-test",
+      "--compiler-js", compiler,
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 7, result.stderr);
+    assert.match(result.stderr, /SC-NPM-STATIC dynamic-only: static coverage 42%; dynamic island fallback required/);
+    assert.match(result.stderr, /does not clear scriptc's static tier/);
+    assert.match(result.stderr, /never enables npm auto-fallback or --dynamic/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the service compile lane refuses a package whose successful coverage verdict is below 100%", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-partial-static-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.22" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({
+      compiler_version: "0.0.22",
+      packages: [{ name: "partial-static", version: "1.0.0", content_hash: "b".repeat(64) }],
+    }));
+    const compiler = path.join(root, "compiler.mjs");
+    fs.writeFileSync(compiler, `
+import fs from "node:fs";
+if (process.argv.includes("-v")) { console.log("0.0.22"); process.exit(0); }
+if (process.argv[2] === "coverage") {
+  console.log("scriptc coverage service_host_main.ts\\n\\n  statements analyzed   10\\n  compile statically    8  (80%)\\n\\n  deferred to runtime   2 sites\\n      ×2  unsupported package calls  SC2020");
+  process.exit(0);
+}
+const out = process.argv[process.argv.indexOf("-o") + 1];
+fs.writeFileSync(out, "build should not have run");
+`);
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    const output = path.join(root, "service-host");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-exe", output,
+      "--host-platform", "test-test-test",
+      "--target-platform", "test-test-test",
+      "--compiler-js", compiler,
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /compile statically\s+8\s+\(80%\)/);
+    assert.match(result.stderr, /does not clear scriptc's static tier/);
+    assert.equal(fs.existsSync(output), false, "the build must not run after partial static coverage");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

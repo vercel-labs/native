@@ -70,7 +70,7 @@ export type Declaration = tsImpl.Declaration;
 /// except `useUnknownInCatchVariables` (see below), where the subset checker
 /// itself is the stricter authority — so the 6-to-7 provider swap changes no
 /// acceptance decision.
-export function subsetCompilerOptions(): tsImpl.CompilerOptions {
+export function subsetCompilerOptions(generatedServicesPath?: string): tsImpl.CompilerOptions {
   return {
     strict: true,
     // The one strict-family knob turned OFF: the subset's own checker types
@@ -89,6 +89,9 @@ export function subsetCompilerOptions(): tsImpl.CompilerOptions {
     // (tmp dirs, workspaces) resolve the same modules.
     paths: {
       "@native-sdk/core": [sdkCoreModulePath.replace(/\.ts$/, "")],
+      ...(generatedServicesPath
+        ? { "@native-sdk/services": [generatedServicesPath.replace(/\.ts$/, "")] }
+        : {}),
       ...Object.fromEntries(
         [...sdkLibraryModules].map(([name, p]) => [name, [p.replace(/\.ts$/, "")]]),
       ),
@@ -590,6 +593,26 @@ export function lineColumn(file: SourceFile, pos: number): { line: number; colum
 /// valid core never imports those files, so they cannot be discovered from
 /// the entry root. The caller still passes only core files to the subset
 /// checker and integer inference.
-export function createSubsetProgram(entry: string, roots: readonly string[] = [entry]): tsImpl.Program {
-  return tsImpl.createProgram([...new Set([entry, ...roots, bytesTextMethodsDts])], subsetCompilerOptions());
+export function createSubsetProgram(
+  entry: string,
+  roots: readonly string[] = [entry],
+  virtualFiles: ReadonlyMap<string, string> = new Map(),
+): tsImpl.Program {
+  const generatedServicesPath = [...virtualFiles.keys()].find((file) => path.basename(file) === "services.gen.ts");
+  const options = subsetCompilerOptions(generatedServicesPath);
+  if (virtualFiles.size === 0) return tsImpl.createProgram([...new Set([entry, ...roots, bytesTextMethodsDts])], options);
+  const host = tsImpl.createCompilerHost(options);
+  const virtual = new Map([...virtualFiles].map(([file, source]) => [path.resolve(file), source]));
+  const originalFileExists = host.fileExists.bind(host);
+  const originalReadFile = host.readFile.bind(host);
+  const originalGetSourceFile = host.getSourceFile.bind(host);
+  host.fileExists = (file) => virtual.has(path.resolve(file)) || originalFileExists(file);
+  host.readFile = (file) => virtual.get(path.resolve(file)) ?? originalReadFile(file);
+  host.getSourceFile = (file, languageVersion, onError, shouldCreateNewSourceFile) => {
+    const source = virtual.get(path.resolve(file));
+    return source === undefined
+      ? originalGetSourceFile(file, languageVersion, onError, shouldCreateNewSourceFile)
+      : tsImpl.createSourceFile(file, source, languageVersion, true, tsImpl.ScriptKind.TS);
+  };
+  return tsImpl.createProgram([...new Set([entry, ...roots, bytesTextMethodsDts])], options, host);
 }

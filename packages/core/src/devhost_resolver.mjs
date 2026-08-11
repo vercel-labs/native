@@ -10,6 +10,14 @@
 // always imports the SDK checkout's module directly. Relative imports
 // inside the core's src/ are real files node resolves itself.
 
+let servicesClientUrl = null;
+let servicePackages = {};
+
+export function initialize(data) {
+  servicesClientUrl = data?.servicesClientUrl ?? null;
+  servicePackages = data?.servicePackages ?? {};
+}
+
 export async function resolve(specifier, context, nextResolve) {
   if (specifier === "@native-sdk/core") {
     return { shortCircuit: true, url: new URL("../sdk/core.ts", import.meta.url).href };
@@ -17,6 +25,12 @@ export async function resolve(specifier, context, nextResolve) {
   if (specifier.startsWith("@native-sdk/core/")) {
     const lib = specifier.slice("@native-sdk/core/".length);
     return { shortCircuit: true, url: new URL(`../sdk/${lib}.ts`, import.meta.url).href };
+  }
+  if (specifier === "@native-sdk/services" && servicesClientUrl) {
+    return { shortCircuit: true, url: servicesClientUrl };
+  }
+  if (Object.hasOwn(servicePackages, specifier)) {
+    return { shortCircuit: true, url: servicePackages[specifier] };
   }
   return nextResolve(specifier, context);
 }

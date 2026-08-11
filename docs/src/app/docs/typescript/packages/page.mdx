@@ -18,7 +18,7 @@ The question behind "can I use npm?" is almost always one of these five:
     <tr>
       <td>Filesystem, JSON/regex parsing, transforms, or imperative work in ordinary TypeScript</td>
       <td>A compiled module under <code>src/services/</code></td>
-      <td>A native service-host process, reached with <code>Cmd.request</code></td>
+      <td>A native service-host process, reached through <code>@native-sdk/services</code> commands</td>
     </tr>
     <tr>
       <td>An HTTP API — including AI/LLM endpoints</td>
@@ -45,9 +45,9 @@ The question behind "can I use npm?" is almost always one of these five:
 
 ## Compiled TypeScript services
 
-Put ordinary static-tier TypeScript under `src/services/` when the work needs Node built-ins, regexes, JSON, `Map`/`Set`, `Date`, classes, or ambient process authority. Each directly exported, non-default named synchronous function becomes an operation named `<module-basename>.<export>` and takes zero arguments or one `Uint8Array`, returning `Uint8Array`. The core calls it with `Cmd.request`, so success and failure still arrive as Msgs and record/replay remains offline.
+Put ordinary static-tier TypeScript under `src/services/` when the work needs Node built-ins, regexes, JSON, `Map`/`Set`, `Date`, classes, or ambient process authority. Each directly exported, non-default named synchronous function becomes an operation named `<module-basename>.<export>`. Its request and result may be shared, contract-encodable records; the core calls the generated constructor from `@native-sdk/services`, so success and failure still arrive as Msgs and record/replay remains offline.
 
-This is compiled native code with no JavaScript engine. Phase 1 is vendored-source-only: bare package imports teach NS1066, so check the utility's source in under `src/services/`. The host is a lazily spawned sibling executable on desktop today; [TypeScript services](/docs/typescript#typescript-services) covers authority, crash recovery, packaging, and the mobile/in-process limitation.
+This is compiled native code with no JavaScript engine. `native vendor . package@X.Y.Z` resolves an exact package graph once, with lifecycle scripts disabled, into checked-in `src/services/vendor/` sources and hash facts in app.zon. Builds are offline: every byte is verified and scriptc receives only the explicit `--npm-static` package list—never automatic or dynamic fallback. `native check` preserves scriptc's coverage note and refuses anything below 100% static coverage. A five-package 0.0.22 calibration passed three small source-shipping utilities and refused two (`nanoid` and `micromark`), so package support is intentionally selective. The host is a lazily spawned sibling executable on desktop today; [TypeScript services](/docs/typescript#typescript-services) covers typed calls, streaming, cancellation, authority, crash recovery, and the mobile/in-process limitation.
 
 ## Calling APIs, AI endpoints included
 
@@ -179,7 +179,7 @@ import { containsIgnoreCase } from "@native-sdk/core/text"; // the SDK library c
 ```
 
 - **Vendor subset-clean code under `src/` outside `src/services/`.** It compiles into the core like your own modules ([splitting a core into modules](/docs/typescript#splitting-a-core-into-modules)); the subset checker tells you immediately — by rule ID, with the rewrite — whether it fits.
-- **Vendor ordinary static-tier code under `src/services/`.** Classes, regexes, JSON, `Map`/`Set`, `Date`, Node built-ins, and imperative transforms stay in TypeScript and compile into the service host; the core reaches their exported byte operations through `Cmd.request`.
+- **Vendor ordinary static-tier code or exact npm packages under `src/services/`.** Classes, regexes, JSON, `Map`/`Set`, `Date`, Node built-ins, and imperative transforms stay in TypeScript and compile into the service host; run `native vendor . package@X.Y.Z` for a package, then reach its typed exported operations through `@native-sdk/services`.
 - **`@native-sdk/core/*` is the curated library channel**: SDK modules written in the same subset, compiled into your core when imported and absent when not. Today that is `@native-sdk/core/text` — the byte-splice text engine (caret, selection, IME, case-insensitive search) — and `@native-sdk/core/events` — the canonical event record types markup and the wiring channels match. The channel grows with the toolkit; JSON encoding/parsing over bytes, today demonstrated in `examples/chatbot/src/api.ts`, is the kind of module it exists to absorb.
 
-One thing deliberately does not exist: a package manager for cores. A core's import graph is exactly its class under `src/` plus the SDK modules. Phase-1 services are hermetic too: their source is checked in under `src/services/`, with no install or network step. Nothing arrives at build time that you have not checked in.
+One thing deliberately does not exist: a package manager for cores. A core's import graph is exactly its class under `src/` plus the SDK modules. Services stay hermetic: local and npm sources are checked in under `src/services/`, app.zon pins each npm name/version/tree hash, and build performs no install or network step. Nothing arrives at build time that you have not checked in.

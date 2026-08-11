@@ -155,6 +155,7 @@ pub fn TsUiApp(comptime core: type) type {
                     .poll_fn = poll,
                     .pending_fn = pending,
                     .bind_services_fn = bindServices,
+                    .bind_channels_fn = bindChannels,
                     .shutdown_fn = shutdown,
                 };
             }
@@ -196,6 +197,12 @@ pub fn TsUiApp(comptime core: type) type {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
                 if (self.primary.bind_services_fn) |bind_fn| bind_fn(self.primary.context, services);
                 if (self.persist.bind_services_fn) |bind_fn| bind_fn(self.persist.context, services);
+            }
+
+            fn bindChannels(context: *anyopaque, channels: runtime_effects.HostChannelBinding) void {
+                const self: *HostCallMux = @ptrCast(@alignCast(context));
+                if (self.primary.bind_channels_fn) |bind_fn| bind_fn(self.primary.context, channels);
+                if (self.persist.bind_channels_fn) |bind_fn| bind_fn(self.persist.context, channels);
             }
 
             fn shutdown(context: *anyopaque) void {
@@ -262,6 +269,10 @@ pub fn TsUiApp(comptime core: type) type {
             /// Generated service registry/carrier for Cmd.host/request. Null
             /// preserves the existing embedding-host behavior.
             host_calls: ?runtime_effects.HostCallBinding = null,
+            /// Typed service result projection generated from the same
+            /// sidecar as `host_calls`. Null keeps raw Cmd.request byte
+            /// routing for embedders and apps without services.
+            service_results: ?Host.ServiceResultBinding = null,
             persist: ?PersistOptions = null,
         };
 
@@ -306,6 +317,7 @@ pub fn TsUiApp(comptime core: type) type {
         fn applyCoreOptions(core_options: CoreOptions) void {
             Host.setAudioCacheDir(core_options.audio_cache_dir);
             Host.setImageCacheDir(core_options.image_cache_dir);
+            Host.bindServiceResults(core_options.service_results);
             boot_images_store = core_options.boot_images;
             env_values_store = core_options.env_values;
             host_calls_store = core_options.host_calls;

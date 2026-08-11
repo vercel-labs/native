@@ -6,6 +6,11 @@
     .platforms = .{"macos"},
     .permissions = .{"view"},
     .capabilities = .{ "native_views", "gpu_surfaces" },
+    .service_packages = .{.{
+        .name = "escape-string-regexp",
+        .version = "5.0.0",
+        .content_hash = "705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d",
+    }},
     .shell = .{
         .windows = .{.{
             .label = "main",

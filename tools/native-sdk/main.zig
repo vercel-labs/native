@@ -94,6 +94,31 @@ pub fn main(init: std.process.Init) !void {
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native check [dir] [--strict]");
         try enterAppDir(init.io, verb_args.dir);
         runCheck(allocator, init.io, init.environ_map, flagBool(args, "--strict")) catch |err| return failVerb(err);
+    } else if (std.mem.eql(u8, command, "vendor")) {
+        if (args.len < 3) fail("usage: native vendor [dir] <package@exact-version> [more packages...]");
+        const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, init.io, init.environ_map) orelse
+            fail("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout");
+        defer allocator.free(framework_root);
+        var package_start: usize = 2;
+        var app_dir: []const u8 = ".";
+        if (!vendorPackageSpec(args[2])) {
+            package_start = 3;
+            app_dir = args[2];
+        }
+        if (package_start >= args.len) fail("usage: native vendor [dir] <package@exact-version> [more packages...]");
+        const script = try std.fs.path.join(allocator, &.{ framework_root, "packages", "core", "scripts", "vendor_service_packages.mjs" });
+        defer allocator.free(script);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(allocator);
+        try argv.appendSlice(allocator, &.{ "node", script, app_dir });
+        try argv.appendSlice(allocator, args[package_start..]);
+        var child = std.process.spawn(init.io, .{ .argv = argv.items, .stdin = .inherit, .stdout = .inherit, .stderr = .inherit, .environ_map = init.environ_map }) catch
+            fail("native vendor requires Node.js and npm on PATH");
+        const term = try child.wait(init.io);
+        switch (term) {
+            .exited => |code| if (code != 0) std.process.exit(1),
+            else => std.process.exit(1),
+        }
     } else if (std.mem.eql(u8, command, "eject")) {
         // `eject component <name>` is dispatched before the plain build
         // eject so `component` is never mistaken for an app directory.
@@ -258,8 +283,32 @@ pub fn main(init: std.process.Init) !void {
                 tooling.ts_core.selfHealEditorPackage(allocator, init.io, framework_root);
             }
             const dev_metadata = try tooling.manifest.readMetadata(allocator, init.io, "app.zon");
+            const dev_service_packages = try allocator.alloc(tooling.ts_core.ServicePackage, dev_metadata.service_packages.len);
+            defer allocator.free(dev_service_packages);
+            for (dev_metadata.service_packages, 0..) |package_entry, index| dev_service_packages[index] = .{
+                .name = package_entry.name,
+                .version = package_entry.version,
+                .content_hash = package_entry.content_hash,
+            };
+            var dev_canvas_label: []const u8 = "canvas";
+            var dev_window_width: f32 = 800;
+            var dev_window_height: f32 = 600;
+            outer: for (dev_metadata.shell.windows) |window| {
+                for (window.views) |view| {
+                    if (std.mem.eql(u8, view.kind, "gpu_surface")) {
+                        dev_canvas_label = view.label;
+                        dev_window_width = view.width orelse window.width;
+                        dev_window_height = view.height orelse window.height;
+                        break :outer;
+                    }
+                }
+            }
             tooling.ts_core.runDevHost(allocator, init.io, framework_root, .{
                 .base_env = init.environ_map,
+                .app_name = dev_metadata.name,
+                .canvas_label = dev_canvas_label,
+                .window_width = dev_window_width,
+                .window_height = dev_window_height,
                 .script = try flagValue(args, "--script"),
                 .watch = flagBool(args, "--watch"),
                 .persist_routes = if (dev_metadata.persist) |persist| .{
@@ -267,6 +316,7 @@ pub fn main(init: std.process.Init) !void {
                     .none = persist.restore.none,
                     .err = persist.restore.err,
                 } else null,
+                .service_packages = dev_service_packages,
             }) catch |err| return failVerb(err);
             return;
         }
@@ -393,6 +443,7 @@ fn usage() void {
         \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
         \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.zon
+        \\  vendor [dir] <package@exact-version> [...]     check npm sources into src/services/vendor and pin their hashes in app.zon
         \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  eject component <name> [dir]                   write an owned copy of a library composite into src/components/
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
@@ -593,12 +644,20 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         // missing or version-skewed vs the SDK — one info line, never a
         // check failure.
         tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
+        const check_service_packages = try allocator.alloc(tooling.ts_core.ServicePackage, metadata.service_packages.len);
+        defer allocator.free(check_service_packages);
+        for (metadata.service_packages, 0..) |package_entry, index| check_service_packages[index] = .{
+            .name = package_entry.name,
+            .version = package_entry.version,
+            .content_hash = package_entry.content_hash,
+        };
         try tooling.ts_core.checkCore(
             allocator,
             io,
             env_map,
             framework_root,
             metadata.capabilities,
+            check_service_packages,
             if (metadata.persist) |persist| persist.version else null,
             if (metadata.persist) |persist| .{
                 .ok = persist.restore.ok,
@@ -868,6 +927,19 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
         return arg;
     }
     return null;
+}
+
+fn vendorPackageSpec(value: []const u8) bool {
+    const at = std.mem.lastIndexOfScalar(u8, value, '@') orelse return false;
+    if (at == 0 or at + 1 == value.len) return false;
+    var parts = std.mem.splitScalar(u8, value[at + 1 ..], '.');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        for (part) |byte| if (!std.ascii.isDigit(byte)) return false;
+        count += 1;
+    }
+    return count == 3;
 }
 
 fn splitCommand(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {

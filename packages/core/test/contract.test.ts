@@ -62,7 +62,7 @@ export function update(model: Model, msg: Msg): Model {
 test("a small core's contract carries types, arms, slots, and channels", () => {
   const doc = contractOf(smallCore);
   assert.equal(doc.format, 1);
-  assert.equal(doc.wire_version, 3);
+  assert.equal(doc.wire_version, 4);
   assert.equal(doc.abi_version, 2);
   assert.equal(doc.entry, "src/core.ts");
   assert.equal(doc.model, "Model");

@@ -47,6 +47,20 @@ const argv0 = args.compiler
   ? (fs.existsSync(args.compiler) ? [args.compiler] : args.compiler.split(/\s+/))
   : [process.execPath, args["compiler-js"]];
 
+function isNpmStaticRefusal(output) {
+  const percent = output.match(/compile statically\s+\d+\s+\((\d+)%\)/i);
+  return (percent !== null && Number(percent[1]) < 100)
+    || /SC-NPM-STATIC|\bSC2013\b|\bSC4020\b|island fallback|cannot compile statically|static coverage[^\n]*dynamic/i.test(output);
+}
+
+function printNpmStaticTeaching() {
+  console.error(
+    "native check: this service package does not clear scriptc's static tier. " +
+    "Choose another exact vendored package, port/vendor a static-compatible implementation, or wait for compiler support; " +
+    "Native SDK never enables npm auto-fallback or --dynamic.",
+  );
+}
+
 const manifest = JSON.parse(fs.readFileSync(args.manifest, "utf8"));
 const pin = manifest.dependencies?.scriptc;
 const contract = JSON.parse(fs.readFileSync(args.contract, "utf8"));
@@ -69,11 +83,35 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-external-services-"))
 try {
   fs.cpSync(args.stage, work, { recursive: true });
   const built = path.join(work, process.platform === "win32" ? "service-host.exe" : "service-host");
-  const result = spawnSync(argv0[0], [...argv0.slice(1), "build", "service_host_main.ts", "-o", built], {
+  const staticPackages = Array.isArray(contract.packages) ? contract.packages.map((entry) => entry.name) : [];
+  const compileArgs = [...argv0.slice(1), "build", "service_host_main.ts", "-o", built];
+  if (staticPackages.length > 0) compileArgs.push("--npm-static", staticPackages.join(","));
+  if (staticPackages.length > 0) {
+    const coverage = spawnSync(argv0[0], [
+      ...argv0.slice(1),
+      "coverage",
+      "service_host_main.ts",
+      "--npm-static",
+      staticPackages.join(","),
+    ], { cwd: work, encoding: "utf8" });
+    const coverageOutput = `${coverage.stdout ?? ""}${coverage.stderr ?? ""}`;
+    if (coverage.status !== 0 || isNpmStaticRefusal(coverageOutput)) {
+      if (coverage.stdout) process.stdout.write(coverage.stdout);
+      if (coverage.stderr) process.stderr.write(coverage.stderr);
+      if (isNpmStaticRefusal(coverageOutput)) printNpmStaticTeaching();
+      process.exit(coverage.status && coverage.status !== 0 ? coverage.status : 1);
+    }
+  }
+  const result = spawnSync(argv0[0], compileArgs, {
     cwd: work,
-    stdio: "inherit",
+    encoding: "utf8",
   });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.status !== 0) {
+    if (isNpmStaticRefusal(`${result.stdout ?? ""}${result.stderr ?? ""}`)) printNpmStaticTeaching();
+    process.exit(result.status ?? 1);
+  }
   if (!fs.existsSync(built)) {
     console.error("the external service compile produced no executable");
     process.exit(1);
