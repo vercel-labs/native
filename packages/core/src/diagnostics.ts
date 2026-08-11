@@ -430,8 +430,8 @@ export const rules = {
     fix: "Increase app.zon's `.persist.version` when the `Model` shape changes, and never decrease or reuse a version number.",
     why: "The version selects the app's pure migration path while the model fingerprint rejects accidental shape drift; reusing a version would make old bytes ambiguous and could restore them into the wrong model layout.",
   },
-  NS1066: {
-    id: "NS1066",
+  NS1069: {
+    id: "NS1069",
     title: "Cmd.store and its capability must agree",
     fix: "Add `\"store\"` to app.zon's `capabilities`, or remove the unused capability/command.",
     why: "The store capability controls whether SQLite and the engine-owned record-store binding are linked into the app. Keeping the declaration and command in lockstep prevents a rejected effect and sheds the storage engine from apps that do not use it.",

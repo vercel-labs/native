@@ -19,7 +19,7 @@ test("clean core passes the checker", () => {
   assert.deepEqual(ruleIds(checkOnly(core)), []);
 });
 
-test("NS1066 keeps every Cmd.store factory in capability lockstep", () => {
+test("NS1069 keeps every Cmd.store factory in capability lockstep", () => {
   const source = `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 export interface Model { readonly bytes: Uint8Array; }
@@ -46,12 +46,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 `;
   const enabled = check(source, { capabilities: ["store"] });
   assert.equal(enabled.ok, true, JSON.stringify(enabled));
-  assert.equal(enabled.warnings.some((d) => d.id === "NS1066"), false);
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1069"), false);
 
   const missing = check(source);
-  assert.equal(missing.warnings.filter((d) => d.id === "NS1066").length, 5);
+  assert.equal(missing.warnings.filter((d) => d.id === "NS1069").length, 5);
   const unused = check(core, { capabilities: ["store"] });
-  assert.equal(unused.warnings.filter((d) => d.id === "NS1066").length, 1);
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1069").length, 1);
 });
 
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {

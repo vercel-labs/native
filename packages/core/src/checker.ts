@@ -504,7 +504,7 @@ export class SubsetChecker {
       this.warn("NS1028", "app.zon declares the `persist` capability, but this core has no `Cmd.persist()` call.", this.entry);
     }
     if (this.capabilities.has("store") && !this.usesStore) {
-      this.warn("NS1066", "app.zon declares the `store` capability, but this core has no `Cmd.store.*` call.", this.entry);
+      this.warn("NS1069", "app.zon declares the `store` capability, but this core has no `Cmd.store.*` call.", this.entry);
     }
     this.checkExceptions();
     return {
@@ -2495,7 +2495,7 @@ export class SubsetChecker {
         }
       }
 
-      // NS1066 — the nested record-store factories remain capability-bound;
+      // NS1069 — the nested record-store factories remain capability-bound;
       // recognizing the SDK Cmd symbol (rather than its spelling alone) keeps
       // local objects named Cmd out of this cross-file contract check.
       if (
@@ -2509,7 +2509,7 @@ export class SubsetChecker {
       ) {
         this.usesStore = true;
         if (!this.capabilities.has("store")) {
-          this.warn("NS1066", "`Cmd.store.*` requires the `store` capability in app.zon.", node);
+          this.warn("NS1069", "`Cmd.store.*` requires the `store` capability in app.zon.", node);
         }
       }
 

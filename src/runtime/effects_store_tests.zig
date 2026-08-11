@@ -163,6 +163,40 @@ test "record-store keys replace on reissue and cancel silently" {
     try std.testing.expect(fx.takeMsg() == null);
 }
 
+test "draining a store terminal retires a producer preempted after enqueue" {
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    const key = 32;
+    fx.storeGet(.{ .key = key, .record_key = "doc/32", .on_result = Fx.hostMsg(.result) });
+    try fx.feedHostResult(key, true, &.{0});
+
+    // Reconstruct the real write worker's preemption window exactly:
+    // `storeWorkerMain` publishes the terminal entry, then stores
+    // `.draining`. A consumer can acquire the queue between those two
+    // operations and observe the queued result while the slot still says
+    // `.running`. The fake feed stores first, so rewind just that state.
+    for (&fx.slots) |*slot| {
+        if (slot.kind == .store and slot.key == key) slot.state.store(.running, .release);
+    }
+
+    const result = try takeResult(&fx);
+    try std.testing.expect(result.ok);
+    try std.testing.expectEqualSlices(u8, &.{0}, result.bytes);
+
+    // Delivery is the key-freeing instant. The drain must publish the
+    // terminal state itself rather than depending on the preempted worker
+    // to resume before update handles the result.
+    for (&fx.slots) |*slot| {
+        if (slot.kind != .store or slot.key != key) continue;
+        try std.testing.expectEqual(.draining, slot.state.load(.acquire));
+        try std.testing.expect(slot.fetch_buffer == null);
+        return;
+    }
+    return error.TestExpectedStoreSlot;
+}
+
 fn readU32(bytes: []const u8, cursor: *usize) u32 {
     const value = std.mem.readInt(u32, bytes[cursor.*..][0..4], .little);
     cursor.* += 4;

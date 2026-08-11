@@ -3557,10 +3557,12 @@ pub fn Effects(comptime Msg: type) type {
             volume: f32,
         };
 
-        /// `draining`: the worker is done and the terminal entry is
+        /// `draining`: the effect work is done and the terminal entry is
         /// queued, but the slot still owns a heap buffer (a fetch's body
         /// or a collect spawn's stdout) until the drain delivers (and
-        /// thereby retires) it.
+        /// thereby retires) it. A consumer that dequeues a worker-fed
+        /// terminal may publish this state before the producer thread's
+        /// post-enqueue epilogue finishes; reclaim joins that epilogue.
         const SlotState = enum(u8) { idle, running, done, draining };
 
         const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host, store, image };
@@ -10527,15 +10529,23 @@ pub fn Effects(comptime Msg: type) type {
                         // `.response`: a mismatched generation means the
                         // occupant was already retired (replaced or
                         // cancelled — its result drops silently, per the
-                        // request contract). No consumer-side
-                        // `.draining` store is needed here (unlike the
-                        // worker-fed arms): host answers are fed on the
-                        // loop thread with the store sequenced before
-                        // the enqueue — and a same-key host request
-                        // REPLACES an in-flight one rather than
-                        // rejecting, so no handler retry hinges on the
-                        // state either way.
+                        // request contract).
                         if (entry.generation != slot.generation) continue;
+                        // Ordinary host answers are fed on the loop
+                        // thread with `.draining` sequenced before the
+                        // enqueue. Store WRITES reuse this entry family,
+                        // but their workers post first and store
+                        // `.draining` immediately afterward so a full
+                        // queue cannot make a joinable slot block its own
+                        // producer. The drain can therefore race ahead of
+                        // that store. Retire a store occupancy here before
+                        // its terminal reaches update, matching the file
+                        // and image worker-fed arms: a handler that issues
+                        // another store command under the same key must be
+                        // able to reuse this slot instead of consuming a
+                        // second store slot (or rejecting at capacity).
+                        // The worker's later re-store is idempotent.
+                        if (slot.kind == .store) slot.state.store(.draining, .release);
                         // Take buffer ownership so the slot can be
                         // reused while `update` still reads the bytes.
                         if (self.drain_fetch_body) |old| self.allocator.free(old);
@@ -13357,10 +13367,13 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Join a finished worker's thread and clear its handle.
-        /// Loop-thread only. The reclaim path reaches this only after
-        /// the worker published a non-running slot state — its last
-        /// slot access — so the join blocks for the thread's epilogue
-        /// (a wake nudge and the OS exit), never on child I/O. The
+        /// Loop-thread only. The reclaim path reaches this after either
+        /// the worker published a non-running slot state or the consumer
+        /// dequeued its terminal and idempotently published `.draining`.
+        /// In the latter case the successful enqueue proves the effect
+        /// work and result production are complete, so the join waits
+        /// only for the producer's post-enqueue epilogue (a state store,
+        /// wake nudge, and OS exit), never on child I/O. The
         /// teardown path (`deinit`) may join a still-running worker;
         /// convergence there is the kill's and the shutdown flag's
         /// doing, as documented at that call site.
@@ -13410,8 +13423,9 @@ pub fn Effects(comptime Msg: type) type {
                     // A draining slot is reusable once the drain
                     // delivered its terminal (took the fetch body or
                     // collected stdout, or cleared a `.lines` exit's
-                    // marker). Its worker is already finished either
-                    // way: retire the thread now.
+                    // marker). Its effect work is already finished either
+                    // way; retire the thread now (the join may wait for a
+                    // producer's short post-enqueue epilogue).
                     .draining => {
                         joinWorker(slot);
                         if (slot.fetch_buffer == null and slot.collect_buffer == null and !slot.exit_undelivered) {

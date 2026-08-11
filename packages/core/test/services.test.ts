@@ -106,7 +106,9 @@ test("NS1066 refuses phase-1 npm imports but permits compiler-shipped Node built
     "core.ts": serviceCore,
     "services/feeds.ts": `import thing from "left-pad"; export function parse(bytes: Uint8Array): Uint8Array { void thing; return bytes; }`,
   });
-  assert.ok(npm.diagnostics.some((d) => d.id === "NS1066"), JSON.stringify(npm.diagnostics));
+  const diagnostic = npm.diagnostics.find((d) => d.id === "NS1066");
+  assert.ok(diagnostic, JSON.stringify(npm.diagnostics));
+  assert.equal(diagnostic.title, "service dependencies are vendored in phase 1");
 
   const builtin = checkFiles({
     "core.ts": serviceCore,
