@@ -68,11 +68,23 @@ pub const Store = struct {
         var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
         const backup_path = joinPath(&backup_buffer, self.data_dir, backup_name) orelse return .io_failed;
 
+        // An older binary must not displace either generation written by a
+        // newer schema. Checking the backup separately matters when the
+        // future primary is torn: repeated rollback writes must not erase the
+        // last recoverable future generation.
+        if (cwd.readFileAlloc(self.io, backup_path, self.allocator, .limited(header_len + max_snapshot_bytes))) |previous| {
+            defer self.allocator.free(previous);
+            if (decodeEnvelope(previous, null) == .valid and envelopeSchemaVersion(previous) > self.config.schema_version) {
+                return .version_unknown;
+            }
+        } else |_| {}
+
         // Preserve only a structurally sound primary. A corrupt primary must
         // never replace the last known-good backup.
         if (cwd.readFileAlloc(self.io, primary_path, self.allocator, .limited(header_len + max_snapshot_bytes))) |previous| {
             defer self.allocator.free(previous);
             if (decodeEnvelope(previous, null) == .valid) {
+                if (envelopeSchemaVersion(previous) > self.config.schema_version) return .version_unknown;
                 atomicWrite(self.io, cwd, backup_path, previous) catch return .io_failed;
             }
         } else |_| {}
@@ -326,8 +338,8 @@ fn decodeEnvelope(bytes: []const u8, expected: ?Config) Decoded {
     if (!std.crypto.timing_safe.eql([checksum_len]u8, checksum[0..checksum_len].*, actual)) return .corrupt;
 
     if (expected) |config| {
-        if (snapshot_format != config.snapshot_format) return .corrupt;
         if (schema_version > config.schema_version) return .future_version;
+        if (snapshot_format != config.snapshot_format) return .corrupt;
         if (schema_version < config.schema_version) return .{ .migration_required = .{ .body = body, .version = schema_version } };
         if (model_fingerprint != config.model_fingerprint) return .corrupt;
     }
@@ -370,6 +382,13 @@ fn takeInt(comptime T: type, bytes: []const u8, at: *usize) T {
     const value = std.mem.readInt(T, bytes[at.*..][0..size], .little);
     at.* += size;
     return value;
+}
+
+/// Read the schema field from an envelope already accepted by the structural
+/// `decodeEnvelope(bytes, null)` check.
+fn envelopeSchemaVersion(bytes: []const u8) u64 {
+    const at = magic.len + @sizeOf(u32) + @sizeOf(u32);
+    return std.mem.readInt(u64, bytes[at..][0..@sizeOf(u64)], .little);
 }
 
 fn joinPath(buffer: []u8, dir: []const u8, name: []const u8) ?[]const u8 {
@@ -518,6 +537,52 @@ test "snapshot store closes version and shape mismatches" {
     try std.testing.expectEqual(Outcome.version_unknown, older.restore().outcome);
     const changed = Store.init(std.testing.io, std.testing.allocator, path, .{ .schema_version = 2, .model_fingerprint = 10, .snapshot_format = 1 });
     try std.testing.expectEqual(Outcome.corrupt, changed.restore().outcome);
+}
+
+test "snapshot store refuses downgrade writes and preserves the future generation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try testDirPath(&tmp, &path_buffer);
+    const future = Store.init(std.testing.io, std.testing.allocator, path, .{
+        .schema_version = 3,
+        .model_fingerprint = 30,
+        .snapshot_format = 2,
+    });
+    try std.testing.expectEqual(Outcome.ok, future.write("future model"));
+
+    const rollback = Store.init(std.testing.io, std.testing.allocator, path, .{
+        .schema_version = 2,
+        .model_fingerprint = 20,
+        .snapshot_format = 1,
+    });
+    try std.testing.expectEqual(Outcome.version_unknown, rollback.restore().outcome);
+    try std.testing.expectEqual(Outcome.version_unknown, rollback.write("rollback model"));
+    try std.testing.expectEqual(Outcome.version_unknown, rollback.write("second rollback model"));
+
+    var restored = future.restore();
+    defer restored.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Outcome.ok, restored.outcome);
+    try std.testing.expectEqualStrings("future model", restored.bytes);
+
+    var backup_buffer: [512]u8 = undefined;
+    const backup = joinPath(&backup_buffer, path, backup_name).?;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(std.testing.io, backup, std.testing.allocator, .limited(header_len + max_snapshot_bytes));
+    try std.testing.expectError(error.FileNotFound, bytes);
+
+    // A torn future primary still leaves a future backup. Rollback writes must
+    // protect that last recoverable generation too.
+    try std.testing.expectEqual(Outcome.ok, future.write("newest future model"));
+    var primary_buffer: [512]u8 = undefined;
+    const primary = joinPath(&primary_buffer, path, snapshot_name).?;
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = primary, .data = "torn" });
+    try std.testing.expectEqual(Outcome.version_unknown, rollback.write("rollback over torn primary"));
+
+    var recovered = future.restore();
+    defer recovered.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Outcome.ok, recovered.outcome);
+    try std.testing.expectEqualStrings("future model", recovered.bytes);
+    try std.testing.expect(recovered.used_backup);
 }
 
 test "snapshot store rejects over-bound models without touching disk" {

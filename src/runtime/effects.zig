@@ -4265,8 +4265,11 @@ pub fn Effects(comptime Msg: type) type {
         replay_env_len: usize = 0,
         /// Exactly one restore outcome is owed to a persistence-enabled boot.
         /// A two-entry queue makes a damaged duplicate journal detectable at
-        /// replay settle instead of overwriting the first outcome.
+        /// replay settle instead of overwriting the first outcome. Payloads
+        /// are copied at the journal handoff: session replay's blob scratch
+        /// expires with the installing event.
         replay_persist: [2]ReplayPersistEntry = undefined,
+        replay_persist_bytes: [2]?[]u8 = @splat(null),
         replay_persist_head: usize = 0,
         replay_persist_len: usize = 0,
         /// Set once from the loop thread before the first dispatch;
@@ -5176,6 +5179,12 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(bytes);
                 self.persist_restore_bytes = null;
             }
+            for (&self.replay_persist_bytes) |*bytes| {
+                if (bytes.*) |owned| self.allocator.free(owned);
+                bytes.* = null;
+            }
+            self.replay_persist_head = 0;
+            self.replay_persist_len = 0;
             // And an undrained replay write-verdict spill.
             if (self.replay_pty_write_spill.len > 0) {
                 self.allocator.free(self.replay_pty_write_spill);
@@ -5890,18 +5899,31 @@ pub fn Effects(comptime Msg: type) type {
             self.journalNote(.{ .kind = .persist, .key = 0, .payload = bytes, .persist_outcome = outcome });
         }
 
-        /// Queue a journaled boot restore for the persistence adapter. Slices
-        /// reference replay-owned storage and outlive the installing event.
+        /// Queue a journaled boot restore for the persistence adapter. Copy
+        /// successful bytes because the replay blob scratch that supplies
+        /// them expires with the installing event.
         pub fn pushReplayPersist(self: *Self, outcome: EffectPersistOutcome, bytes: []const u8) error{EffectNotFound}!void {
             if (self.replay_persist_len >= self.replay_persist.len) return error.EffectNotFound;
             const index = (self.replay_persist_head + self.replay_persist_len) % self.replay_persist.len;
-            self.replay_persist[index] = .{ .outcome = outcome, .bytes = bytes };
+            std.debug.assert(self.replay_persist_bytes[index] == null);
+            const owned = if (bytes.len > 0)
+                self.allocator.dupe(u8, bytes) catch
+                    @panic("effects: out of memory retaining a replayed model restore payload")
+            else
+                null;
+            self.replay_persist_bytes[index] = owned;
+            self.replay_persist[index] = .{ .outcome = outcome, .bytes = if (owned) |copy| copy else "" };
             self.replay_persist_len += 1;
         }
 
         pub fn takeReplayPersist(self: *Self) ?ReplayPersistEntry {
             if (self.replay_persist_len == 0) return null;
-            const entry = self.replay_persist[self.replay_persist_head];
+            const index = self.replay_persist_head;
+            const entry = self.replay_persist[index];
+            const owned = self.replay_persist_bytes[index];
+            self.replay_persist_bytes[index] = null;
+            if (self.persist_restore_bytes) |old| self.allocator.free(old);
+            self.persist_restore_bytes = owned;
             self.replay_persist_head = (self.replay_persist_head + 1) % self.replay_persist.len;
             self.replay_persist_len -= 1;
             return entry;
@@ -5937,10 +5959,15 @@ pub fn Effects(comptime Msg: type) type {
                 });
                 return;
             }
-            if (self.persist_restore_bytes) |old| self.allocator.free(old);
-            const stable = self.allocator.dupe(u8, source_bytes) catch
-                @panic("effects: out of memory retaining the model restore payload");
-            self.persist_restore_bytes = stable;
+            const stable = if (self.replay)
+                source_bytes
+            else blk: {
+                if (self.persist_restore_bytes) |old| self.allocator.free(old);
+                const copy = self.allocator.dupe(u8, source_bytes) catch
+                    @panic("effects: out of memory retaining the model restore payload");
+                self.persist_restore_bytes = copy;
+                break :blk copy;
+            };
             const result: EffectPersistResult = .{ .outcome = entry.outcome, .bytes = stable };
             if (!self.replay) self.journalPersistRestore(result.outcome, result.bytes);
             self.stagePendingStaged(.{

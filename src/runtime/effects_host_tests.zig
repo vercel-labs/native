@@ -572,11 +572,13 @@ test "Zig persistence restore is a staged, journaled Msg and replay ignores live
     defer replay.deinit();
     replay.bindJournal(.{ .context = &context, .record_fn = Capture.note });
     replay.armReplay();
-    try replay.pushReplayPersist(.corrupt, "");
+    var replay_source = "recorded".*;
+    try replay.pushReplayPersist(.ok, &replay_source);
+    @memset(&replay_source, 'x');
     replay.deliverPersistRestore(.ok, "live bytes must lose", PersistEffects.persistMsg(.restored));
     const replay_msg = replay.takeMsg() orelse return error.TestExpectedMsg;
-    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.corrupt, replay_msg.restored.outcome);
-    try std.testing.expectEqualStrings("", replay_msg.restored.bytes);
+    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.ok, replay_msg.restored.outcome);
+    try std.testing.expectEqualStrings("recorded", replay_msg.restored.bytes);
     try std.testing.expectEqual(@as(usize, 0), Capture.count);
     try replay.settleReplayFeeds();
 }
