@@ -169,6 +169,7 @@ pub fn main(init: std.process.Init) !void {
         };
         const target_name = try flagValue(args, "--target") orelse "macos";
         const target = tooling.package.PackageTarget.parse(target_name) orelse fail("invalid package target");
+        const project_dir = std.fs.path.dirname(manifest_path) orelse ".";
         const web_engine_override = if (try flagValue(args, "--web-engine")) |value|
             tooling.web_engine.Engine.parse(value) orelse fail("invalid web engine")
         else
@@ -212,6 +213,19 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("warning[package.no-binary]: no app binary at zig-out/bin/{s} and no --binary flag - the package will not contain an executable\n" ++
                 "  build the app first (`zig build`) or pass --binary <path>\n", .{metadata.name});
         }
+        const explicit_service_binary_path = try flagValue(args, "--service-binary");
+        const has_service_sources = explicit_service_binary_path == null and target != .ios and target != .android and
+            try tooling.package.projectHasTypeScriptServices(allocator, init.io, project_dir);
+        const service_binary_path = explicit_service_binary_path orelse if (has_service_sources)
+            try tooling.package.discoverInstalledServiceBinary(allocator, init.io, project_dir, metadata.name, target)
+        else
+            null;
+        if (has_service_sources and service_binary_path == null) {
+            std.debug.print("warning[package.no-service-binary]: no service host at zig-out/bin/{s}_services and no --service-binary flag - service calls will fail in the package\n" ++
+                "  build the app first (`native build`) or pass --service-binary <path>\n", .{metadata.name});
+        } else if (explicit_service_binary_path == null and service_binary_path != null) {
+            std.debug.print("info[package.service-binary]: using zig-out/bin/{s}_services\n", .{metadata.name});
+        }
         if (web_engine.engine == .chromium and web_engine.cef_auto_install) {
             try tooling.cef.run(allocator, init.io, init.environ_map, &.{ "install", "--dir", web_engine.cef_dir });
         }
@@ -220,9 +234,9 @@ pub fn main(init: std.process.Init) !void {
             .target = target,
             .optimize = optimize_value,
             .output_path = output_dir,
-            .project_dir = std.fs.path.dirname(manifest_path) orelse ".",
+            .project_dir = project_dir,
             .binary_path = binary_path,
-            .service_binary_path = try flagValue(args, "--service-binary"),
+            .service_binary_path = service_binary_path,
             .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
             .frontend = metadata.frontend,
             .web_engine = web_engine.engine,

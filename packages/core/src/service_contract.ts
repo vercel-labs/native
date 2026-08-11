@@ -34,25 +34,18 @@ function report(site: string, node: ts.Node): SubsetDiagnostic {
   return makeDiagnostic("NS1067", site, file.fileName, where.line, where.column);
 }
 
-function aliasesIn(files: readonly ts.SourceFile[]): ReadonlySet<string> {
-  const aliases = new Set<string>(["Uint8Array"]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const file of files) {
-      for (const stmt of file.statements) {
-        if (!ts.isTypeAliasDeclaration(stmt) || !ts.isTypeReferenceNode(stmt.type) || !ts.isIdentifier(stmt.type.typeName)) continue;
-        if (!aliases.has(stmt.type.typeName.text) || aliases.has(stmt.name.text)) continue;
-        aliases.add(stmt.name.text);
-        changed = true;
-      }
-    }
+function isBytesType(tast: TypedAst, node: ts.TypeNode | undefined, seen = new Set<ts.Node>()): boolean {
+  if (!node || !ts.isTypeReferenceNode(node)) return false;
+  const name = ts.isIdentifier(node.typeName) ? node.typeName : node.typeName.right;
+  const declaration = tast.declarationOf(name);
+  if (name.text === "Uint8Array") {
+    // Preserve the direct global spelling while still respecting a local
+    // type alias that shadows it.
+    if (!declaration || !ts.isTypeAliasDeclaration(declaration)) return true;
   }
-  return aliases;
-}
-
-function isBytesType(node: ts.TypeNode | undefined, aliases: ReadonlySet<string>): boolean {
-  return !!node && ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && aliases.has(node.typeName.text);
+  if (!declaration || !ts.isTypeAliasDeclaration(declaration) || seen.has(declaration)) return false;
+  seen.add(declaration);
+  return isBytesType(tast, declaration.type, seen);
 }
 
 function unwrapExpression(expr: ts.Expression): ts.Expression {
@@ -111,8 +104,6 @@ export function emitServiceContract(
   const operations: ServiceOperation[] = [];
   const names = new Set<string>();
   const namespaceClaims = new Map<string, ts.Node>();
-  const aliases = aliasesIn(files);
-
   for (const file of files) {
     const relative = path.relative(srcRoot, file.fileName).split(path.sep).join("/");
     const module = relative.replace(/^services\//, "").replace(/\.ts$/, "");
@@ -176,11 +167,11 @@ export function emitServiceContract(
         diagnostics.push(report(`\`${opName}\` is not a synchronous function with a body.`, stmt.name));
         continue;
       }
-      if (stmt.parameters.length > 1 || (stmt.parameters.length === 1 && !isBytesType(stmt.parameters[0].type, aliases))) {
+      if (stmt.parameters.length > 1 || (stmt.parameters.length === 1 && !isBytesType(tast, stmt.parameters[0].type))) {
         diagnostics.push(report(`\`${opName}\` does not take zero arguments or one Uint8Array payload.`, stmt.name));
         continue;
       }
-      if (!isBytesType(stmt.type, aliases)) {
+      if (!isBytesType(tast, stmt.type)) {
         diagnostics.push(report(`\`${opName}\` does not declare a Uint8Array return type.`, stmt.name));
         continue;
       }

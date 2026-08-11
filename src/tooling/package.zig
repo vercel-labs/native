@@ -91,6 +91,45 @@ pub const PackageOptions = struct {
     env_map: ?*std.process.Environ.Map = null,
 };
 
+/// Whether the app source tree declares the TypeScript service class. This
+/// guards CLI auto-discovery so a stale installed helper is never added to a
+/// package after the app's services have been removed.
+pub fn projectHasTypeScriptServices(allocator: std.mem.Allocator, io: std.Io, project_dir: []const u8) !bool {
+    const services_path = try std.fs.path.join(allocator, &.{ project_dir, "src", "services" });
+    defer allocator.free(services_path);
+    var dir = std.Io.Dir.cwd().openDir(io, services_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".ts") and
+            !std.mem.endsWith(u8, entry.basename, ".d.ts")) return true;
+    }
+    return false;
+}
+
+/// Locate the service host installed by a normal `native build`. Explicit
+/// package inputs still win; this is the CLI's no-flag fallback twin of the
+/// main executable discovery.
+pub fn discoverInstalledServiceBinary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_dir: []const u8,
+    app_name: []const u8,
+    target: PackageTarget,
+) !?[]const u8 {
+    const suffix: []const u8 = if (target == .windows) ".exe" else "";
+    const file_name = try std.fmt.allocPrint(allocator, "{s}_services{s}", .{ app_name, suffix });
+    defer allocator.free(file_name);
+    const candidate = try std.fs.path.join(allocator, &.{ project_dir, "zig-out", "bin", file_name });
+    var file = std.Io.Dir.cwd().openFile(io, candidate, .{}) catch {
+        allocator.free(candidate);
+        return null;
+    };
+    file.close(io);
+    return candidate;
+}
+
 /// The Windows subsystem verdict the packaging posture check reaches:
 /// `gui` and `console` only when the PE optional header actually said
 /// so, `unknown` when the probe proved nothing — non-PE or truncated
@@ -3351,6 +3390,25 @@ test "desktop packages place the TypeScript service host beside the app" {
     defer mac_dir.close(std.testing.io);
     var mac_service = try mac_dir.openFile(std.testing.io, "Contents/MacOS/service-demo_services", .{});
     mac_service.close(std.testing.io);
+}
+
+test "normal build service host is discovered only for a service-bearing app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-service-discovery";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/src/services");
+    try cwd.createDirPath(std.testing.io, root ++ "/zig-out/bin");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/feeds.ts", .data = "export function parse(): Uint8Array { return new Uint8Array(0); }" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/zig-out/bin/service-demo_services", .data = "service" });
+
+    try std.testing.expect(try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    const discovered = (try discoverInstalledServiceBinary(std.testing.allocator, std.testing.io, root, "service-demo", .linux)).?;
+    defer std.testing.allocator.free(discovered);
+    try std.testing.expectEqualStrings(root ++ "/zig-out/bin/service-demo_services", discovered);
+
+    try cwd.deleteTree(std.testing.io, root ++ "/src/services");
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
 }
 
 test "desktop chromium packages are rejected before CEF layout checks" {

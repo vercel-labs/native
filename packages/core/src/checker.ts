@@ -445,13 +445,15 @@ export class SubsetChecker {
   private readonly files: readonly ts.SourceFile[];
   private readonly entry: ts.SourceFile;
   private readonly fileSet: Set<ts.SourceFile>;
-  private readonly serviceOps: ReadonlySet<string>;
+  /// Null means the app has no service registry. An empty set is distinct:
+  /// service files exist, but none exported a callable operation.
+  private readonly serviceOps: ReadonlySet<string> | null;
 
   constructor(
     tast: TypedAst,
     table: TypeTable,
     files: readonly ts.SourceFile[] | ts.SourceFile,
-    serviceOps: ReadonlySet<string> = new Set(),
+    serviceOps: ReadonlySet<string> | null = null,
   ) {
     this.tast = tast;
     this.table = table;
@@ -463,7 +465,7 @@ export class SubsetChecker {
 
   check(): CheckResult {
     for (const file of this.files) this.findCmdNames(file);
-    this.checkServiceRequests();
+    this.checkServiceCalls();
     for (const file of this.files) this.checkModuleShape(file);
     this.checkEntryContract();
     this.checkNameCollisions();
@@ -489,23 +491,24 @@ export class SubsetChecker {
   }
 
   /// NS1067 — once an app declares a service registry, every generic
-  /// Cmd.request literal must resolve either to that registry or to the
-  /// SDK-reserved native family. This keeps a typo from reaching the
-  /// runtime's stale/skew rejection path.
-  private checkServiceRequests(): void {
-    if (this.serviceOps.size === 0 || this.cmdNames.size === 0) return;
+  /// Cmd.host/request literal must resolve either to that registry or to
+  /// the SDK-reserved native family. The service binding owns both command
+  /// channels, so an unknown fire-and-forget host call would otherwise be
+  /// dropped silently by ServiceHost.send.
+  private checkServiceCalls(): void {
+    if (this.serviceOps === null || this.cmdNames.size === 0) return;
     const visit = (node: ts.Node): void => {
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
-        node.expression.name.text === "request" &&
+        (node.expression.name.text === "request" || node.expression.name.text === "host") &&
         ts.isIdentifier(node.expression.expression) &&
         this.cmdNames.has(node.expression.expression.text) &&
         this.isSdkReference(node.expression.expression)
       ) {
         const name = node.arguments[0];
         if (!name || !ts.isStringLiteral(name)) {
-          this.report("NS1067", "A service request name is not a string literal from the generated registry.", name ?? node);
+          this.report("NS1067", "A service call name is not a string literal from the generated registry.", name ?? node);
         } else if (!name.text.startsWith("native-sdk.") && !this.serviceOps.has(name.text)) {
           this.report("NS1067", `\`${name.text}\` names no operation in services.contract.json.`, name);
         }
@@ -1429,7 +1432,7 @@ export class SubsetChecker {
       if (name.text === "type_origins") {
         this.report("NS1038", "`type_origins` collides with the generated contract type-origin metadata declaration.", name);
       }
-      if (this.serviceOps.size > 0 && name.text.startsWith("__nativeSdk")) {
+      if (this.serviceOps !== null && name.text.startsWith("__nativeSdk")) {
         this.report("NS1067", "A core declaration imported by the service host uses the reserved `__nativeSdk` transport-lowering prefix.", name);
       }
     };

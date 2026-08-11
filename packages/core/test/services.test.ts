@@ -100,7 +100,7 @@ test("NS1066 refuses phase-1 npm imports but permits compiler-shipped Node built
   assert.equal(builtin.ok, true, JSON.stringify(builtin.diagnostics));
 });
 
-test("NS1067 validates operation signatures, throws, and core request names", () => {
+test("NS1067 validates operation signatures, throws, and core service call names", () => {
   const badSignature = checkFiles({
     "core.ts": serviceCore,
     "services/feeds.ts": `export async function parse(value: string): Promise<string> { return value; }`,
@@ -168,6 +168,42 @@ test("NS1067 validates operation signatures, throws, and core request names", ()
   const diagnostic = unknown.diagnostics.find((d) => d.id === "NS1067");
   assert.ok(diagnostic, JSON.stringify(unknown.diagnostics));
   assert.match(diagnostic.message, /services\.contract\.json/);
+
+  const unknownHost = checkFiles({
+    "core.ts": serviceCore.replace(
+      `Cmd.request("feeds.parse", model.bytes, { key: "parse", ok: "parsed", err: "failed" })`,
+      `Cmd.host("feeds.missing", model.bytes)`,
+    ),
+    "services/feeds.ts": `export function parse(bytes: Uint8Array): Uint8Array { return bytes; }`,
+  });
+  const hostDiagnostic = unknownHost.diagnostics.find((d) => d.id === "NS1067");
+  assert.ok(hostDiagnostic, JSON.stringify(unknownHost.diagnostics));
+  assert.match(hostDiagnostic.message, /services\.contract\.json/);
+
+  const knownHost = checkFiles({
+    "core.ts": serviceCore.replace(
+      `Cmd.request("feeds.parse", model.bytes, { key: "parse", ok: "parsed", err: "failed" })`,
+      `Cmd.host("feeds.parse", model.bytes)`,
+    ),
+    "services/feeds.ts": `export function parse(bytes: Uint8Array): Uint8Array { return bytes; }`,
+  });
+  assert.equal(knownHost.ok, true, JSON.stringify(knownHost.diagnostics));
+});
+
+test("service byte aliases resolve through legal shared modules", () => {
+  const result = checkFiles({
+    "core.ts": serviceCore,
+    "shared.ts": `export type Bytes = Uint8Array;`,
+    "services/feeds.ts": `
+import type { Bytes } from "../shared.ts";
+export function parse(bytes: Bytes): Bytes { return bytes; }
+`,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.deepEqual(
+    JSON.parse(result.servicesContract!).operations.map((op: { name: string }) => op.name),
+    ["feeds.parse"],
+  );
 });
 
 test("service staging lowers tagged throws across the service-host graph", () => {

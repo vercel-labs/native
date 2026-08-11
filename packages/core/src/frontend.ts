@@ -98,7 +98,10 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   }
 
   const table = new TypeTable(tast, coreFiles);
-  const checker = new SubsetChecker(tast, table, coreFiles, new Set(serviceSurface.operations.map((op) => op.name)));
+  const serviceOps = serviceSurface.contract === null
+    ? null
+    : new Set(serviceSurface.operations.map((op) => op.name));
+  const checker = new SubsetChecker(tast, table, coreFiles, serviceOps);
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {
     return { ok: false, contract: null, servicesContract: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
