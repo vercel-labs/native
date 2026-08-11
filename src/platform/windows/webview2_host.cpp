@@ -7634,9 +7634,10 @@ size_t native_sdk_windows_format_local_time(Host *host, int64_t timestamp_ms, in
     ULARGE_INTEGER ticks = {};
     ticks.QuadPart = static_cast<uint64_t>(ticks_value);
     FILETIME utc = { ticks.LowPart, ticks.HighPart };
-    FILETIME local = {};
+    SYSTEMTIME utc_system_time = {};
     SYSTEMTIME system_time = {};
-    if (!FileTimeToLocalFileTime(&utc, &local) || !FileTimeToSystemTime(&local, &system_time)) return 0;
+    if (!FileTimeToSystemTime(&utc, &utc_system_time) ||
+        !SystemTimeToTzSpecificLocalTimeEx(nullptr, &utc_system_time, &system_time)) return 0;
 
     wchar_t date_text[128] = {};
     wchar_t time_text[128] = {};

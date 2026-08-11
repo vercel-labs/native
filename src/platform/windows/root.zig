@@ -2106,6 +2106,22 @@ test "windows hide-on-close support requires the declared tray (the only re-show
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .window_hide_on_close));
 }
 
+test "windows local time conversion applies the timestamp's dynamic daylight rules" {
+    // The Win32 host cannot execute in this portable suite, so pin the API
+    // sequence Microsoft requires: first expose the UTC SYSTEMTIME, then let
+    // the active dynamic time zone select the offset for that instant. Using
+    // FileTimeToLocalFileTime here would instead apply the current DST bias.
+    const host_source = @embedFile("webview2_host.cpp");
+    const format_at = std.mem.indexOf(u8, host_source, "size_t native_sdk_windows_format_local_time(") orelse return error.TestExpectedEqual;
+    const format_tail = host_source[format_at..];
+    const format_end = std.mem.indexOf(u8, format_tail, "size_t native_sdk_windows_clipboard_read(") orelse return error.TestExpectedEqual;
+    const format_source = format_tail[0..format_end];
+    const utc_at = std.mem.indexOf(u8, format_source, "FileTimeToSystemTime(&utc, &utc_system_time)") orelse return error.TestExpectedEqual;
+    const local_at = std.mem.indexOf(u8, format_source, "SystemTimeToTzSpecificLocalTimeEx(nullptr, &utc_system_time, &system_time)") orelse return error.TestExpectedEqual;
+    try std.testing.expect(utc_at < local_at);
+    try std.testing.expect(std.mem.indexOf(u8, format_source, "FileTimeToLocalFileTime") == null);
+}
+
 test "windows tray carries lifecycle commands rich rows and key equivalents into the host" {
     // These are native Win32 behaviors, so the portable suite pins the
     // compiled host seam. Windows packaging builds cross-compile the same
