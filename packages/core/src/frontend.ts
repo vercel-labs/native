@@ -11,6 +11,7 @@ import { resolveModuleGraph } from "./modules.ts";
 import { TypeTable } from "./types.ts";
 import { IntInference } from "./infer.ts";
 import { SubsetChecker } from "./checker.ts";
+import type { PersistRoutes } from "./checker.ts";
 import { emitContractSidecar, ContractError } from "./contract.ts";
 import { makeDiagnostic, formatDiagnostic, type SubsetDiagnostic } from "./diagnostics.ts";
 import path from "node:path";
@@ -30,6 +31,9 @@ export interface FrontendOptions {
   /// version/fingerprint pair and warns if a shape moves without a bump.
   readonly persistVersion?: number;
   readonly persistStatePath?: string;
+  /// app.zon's persistence restore routes, projected without manifest syntax
+  /// so the frontend can validate them against the core's Msg union.
+  readonly persistRoutes?: PersistRoutes;
 }
 
 export interface FrontendResult {
@@ -87,7 +91,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   }
 
   const table = new TypeTable(tast, files);
-  const checker = new SubsetChecker(tast, table, files, options.capabilities ?? []);
+  const checker = new SubsetChecker(tast, table, files, options.capabilities ?? [], options.persistRoutes);
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {
     return { ok: false, contract: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };

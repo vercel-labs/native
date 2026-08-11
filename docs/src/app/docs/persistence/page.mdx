@@ -61,7 +61,7 @@ The restore result crosses the ordinary effect journal boundary. Recording store
 
 ## Schema versions and migration
 
-Increase `.persist.version` whenever the `Model` shape changes, and never reuse a version. `native check` remembers the last accepted version/fingerprint pair under `.native/cache` and reports NS1065 when the shape changes without a bump or the version moves backward. The snapshot header carries that app version, the generated model-only shape fingerprint, and the compiler's snapshot-format version, so a cold checkout still fails closed at runtime: a same-version shape mismatch reports `corrupt`, and a snapshot from a future app version reports `version_unknown`.
+Increase `.persist.version` whenever the `Model` shape changes, and never reuse a version. `native check` verifies that the configured `ok` and `none` routes name void `Msg` arms and `err` names a one-`Uint8Array`-field arm; `native dev --core` runs the same fence before starting its virtual host. Check also remembers the last accepted version/fingerprint pair under `.native/cache` and reports NS1065 when the shape changes without a bump or the version moves backward. The snapshot header carries that app version, the generated model-only shape fingerprint, and the compiler's snapshot-format version, so a cold checkout still fails closed at runtime: a same-version shape mismatch reports `corrupt`, and a snapshot from a future app version reports `version_unknown`.
 
 To accept an older version, export the pure migration hook from `src/core.ts`:
 

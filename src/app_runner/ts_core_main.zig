@@ -115,14 +115,18 @@ pub fn main(init: std.process.Init) !void {
         .cache,
         &cache_dir_buffer,
     ) catch "";
-    // The durable per-app data directory, resolved by the same platform
-    // convention as Zig-core apps. TS cores request it through the
-    // ordinary journaled envMsgs boundary under `app_data_dir_env`; it
-    // is framework-provided rather than trusted from the ambient
-    // environment, so package launch cwd and env differences disappear.
+    // The durable per-app data directory, resolved by the platform app-data
+    // convention and keyed by the manifest's stable bundle identity. TS cores
+    // request it through the ordinary journaled envMsgs boundary under
+    // `app_data_dir_env`; it is framework-provided rather than trusted from
+    // the ambient environment, so package launch cwd and env differences
+    // disappear.
     var data_dir_buffer: [512]u8 = undefined;
     const app_data_dir = native_sdk.app_dirs.resolveOne(
-        .{ .name = manifest.name },
+        // Durable state follows the reverse-DNS bundle identity, not the
+        // mutable short machine name. Two installed apps may share a name;
+        // their manifest ids are the stable isolation boundary.
+        .{ .name = manifest.id },
         native_sdk.app_dirs.currentPlatform(),
         native_sdk.debug.envFromMap(init.environ_map),
         .data,

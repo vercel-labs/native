@@ -429,6 +429,15 @@ export interface CheckResult {
   readonly subNames: Set<string>;
 }
 
+/// Manifest-owned boot routes for engine model persistence. The frontend
+/// receives these as plain strings so it stays independent of app.zon's file
+/// format while still checking the cross-file Msg contract.
+export interface PersistRoutes {
+  readonly ok: string;
+  readonly none: string;
+  readonly err: string;
+}
+
 export class SubsetChecker {
   private readonly diagnostics: SubsetDiagnostic[] = [];
   private readonly warnings: SubsetDiagnostic[] = [];
@@ -446,21 +455,30 @@ export class SubsetChecker {
   private readonly entry: ts.SourceFile;
   private readonly fileSet: Set<ts.SourceFile>;
   private readonly capabilities: Set<string>;
+  private readonly persistRoutes: PersistRoutes | undefined;
   private usesPersist = false;
 
-  constructor(tast: TypedAst, table: TypeTable, files: readonly ts.SourceFile[] | ts.SourceFile, capabilities: readonly string[] = []) {
+  constructor(
+    tast: TypedAst,
+    table: TypeTable,
+    files: readonly ts.SourceFile[] | ts.SourceFile,
+    capabilities: readonly string[] = [],
+    persistRoutes?: PersistRoutes,
+  ) {
     this.tast = tast;
     this.table = table;
     this.files = Array.isArray(files) ? files : [files as ts.SourceFile];
     this.entry = this.files[0];
     this.fileSet = new Set(this.files);
     this.capabilities = new Set(capabilities);
+    this.persistRoutes = persistRoutes;
   }
 
   check(): CheckResult {
     for (const file of this.files) this.findCmdNames(file);
     for (const file of this.files) this.checkModuleShape(file);
     this.checkEntryContract();
+    this.checkPersistRoutes();
     this.checkNameCollisions();
     this.checkGeneratedMetadataNames();
     this.checkModelHoldsData();
@@ -485,6 +503,44 @@ export class SubsetChecker {
       cmdNames: this.cmdNames,
       subNames: this.subNames,
     };
+  }
+
+  /// app.zon owns these names, while the TypeScript core owns Msg. Validate
+  /// the seam in the frontend so `native check` and the node dev host fail at
+  /// the authoring boundary instead of waiting for generated Zig to compile.
+  private checkPersistRoutes(): void {
+    const routes = this.persistRoutes;
+    if (routes === undefined) return;
+    const msg = this.table.unions.get("Msg");
+    if (msg === undefined) return; // NS1062 owns the missing-root teaching.
+
+    const checks = [
+      { role: "ok", route: routes.ok, payload: "void" },
+      { role: "none", route: routes.none, payload: "void" },
+      { role: "err", route: routes.err, payload: "bytes" },
+    ] as const;
+    for (const check of checks) {
+      const arm = msg.arms.find((candidate) => candidate.tag === check.route);
+      if (arm === undefined) {
+        this.report(
+          "NS1033",
+          `app.zon persistence restore route \`${check.route}\` (${check.role}) names no Msg arm.`,
+          msg.decl.name,
+        );
+        continue;
+      }
+      const valid =
+        check.payload === "void"
+          ? arm.fields.length === 0
+          : arm.fields.length === 1 && arm.fields[0].type.k === "bytes";
+      if (!valid) {
+        this.report(
+          "NS1033",
+          `app.zon persistence restore route \`${check.route}\` (${check.role}) has the wrong Msg payload; ok/none must be void and err must carry one Uint8Array field.`,
+          arm.fields[0]?.decl ?? msg.decl.name,
+        );
+      }
+    }
   }
 
   private report(id: RuleId, site: string, node: ts.Node): void {

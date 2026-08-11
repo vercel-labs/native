@@ -25,6 +25,9 @@ function main(argv: string[]): number {
   let contractEntry: string | null = null;
   let persistVersion: number | null = null;
   let persistStatePath: string | null = null;
+  let persistOk: string | null = null;
+  let persistNone: string | null = null;
+  let persistErr: string | null = null;
   const capabilities: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--contract") {
@@ -52,6 +55,24 @@ function main(argv: string[]): number {
         console.error("--persist-state requires a path");
         return 2;
       }
+    } else if (args[i] === "--persist-ok") {
+      persistOk = args[++i] ?? null;
+      if (persistOk === null) {
+        console.error("--persist-ok requires a Msg arm name");
+        return 2;
+      }
+    } else if (args[i] === "--persist-none") {
+      persistNone = args[++i] ?? null;
+      if (persistNone === null) {
+        console.error("--persist-none requires a Msg arm name");
+        return 2;
+      }
+    } else if (args[i] === "--persist-err") {
+      persistErr = args[++i] ?? null;
+      if (persistErr === null) {
+        console.error("--persist-err requires a Msg arm name");
+        return 2;
+      }
     } else if (args[i] === "-o" || args[i] === "--out") {
       console.error(
         "-o named the removed TS-to-Zig emitter (v0.7.0 removed it): TypeScript cores compile through the external core compiler now, and this CLI checks the core and emits its contract sidecar (--contract). Drop the flag.",
@@ -70,6 +91,15 @@ function main(argv: string[]): number {
     );
     return 2;
   }
+  const persistRouteCount = [persistOk, persistNone, persistErr].filter((route) => route !== null).length;
+  if (persistRouteCount !== 0 && persistRouteCount !== 3) {
+    console.error("--persist-ok, --persist-none, and --persist-err must be provided together");
+    return 2;
+  }
+  const persistRoutes =
+    persistOk !== null && persistNone !== null && persistErr !== null
+      ? { ok: persistOk, none: persistNone, err: persistErr }
+      : undefined;
   const options: FrontendOptions = {
     // The document's entry spelling defaults to the argument's own,
     // POSIX separators (the sidecar/facade contract is platform-free).
@@ -77,6 +107,7 @@ function main(argv: string[]): number {
     capabilities,
     persistVersion: persistVersion ?? undefined,
     persistStatePath: persistStatePath ?? undefined,
+    persistRoutes,
   };
   const result = checkFile(entry, options);
   for (const e of result.typeErrors) console.error(e);

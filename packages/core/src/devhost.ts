@@ -49,6 +49,7 @@ import readline from "node:readline";
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 import { installTextMethods } from "./text_polyfill.ts";
+import { checkFile, formatDiagnostic } from "./frontend.ts";
 
 interface Cmdish {
   readonly op: string;
@@ -78,6 +79,21 @@ for (let i = 0; i < args.length; i++) {
   else usage();
 }
 if (!entry) usage();
+const persistRouteCount = [persistOk, persistNone, persistErr].filter((route) => route !== null).length;
+if (persistRouteCount !== 0 && persistRouteCount !== 3) usage();
+if (persistOk !== null && persistNone !== null && persistErr !== null) {
+  // Type information is erased by the time this module imports the app core.
+  // Run the frontend inside the watched process so every node --watch restart
+  // revalidates manifest-owned routes against the newly edited Msg union.
+  const checked = checkFile(entry, {
+    capabilities: ["persist"],
+    persistRoutes: { ok: persistOk, none: persistNone, err: persistErr },
+  });
+  for (const error of checked.typeErrors) console.error(error);
+  for (const diagnostic of checked.diagnostics) console.error(formatDiagnostic(diagnostic));
+  for (const warning of checked.warnings) console.error(formatDiagnostic(warning, "warning"));
+  if (!checked.ok) process.exit(1);
+}
 
 // The resolver hook maps "@native-sdk/core" onto this package's own SDK
 // module (app trees carry no node_modules for bare resolution to find),

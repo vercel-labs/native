@@ -597,6 +597,11 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
             framework_root,
             metadata.capabilities,
             if (metadata.persist) |persist| persist.version else null,
+            if (metadata.persist) |persist| .{
+                .ok = persist.restore.ok,
+                .none = persist.restore.none,
+                .err = persist.restore.err,
+            } else null,
         );
         try tooling.ts_core.compilerTypecheckCore(allocator, io, env_map, framework_root);
     }
