@@ -57,7 +57,15 @@ pub const mobile_shell_windows = [_]app_manifest.ShellWindow{.{
 pub const mobile_shell_scene: app_manifest.ShellConfig = .{ .windows = &mobile_shell_windows };
 
 pub fn UiAppHost(comptime AppDef: type) type {
+    return UiAppHostWithRecordStore(AppDef, false);
+}
+
+/// Capability-specialized mobile host. The boolean is comptime so a mobile
+/// artifact without `store` never analyzes SQLite open/deinit and carries no
+/// database symbols; `build/app.zig` supplies the manifest-inferred value.
+pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_enabled: bool) type {
     const features: runtime.UiAppFeatures = if (@hasDecl(AppDef, "features")) AppDef.features else .{};
+    const RecordStoreType = if (record_store_enabled) runtime.RecordStore else void;
     return struct {
         const Self = @This();
 
@@ -69,6 +77,8 @@ pub fn UiAppHost(comptime AppDef: type) type {
         /// the host wraps it so ABI-facing counters observe every event.
         inner_app: runtime.App,
         embedded: EmbeddedApp,
+        record_store: RecordStoreType = undefined,
+        record_store_open: bool = false,
         started: bool = false,
         frame_index: u64 = 0,
         last_error: ?anyerror = null,
@@ -130,6 +140,7 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // produce real pixels (the buffer M2's surface blit consumes).
             self.null_platform.gpu_surface_packets = false;
             self.started = false;
+            self.record_store_open = false;
             self.frame_index = 0;
             self.last_error = null;
             self.command_count = 0;
@@ -180,6 +191,9 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // its heap-owned registrations (registered canvas font
             // bytes) before the host storage goes.
             self.embedded.deinit();
+            if (comptime record_store_enabled) {
+                if (self.record_store_open) self.record_store.deinit();
+            }
             // The embedded null platform lives inside `self`, so freeing
             // `self` IS this path's platform destruction — and an
             // abandoned channel wake call may still enter that platform
@@ -197,8 +211,28 @@ pub fn UiAppHost(comptime AppDef: type) type {
         }
 
         pub fn start(self: *Self) anyerror!void {
+            if (comptime record_store_enabled) {
+                if (!self.record_store_open) return error.StoreDataDirUnavailable;
+            }
             self.started = true;
             try self.embedded.start();
+        }
+
+        /// Install the OS-owned app-data directory before start. iOS passes
+        /// Library/Application Support and Android passes files/, exactly the
+        /// `.data` directories resolved by `app_dirs` on those platforms.
+        pub fn setDataRoot(self: *Self, data_root: []const u8) !void {
+            if (comptime !record_store_enabled) return;
+            if (self.started) return error.AppAlreadyStarted;
+            if (data_root.len == 0 or data_root.len > max_mobile_asset_root_bytes) return error.InvalidStoreDataDir;
+            if (self.record_store_open) {
+                self.record_store.deinit();
+                self.record_store_open = false;
+                self.embedded.runtime.options.record_store = null;
+            }
+            self.record_store = try runtime.RecordStore.open(std.heap.page_allocator, data_root);
+            self.record_store_open = true;
+            self.embedded.runtime.options.record_store = self.record_store.binding();
         }
 
         /// Host-pumped frame step: the shim's display-link (or test) tick.

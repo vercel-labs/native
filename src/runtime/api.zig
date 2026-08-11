@@ -489,6 +489,10 @@ pub const Options = struct {
     shortcuts: []const platform.Shortcut = &.{},
     automation: ?automation.Server = null,
     window_state_store: ?window_state.Store = null,
+    /// Engine-owned record-store service. The app runner sets this only
+    /// when app.zon declares the `store` capability; replay leaves it null
+    /// because journaled effect results are the whole external world.
+    record_store: ?runtime_effects.RecordStoreBinding = null,
     js_window_api: bool = false,
     /// Whether this build ships the embedded web layer. The app runner
     /// sets it from the build graph's app.zon inference (declare-to-use:

@@ -1296,6 +1296,8 @@ fn parseCapability(value: []const u8) !app_manifest.Capability {
     if (std.mem.eql(u8, value, "clipboard")) return .clipboard;
     if (std.mem.eql(u8, value, "credentials")) return .credentials;
     if (std.mem.eql(u8, value, "persist")) return .persist;
+    if (std.mem.eql(u8, value, "store")) return .store;
+    if (std.mem.eql(u8, value, "sqlite")) return .sqlite;
     if (std.mem.eql(u8, value, "open_url")) return .open_url;
     if (std.mem.eql(u8, value, "reveal_path")) return .reveal_path;
     if (std.mem.eql(u8, value, "recent_documents")) return .recent_documents;
@@ -2444,6 +2446,14 @@ test "manifest metadata parser carries model persistence configuration" {
     defer std.testing.allocator.free(capabilities);
     try app_manifest.validatePersist(convertPersist(metadata.persist), capabilities);
     try std.testing.expectError(error.MissingRequiredField, app_manifest.validatePersist(convertPersist(metadata.persist), &.{}));
+}
+
+test "manifest capability parser recognizes both shared SQLite tiers" {
+    const values = [_][]const u8{ "store", "sqlite" };
+    const capabilities = try parseCapabilities(std.testing.allocator, &values);
+    defer std.testing.allocator.free(capabilities);
+    try std.testing.expectEqual(app_manifest.CapabilityKind.store, capabilities[0].kind());
+    try std.testing.expectEqual(app_manifest.CapabilityKind.sqlite, capabilities[1].kind());
 }
 
 test "manifest metadata parser reads structured security policy" {

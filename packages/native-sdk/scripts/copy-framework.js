@@ -7,10 +7,10 @@
 // build script that `addApp` lives in), app.zon (the SDK's own manifest,
 // which its build script reads at configure time), assets/ (files the
 // build graph resolves from the dependency, e.g. the Windows application
-// manifest build/app.zig wires via dep.path), third_party/webview2/ (the
-// vendored WebView2 SDK header and loader the Windows build resolves the
-// same way; the CEF runtimes stay out — they are large downloaded
-// artifacts, not repo files), and the agent skills. With the payload in
+// manifest build/app.zig wires via dep.path), third_party/webview2/ and
+// third_party/sqlite/ (the vendored platform/storage sources build/app.zig
+// resolves the same way; the CEF runtimes stay out — they are large
+// downloaded artifacts, not repo files), and the agent skills. With the payload in
 // the package, `native init && native dev` work offline right after
 // install.
 //
@@ -44,11 +44,13 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
 }
 
 {
-  const source = join(repoRoot, 'third_party', 'webview2');
-  const target = join(projectRoot, 'third_party', 'webview2');
   rmSync(join(projectRoot, 'third_party'), { recursive: true, force: true });
-  cpSync(source, target, { recursive: true });
-  console.log(`✓ Copied third_party/webview2/ to ${target}`);
+  for (const dir of ['webview2', 'sqlite']) {
+    const source = join(repoRoot, 'third_party', dir);
+    const target = join(projectRoot, 'third_party', dir);
+    cpSync(source, target, { recursive: true });
+    console.log(`✓ Copied third_party/${dir}/ to ${target}`);
+  }
 }
 
 // corewire (tools/corewire): the contract-sidecar mirror/facade/profile

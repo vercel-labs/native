@@ -13,6 +13,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "native-ui": "Native UI",
   "dynamic-images": "Dynamic Images",
   persistence: "Model Persistence",
+  "record-store": "Record Store",
   terminal: "Terminal",
   state: "State & Data Flow",
   theming: "Theming",

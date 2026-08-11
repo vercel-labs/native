@@ -809,6 +809,14 @@ export interface WriteRoute<M extends Msgish> {
   readonly err: BytesKind<M>;
 }
 
+/// Pagination controls for `Cmd.store.scan`. `limit` defaults to 100 and is
+/// bounded at 256. `after` is the opaque key cursor returned by the previous
+/// page; omit it for the first page.
+export interface StoreScanOptions {
+  readonly limit?: number;
+  readonly after?: string | Uint8Array;
+}
+
 /// `Cmd.fetch` routing: the ok arm carries `{ status, body }` (one number
 /// field, one bytes field — matched by type); the err arm the reason bytes.
 export interface FetchRoute<M extends Msgish> {
@@ -988,6 +996,37 @@ export type Cmd<M extends Msgish> =
       readonly errKind: string;
       readonly path: Uint8Array;
       readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "store_set";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "store_get" | "store_delete";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+    }
+  | {
+      readonly op: "store_scan";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly prefix: string;
+      readonly limit: number;
+      readonly after: string | Uint8Array;
+    }
+  | {
+      readonly op: "store_set_many";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
     }
   | {
       readonly op: "fetch";
@@ -1263,6 +1302,45 @@ export const Cmd = {
   /// no payload — or the `err` arm with the reason bytes.
   writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
     return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+
+  /// Capability-gated, engine-owned per-record storage. Keys are UTF-8 text
+  /// up to 512 bytes; values are bytes up to 1 MiB. Results remain effects:
+  /// they arrive through the supplied Msg routes after update commits.
+  store: {
+    set<M extends Msgish>(storeKey: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_set", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey, bytes };
+    },
+
+    /// The ok payload is `[1][value...]` for a hit or `[0]` for a miss, so
+    /// an empty stored value remains distinguishable from absence.
+    get<M extends Msgish>(storeKey: string, route: RequestRoute<M>): Cmd<M> {
+      return { op: "store_get", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+
+    /// Deleting an absent key succeeds.
+    delete<M extends Msgish>(storeKey: string, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_delete", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+
+    /// The ok payload is a length-prefixed page of `(key,value)` pairs and
+    /// a next-key cursor. Pages end at record boundaries; data is never cut.
+    scan<M extends Msgish>(prefix: string, options: StoreScanOptions, route: RequestRoute<M>): Cmd<M> {
+      return {
+        op: "store_scan",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        prefix,
+        limit: options.limit ?? 0,
+        after: options.after ?? "",
+      };
+    },
+
+    /// Atomically upsert all entries (at most 64 entries / 8 MiB encoded).
+    setMany<M extends Msgish>(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_set_many", key: route.key ?? "", okKind: route.ok, errKind: route.err, entries };
+    },
   },
 
   fetch: fetchCmd,

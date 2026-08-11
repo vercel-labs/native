@@ -75,10 +75,15 @@ const platform = @import("../platform/root.zig");
 const validation = @import("validation.zig");
 const runtime_clock = @import("clock.zig");
 const persist_store = @import("persist_store.zig");
+const record_store = @import("record_store.zig");
 const pty_transport = @import("pty.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
 pub const max_effects: usize = 16;
+/// Record-store effects have their own capacity: a large batch or a busy
+/// database cannot consume the spawn/fetch/file family's sixteen slots.
+pub const max_store_effects: usize = 16;
+const total_effect_slots: usize = max_effects + max_store_effects;
 /// Maximum argv entries per spawn.
 pub const max_effect_argv: usize = 16;
 /// Maximum total bytes across all argv entries of one spawn.
@@ -170,6 +175,16 @@ pub const max_effect_file_bytes: usize = 1024 * 1024;
 /// consume a file-effect slot or inherit the raw-file cap.
 pub const max_effect_persist_snapshot_bytes: usize = persist_store.max_snapshot_bytes;
 pub const EffectPersistOutcome = persist_store.Outcome;
+pub const max_effect_store_key_bytes: usize = record_store.max_key_bytes;
+pub const max_effect_store_value_bytes: usize = record_store.max_value_bytes;
+pub const max_effect_store_batch_entries: usize = record_store.max_batch_entries;
+pub const max_effect_store_batch_bytes: usize = record_store.max_batch_bytes;
+pub const max_effect_store_result_bytes: usize = record_store.max_result_bytes;
+pub const default_effect_store_scan_limit: u32 = record_store.default_scan_limit;
+pub const max_effect_store_scan_limit: u32 = record_store.max_scan_limit;
+pub const EffectStoreOutcome = record_store.Outcome;
+pub const EffectStoreOp = record_store.Operation;
+pub const RecordStoreBinding = record_store.Binding;
 /// The one boot-time model-restore result delivered to a persistence-enabled
 /// Zig core. Successful bytes contain the generated snapshot body; every
 /// other outcome carries an empty slice. The bytes are instance-lived, so an
@@ -2891,6 +2906,40 @@ pub fn Effects(comptime Msg: type) type {
             on_result: ?HostMsgFn = null,
         };
 
+        pub const StoreEntry = struct {
+            key: []const u8,
+            bytes: []const u8,
+        };
+
+        pub const StoreSetOptions = struct {
+            key: u64,
+            record_key: []const u8,
+            bytes: []const u8,
+            on_result: ?HostMsgFn = null,
+        };
+
+        pub const StoreGetOptions = struct {
+            key: u64,
+            record_key: []const u8,
+            on_result: ?HostMsgFn = null,
+        };
+
+        pub const StoreDeleteOptions = StoreGetOptions;
+
+        pub const StoreScanOptions = struct {
+            key: u64,
+            prefix: []const u8,
+            limit: u32 = default_effect_store_scan_limit,
+            after: []const u8 = "",
+            on_result: ?HostMsgFn = null,
+        };
+
+        pub const StoreSetManyOptions = struct {
+            key: u64,
+            entries: []const StoreEntry,
+            on_result: ?HostMsgFn = null,
+        };
+
         /// A recorded host request, exposed by the fake executor for
         /// test assertions. Slices point into slot storage and stay
         /// valid until the request retires.
@@ -3496,7 +3545,7 @@ pub fn Effects(comptime Msg: type) type {
         /// thereby retires) it.
         const SlotState = enum(u8) { idle, running, done, draining };
 
-        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host, image };
+        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host, store, image };
 
         const EntryKind = enum(u8) { line, exit, response, file, clipboard, host, image, channel, pty };
 
@@ -3987,6 +4036,22 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        /// Immutable input and bounded result storage for one record-store
+        /// write. The worker owns this block until `joinWorker`; keeping the
+        /// SQLite input out of the slot lets a replaced request become
+        /// logically cancelled without racing the write that must still run
+        /// before its replacement.
+        const StoreWorkerContext = struct {
+            binding: RecordStoreBinding,
+            operation: EffectStoreOp,
+            sequence: u64,
+            sequence_ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            payload: []u8,
+            output: [32]u8 = undefined,
+            outcome: EffectStoreOutcome = .rejected,
+            output_len: usize = 0,
+        };
+
         const Slot = struct {
             state: std.atomic.Value(SlotState) = std.atomic.Value(SlotState).init(.idle),
             generation: u32 = 0,
@@ -4035,6 +4100,10 @@ pub fn Effects(comptime Msg: type) type {
             /// handshake — the loop thread only dereferences it while
             /// the channel is alive.
             spawn_ctx: ?*SpawnWorkerContext = null,
+            /// The private input/result block of an off-loop record-store
+            /// write. Store workers are always joined before teardown can
+            /// release the host-owned database binding.
+            store_ctx: ?*StoreWorkerContext = null,
             /// Producer-side drop accounting (worker in real mode, loop
             /// thread in fake mode; never both).
             dropped_pending: u32 = 0,
@@ -4352,6 +4421,10 @@ pub fn Effects(comptime Msg: type) type {
         /// requests reject loudly in real mode, and the fake executor
         /// parks requests for `feedHostResult` regardless.
         host_calls: ?HostCallBinding = null,
+        /// Capability-installed record-store service. Store commands are
+        /// SDK-reserved routed requests, so their results reuse the request
+        /// journal/replay path while the database handle stays host-owned.
+        record_store_binding: ?RecordStoreBinding = null,
         /// Window-action mirror: counts and the last requested label,
         /// observable in tests (`windowActionState`).
         window_action_state: WindowActionState = .{},
@@ -4445,7 +4518,7 @@ pub fn Effects(comptime Msg: type) type {
         /// process-lifetime posting handles. Seedable in tests to pin
         /// the non-wrapping guarantee without 2^32 opens.
         channel_generation: u64 = 0,
-        slots: [max_effects]Slot = [_]Slot{.{}} ** max_effects,
+        slots: [total_effect_slots]Slot = [_]Slot{.{}} ** total_effect_slots,
         /// Fixed fx timer table (see `max_effect_timers`): timers live
         /// beside the effect slots, never in them. Loop-thread only.
         timer_slots: [max_effect_timers]TimerSlot = [_]TimerSlot{.{}} ** max_effect_timers,
@@ -4900,6 +4973,27 @@ pub fn Effects(comptime Msg: type) type {
                 if (slot.kind == .host and slot.state.load(.acquire) == .running) {
                     self.releaseFetchSlot(slot);
                     slot.generation = 0;
+                }
+            }
+            // Store writes use std.Thread directly rather than the shared
+            // threaded-I/O executor. Let the bounded SQLite operations finish
+            // and join them before the runner may close their host-owned DB.
+            // Their ordered-write condition means all workers must be allowed
+            // to progress together; wait for the family as a set, then join.
+            if (comptime io_threaded_supported) {
+                while (true) {
+                    var store_running = false;
+                    for (&self.slots) |*slot| {
+                        if (slot.kind == .store and !slot.fake and slot.state.load(.acquire) == .running) {
+                            store_running = true;
+                            break;
+                        }
+                    }
+                    if (!store_running) break;
+                    std.Thread.yield() catch {};
+                }
+                for (&self.slots) |*slot| {
+                    if (slot.kind == .store) joinWorker(slot);
                 }
             }
             for (&self.slots) |*slot| {
@@ -5561,6 +5655,13 @@ pub fn Effects(comptime Msg: type) type {
         /// sticks.
         pub fn bindHostCalls(self: *Self, binding: HostCallBinding) void {
             if (self.host_calls == null) self.host_calls = binding;
+        }
+
+        /// Bind the engine-owned Tier-2 store. Loop-thread only; first bind
+        /// sticks. Apps without the `store` capability never install it and
+        /// receive a closed `rejected` outcome if a command is smuggled in.
+        pub fn bindRecordStore(self: *Self, binding: RecordStoreBinding) void {
+            if (self.record_store_binding == null) self.record_store_binding = binding;
         }
 
         /// Switch this channel into session-replay mode: the fake
@@ -7758,6 +7859,147 @@ pub fn Effects(comptime Msg: type) type {
             self.hostSend("core.persist", "");
         }
 
+        /// Upsert one record. Store keys are UTF-8 (1..512 bytes), values are
+        /// bounded at 1 MiB, and the result uses the request shape: `ok=true`
+        /// with empty bytes on success, otherwise `ok=false` with one closed
+        /// StoreOutcome name (`bad_key`, `over_bound`, `io_failed`, `busy`, or
+        /// `rejected`).
+        pub fn storeSet(self: *Self, options: StoreSetOptions) void {
+            if (!record_store.validKey(options.record_key)) return self.rejectStore(options.key, options.on_result, .bad_key);
+            if (options.bytes.len > max_effect_store_value_bytes) return self.rejectStore(options.key, options.on_result, .over_bound);
+            const payload = self.storeFieldsPayload(&.{ options.record_key, options.bytes }) orelse
+                return self.rejectStore(options.key, options.on_result, .rejected);
+            defer self.allocator.free(payload);
+            self.startHostRequest(.{
+                .key = options.key,
+                .name = "core.store.set",
+                .payload = payload,
+                .on_result = options.on_result,
+            }, max_effect_store_value_bytes + max_effect_store_key_bytes + 16, 32, .set);
+        }
+
+        /// Read one record. The ok payload is a one-byte presence envelope:
+        /// `[1][value...]` for a hit and `[0]` for a miss. The tag keeps an
+        /// empty stored value distinct from absence while retaining the
+        /// existing RequestRoute/EffectHostResult surface.
+        pub fn storeGet(self: *Self, options: StoreGetOptions) void {
+            if (!record_store.validKey(options.record_key)) return self.rejectStore(options.key, options.on_result, .bad_key);
+            const payload = self.storeFieldsPayload(&.{options.record_key}) orelse
+                return self.rejectStore(options.key, options.on_result, .rejected);
+            defer self.allocator.free(payload);
+            self.startHostRequest(.{
+                .key = options.key,
+                .name = "core.store.get",
+                .payload = payload,
+                .on_result = options.on_result,
+            }, max_effect_store_key_bytes + 8, max_effect_store_value_bytes + 1, .get);
+        }
+
+        /// Delete one record. Missing keys succeed.
+        pub fn storeDelete(self: *Self, options: StoreDeleteOptions) void {
+            if (!record_store.validKey(options.record_key)) return self.rejectStore(options.key, options.on_result, .bad_key);
+            const payload = self.storeFieldsPayload(&.{options.record_key}) orelse
+                return self.rejectStore(options.key, options.on_result, .rejected);
+            defer self.allocator.free(payload);
+            self.startHostRequest(.{
+                .key = options.key,
+                .name = "core.store.delete",
+                .payload = payload,
+                .on_result = options.on_result,
+            }, max_effect_store_key_bytes + 8, 32, .delete);
+        }
+
+        /// Scan a byte-lexicographic prefix page. The ok payload is
+        /// `[count u32][count * (key_len u32,key,value_len u32,value)]`
+        /// followed by `[next_len u32,next]`; an empty next ends iteration.
+        pub fn storeScan(self: *Self, options: StoreScanOptions) void {
+            if (!record_store.validPrefix(options.prefix) or
+                (options.after.len > 0 and !record_store.validKey(options.after)))
+            {
+                return self.rejectStore(options.key, options.on_result, .bad_key);
+            }
+            if (options.limit > max_effect_store_scan_limit) return self.rejectStore(options.key, options.on_result, .over_bound);
+            const len = std.math.add(usize, 16, options.prefix.len) catch
+                return self.rejectStore(options.key, options.on_result, .over_bound);
+            const total = std.math.add(usize, len, options.after.len) catch
+                return self.rejectStore(options.key, options.on_result, .over_bound);
+            const payload = self.allocator.alloc(u8, total) catch
+                return self.rejectStore(options.key, options.on_result, .rejected);
+            defer self.allocator.free(payload);
+            var at: usize = 0;
+            writeStoreU32(payload, &at, 0);
+            writeStoreField(payload, &at, options.prefix);
+            writeStoreU32(payload, &at, options.limit);
+            writeStoreField(payload, &at, options.after);
+            self.startHostRequest(.{
+                .key = options.key,
+                .name = "core.store.scan",
+                .payload = payload,
+                .on_result = options.on_result,
+            }, max_effect_store_key_bytes * 2 + 16, max_effect_store_result_bytes, .scan);
+        }
+
+        /// Atomically upsert a bounded batch. Validation happens before the
+        /// request starts, and SQLite applies every entry in one transaction.
+        pub fn storeSetMany(self: *Self, options: StoreSetManyOptions) void {
+            if (options.entries.len == 0 or options.entries.len > max_effect_store_batch_entries) {
+                return self.rejectStore(options.key, options.on_result, .over_bound);
+            }
+            var len: usize = 8;
+            for (options.entries) |entry| {
+                if (!record_store.validKey(entry.key)) return self.rejectStore(options.key, options.on_result, .bad_key);
+                if (entry.bytes.len > max_effect_store_value_bytes) return self.rejectStore(options.key, options.on_result, .over_bound);
+                len = std.math.add(usize, len, 8) catch return self.rejectStore(options.key, options.on_result, .over_bound);
+                len = std.math.add(usize, len, entry.key.len) catch return self.rejectStore(options.key, options.on_result, .over_bound);
+                len = std.math.add(usize, len, entry.bytes.len) catch return self.rejectStore(options.key, options.on_result, .over_bound);
+            }
+            if (len > max_effect_store_batch_bytes) return self.rejectStore(options.key, options.on_result, .over_bound);
+            const payload = self.allocator.alloc(u8, len) catch
+                return self.rejectStore(options.key, options.on_result, .rejected);
+            defer self.allocator.free(payload);
+            var at: usize = 0;
+            writeStoreU32(payload, &at, 0);
+            writeStoreU32(payload, &at, @intCast(options.entries.len));
+            for (options.entries) |entry| {
+                writeStoreField(payload, &at, entry.key);
+                writeStoreField(payload, &at, entry.bytes);
+            }
+            self.startHostRequest(.{
+                .key = options.key,
+                .name = "core.store.setMany",
+                .payload = payload,
+                .on_result = options.on_result,
+            }, max_effect_store_batch_bytes, 32, .set_many);
+        }
+
+        fn storeFieldsPayload(self: *Self, fields: []const []const u8) ?[]u8 {
+            var len: usize = 4;
+            for (fields) |field| {
+                len = std.math.add(usize, len, 4) catch return null;
+                len = std.math.add(usize, len, field.len) catch return null;
+            }
+            const payload = self.allocator.alloc(u8, len) catch return null;
+            var at: usize = 0;
+            writeStoreU32(payload, &at, 0);
+            for (fields) |field| writeStoreField(payload, &at, field);
+            return payload;
+        }
+
+        fn writeStoreU32(buffer: []u8, at: *usize, value: u32) void {
+            std.mem.writeInt(u32, buffer[at.*..][0..4], value, .little);
+            at.* += 4;
+        }
+
+        fn writeStoreField(buffer: []u8, at: *usize, bytes: []const u8) void {
+            writeStoreU32(buffer, at, @intCast(bytes.len));
+            @memcpy(buffer[at.*..][0..bytes.len], bytes);
+            at.* += bytes.len;
+        }
+
+        fn rejectStore(self: *Self, key: u64, on_result: ?HostMsgFn, outcome: EffectStoreOutcome) void {
+            self.deliverLoopHost(.{ .key = key, .ok = false, .bytes = record_store.outcomeName(outcome) }, on_result, true);
+        }
+
         /// A keyed, routed host command — the generic named host call
         /// behind a transpiled core's `request` wire records: the host
         /// performs `name` with `payload` and answers with exactly one
@@ -7775,11 +8017,22 @@ pub fn Effects(comptime Msg: type) type {
         /// the request parks in its slot (inspect with `pendingHostAt`,
         /// answer with `feedHostResult`).
         pub fn hostRequest(self: *Self, options: HostRequestOptions) void {
+            self.startHostRequest(options, max_effect_host_payload_bytes, max_effect_host_result_bytes, null);
+        }
+
+        fn startHostRequest(
+            self: *Self,
+            options: HostRequestOptions,
+            payload_limit: usize,
+            result_limit: usize,
+            store_op: ?EffectStoreOp,
+        ) void {
             self.reclaimSlots();
             const fake = self.executor == .fake;
             const native_request = isNativeHostRequestName(options.name);
+            const store_request = store_op != null;
             if (options.name.len == 0 or options.name.len > max_effect_host_name_bytes or
-                options.payload.len > max_effect_host_payload_bytes)
+                options.payload.len > payload_limit)
             {
                 return self.rejectHost(options.key, options.on_result);
             }
@@ -7824,33 +8077,48 @@ pub fn Effects(comptime Msg: type) type {
                     const state = slot.state.load(.acquire);
                     if (state != .running and state != .draining) continue;
                     if (slot.key != options.key) continue;
-                    if (slot.kind != .host) {
+                    const expected_kind: SlotKind = if (store_request) .store else .host;
+                    if (slot.kind != expected_kind) {
                         if (state == .running or slotTerminalUndelivered(slot)) {
                             return self.rejectHost(options.key, options.on_result);
                         }
                         continue;
                     }
+                    // A write already handed to SQLite is only logically
+                    // cancelled: it still runs in issue order, and its
+                    // terminal is swallowed. Its replacement needs a fresh
+                    // store slot so the worker's storage cannot be reused.
+                    if (slot.kind == .store and state == .running and !slot.fake and slot.worker_thread != null) {
+                        slot.cancelled_generation = slot.generation;
+                        slot.cancel_requested.store(true, .release);
+                        continue;
+                    }
                     // Tell the host first: a late answer for the old
                     // occupancy must find nothing.
-                    if (state == .running and !slot.fake) self.notifyHostCancel(options.key);
+                    if (slot.kind == .host and state == .running and !slot.fake) self.notifyHostCancel(options.key);
+                    if (slot.kind == .store and state == .draining) joinWorker(slot);
                     self.releaseFetchSlot(slot);
                     slot.generation = 0;
                     replaced = index;
                 }
                 break :blk replaced orelse
-                    (self.findIdleSlot() orelse return self.rejectHost(options.key, options.on_result));
+                    ((if (store_request) self.findIdleStoreSlot() else self.findIdleSlot()) orelse
+                        return self.rejectHost(options.key, options.on_result));
             };
 
             const slot = &self.slots[slot_index];
             // The buffer holds the payload copy, then the result space.
-            const buffer = self.allocator.alloc(u8, options.payload.len + max_effect_host_result_bytes) catch {
+            const total_buffer_len = std.math.add(usize, options.payload.len, result_limit) catch {
+                return self.rejectHost(options.key, options.on_result);
+            };
+            const buffer = self.allocator.alloc(u8, total_buffer_len) catch {
                 return self.rejectHost(options.key, options.on_result);
             };
             slot.generation = self.next_generation;
             self.next_generation +%= 1;
             if (self.next_generation == 0) self.next_generation = 1;
             slot.key = options.key;
-            slot.kind = .host;
+            slot.kind = if (store_request) .store else .host;
             slot.on_line = null;
             slot.on_exit = null;
             slot.on_response = null;
@@ -7878,6 +8146,14 @@ pub fn Effects(comptime Msg: type) type {
             // Fake mode (tests and session replay) parks here: the feed
             // is the only terminal source.
             if (fake) return;
+            if (store_op) |operation| {
+                if (operation == .get or operation == .scan) {
+                    self.performBoundStoreRequest(slot.hostName(), options.key, slot.fetchPayload());
+                } else {
+                    self.startStoreWorker(slot_index, operation);
+                }
+                return;
+            }
             if (native_request) {
                 self.performNativeHostRequest(slot.hostName(), options.key, slot.fetchPayload());
                 return;
@@ -7887,7 +8163,8 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn isNativeHostRequestName(name: []const u8) bool {
-            return std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
+            return std.mem.startsWith(u8, name, "core.store.") or
+                std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
                 std.mem.eql(u8, name, "native-sdk.credentials.set") or
                 std.mem.eql(u8, name, "native-sdk.credentials.get") or
@@ -7910,6 +8187,10 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn performNativeHostRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            if (std.mem.startsWith(u8, name, "core.store.")) {
+                self.performBoundStoreRequest(name, key, payload);
+                return;
+            }
             if (std.mem.startsWith(u8, name, "native-sdk.credentials.") or
                 std.mem.eql(u8, name, "native-sdk.time.formatLocal"))
             {
@@ -7941,6 +8222,129 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
+        }
+
+        fn performBoundStoreRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            const binding = self.record_store_binding orelse {
+                self.feedHostResult(key, false, "rejected") catch {};
+                return;
+            };
+            const op: EffectStoreOp = if (std.mem.eql(u8, name, "core.store.set"))
+                .set
+            else if (std.mem.eql(u8, name, "core.store.get"))
+                .get
+            else if (std.mem.eql(u8, name, "core.store.delete"))
+                .delete
+            else if (std.mem.eql(u8, name, "core.store.scan"))
+                .scan
+            else if (std.mem.eql(u8, name, "core.store.setMany"))
+                .set_many
+            else {
+                self.feedHostResult(key, false, "rejected") catch {};
+                return;
+            };
+            const output = self.allocator.alloc(u8, max_effect_store_result_bytes) catch {
+                self.feedHostResult(key, false, "rejected") catch {};
+                return;
+            };
+            defer self.allocator.free(output);
+            const execution = binding.execute_fn(binding.context, op, payload, output);
+            if (execution.len > output.len) {
+                self.feedHostResult(key, false, "over_bound") catch {};
+                return;
+            }
+            switch (execution.outcome) {
+                .ok, .miss => self.feedHostResult(key, true, output[0..execution.len]) catch {},
+                else => self.feedHostResult(key, false, record_store.outcomeName(execution.outcome)) catch {},
+            }
+        }
+
+        /// Start one store write on the store-reserved worker family. The
+        /// binding reserves a monotonic SQLite position on this loop thread;
+        /// workers therefore commit in command-stream order even if the OS
+        /// schedules their threads differently.
+        fn startStoreWorker(self: *Self, slot_index: usize, operation: EffectStoreOp) void {
+            const slot = &self.slots[slot_index];
+            if (comptime !io_threaded_supported) {
+                self.feedHostResult(slot.key, false, "rejected") catch {};
+                return;
+            }
+            const binding = self.record_store_binding orelse {
+                self.feedHostResult(slot.key, false, "rejected") catch {};
+                return;
+            };
+            const payload = process_allocator.dupe(u8, slot.fetchPayload()) catch {
+                self.feedHostResult(slot.key, false, "rejected") catch {};
+                return;
+            };
+            const ctx = process_allocator.create(StoreWorkerContext) catch {
+                process_allocator.free(payload);
+                self.feedHostResult(slot.key, false, "rejected") catch {};
+                return;
+            };
+            ctx.* = .{
+                .binding = binding,
+                .operation = operation,
+                .sequence = 0,
+                .payload = payload,
+            };
+            slot.store_ctx = ctx;
+            const thread = std.Thread.spawn(.{}, storeWorkerMain, .{ self, slot_index, slot.generation, ctx }) catch {
+                slot.store_ctx = null;
+                process_allocator.free(payload);
+                process_allocator.destroy(ctx);
+                self.feedHostResult(slot.key, false, "rejected") catch {};
+                return;
+            };
+            slot.worker_thread = thread;
+            ctx.sequence = binding.reserve_write_fn(binding.context);
+            ctx.sequence_ready.store(true, .release);
+        }
+
+        fn storeWorkerMain(self: *Self, slot_index: usize, generation: u32, ctx: *StoreWorkerContext) void {
+            while (!ctx.sequence_ready.load(.acquire)) std.atomic.spinLoopHint();
+            const execution = ctx.binding.execute_write_fn(
+                ctx.binding.context,
+                ctx.sequence,
+                ctx.operation,
+                ctx.payload,
+                &ctx.output,
+            );
+            ctx.outcome = execution.outcome;
+            ctx.output_len = @min(execution.len, ctx.output.len);
+
+            const slot = &self.slots[slot_index];
+            const buffer = slot.fetch_buffer orelse {
+                slot.state.store(.done, .release);
+                return;
+            };
+            const result: []const u8 = switch (execution.outcome) {
+                .ok, .miss => ctx.output[0..ctx.output_len],
+                else => record_store.outcomeName(execution.outcome),
+            };
+            const capacity = buffer.len - slot.payload_len;
+            const within_bound = execution.len <= ctx.output.len and result.len <= capacity;
+            const delivered = if (within_bound) result else "over_bound";
+            @memcpy(buffer[slot.payload_len..][0..delivered.len], delivered);
+            slot.body_len = delivered.len;
+            var entry: Entry = .{
+                .kind = .host,
+                .slot_index = @intCast(slot_index),
+                .generation = generation,
+                .key = slot.key,
+                .line_len = @intCast(delivered.len),
+                .host_ok = within_bound and (execution.outcome == .ok or execution.outcome == .miss),
+                .host_fn = slot.on_host,
+            };
+            while (!self.enqueue(&entry)) {
+                if (self.shutdown.load(.acquire)) {
+                    slot.state.store(.done, .release);
+                    return;
+                }
+                std.atomic.spinLoopHint();
+            }
+            slot.state.store(.draining, .release);
+            self.wakeHost();
         }
 
         fn performBoundSystemRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
@@ -8062,8 +8466,14 @@ pub fn Effects(comptime Msg: type) type {
             for (&self.slots) |*slot| {
                 const state = slot.state.load(.acquire);
                 if (state != .running and state != .draining) continue;
-                if (slot.kind != .host or slot.key != key) continue;
-                if (state == .running and !slot.fake) self.notifyHostCancel(key);
+                if ((slot.kind != .host and slot.kind != .store) or slot.key != key) continue;
+                if (slot.kind == .store and state == .running and !slot.fake and slot.worker_thread != null) {
+                    slot.cancelled_generation = slot.generation;
+                    slot.cancel_requested.store(true, .release);
+                    continue;
+                }
+                if (slot.kind == .host and state == .running and !slot.fake) self.notifyHostCancel(key);
+                if (slot.kind == .store and state == .draining) joinWorker(slot);
                 self.releaseFetchSlot(slot);
                 // A queued result entry (fed, undrained) dies by
                 // generation mismatch; zero marks "no occupancy".
@@ -8112,7 +8522,7 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             const slot = &self.slots[slot_index];
-            if (slot.kind == .host) return self.cancelHostRequest(key);
+            if (slot.kind == .host or slot.kind == .store) return self.cancelHostRequest(key);
             slot.cancelled_generation = slot.generation;
             slot.cancel_requested.store(true, .release);
             if (slot.fake) {
@@ -11157,7 +11567,7 @@ pub fn Effects(comptime Msg: type) type {
         pub fn pendingHostCount(self: *Self) usize {
             var count: usize = 0;
             for (&self.slots) |*slot| {
-                if (slot.fake and slot.kind == .host and slot.state.load(.acquire) == .running) count += 1;
+                if (slot.fake and (slot.kind == .host or slot.kind == .store) and slot.state.load(.acquire) == .running) count += 1;
             }
             return count;
         }
@@ -11166,7 +11576,7 @@ pub fn Effects(comptime Msg: type) type {
         pub fn pendingHostAt(self: *Self, index: usize) ?HostRequest {
             var seen: usize = 0;
             for (&self.slots) |*slot| {
-                if (!(slot.fake and slot.kind == .host and slot.state.load(.acquire) == .running)) continue;
+                if (!(slot.fake and (slot.kind == .host or slot.kind == .store) and slot.state.load(.acquire) == .running)) continue;
                 if (seen == index) {
                     return .{
                         .key = slot.key,
@@ -11193,7 +11603,7 @@ pub fn Effects(comptime Msg: type) type {
         pub fn feedHostResult(self: *Self, key: u64, ok: bool, bytes: []const u8) error{EffectNotFound}!void {
             const slot_index = blk: {
                 const index = self.findActiveSlot(key) orelse return error.EffectNotFound;
-                if (self.slots[index].kind != .host) return error.EffectNotFound;
+                if (self.slots[index].kind != .host and self.slots[index].kind != .store) return error.EffectNotFound;
                 break :blk index;
             };
             const slot = &self.slots[slot_index];
@@ -12766,7 +13176,14 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn findIdleSlot(self: *Self) ?usize {
-            for (&self.slots, 0..) |*slot, index| {
+            for (self.slots[0..max_effects], 0..) |*slot, index| {
+                if (slot.state.load(.acquire) == .idle) return index;
+            }
+            return null;
+        }
+
+        fn findIdleStoreSlot(self: *Self) ?usize {
+            for (self.slots[max_effects..], max_effects..) |*slot, index| {
                 if (slot.state.load(.acquire) == .idle) return index;
             }
             return null;
@@ -12864,7 +13281,7 @@ pub fn Effects(comptime Msg: type) type {
         fn slotTerminalUndelivered(slot: *const Slot) bool {
             return switch (slot.kind) {
                 .spawn => slot.collect_buffer != null or slot.exit_undelivered,
-                .fetch, .file, .clipboard, .host, .image => slot.fetch_buffer != null,
+                .fetch, .file, .clipboard, .host, .store, .image => slot.fetch_buffer != null,
             };
         }
 
@@ -12914,6 +13331,11 @@ pub fn Effects(comptime Msg: type) type {
                 if (slot.spawn_ctx) |ctx| {
                     destroySpawnContext(ctx);
                     slot.spawn_ctx = null;
+                }
+                if (slot.store_ctx) |ctx| {
+                    process_allocator.free(ctx.payload);
+                    process_allocator.destroy(ctx);
+                    slot.store_ctx = null;
                 }
             }
         }

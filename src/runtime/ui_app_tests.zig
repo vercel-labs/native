@@ -109,6 +109,32 @@ fn retainedTextExists(runtime: *core.Runtime, text: []const u8) !bool {
     return false;
 }
 
+test "record-store test harness binds one hermetic in-memory database" {
+    const harness = try core.TestHarness().createWithRecordStore(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    try std.testing.expect(harness.record_store != null);
+    try std.testing.expect(harness.runtime.options.record_store != null);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, counterOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try app_state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expect(app_state.effects.record_store_binding != null);
+    try harness.stop(app);
+}
+
 test "ui app owns install, dispatch, and rebuild end to end" {
     // The runtime and the app are both large structs; keep them off the
     // test thread's stack.

@@ -19,6 +19,41 @@ test("clean core passes the checker", () => {
   assert.deepEqual(ruleIds(checkOnly(core)), []);
 });
 
+test("NS1066 keeps every Cmd.store factory in capability lockstep", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: asciiBytes("v") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.store.set("doc/1", model.bytes, { key: "put", ok: "wrote", err: "failed" }),
+      Cmd.store.get("doc/1", { key: "get", ok: "loaded", err: "failed" }),
+      Cmd.store.delete("doc/1", { key: "del", ok: "wrote", err: "failed" }),
+      Cmd.store.scan("doc/", { limit: 10 }, { key: "scan", ok: "loaded", err: "failed" }),
+      Cmd.store.setMany([["doc/2", model.bytes]], { key: "many", ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["store"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1066"), false);
+
+  const missing = check(source);
+  assert.equal(missing.warnings.filter((d) => d.id === "NS1066").length, 5);
+  const unused = check(core, { capabilities: ["store"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1066").length, 1);
+});
+
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {
   const source = `
 import { Cmd } from "@native-sdk/core";

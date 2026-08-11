@@ -19,6 +19,7 @@ const mirrors = [
   { source: 'skills', target: 'skills' },
   { source: 'skill-data', target: 'skill-data' },
   { source: 'third_party/webview2', target: 'third_party/webview2' },
+  { source: 'third_party/sqlite', target: 'third_party/sqlite' },
   // corewire: the mirror/facade/profile generator every TypeScript-core
   // build compiles from the dependency.
   { source: 'tools/corewire', target: 'tools/corewire' },

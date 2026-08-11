@@ -25,6 +25,7 @@
     "packages/core/package-lock.json",
     "tools/corewire",
     "third_party/webview2",
+    "third_party/sqlite",
     "native-sdk.d.ts",
     "README.md",
     "LICENSE"

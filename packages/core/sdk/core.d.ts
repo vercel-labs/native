@@ -117,6 +117,10 @@ export interface WriteRoute<M extends Msgish> {
     readonly ok: EmptyKind<M>;
     readonly err: BytesKind<M>;
 }
+export interface StoreScanOptions {
+    readonly limit?: number;
+    readonly after?: string | Uint8Array;
+}
 export interface FetchRoute<M extends Msgish> {
     readonly key?: string;
     readonly ok: FetchedKind<M>;
@@ -228,6 +232,33 @@ export type Cmd<M extends Msgish> = {
     readonly errKind: string;
     readonly path: Uint8Array;
     readonly bytes: Uint8Array;
+} | {
+    readonly op: "store_set";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly storeKey: string;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "store_get" | "store_delete";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly storeKey: string;
+} | {
+    readonly op: "store_scan";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly prefix: string;
+    readonly limit: number;
+    readonly after: string | Uint8Array;
+} | {
+    readonly op: "store_set_many";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
 } | {
     readonly op: "fetch";
     readonly key: string;
@@ -391,6 +422,13 @@ export declare const Cmd: {
     cancel(key: string): Cmd<never>;
     readFile<M extends Msgish>(path: Uint8Array, route: RequestRoute<M>): Cmd<M>;
     writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+    store: {
+        set<M extends Msgish>(storeKey: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+        get<M extends Msgish>(storeKey: string, route: RequestRoute<M>): Cmd<M>;
+        delete<M extends Msgish>(storeKey: string, route: WriteRoute<M>): Cmd<M>;
+        scan<M extends Msgish>(prefix: string, options: StoreScanOptions, route: RequestRoute<M>): Cmd<M>;
+        setMany<M extends Msgish>(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: WriteRoute<M>): Cmd<M>;
+    };
     fetch: typeof fetchCmd;
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;

@@ -141,8 +141,27 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("json", json_mod);
     desktop_mod.addImport("canvas", canvas_mod);
     desktop_mod.addImport("terminal_vt", terminalVtModule(b, target, optimize));
+    desktop_mod.addIncludePath(b.path("third_party/sqlite"));
+    desktop_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    desktop_mod.link_libc = true;
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
+
+    // SQLite is capability-shed from ordinary app artifacts. Its focused
+    // engine/store suite gets a dedicated module that explicitly compiles the
+    // vendored amalgamation, so framework tests cover it without making every
+    // unrelated example carry the database object.
+    const record_store_mod = module(b, target, optimize, "src/runtime/record_store.zig");
+    record_store_mod.addIncludePath(b.path("third_party/sqlite"));
+    record_store_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    record_store_mod.link_libc = true;
+    const record_store_tests = testArtifact(b, record_store_mod);
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -472,6 +491,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
+    test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
@@ -1418,6 +1438,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-surface", "Run GPU surface example tests", "examples/gpu-surface", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
@@ -1624,6 +1645,12 @@ pub fn build(b: *std.Build) void {
     const mobile_canvas_lib_step = b.step("test-example-mobile-canvas-lib", "Build the mobile-canvas embed static library through addMobileLib");
     mobile_canvas_lib_step.dependOn(&build_mobile_canvas_lib.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_lib.step);
+
+    const build_mobile_canvas_store_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dstore=true" });
+    build_mobile_canvas_store_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_store_lib_step = b.step("test-example-mobile-canvas-lib-store", "Build a record-store-capable mobile embed static library");
+    mobile_canvas_store_lib_step.dependOn(&build_mobile_canvas_store_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_store_lib.step);
 
     // Android cross-compile proof: pure Zig (no NDK sysroot — the static
     // lib links no libc), PIC so the objects can land in the shim's .so.
@@ -2709,6 +2736,15 @@ pub fn build(b: *std.Build) void {
     cef_bundle_step.dependOn(&cef_bundle_script.step);
 }
 
+fn sqliteCompileFlags() []const []const u8 {
+    return &.{
+        "-DSQLITE_THREADSAFE=1",
+        "-DSQLITE_OMIT_LOAD_EXTENSION",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_DEFAULT_MEMSTATUS=0",
+    };
+}
+
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(path),
@@ -2844,6 +2880,7 @@ fn tsCoreE2eArtifact(
         .entry = "tests/ts-core/fixture.ts",
         .src_dir = host_src.getDirectory(),
         .name = "host_fixture_core",
+        .store_capability = true,
         // The fixture drives pastBytes to the f64-exact boundary (2^53):
         // no honest i64 declaration exists there, so the compiled
         // projection carries the slot as f64.
@@ -3144,6 +3181,8 @@ const ExternalCoreFixtureSpec = struct {
     name: []const u8,
     /// The fixture stands in for an app whose manifest declares Tier 1.
     persist_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares Tier 2.
+    store_capability: bool = false,
     /// Attested integer slots the compiled projection carries as f64
     /// (values that reach the f64-exact boundary have no honest i64
     /// declaration on that side) — corewire's --f64-slot demotions,
@@ -3179,6 +3218,7 @@ fn externalCoreFixtureModule(
     check.addArg("--contract-entry");
     check.addArg(spec.entry);
     if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
+    if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{

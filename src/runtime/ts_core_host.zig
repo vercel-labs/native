@@ -472,6 +472,7 @@ pub fn TsCoreHost(comptime core: type) type {
             key: [max_wire_key_bytes]u8 = undefined,
             ok_tag: u8 = 0,
             err_tag: u8 = 0,
+            ok_void: bool = false,
 
             fn wireKey(entry: *const RequestEntry) []const u8 {
                 return entry.key[0..entry.key_len];
@@ -657,7 +658,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var audio_cache_dir_len: usize = 0;
         var audio_cache_dir_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
         var audio_cache_path_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
-        var requests: [runtime_effects.max_effects]RequestEntry = @splat(.{});
+        var requests: [runtime_effects.max_effects + runtime_effects.max_store_effects]RequestEntry = @splat(.{});
         var timers: [runtime_effects.max_effect_timers]TimerEntry = @splat(.{});
         var effects_table: [runtime_effects.max_effects]EffectEntry = @splat(.{});
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
@@ -1374,6 +1375,89 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // dock_presence [op][visible u8]
                     0x22 => fx.setDockPresence(takeByte(cmd, &at) != 0),
+                    // store_set [op][route][scope u32][key bytes][value bytes]
+                    0x23 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeSet(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .bytes = bytes,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_get [op][route][scope u32][key bytes]
+                    0x24 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, false) orelse continue;
+                        fx.storeGet(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_delete [op][route][scope u32][key bytes]
+                    0x25 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeDelete(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_scan [op][route][scope u32][prefix bytes]
+                    //            [limit u32][after bytes]
+                    0x26 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const prefix = takeLongBytes(cmd, &at);
+                        const limit = takeU32(cmd, &at);
+                        const after = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, false) orelse continue;
+                        fx.storeScan(.{
+                            .key = request_key,
+                            .prefix = prefix,
+                            .limit = limit,
+                            .after = after,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_set_many [op][route][scope u32][count u32]
+                    //                [count * (key bytes,value bytes)]
+                    0x27 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const count: usize = @intCast(takeU32(cmd, &at));
+                        var entries: [runtime_effects.max_effect_store_batch_entries]Fx.StoreEntry = undefined;
+                        var kept: usize = 0;
+                        for (0..count) |_| {
+                            const record_key = takeLongBytes(cmd, &at);
+                            const bytes = takeLongBytes(cmd, &at);
+                            if (kept < entries.len) {
+                                entries[kept] = .{ .key = record_key, .bytes = bytes };
+                                kept += 1;
+                            }
+                        }
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeSetMany(.{
+                            .key = request_key,
+                            .entries = if (count <= entries.len) entries[0..kept] else &.{},
+                            .on_result = hostResultMsg,
+                        });
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -2303,13 +2387,24 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the engine replaces the in-flight call under the same engine
         /// key. Unkeyed requests (`key.len == 0`) each take a fresh
         /// entry: nothing can replace or cancel them.
-        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+        fn allocRequestEntry(
+            fx: *Fx,
+            key: []const u8,
+            ok_tag: u8,
+            err_tag: u8,
+            ok_void: bool,
+            store_request: bool,
+        ) ?u64 {
             const index = blk: {
                 if (key.len > 0) {
-                    if (findRequest(key)) |existing| break :blk existing;
+                    if (findRequest(key)) |existing| {
+                        const existing_is_store = existing >= runtime_effects.max_effects;
+                        if (existing_is_store == store_request) break :blk existing;
+                        fx.cancelHostRequest(request_key_base + existing);
+                        requests[existing].used = false;
+                    }
                 }
-                break :blk freeRequestIndex() orelse
-                    @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
+                break :blk (if (store_request) freeStoreRequestIndex() else freeRequestIndex()) orelse return null;
             };
             const entry = &requests[index];
             entry.used = true;
@@ -2317,6 +2412,23 @@ pub fn TsCoreHost(comptime core: type) type {
             @memcpy(entry.key[0..key.len], key);
             entry.ok_tag = ok_tag;
             entry.err_tag = err_tag;
+            entry.ok_void = ok_void;
+            return index;
+        }
+
+        fn allocStoreRequestEntry(fx: *Fx, head: RoutedHead, ok_void: bool) ?u64 {
+            const index = allocRequestEntry(fx, head.key, head.ok_tag, head.err_tag, ok_void, true) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return null;
+            };
+            return request_key_base + index;
+        }
+
+        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, false) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                return;
+            };
             fx.hostRequest(.{
                 .key = request_key_base + index,
                 .name = name,
@@ -2333,7 +2445,14 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn freeRequestIndex() ?usize {
-            for (&requests, 0..) |*entry, index| {
+            for (requests[0..runtime_effects.max_effects], 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        fn freeStoreRequestIndex() ?usize {
+            for (requests[runtime_effects.max_effects..], runtime_effects.max_effects..) |*entry, index| {
                 if (!entry.used) return index;
             }
             return null;
@@ -2354,6 +2473,7 @@ pub fn TsCoreHost(comptime core: type) type {
             }
             const entry = &requests[index];
             entry.used = false;
+            if (result.ok and entry.ok_void) return msgFromTagVoid(entry.ok_tag);
             return msgFromTagBytes(if (result.ok) entry.ok_tag else entry.err_tag, result.bytes);
         }
 
@@ -3184,6 +3304,12 @@ pub fn TsCoreHost(comptime core: type) type {
             const slice = bytes[at.* .. at.* + len];
             at.* += len;
             return slice;
+        }
+
+        /// A fixed-width little-endian integer.
+        fn takeU32(bytes: []const u8, at: *usize) u32 {
+            const raw = takeBytes(bytes, at, 4);
+            return std.mem.readInt(u32, raw[0..4], .little);
         }
 
         /// A one-byte-length-prefixed field (names and keys).

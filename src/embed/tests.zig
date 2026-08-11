@@ -1019,6 +1019,8 @@ const MobileCounterDef = struct {
 
 const MobileCounterHost = ui_host.UiAppHost(MobileCounterDef);
 const MobileCounterApi = c_api.MobileCApi(MobileCounterHost);
+const MobileStoreHost = ui_host.UiAppHostWithRecordStore(MobileCounterDef, true);
+const MobileStoreApi = c_api.MobileCApi(MobileStoreHost);
 
 fn expectNoUiHostError(app: ?*anyopaque) !void {
     try std.testing.expectEqualStrings("", std.mem.span(MobileCounterApi.native_sdk_app_last_error_name(app)));
@@ -1050,6 +1052,33 @@ fn tapMobileWidget(app: ?*anyopaque, node: MobileWidgetSemantics) !void {
     try expectNoUiHostError(app);
     MobileCounterApi.native_sdk_app_touch(app, 1, 1, x, y, 0);
     try expectNoUiHostError(app);
+}
+
+test "mobile store capability requires and binds the OS app-data root before start" {
+    const app = MobileStoreApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileStoreApi.native_sdk_app_destroy(app);
+    const self: *MobileStoreHost = @ptrCast(@alignCast(app));
+
+    MobileStoreApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("StoreDataDirUnavailable", std.mem.span(MobileStoreApi.native_sdk_app_last_error_name(app)));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-store", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileStoreApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.record_store_open);
+    try std.testing.expect(self.embedded.runtime.options.record_store != null);
+
+    MobileStoreApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("", std.mem.span(MobileStoreApi.native_sdk_app_last_error_name(app)));
+    var surface_token: u8 = 0;
+    MobileStoreApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileStoreApi.native_sdk_app_frame(app);
+    try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
+    try std.testing.expect(self.ui.effects.record_store_binding != null);
+    MobileStoreApi.native_sdk_app_stop(app);
 }
 
 test "mobile C ABI drives a user UiApp canvas scene end to end" {

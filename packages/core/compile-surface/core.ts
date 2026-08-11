@@ -126,6 +126,11 @@ export interface WriteRoute<M extends Msgish> {
   readonly err: M["kind"];
 }
 
+export interface StoreScanOptions {
+  readonly limit?: number;
+  readonly after?: string | Uint8Array;
+}
+
 export interface FetchRoute<M extends Msgish> {
   readonly key?: string;
   readonly ok: M["kind"];
@@ -286,6 +291,37 @@ export type CmdData =
       readonly errKind: string;
       readonly path: Uint8Array;
       readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "store_set";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "store_get" | "store_delete";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+    }
+  | {
+      readonly op: "store_scan";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly prefix: string;
+      readonly limit: number;
+      readonly after: string | Uint8Array;
+    }
+  | {
+      readonly op: "store_set_many";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
     }
   | {
       readonly op: "fetch";
@@ -484,6 +520,24 @@ export const Cmd = {
 
   writeFile(path: Uint8Array, bytes: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
     return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+
+  store: {
+    set(storeKey: string, bytes: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "store_set", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey, bytes };
+    },
+    get(storeKey: string, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "store_get", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+    delete(storeKey: string, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "store_delete", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+    scan(prefix: string, options: StoreScanOptions, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "store_scan", key: route.key ?? "", okKind: route.ok, errKind: route.err, prefix, limit: options.limit ?? 0, after: options.after ?? "" };
+    },
+    setMany(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "store_set_many", key: route.key ?? "", okKind: route.ok, errKind: route.err, entries };
+    },
   },
 
   fetch(

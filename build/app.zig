@@ -343,6 +343,7 @@ fn tsCoreStage(
     app_root: []const u8,
     app_name: []const u8,
     persist_capability: bool,
+    store_capability: bool,
     persist_version: ?u64,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
@@ -371,6 +372,7 @@ fn tsCoreStage(
     // contract carries no machine paths).
     check.addArgs(&.{ "--contract-entry", "src/core.ts" });
     if (persist_capability) check.addArgs(&.{ "--capability", "persist" });
+    if (store_capability) check.addArgs(&.{ "--capability", "store" });
     if (persist_version) |version| {
         check.addArgs(&.{ "--persist-version", b.fmt("{d}", .{version}) });
         check.addArgs(&.{ "--persist-state", appPath(b, app_root, ".native/cache/persist-schema.json") });
@@ -542,6 +544,7 @@ pub const mobile_export_symbol_names = [_][]const u8{
     "native_sdk_app_audio_event",
     "native_sdk_app_set_image_service",
     "native_sdk_app_set_automation_dir",
+    "native_sdk_app_set_data_root",
     "native_sdk_app_touch",
     "native_sdk_app_scroll",
     "native_sdk_app_key",
@@ -589,6 +592,10 @@ pub const MobileLibOptions = struct {
     /// `src/embed/ui_host.zig`. Ignored for `.scene = .webview`.
     main: []const u8 = "src/main.zig",
     scene: MobileSceneOption = .canvas,
+    /// Link and install the engine-owned Tier-2 record store. Standard
+    /// `addApp` builds infer this from app.zon; direct `addMobileLib`
+    /// callers state it here because that lower-level API has no manifest.
+    store_capability: bool = false,
 };
 
 /// Mobile counterpart of `addApp`: produce the embed static library
@@ -626,9 +633,25 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
     });
     exports_mod.addImport("native_sdk", native_sdk_mod);
     if (options.scene == .canvas) {
+        const mobile_options = b.addOptions();
+        mobile_options.addOption(bool, "store_capability", options.store_capability);
+        exports_mod.addImport("mobile_build_options", mobile_options.createModule());
         const app_mod = localModule(b, target, optimize, options.main);
         app_mod.addImport("native_sdk", native_sdk_mod);
         exports_mod.addImport("app", app_mod);
+    }
+    if (options.store_capability) {
+        exports_mod.addIncludePath(dep.path("third_party/sqlite"));
+        exports_mod.addCSourceFile(.{
+            .file = dep.path("third_party/sqlite/sqlite3.c"),
+            .flags = &.{
+                "-DSQLITE_THREADSAFE=1",
+                "-DSQLITE_OMIT_LOAD_EXTENSION",
+                "-DSQLITE_DQS=0",
+                "-DSQLITE_DEFAULT_MEMSTATUS=0",
+            },
+        });
+        exports_mod.link_libc = true;
     }
     exports_mod.export_symbol_names = &mobile_export_symbol_names;
 
@@ -707,7 +730,15 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
     }
     const ts_stage: ?TsCoreStage = if (core_tree == .ts)
-        tsCoreStage(b, dep, app_options.app_root, app_options.name, app_config.persist_capability, app_config.persist_version)
+        tsCoreStage(
+            b,
+            dep,
+            app_options.app_root,
+            app_options.name,
+            app_config.persist_capability,
+            app_config.store_capability,
+            app_config.persist_version,
+        )
     else
         null;
 
@@ -720,6 +751,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
             .main = appPath(b, app_options.app_root, app_options.main),
+            .store_capability = app_config.store_capability,
         });
     }
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
@@ -1011,6 +1043,23 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         app_mod.link_libc = true;
         app_mod.addObjectFile(stage.archive);
     }
+    if (app_config.sqlite_capability) {
+        // `store` and the relational `sqlite` tier share this exact object.
+        // The source is absent from every artifact declaring neither
+        // capability, which keeps capability inference a real binary-size
+        // boundary rather than a runtime flag.
+        app_mod.addIncludePath(dep.path("third_party/sqlite"));
+        app_mod.addCSourceFile(.{
+            .file = dep.path("third_party/sqlite/sqlite3.c"),
+            .flags = &.{
+                "-DSQLITE_THREADSAFE=1",
+                "-DSQLITE_OMIT_LOAD_EXTENSION",
+                "-DSQLITE_DQS=0",
+                "-DSQLITE_DEFAULT_MEMSTATUS=0",
+            },
+        });
+        app_mod.link_libc = true;
+    }
     addMacosPrivacyInfoPlist(b, app_mod, target, app_config);
     return app_mod;
 }
@@ -1104,6 +1153,10 @@ fn nativeSdkModuleWithTerminal(b: *std.Build, dep: *std.Build.Dependency, target
     debug_mod.addImport("trace", trace_mod);
 
     const native_sdk_mod = externalModule(b, dep, target, optimize, "src/root.zig");
+    // The header makes the internal wrapper parsable even when lazy exports
+    // are reflected; the amalgamation itself is attached below only for an
+    // opted-in store/sqlite artifact.
+    native_sdk_mod.addIncludePath(dep.path("third_party/sqlite"));
     native_sdk_mod.addImport("geometry", geometry_mod);
     native_sdk_mod.addImport("assets", assets_mod);
     native_sdk_mod.addImport("app_dirs", app_dirs_mod);
@@ -1438,6 +1491,8 @@ const AppManifestBuildConfig = struct {
     system_audio_permission: bool = false,
     persist_capability: bool = false,
     persist_version: ?u64 = null,
+    store_capability: bool = false,
+    sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
     /// NOT web intent — it is the default in many canvas manifests.
@@ -1512,6 +1567,8 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .system_audio_permission = hasManifestPermission(raw.permissions, "system_audio"),
         .persist_capability = hasManifestCapability(raw.capabilities, "persist"),
         .persist_version = if (raw.persist) |persist| persist.version else null,
+        .store_capability = hasManifestCapability(raw.capabilities, "store"),
+        .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };
 }

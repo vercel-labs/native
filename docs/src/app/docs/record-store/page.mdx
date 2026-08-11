@@ -1,0 +1,127 @@
+# Record Store
+
+The record store persists independent byte records without giving `update` a database handle or making the app own a file format. It is the right fit for caches, message history, and document-sized values that grow or change one record at a time. Declare the build capability in `app.zon`:
+
+```zig:app.zon
+.capabilities = .{ "store" },
+```
+
+`"store"` links the shared SQLite engine and opens one engine-owned `store.db` in the app-data directory. Apps name keys, never paths or SQL. The common desktop runner and the iOS and Android hosts install that data directory before the first app effect. Apps without either storage capability do not link SQLite, and `native check` warns when the `"store"` declaration and `Cmd.store.*` calls disagree. The relational tier's `"sqlite"` capability selects the same engine object, so an app declaring both still links SQLite once.
+
+## A saved draft
+
+Every operation is a command. The committed model changes first; the result returns later as an ordinary `Msg`.
+
+```ts:src/core.ts
+import { Cmd } from "@native-sdk/core";
+
+export interface Model {
+  readonly draft: Uint8Array;
+  readonly loaded: boolean;
+}
+
+export type Msg =
+  | { readonly kind: "load" }
+  | { readonly kind: "loaded"; readonly result: Uint8Array }
+  | { readonly kind: "edited"; readonly draft: Uint8Array }
+  | { readonly kind: "saved" }
+  | { readonly kind: "store_failed"; readonly reason: Uint8Array };
+
+export const viewUnbound = ["loaded", "saved", "store_failed"] as const;
+
+export function initialModel(): Model {
+  return { draft: new Uint8Array(0), loaded: false };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "load":
+      return [model, Cmd.store.get("draft/current", {
+        key: "load-draft", ok: "loaded", err: "store_failed",
+      })];
+    case "loaded":
+      // A get result starts with 1 for a hit and 0 for a miss. The value
+      // follows the hit byte, so an empty value is distinct from absence.
+      return msg.result[0] === 1
+        ? { draft: msg.result.subarray(1), loaded: true }
+        : { ...model, loaded: true };
+    case "edited":
+      return [{ ...model, draft: msg.draft }, Cmd.store.set(
+        "draft/current",
+        msg.draft,
+        { key: "save-draft", ok: "saved", err: "store_failed" },
+      )];
+    case "saved":
+    case "store_failed":
+      return model;
+  }
+}
+```
+
+Reissuing the same route `key` replaces the older in-flight operation, and `Cmd.cancel(key)` cancels it silently. Distinct commands issued in one commit are performed in command-stream order: a synchronous read waits for writes that precede it. A get in a later commit also observes an earlier successful set.
+
+## Zig-core parity
+
+Zig cores use the same runtime-owned database and result envelope. The common app runner installs the binding before the app's first effect; no Zig entry point resolves a path or opens SQLite.
+
+```zig
+const Msg = union(enum) {
+    store_result: native_sdk.EffectHostResult,
+};
+const Effects = native_sdk.Effects(Msg);
+
+fn loadDraft(fx: *Effects) void {
+    fx.storeGet(.{
+        .key = 1,
+        .record_key = "draft/current",
+        .on_result = Effects.hostMsg(.store_result),
+    });
+}
+```
+
+`Effects.storeSet`, `storeGet`, `storeDelete`, `storeScan`, and `storeSetMany` mirror the TypeScript operations. Their `EffectHostResult` carries `key`, `ok`, and `bytes`; get and scan use exactly the framing described below.
+
+## Operations and bounds
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Behavior</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Cmd.store.set(key, bytes, route)</code></td>
+      <td>Insert or replace one value. Keys are non-empty UTF-8 up to 512 bytes; values are at most 1 MiB.</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.store.get(key, route)</code></td>
+      <td>Return <code>[1][value...]</code> for a hit or <code>[0]</code> for a miss through the ok arm.</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.store.delete(key, route)</code></td>
+      <td>Delete one value. A missing key succeeds.</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.store.scan(prefix, options, route)</code></td>
+      <td>Return a byte-lexicographic prefix page. <code>limit</code> defaults to 100 and is capped at 256; pass the returned next-key bytes as <code>after</code> (a known literal key may be passed as a string).</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.store.setMany(entries, route)</code></td>
+      <td>Insert or replace 1–64 records atomically, with an 8 MiB encoded batch bound.</td>
+    </tr>
+  </tbody>
+</table>
+
+A scan page is little-endian framed bytes: `count u32`, then `count` repetitions of `key_length u32`, key bytes, `value_length u32`, value bytes, followed by `next_length u32` and the next-key bytes. An empty next key ends pagination. Pages stop at record boundaries; records are never truncated.
+
+All error arms receive one closed reason as UTF-8 bytes: `io_failed`, `over_bound`, `bad_key`, `rejected`, or `busy`. Cache misses use the get ok arm because absence is an expected lookup result. `setMany` validates the entire batch before its transaction, so an invalid entry changes nothing.
+
+## Replay and the virtual host
+
+Store results use the ordinary effect journal. Session replay feeds the recorded result and never opens the live database. Zig full-loop tests opt into one hermetic SQLite database per harness with `TestHarness().createWithRecordStore(allocator, surface)`; it is bound before `harness.start(app)` and closed by `harness.destroy(allocator)`. `native dev --core` performs the same API against a process-local map that survives its simulated `{"restart": true}` command.
+
+Use [Model Persistence](/docs/persistence) when the whole in-memory model is the unit you save. Use the record store when records grow independently. Use raw file effects only for user-visible files, exports, or blobs larger than the record bound; relational queries and secondary indexes belong in the SQL tier rather than this API.
+
+The repository's [record-store example](https://github.com/vercel-labs/native/tree/main/examples/record-store) exercises all five commands from a TypeScript core and Native markup view.

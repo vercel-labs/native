@@ -152,6 +152,11 @@ export type Msg =
   | { readonly kind: "mix_reject_flip" }
   | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number }
   | { readonly kind: "notify" }
+  | { readonly kind: "store_put" }
+  | { readonly kind: "store_get" }
+  | { readonly kind: "store_delete" }
+  | { readonly kind: "store_scan" }
+  | { readonly kind: "store_many" }
   | { readonly kind: "open_pty" }
   | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
 
@@ -451,6 +456,20 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
         subtitle: asciiBytes("native-sdk"),
         body: asciiBytes("TS core notification"),
       })];
+    case "store_put":
+      return [model, Cmd.store.set("fixture/one", model.status, { key: "store", ok: "wrote", err: "failed" })];
+    case "store_get":
+      return [model, Cmd.store.get("fixture/one", { key: "store", ok: "loaded", err: "failed" })];
+    case "store_delete":
+      return [model, Cmd.store.delete("fixture/one", { key: "store", ok: "wrote", err: "failed" })];
+    case "store_scan":
+      return [model, Cmd.store.scan("fixture/café/", { limit: 7, after: utf8Bytes("fixture/café/🚀") }, { key: "store", ok: "loaded", err: "failed" })];
+    case "store_many":
+      return [model, Cmd.store.setMany([
+        ["fixture/one", asciiBytes("one")],
+        ["fixture/two", model.status],
+        ["fixture/café/🚀/next", asciiBytes("page")],
+      ], { key: "store", ok: "wrote", err: "failed" })];
     case "open_pty":
       return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
     case "pty_evt":

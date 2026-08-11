@@ -242,6 +242,25 @@ pub fn MobileCApi(comptime Host: type) type {
             return 1;
         }
 
+        /// Supply the OS-owned app-data directory before start. Hosts call
+        /// this for every app; non-store host types accept it as a no-op so
+        /// the mobile ABI does not vary with capability shedding.
+        pub fn native_sdk_app_set_data_root(app: ?*anyopaque, path: ?[*]const u8, len: usize) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const dir = inputSlice(path, len) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            if (comptime @hasDecl(Host, "setDataRoot")) {
+                self.setDataRoot(dir) catch |err| {
+                    recordError(self, err);
+                    return 0;
+                };
+            }
+            self.last_error = null;
+            return 1;
+        }
+
         pub fn native_sdk_app_touch(app: ?*anyopaque, id: u64, phase: c_int, x: f32, y: f32, pressure: f32) callconv(.c) void {
             const self = hostApp(Host, app) orelse return;
             self.embedded.touch(id, phase, x, y, pressure) catch |err| {
@@ -762,6 +781,7 @@ pub const native_sdk_app_set_audio_service = FixedShellApi.native_sdk_app_set_au
 pub const native_sdk_app_audio_event = FixedShellApi.native_sdk_app_audio_event;
 pub const native_sdk_app_set_image_service = FixedShellApi.native_sdk_app_set_image_service;
 pub const native_sdk_app_set_automation_dir = FixedShellApi.native_sdk_app_set_automation_dir;
+pub const native_sdk_app_set_data_root = FixedShellApi.native_sdk_app_set_data_root;
 pub const native_sdk_app_touch = FixedShellApi.native_sdk_app_touch;
 pub const native_sdk_app_scroll = FixedShellApi.native_sdk_app_scroll;
 pub const native_sdk_app_key = FixedShellApi.native_sdk_app_key;

@@ -36,8 +36,9 @@
 //   - timer/now/delay arms carry exactly one number payload field (pinned
 //     by tsc), so the harness constructs them shape-directed without
 //     needing the field's name.
-// Cmd.persist snapshots the committed model in virtual-host memory; every
-// other effect (files, buffered/streaming fetch, clipboard,
+// Cmd.persist snapshots the committed model in virtual-host memory, and
+// Cmd.store performs against a process-local byte map. Every other effect
+// (files, buffered/streaming fetch, clipboard,
 // notifications, spawn, audio, host commands)
 // is printed as `cmd ...` and NOT performed — feed its result back yourself
 // as an ordinary Msg line. That is the point: results are plain messages,
@@ -112,6 +113,7 @@ if (typeof mod.initialModel !== "function" || typeof mod.update !== "function") 
 // ---------------------------------------------------------- transcript i/o
 
 const decoder = new TextDecoder();
+const strictDecoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
 
 function jsonable(value: unknown): unknown {
@@ -153,6 +155,16 @@ const delays = new Map<string, { msgKind: string; at: number }>();
 /// Process-local Tier-1 store. `structuredClone` preserves Uint8Array and
 /// nested model data without making the app own a serialization format.
 let persistedModel: unknown | null = null;
+/// Process-local Tier-2 store. Like a real app database, it survives the
+/// harness's simulated process restart while remaining hermetic to this run.
+const recordStore = new Map<string, Uint8Array>();
+
+const maxStoreKeyBytes = 512;
+const maxStoreValueBytes = 1024 * 1024;
+const maxStoreBatchEntries = 64;
+const maxStoreBatchBytes = 8 * 1024 * 1024;
+const maxStoreScanLimit = 256;
+const maxStoreResultBytes = maxStoreValueBytes + (2 * maxStoreKeyBytes) + 32;
 
 /// Timer/now/delay arms carry exactly one number payload field (tsc pins
 /// the shape), so a proxy that answers every non-kind read with the
@@ -175,6 +187,153 @@ function bytesMsg(kind: string, bytes: Uint8Array): unknown {
       has: () => true,
     },
   );
+}
+
+function emptyMsg(kind: string): unknown {
+  return { kind };
+}
+
+function storeKeyBytes(key: string, allowEmpty = false): Uint8Array | null {
+  const bytes = encoder.encode(key);
+  if ((!allowEmpty && bytes.length === 0) || bytes.length > maxStoreKeyBytes) return null;
+  return bytes;
+}
+
+function validStoreKeyBytes(bytes: Uint8Array, allowEmpty = false): Uint8Array | null {
+  if ((!allowEmpty && bytes.length === 0) || bytes.length > maxStoreKeyBytes) return null;
+  try {
+    strictDecoder.decode(bytes);
+  } catch {
+    return null;
+  }
+  return bytes;
+}
+
+function compareBytes(left: Uint8Array, right: Uint8Array): number {
+  const count = Math.min(left.length, right.length);
+  for (let i = 0; i < count; i++) {
+    if (left[i]! !== right[i]!) return left[i]! - right[i]!;
+  }
+  return left.length - right.length;
+}
+
+function startsWithBytes(value: Uint8Array, prefix: Uint8Array): boolean {
+  if (prefix.length > value.length) return false;
+  for (let i = 0; i < prefix.length; i++) if (value[i] !== prefix[i]) return false;
+  return true;
+}
+
+function frameStoreScan(entries: ReadonlyArray<readonly [Uint8Array, Uint8Array]>, next: Uint8Array): Uint8Array {
+  let length = 8 + next.length;
+  for (const [key, value] of entries) length += 8 + key.length + value.length;
+  const output = new Uint8Array(length);
+  const view = new DataView(output.buffer);
+  let at = 0;
+  const writeU32 = (value: number): void => {
+    view.setUint32(at, value, true);
+    at += 4;
+  };
+  const writeBytes = (bytes: Uint8Array): void => {
+    writeU32(bytes.length);
+    output.set(bytes, at);
+    at += bytes.length;
+  };
+  writeU32(entries.length);
+  for (const [key, value] of entries) {
+    writeBytes(key);
+    writeBytes(value);
+  }
+  writeBytes(next);
+  return output;
+}
+
+function rejectStore(cmd: Cmdish, reason: string): void {
+  say(`cmd ${cmd.op} rejected ${reason}`);
+  dispatch(bytesMsg(cmd.errKind as string, encoder.encode(reason)));
+}
+
+function performStoreCmd(cmd: Cmdish): void {
+  const routeKey = cmd.key as string;
+  switch (cmd.op) {
+    case "store_set": {
+      const key = cmd.storeKey as string;
+      const keyBytes = storeKeyBytes(key);
+      const bytes = cmd.bytes;
+      if (!keyBytes) return rejectStore(cmd, "bad_key");
+      if (!(bytes instanceof Uint8Array) || bytes.length > maxStoreValueBytes) return rejectStore(cmd, "over_bound");
+      recordStore.set(key, bytes.slice());
+      say(`cmd store_set ${routeKey} ${key} (stored in virtual host memory)`);
+      dispatch(emptyMsg(cmd.okKind as string));
+      return;
+    }
+    case "store_get": {
+      const key = cmd.storeKey as string;
+      if (!storeKeyBytes(key)) return rejectStore(cmd, "bad_key");
+      const value = recordStore.get(key);
+      const result = new Uint8Array(value === undefined ? 1 : value.length + 1);
+      if (value !== undefined) {
+        result[0] = 1;
+        result.set(value, 1);
+      }
+      say(`cmd store_get ${routeKey} ${key} (${value === undefined ? "miss" : "hit"})`);
+      dispatch(bytesMsg(cmd.okKind as string, result));
+      return;
+    }
+    case "store_delete": {
+      const key = cmd.storeKey as string;
+      if (!storeKeyBytes(key)) return rejectStore(cmd, "bad_key");
+      recordStore.delete(key);
+      say(`cmd store_delete ${routeKey} ${key} (deleted from virtual host memory)`);
+      dispatch(emptyMsg(cmd.okKind as string));
+      return;
+    }
+    case "store_scan": {
+      const prefix = cmd.prefix as string;
+      const after = cmd.after as string | Uint8Array;
+      const prefixBytes = storeKeyBytes(prefix, true);
+      const afterBytes = typeof after === "string"
+        ? (after === "" ? new Uint8Array(0) : storeKeyBytes(after))
+        : validStoreKeyBytes(after, true);
+      const requested = cmd.limit as number;
+      const limit = requested === 0 ? 100 : requested;
+      if (!prefixBytes || !afterBytes) return rejectStore(cmd, "bad_key");
+      if (!Number.isInteger(limit) || limit < 1 || limit > maxStoreScanLimit) return rejectStore(cmd, "over_bound");
+      const matches = [...recordStore.entries()]
+        .map(([key, value]) => [encoder.encode(key), value] as const)
+        .filter(([key]) => startsWithBytes(key, prefixBytes) && (afterBytes.length === 0 || compareBytes(key, afterBytes) > 0))
+        .sort(([left], [right]) => compareBytes(left, right));
+      const page: Array<readonly [Uint8Array, Uint8Array]> = [];
+      let framedLength = 8;
+      for (const entry of matches) {
+        if (page.length >= limit) break;
+        const rowLength = 8 + entry[0].length + entry[1].length;
+        if (framedLength + rowLength + entry[0].length > maxStoreResultBytes && page.length > 0) break;
+        page.push(entry);
+        framedLength += rowLength;
+      }
+      const hasMore = page.length < matches.length;
+      const next = hasMore ? page.at(-1)![0] : new Uint8Array(0);
+      say(`cmd store_scan ${routeKey} ${prefix} (${page.length} records${hasMore ? ", more" : ""})`);
+      dispatch(bytesMsg(cmd.okKind as string, frameStoreScan(page, next)));
+      return;
+    }
+    case "store_set_many": {
+      const entries = cmd.entries as ReadonlyArray<readonly [string, Uint8Array]>;
+      if (!Array.isArray(entries) || entries.length === 0 || entries.length > maxStoreBatchEntries) return rejectStore(cmd, "over_bound");
+      let encodedLength = 8;
+      for (const [key, value] of entries) {
+        const keyBytes = storeKeyBytes(key);
+        if (!keyBytes) return rejectStore(cmd, "bad_key");
+        if (!(value instanceof Uint8Array) || value.length > maxStoreValueBytes) return rejectStore(cmd, "over_bound");
+        encodedLength += 8 + keyBytes.length + value.length;
+        if (encodedLength > maxStoreBatchBytes) return rejectStore(cmd, "over_bound");
+      }
+      for (const [key, value] of entries) recordStore.set(key, value.slice());
+      say(`cmd store_set_many ${routeKey} (${entries.length} records stored atomically)`);
+      dispatch(emptyMsg(cmd.okKind as string));
+      return;
+    }
+  }
 }
 
 function performCmd(cmd: Cmdish): void {
@@ -212,6 +371,13 @@ function performCmd(cmd: Cmdish): void {
         say("cmd persist rejected by virtual host");
         if (persistErr) dispatch(bytesMsg(persistErr, encoder.encode("rejected")));
       }
+      return;
+    case "store_set":
+    case "store_get":
+    case "store_delete":
+    case "store_scan":
+    case "store_set_many":
+      performStoreCmd(cmd);
       return;
     case "show_notification": {
       const details = Object.entries(cmd)
