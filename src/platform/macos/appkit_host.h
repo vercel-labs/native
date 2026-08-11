@@ -652,6 +652,7 @@ int native_sdk_appkit_clear_recent_documents(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_set_credential(native_sdk_appkit_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len, const char *secret, size_t secret_len);
 size_t native_sdk_appkit_get_credential(native_sdk_appkit_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len, char *buffer, size_t buffer_len);
 int native_sdk_appkit_delete_credential(native_sdk_appkit_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len);
+size_t native_sdk_appkit_format_local_time(native_sdk_appkit_host_t *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len);
 
 typedef struct {
     const char *title;

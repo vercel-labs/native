@@ -189,6 +189,7 @@ export interface NotificationSpec {
     readonly subtitle?: Uint8Array;
     readonly body?: Uint8Array;
 }
+export type LocalTimeStyle = "date" | "time" | "datetime";
 export type Cmd<M extends Msgish> = {
     readonly op: "none";
 } | {
@@ -394,6 +395,12 @@ export declare const Cmd: {
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     showNotification(spec: NotificationSpec): Cmd<never>;
+    openExternalUrl(url: Uint8Array): Cmd<never>;
+    revealPath(path: Uint8Array): Cmd<never>;
+    credentialSet<M extends Msgish>(service: Uint8Array, account: Uint8Array, secret: Uint8Array, route: RequestRoute<M>): Cmd<M>;
+    credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
+    credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
+    formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
     audioPlay<M extends Msgish>(key: string, source: AudioSource, route: AudioRoute<M>): Cmd<M>;

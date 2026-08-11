@@ -34,6 +34,7 @@ const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 const max_credential_service_bytes = types.max_credential_service_bytes;
 const max_credential_account_bytes = types.max_credential_account_bytes;
 const max_credential_secret_bytes = types.max_credential_secret_bytes;
+const max_local_time_text_bytes = types.max_local_time_text_bytes;
 const max_tray_items = types.max_tray_items;
 const max_tray_icon_path_bytes = types.max_tray_icon_path_bytes;
 const max_tray_title_bytes = types.max_tray_title_bytes;
@@ -110,6 +111,7 @@ const MessageDialogOptions = types.MessageDialogOptions;
 const NotificationOptions = types.NotificationOptions;
 const CredentialKey = types.CredentialKey;
 const Credential = types.Credential;
+const LocalTimeStyle = types.LocalTimeStyle;
 const TrayItemId = types.TrayItemId;
 const TrayOptions = types.TrayOptions;
 const TrayPresentation = types.TrayPresentation;
@@ -476,6 +478,10 @@ pub const NullPlatform = struct {
     credential_secret_len: usize = 0,
     credential_set_count: usize = 0,
     credential_delete_count: usize = 0,
+    /// Deterministic local-zone model for tests. Real hosts consult the OS
+    /// zone (including DST at the requested instant); the null host uses this
+    /// fixed offset so suites can pin exact output without ambient state.
+    local_time_offset_minutes: i16 = 0,
     webview_navigate_count: usize = 0,
     tray_icon_path: [max_tray_icon_path_bytes]u8 = undefined,
     tray_icon_path_len: usize = 0,
@@ -861,6 +867,7 @@ pub const NullPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .format_local_time_fn = formatLocalTime,
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
@@ -1548,6 +1555,39 @@ pub const NullPlatform = struct {
         if (!std.mem.eql(u8, key.service, self.lastCredentialService()) or !std.mem.eql(u8, key.account, self.lastCredentialAccount())) return error.CredentialNotFound;
         self.credential_secret_len = 0;
         self.credential_delete_count += 1;
+    }
+
+    fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const seconds = @divFloor(timestamp_ms, 1000) + @as(i64, self.local_time_offset_minutes) * 60;
+        const days = @divFloor(seconds, 86_400);
+        const second_of_day: u32 = @intCast(@mod(seconds, 86_400));
+        const parts = localCivilFromDays(days) orelse return error.InvalidTimestamp;
+        const hour = second_of_day / 3600;
+        const minute = (second_of_day % 3600) / 60;
+        const second = second_of_day % 60;
+        return switch (style) {
+            .date => try std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2}", .{ parts.year, parts.month, parts.day }),
+            .time => try std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, minute, second }),
+            .datetime => try std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ parts.year, parts.month, parts.day, hour, minute, second }),
+        };
+    }
+
+    const LocalCivilDate = struct { year: u32, month: u32, day: u32 };
+
+    fn localCivilFromDays(days: i64) ?LocalCivilDate {
+        const shifted = days + 719_468;
+        const era = @divFloor(shifted, 146_097);
+        const day_of_era: u32 = @intCast(shifted - era * 146_097);
+        const year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        const year = @as(i64, year_of_era) + era * 400;
+        const day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        const month_index = (5 * day_of_year + 2) / 153;
+        const day = day_of_year - (153 * month_index + 2) / 5 + 1;
+        const month = if (month_index < 10) month_index + 3 else month_index - 9;
+        const civil_year = if (month <= 2) year + 1 else year;
+        if (civil_year < 1 or civil_year > 9999) return null;
+        return .{ .year = @intCast(civil_year), .month = month, .day = day };
     }
 
     fn createTray(context: ?*anyopaque, options: TrayOptions) anyerror!void {

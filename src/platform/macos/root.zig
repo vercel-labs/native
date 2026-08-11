@@ -254,6 +254,7 @@ extern fn native_sdk_appkit_clear_recent_documents(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_set_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, secret: [*]const u8, secret_len: usize) c_int;
 extern fn native_sdk_appkit_get_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_delete_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize) c_int;
+extern fn native_sdk_appkit_format_local_time(host: *AppKitHost, timestamp_ms: i64, style: c_int, buffer: [*]u8, buffer_len: usize) usize;
 
 const AppKitScrollOccluder = extern struct {
     x: f64,
@@ -744,6 +745,7 @@ pub const MacPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .format_local_time_fn = formatLocalTime,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
@@ -2148,6 +2150,13 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
         key.account.ptr,
         key.account.len,
     ) == 0) return error.CredentialNotFound;
+}
+
+fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    const len = native_sdk_appkit_format_local_time(self.host, timestamp_ms, @intFromEnum(style), buffer.ptr, buffer.len);
+    if (len == 0 or len > buffer.len) return error.LocalTimeFormatFailed;
+    return buffer[0..len];
 }
 
 fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {

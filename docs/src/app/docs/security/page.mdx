@@ -327,7 +327,7 @@ External links are denied by default. To open links in the system browser, opt i
 
 Do not allow broad external patterns for pages that can be influenced by remote content.
 
-The same policy gates `runtime.openExternalUrl(...)` and `window.zero.os.openUrl(...)`. A bridge grant for `native-sdk.os.openUrl` is not enough by itself; the URL must also match `external_links.allowed_urls`.
+The same policy gates `Cmd.openExternalUrl(...)`, `runtime.openExternalUrl(...)`, and `window.zero.os.openUrl(...)`. A bridge grant for `native-sdk.os.openUrl` is not enough by itself; the URL must also match `external_links.allowed_urls`.
 
 ## CSP guidance
 

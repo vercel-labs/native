@@ -163,6 +163,7 @@ extern fn native_sdk_gtk_credentials_available(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_set_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, secret: [*]const u8, secret_len: usize) c_int;
 extern fn native_sdk_gtk_get_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_delete_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize) c_int;
+extern fn native_sdk_gtk_format_local_time(host: *GtkHost, timestamp_ms: i64, style: c_int, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_audio_available(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_audio_spectrum_available(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_audio_load(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
@@ -397,6 +398,7 @@ pub const LinuxPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .format_local_time_fn = formatLocalTime,
                 .audio_load_fn = audioLoad,
                 .audio_load_url_fn = audioLoadUrl,
                 .audio_play_fn = audioPlay,
@@ -1390,6 +1392,13 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
     );
     if (result < 0) return error.UnsupportedService;
     if (result == 0) return error.CredentialNotFound;
+}
+
+fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    const len = native_sdk_gtk_format_local_time(self.host, timestamp_ms, @intFromEnum(style), buffer.ptr, buffer.len);
+    if (len == 0 or len > buffer.len) return error.LocalTimeFormatFailed;
+    return buffer[0..len];
 }
 
 /// Map the audio host's synchronous load result: 0 loading (the

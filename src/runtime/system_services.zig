@@ -108,6 +108,10 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return true;
         }
 
+        pub fn formatLocalTime(self: *Runtime, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+            return self.options.platform.services.formatLocalTime(timestamp_ms, style, buffer);
+        }
+
         pub fn createTray(self: *Runtime, options: platform.TrayOptions) anyerror!void {
             try validateTrayOptions(options);
             try self.options.platform.services.createTray(options);

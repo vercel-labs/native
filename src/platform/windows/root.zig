@@ -197,6 +197,7 @@ extern fn native_sdk_windows_clear_recent_documents(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_set_credential(host: *WindowsHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, secret: [*]const u8, secret_len: usize) c_int;
 extern fn native_sdk_windows_get_credential(host: *WindowsHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_windows_delete_credential(host: *WindowsHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize) c_int;
+extern fn native_sdk_windows_format_local_time(host: *WindowsHost, timestamp_ms: i64, style: c_int, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_windows_clipboard_read(host: *WindowsHost, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_windows_clipboard_write(host: *WindowsHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_windows_clipboard_read_data(host: *WindowsHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
@@ -476,6 +477,7 @@ pub const WindowsPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .format_local_time_fn = formatLocalTime,
                 .audio_load_fn = audioLoad,
                 .audio_load_url_fn = audioLoadUrl,
                 .audio_play_fn = audioPlay,
@@ -1625,6 +1627,13 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
     ) == 0) return error.CredentialNotFound;
 }
 
+fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    const len = native_sdk_windows_format_local_time(self.host, timestamp_ms, @intFromEnum(style), buffer.ptr, buffer.len);
+    if (len == 0 or len > buffer.len) return error.LocalTimeFormatFailed;
+    return buffer[0..len];
+}
+
 /// Map the audio host's synchronous load result: 0 loaded, 1 the file is
 /// missing/unreadable, anything else a decode failure. The asynchronous
 /// `.loaded` acknowledgment (with the decoded duration) follows as an
@@ -2095,6 +2104,22 @@ test "windows hide-on-close support requires the declared tray (the only re-show
     var chromium = testPlatformWithEngine(.chromium);
     chromium.app_info.declares_tray = true;
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .window_hide_on_close));
+}
+
+test "windows local time conversion applies the timestamp's dynamic daylight rules" {
+    // The Win32 host cannot execute in this portable suite, so pin the API
+    // sequence Microsoft requires: first expose the UTC SYSTEMTIME, then let
+    // the active dynamic time zone select the offset for that instant. Using
+    // FileTimeToLocalFileTime here would instead apply the current DST bias.
+    const host_source = @embedFile("webview2_host.cpp");
+    const format_at = std.mem.indexOf(u8, host_source, "size_t native_sdk_windows_format_local_time(") orelse return error.TestExpectedEqual;
+    const format_tail = host_source[format_at..];
+    const format_end = std.mem.indexOf(u8, format_tail, "size_t native_sdk_windows_clipboard_read(") orelse return error.TestExpectedEqual;
+    const format_source = format_tail[0..format_end];
+    const utc_at = std.mem.indexOf(u8, format_source, "FileTimeToSystemTime(&utc, &utc_system_time)") orelse return error.TestExpectedEqual;
+    const local_at = std.mem.indexOf(u8, format_source, "SystemTimeToTzSpecificLocalTimeEx(nullptr, &utc_system_time, &system_time)") orelse return error.TestExpectedEqual;
+    try std.testing.expect(utc_at < local_at);
+    try std.testing.expect(std.mem.indexOf(u8, format_source, "FileTimeToLocalFileTime") == null);
 }
 
 test "windows tray carries lifecycle commands rich rows and key equivalents into the host" {

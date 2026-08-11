@@ -288,6 +288,20 @@ pub const WindowActionBinding = struct {
     quit_fn: *const fn (context: *anyopaque) bool,
 };
 
+/// Runtime-owned platform-service entry points used by the intrinsic
+/// `native-sdk.*` named commands. Binding the Runtime methods—not the raw
+/// PlatformServices table—keeps validation and external-link policy in the
+/// same place for TypeScript effects, Zig callers, and built-in bridge calls.
+pub const SystemServiceBinding = struct {
+    context: *anyopaque,
+    open_external_url_fn: *const fn (context: *anyopaque, url: []const u8) anyerror!void,
+    reveal_path_fn: *const fn (context: *anyopaque, path: []const u8) anyerror!void,
+    set_credential_fn: *const fn (context: *anyopaque, credential: platform.Credential) anyerror!void,
+    get_credential_fn: *const fn (context: *anyopaque, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8,
+    delete_credential_fn: *const fn (context: *anyopaque, key: platform.CredentialKey) anyerror!bool,
+    format_local_time_fn: *const fn (context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8,
+};
+
 /// Type-erased handle to the embedding host's named-command services,
 /// bound onto the effects channel (`bindHostCalls`). This is the seam
 /// behind `hostRequest`/`hostSend` — the generic named host call a
@@ -4325,6 +4339,10 @@ pub fn Effects(comptime Msg: type) type {
         /// by `UiApp` alongside the services — the seam behind
         /// app-drawn window controls (loop-thread only).
         window_actions: ?WindowActionBinding = null,
+        /// Runtime system services with their validation/policy layer intact.
+        /// Intrinsic platform commands use this binding; generic host calls
+        /// continue to use `host_calls` below.
+        system_services: ?SystemServiceBinding = null,
         /// The embedding host's named-command services (`hostSend` /
         /// `hostRequest`), bound by whoever hosts a transpiled app core
         /// (loop-thread only). Null means no host services: sends drop,
@@ -5196,6 +5214,7 @@ pub fn Effects(comptime Msg: type) type {
             // Sever the host-call binding for the same reason: its
             // context belongs to the embedding host.
             self.host_calls = null;
+            self.system_services = null;
         }
 
         /// Discard every queued completion, freeing heap line payloads
@@ -5520,6 +5539,12 @@ pub fn Effects(comptime Msg: type) type {
         /// live window table). Loop-thread only; the first bind sticks.
         pub fn bindWindowActions(self: *Self, binding: WindowActionBinding) void {
             if (self.window_actions == null) self.window_actions = binding;
+        }
+
+        /// Bind runtime-validated platform services for the SDK-reserved
+        /// named command family. Loop-thread only; the first bind sticks.
+        pub fn bindSystemServices(self: *Self, binding: SystemServiceBinding) void {
+            if (self.system_services == null) self.system_services = binding;
         }
 
         /// Point named host commands at the embedding host's services
@@ -7687,6 +7712,11 @@ pub fn Effects(comptime Msg: type) type {
         pub fn hostSend(self: *Self, name: []const u8, payload: []const u8) void {
             if (self.replay) return;
             if (name.len == 0 or name.len > max_effect_host_name_bytes) return;
+            if (isNativeHostSendName(name)) {
+                if (self.executor == .fake) return;
+                self.performNativeHostSend(name, payload);
+                return;
+            }
             const binding = self.host_calls orelse return;
             binding.send_fn(binding.context, name, payload);
         }
@@ -7831,10 +7861,34 @@ pub fn Effects(comptime Msg: type) type {
 
         fn isNativeHostRequestName(name: []const u8) bool {
             return std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
-                std.mem.eql(u8, name, "native-sdk.launch-at-login.set");
+                std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
+                std.mem.eql(u8, name, "native-sdk.credentials.set") or
+                std.mem.eql(u8, name, "native-sdk.credentials.get") or
+                std.mem.eql(u8, name, "native-sdk.credentials.delete") or
+                std.mem.eql(u8, name, "native-sdk.time.formatLocal");
+        }
+
+        fn isNativeHostSendName(name: []const u8) bool {
+            return std.mem.eql(u8, name, "native-sdk.os.openUrl") or
+                std.mem.eql(u8, name, "native-sdk.os.revealPath");
+        }
+
+        fn performNativeHostSend(self: *Self, name: []const u8, payload: []const u8) void {
+            const binding = self.system_services orelse return;
+            if (std.mem.eql(u8, name, "native-sdk.os.openUrl")) {
+                binding.open_external_url_fn(binding.context, payload) catch {};
+            } else {
+                binding.reveal_path_fn(binding.context, payload) catch {};
+            }
         }
 
         fn performNativeHostRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            if (std.mem.startsWith(u8, name, "native-sdk.credentials.") or
+                std.mem.eql(u8, name, "native-sdk.time.formatLocal"))
+            {
+                self.performBoundSystemRequest(name, key, payload);
+                return;
+            }
             const services = self.services orelse {
                 self.feedHostResult(key, false, "unsupported") catch {};
                 return;
@@ -7860,6 +7914,98 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
+        }
+
+        fn performBoundSystemRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            const binding = self.system_services orelse {
+                self.feedHostResult(key, false, "unsupported") catch {};
+                return;
+            };
+
+            if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
+                if (payload.len != 16) return self.feedInvalidNativeRequest(key);
+                const style_value: f64 = @bitCast(std.mem.readInt(u64, payload[0..8], .little));
+                const timestamp_value: f64 = @bitCast(std.mem.readInt(u64, payload[8..16], .little));
+                if (!std.math.isFinite(style_value) or style_value != @floor(style_value) or style_value < 0 or style_value > 2 or
+                    !std.math.isFinite(timestamp_value) or timestamp_value != @floor(timestamp_value) or
+                    timestamp_value < -8_640_000_000_000_000 or timestamp_value > 8_640_000_000_000_000)
+                {
+                    return self.feedInvalidNativeRequest(key);
+                }
+                const style: platform.LocalTimeStyle = @enumFromInt(@as(u8, @intFromFloat(style_value)));
+                const timestamp_ms: i64 = @intFromFloat(timestamp_value);
+                var result_buffer: [platform.max_local_time_text_bytes]u8 = undefined;
+                const result = binding.format_local_time_fn(binding.context, timestamp_ms, style, &result_buffer) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                };
+                if (result.len == 0 or result.len > result_buffer.len) return self.feedInvalidNativeRequest(key);
+                self.feedHostResult(key, true, result) catch {};
+                return;
+            }
+
+            var at: usize = 0;
+            const account = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+            if (std.mem.eql(u8, name, "native-sdk.credentials.set")) {
+                const secret = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+                const service = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+                if (at != payload.len) return self.feedInvalidNativeRequest(key);
+                binding.set_credential_fn(binding.context, .{ .service = service, .account = account, .secret = secret }) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                };
+                self.feedHostResult(key, true, "") catch {};
+                return;
+            }
+            const service = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+            if (at != payload.len) return self.feedInvalidNativeRequest(key);
+            const credential_key: platform.CredentialKey = .{ .service = service, .account = account };
+            if (std.mem.eql(u8, name, "native-sdk.credentials.get")) {
+                var secret_buffer: [platform.max_credential_secret_bytes]u8 = undefined;
+                const secret = binding.get_credential_fn(binding.context, credential_key, &secret_buffer) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                } orelse {
+                    self.feedHostResult(key, false, "not_found") catch {};
+                    return;
+                };
+                self.feedHostResult(key, true, secret) catch {};
+                return;
+            }
+            const deleted = binding.delete_credential_fn(binding.context, credential_key) catch |err| {
+                self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                return;
+            };
+            self.feedHostResult(key, deleted, if (deleted) "" else "not_found") catch {};
+        }
+
+        fn takeNativeRequestBytes(payload: []const u8, at: *usize) ?[]const u8 {
+            if (at.* > payload.len or payload.len - at.* < 4) return null;
+            const len: usize = std.mem.readInt(u32, payload[at.*..][0..4], .little);
+            at.* += 4;
+            if (len > payload.len - at.*) return null;
+            const bytes = payload[at.*..][0..len];
+            at.* += len;
+            return bytes;
+        }
+
+        fn feedInvalidNativeRequest(self: *Self, key: u64) void {
+            self.feedHostResult(key, false, "invalid_request") catch {};
+        }
+
+        fn systemServiceErrorName(err: anyerror) []const u8 {
+            return switch (err) {
+                error.UnsupportedService => "unsupported",
+                error.InvalidCredentialOptions,
+                error.CredentialFieldTooLarge,
+                error.InvalidExternalUrl,
+                error.ExternalUrlTooLarge,
+                error.InvalidRevealPath,
+                error.RevealPathTooLarge,
+                => "invalid_request",
+                error.CredentialNotFound => "not_found",
+                else => "failed",
+            };
         }
 
         fn launchAtLoginStatusName(status: platform.LaunchAtLoginStatus) []const u8 {

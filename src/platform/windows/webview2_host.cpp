@@ -7625,6 +7625,36 @@ int native_sdk_windows_delete_credential(Host *host, const char *service, size_t
     return ok ? 1 : 0;
 }
 
+size_t native_sdk_windows_format_local_time(Host *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len) {
+    (void)host;
+    if (!buffer || buffer_len == 0 || style < 0 || style > 2) return 0;
+
+    const long double ticks_value = static_cast<long double>(timestamp_ms) * 10000.0L + 116444736000000000.0L;
+    if (ticks_value < 0.0L || ticks_value > static_cast<long double>(UINT64_MAX)) return 0;
+    ULARGE_INTEGER ticks = {};
+    ticks.QuadPart = static_cast<uint64_t>(ticks_value);
+    FILETIME utc = { ticks.LowPart, ticks.HighPart };
+    SYSTEMTIME utc_system_time = {};
+    SYSTEMTIME system_time = {};
+    if (!FileTimeToSystemTime(&utc, &utc_system_time) ||
+        !SystemTimeToTzSpecificLocalTimeEx(nullptr, &utc_system_time, &system_time)) return 0;
+
+    wchar_t date_text[128] = {};
+    wchar_t time_text[128] = {};
+    if ((style == 0 || style == 2) && GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &system_time, nullptr, date_text, ARRAYSIZE(date_text), nullptr) == 0) return 0;
+    if ((style == 1 || style == 2) && GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &system_time, nullptr, time_text, ARRAYSIZE(time_text)) == 0) return 0;
+
+    std::wstring text;
+    if (style == 0) text = date_text;
+    else if (style == 1) text = time_text;
+    else text = std::wstring(date_text) + L" " + time_text;
+    if (text.empty()) return 0;
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (needed <= 0 || static_cast<size_t>(needed) > buffer_len) return 0;
+    if (WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), buffer, needed, nullptr, nullptr) != needed) return 0;
+    return static_cast<size_t>(needed);
+}
+
 int native_sdk_windows_create_webview(Host *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
 #if !NATIVE_SDK_HAS_WEBVIEW2
     (void)host;

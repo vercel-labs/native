@@ -75,6 +75,18 @@
 //   Cmd.showNotification({ title, subtitle?, body? })
 //                                fire-and-forget desktop notification; the OS
 //                                remains authoritative over final delivery
+//   Cmd.openExternalUrl(url)      open an allowed HTTP(S) URL in the system
+//                                browser; denied/invalid URLs fail closed
+//   Cmd.revealPath(path)          reveal a path in the system file manager;
+//                                invalid/unavailable requests fail closed
+//   Cmd.credentialSet(service, account, secret, route)
+//   Cmd.credentialGet(service, account, route)
+//   Cmd.credentialDelete(service, account, route)
+//                                routed access to Keychain / Secret Service /
+//                                Credential Manager
+//   Cmd.formatLocalTime(ms, style, route)
+//                                format an epoch timestamp through the host's
+//                                current locale and time zone
 //   Cmd.delay(key, ms, "fired")  a keyed ONE-SHOT timer: dispatches the named
 //                                arm once after `ms`, with the fire time (ms)
 //                                as its single number payload; re-issuing a
@@ -938,6 +950,11 @@ export interface NotificationSpec {
   readonly body?: Uint8Array;
 }
 
+/// The three bounded host-local timestamp presentations. Unlike the markup
+/// `date`/`time`/`datetime` functions (fixed UTC), this is intentionally an
+/// effect because the user's locale and time zone are ambient host state.
+export type LocalTimeStyle = "date" | "time" | "datetime";
+
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
 /// the `Cmd.*` factories, return from `update`/`initialModel`, never inspect
@@ -1274,6 +1291,51 @@ export const Cmd = {
       subtitle: spec.subtitle ?? new Uint8Array(0),
       body: spec.body ?? new Uint8Array(0),
     };
+  },
+
+  /// Open an HTTP(S) URL in the user's system browser. Fire-and-forget: the
+  /// runtime validates the URL and enforces `external_links`; invalid,
+  /// denied, or unavailable requests fail closed.
+  openExternalUrl(url: Uint8Array): Cmd<never> {
+    return { op: "host_bytes", name: "native-sdk.os.openUrl", payload: url };
+  },
+
+  /// Reveal a path in the system file manager (Finder, Files, or Explorer).
+  /// Fire-and-forget; invalid or unavailable requests fail closed.
+  revealPath(path: Uint8Array): Cmd<never> {
+    return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  /// Store a secret in the platform credential store. The ok arm receives
+  /// empty bytes; the err arm receives `invalid_request`, `unsupported`, or
+  /// `failed`.
+  credentialSet<M extends Msgish>(
+    service: Uint8Array,
+    account: Uint8Array,
+    secret: Uint8Array,
+    route: RequestRoute<M>,
+  ): Cmd<M> {
+    return Cmd.request("native-sdk.credentials.set", { service, account, secret }, route);
+  },
+
+  /// Read a secret from the platform credential store. The ok arm receives
+  /// the secret bytes; a missing item routes err with `not_found`.
+  credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.credentials.get", { service, account }, route);
+  },
+
+  /// Delete a secret from the platform credential store. The ok arm receives
+  /// empty bytes; a missing item routes err with `not_found`.
+  credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.credentials.delete", { service, account }, route);
+  },
+
+  /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in
+  /// the host's current locale and local time zone. The localized UTF-8 text
+  /// arrives on ok; invalid timestamps or unavailable services route err.
+  formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M> {
+    const styleCode = style === "date" ? 0 : style === "time" ? 1 : 2;
+    return Cmd.request("native-sdk.time.formatLocal", { style: styleCode, timestampMs }, route);
   },
 
   /// A keyed one-shot delay: dispatch the named Msg arm once, `ms` from now,

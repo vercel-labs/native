@@ -1323,6 +1323,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       if (msg.which === 5) return [model, Cmd.clipboardRead({ key: "p", ok: "loaded", err: "failed" })];
       if (msg.which === 6) return [model, Cmd.delay("d", model.at + 100, "fired")];
       if (msg.which === 7) return [model, Cmd.showNotification({ title: model.data, subtitle: asciiBytes("native-sdk"), body: asciiBytes("Done") })];
+      if (msg.which === 8) return [model, Cmd.openExternalUrl(asciiBytes("https://native-sdk.dev/docs"))];
+      if (msg.which === 9) return [model, Cmd.revealPath(asciiBytes("/tmp/native-sdk.log"))];
+      if (msg.which === 10) return [model, Cmd.credentialSet(asciiBytes("dev.native-sdk.test"), asciiBytes("alice"), model.data, { key: "credential-set", ok: "loaded", err: "failed" })];
+      if (msg.which === 11) return [model, Cmd.credentialGet(asciiBytes("dev.native-sdk.test"), asciiBytes("alice"), { key: "credential-get", ok: "loaded", err: "failed" })];
+      if (msg.which === 12) return [model, Cmd.credentialDelete(asciiBytes("dev.native-sdk.test"), asciiBytes("alice"), { key: "credential-delete", ok: "loaded", err: "failed" })];
+      if (msg.which === 13) return [model, Cmd.formatLocalTime(model.at, "datetime", { key: "local-time", ok: "loaded", err: "failed" })];
       return [model, Cmd.batch([Cmd.delay("d", 250, "fired"), Cmd.cancel("d")])];
     case "loaded": return { ...model, data: msg.body };
     case "wrote": return { ...model, saved: true };

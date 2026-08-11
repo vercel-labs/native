@@ -31,6 +31,7 @@ const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 const max_credential_service_bytes = types.max_credential_service_bytes;
 const max_credential_account_bytes = types.max_credential_account_bytes;
 const max_credential_secret_bytes = types.max_credential_secret_bytes;
+const max_local_time_text_bytes = types.max_local_time_text_bytes;
 const max_tray_items = types.max_tray_items;
 const max_tray_icon_path_bytes = types.max_tray_icon_path_bytes;
 const max_tray_tooltip_bytes = types.max_tray_tooltip_bytes;
@@ -341,6 +342,12 @@ test "null platform records OS actions" {
     try std.testing.expectEqual(@as(usize, 1), null_platform.credentialDeleteCount());
     try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer));
 
+    null_platform.local_time_offset_minutes = -360;
+    var local_time_buffer: [max_local_time_text_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("2024-01-01 21:04:05", try services.formatLocalTime(1_704_164_645_000, .datetime, &local_time_buffer));
+    try std.testing.expectEqualStrings("2024-01-01", try services.formatLocalTime(1_704_164_645_000, .date, &local_time_buffer));
+    try std.testing.expectEqualStrings("21:04:05", try services.formatLocalTime(1_704_164_645_000, .time, &local_time_buffer));
+
     try services.clearRecentDocuments();
     try std.testing.expectEqual(@as(usize, 1), null_platform.recentDocumentsClearedCount());
     try std.testing.expectEqualStrings("", null_platform.lastRecentDocumentPath());
@@ -452,6 +459,7 @@ test "OS actions require backend support" {
     try std.testing.expectError(error.UnsupportedService, services.setCredential(.{ .service = "service", .account = "account", .secret = "secret" }));
     try std.testing.expectError(error.UnsupportedService, services.getCredential(.{ .service = "service", .account = "account" }, &buffer));
     try std.testing.expectError(error.UnsupportedService, services.deleteCredential(.{ .service = "service", .account = "account" }));
+    try std.testing.expectError(error.UnsupportedService, services.formatLocalTime(0, .datetime, &buffer));
 }
 
 test "null platform records webview lifecycle" {

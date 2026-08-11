@@ -252,6 +252,8 @@ export interface NotificationSpec {
   readonly body?: Uint8Array;
 }
 
+export type LocalTimeStyle = "date" | "time" | "datetime";
+
 /// The inert command data — the reference module's Cmd<M> union with
 /// the type parameter erased (M constrains only the factories' arm-name
 /// checking, never the data).
@@ -536,6 +538,48 @@ export const Cmd = {
       subtitle: spec.subtitle ?? new Uint8Array(0),
       body: spec.body ?? new Uint8Array(0),
     };
+  },
+
+  openExternalUrl(url: Uint8Array): CmdData {
+    return { op: "host_bytes", name: "native-sdk.os.openUrl", payload: url };
+  },
+
+  revealPath(path: Uint8Array): CmdData {
+    return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  credentialSet(
+    service: Uint8Array,
+    account: Uint8Array,
+    secret: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    return Cmd.request("native-sdk.credentials.set", hostRecordBytes({ service, account, secret }), route);
+  },
+
+  credentialGet(
+    service: Uint8Array,
+    account: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    return Cmd.request("native-sdk.credentials.get", hostRecordBytes({ service, account }), route);
+  },
+
+  credentialDelete(
+    service: Uint8Array,
+    account: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    return Cmd.request("native-sdk.credentials.delete", hostRecordBytes({ service, account }), route);
+  },
+
+  formatLocalTime(
+    timestampMs: number,
+    style: LocalTimeStyle,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    const styleCode = style === "date" ? 0 : style === "time" ? 1 : 2;
+    return Cmd.request("native-sdk.time.formatLocal", hostRecordBytes({ style: styleCode, timestampMs }), route);
   },
 
   delay(key: string, ms: number, msgKind: string): CmdData {

@@ -255,6 +255,7 @@ int native_sdk_gtk_credentials_available(native_sdk_gtk_host_t *host);
 int native_sdk_gtk_set_credential(native_sdk_gtk_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len, const char *secret, size_t secret_len);
 size_t native_sdk_gtk_get_credential(native_sdk_gtk_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len, char *buffer, size_t buffer_len);
 int native_sdk_gtk_delete_credential(native_sdk_gtk_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len);
+size_t native_sdk_gtk_format_local_time(native_sdk_gtk_host_t *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len);
 /* Audio playback (GStreamer playbin, runtime-loaded like libsecret).
  * native_sdk_gtk_audio_available answers whether the library resolved
  * at runtime; when it did not, every load below answers 3 (no backend)

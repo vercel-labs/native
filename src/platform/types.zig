@@ -246,6 +246,7 @@ pub const max_clipboard_data_bytes: usize = 65536;
 pub const max_credential_service_bytes: usize = 128;
 pub const max_credential_account_bytes: usize = 256;
 pub const max_credential_secret_bytes: usize = 4096;
+pub const max_local_time_text_bytes: usize = 512;
 pub const max_tray_items: usize = 32;
 pub const max_tray_icon_path_bytes: usize = 4096;
 pub const max_tray_title_bytes: usize = 64;
@@ -1380,6 +1381,15 @@ pub const Credential = struct {
     service: []const u8,
     account: []const u8,
     secret: []const u8,
+};
+
+/// Host-local, locale-aware timestamp presentation. This deliberately lives
+/// behind PlatformServices: the same epoch can format differently after a
+/// locale or time-zone change, so app cores must observe it as an effect.
+pub const LocalTimeStyle = enum(u8) {
+    date,
+    time,
+    datetime,
 };
 
 pub const TrayItemId = u32;
@@ -2587,6 +2597,7 @@ pub const PlatformServices = struct {
     set_credential_fn: ?*const fn (context: ?*anyopaque, credential: Credential) anyerror!void = null,
     get_credential_fn: ?*const fn (context: ?*anyopaque, key: CredentialKey, buffer: []u8) anyerror![]const u8 = null,
     delete_credential_fn: ?*const fn (context: ?*anyopaque, key: CredentialKey) anyerror!void = null,
+    format_local_time_fn: ?*const fn (context: ?*anyopaque, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 = null,
     open_external_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8) anyerror!void = null,
     reveal_path_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
     add_recent_document_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
@@ -3127,6 +3138,11 @@ pub const PlatformServices = struct {
     pub fn deleteCredential(self: PlatformServices, key: CredentialKey) anyerror!void {
         const delete_fn = self.delete_credential_fn orelse return error.UnsupportedService;
         return delete_fn(self.context, key);
+    }
+
+    pub fn formatLocalTime(self: PlatformServices, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+        const format_fn = self.format_local_time_fn orelse return error.UnsupportedService;
+        return format_fn(self.context, timestamp_ms, style, buffer);
     }
 
     pub fn openExternalUrl(self: PlatformServices, url: []const u8) anyerror!void {

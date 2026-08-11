@@ -12846,6 +12846,25 @@ int native_sdk_appkit_delete_credential(native_sdk_appkit_host_t *host, const ch
     }
 }
 
+size_t native_sdk_appkit_format_local_time(native_sdk_appkit_host_t *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len) {
+    (void)host;
+    if (!buffer || buffer_len == 0 || style < 0 || style > 2) return 0;
+    @autoreleasepool {
+        NSDate *date = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)timestamp_ms / 1000.0];
+        if (!date) return 0;
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = [NSLocale autoupdatingCurrentLocale];
+        formatter.timeZone = [NSTimeZone localTimeZone];
+        formatter.dateStyle = (style == 0 || style == 2) ? NSDateFormatterShortStyle : NSDateFormatterNoStyle;
+        formatter.timeStyle = (style == 1 || style == 2) ? NSDateFormatterMediumStyle : NSDateFormatterNoStyle;
+        NSString *text = [formatter stringFromDate:date];
+        NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
+        if (!utf8 || utf8.length == 0 || utf8.length > buffer_len) return 0;
+        memcpy(buffer, utf8.bytes, utf8.length);
+        return utf8.length;
+    }
+}
+
 static NSArray<NSString *> *NativeSdkParseExtensions(const char *extensions, size_t len) {
     if (!extensions || len == 0) return nil;
     NSString *str = [[NSString alloc] initWithBytes:extensions length:len encoding:NSUTF8StringEncoding];

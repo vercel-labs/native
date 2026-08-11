@@ -296,6 +296,18 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Show a desktop notification, fire-and-forget; text fields are bytes and the OS remains authoritative over final delivery</td>
     </tr>
     <tr>
+      <td><code>Cmd.openExternalUrl(url)</code> / <code>Cmd.revealPath(path)</code></td>
+      <td>Open an allowed HTTP(S) URL in the system browser or reveal a path in Finder/Files/Explorer; both are fire-and-forget and fail closed</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.credentialSet(...)</code> / <code>credentialGet(...)</code> / <code>credentialDelete(...)</code></td>
+      <td>Routed access to Keychain, Secret Service, or Credential Manager; get returns the secret bytes and missing items route <code>not_found</code></td>
+    </tr>
+    <tr>
+      <td><code>Cmd.formatLocalTime(timestampMs, style, route)</code></td>
+      <td>Format an epoch timestamp as localized <code>date</code>, <code>time</code>, or <code>datetime</code> text in the host's current time zone</td>
+    </tr>
+    <tr>
       <td><code>Cmd.spawn(argv, &#123; key?, stdin?, line?, exit, err &#125;)</code></td>
       <td>Run a subprocess, streaming stdout line by line; <code>collect: true</code> buffers whole stdout into the <code>exit</code> arm instead</td>
     </tr>
@@ -343,6 +355,8 @@ The runtime interprets the command after the model commits and dispatches any re
 </table>
 
 Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires and a streaming fetch's terminal status, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, buffered named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. Live `Cmd.spawn` and streaming-fetch keys reject a duplicate (`err` gets `rejected`) so two sources can never splice into one stream; cancel either first, and that cancel is loud (`err` gets `cancelled`). A streaming fetch whose line is cut or dropped also ends loudly with `err: truncated`, never a misleading successful status. Every routed `err` arm receives a machine-readable reason, so failure is never silence.
+
+Platform state stays on the same effect boundary. `Cmd.openExternalUrl(url)` enforces [`security.navigation.external_links`](/docs/security#external-links) before entering the browser; `Cmd.revealPath(path)` uses the desktop file manager. Credential operations take byte `service` and `account` identifiers plus the standard `{ key?, ok, err }` route: set/delete return empty bytes on `ok`, get returns the secret, and a missing item routes `not_found`. `Cmd.formatLocalTime(timestampMs, "date" | "time" | "datetime", route)` returns localized UTF-8 bytes using the current host locale and time zone. That formatting is deliberately a Cmd—not a pure helper—so session recording captures the observed text and replay never re-reads ambient locale or timezone state.
 
 Durable in-memory state uses `Cmd.persist()`: declare the `persist` capability, configure the boot routes and schema version, then return the command beside the committed model. The engine owns canonical serialization, trailing-edge coalescing, atomic app-data placement, backup recovery, migration, and journal/replay. See [Model Persistence](/docs/persistence) for the complete setup. `Cmd.readFile` and `Cmd.writeFile` remain for user-visible files, exports, and blobs; when using them, request the framework-provided app-data directory through `envMsgs` instead of depending on process cwd.
 
