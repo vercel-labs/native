@@ -978,6 +978,7 @@ pub const NullPlatform = struct {
                 .scale_factor = self.surface_value.scale_factor,
                 .open = true,
                 .focused = index == 0 and window.activate_on_show and window.show == .immediate,
+                .hidden = window.show == .hidden,
             } });
         }
         var frame: u32 = 0;
@@ -1177,6 +1178,7 @@ pub const NullPlatform = struct {
         }
         // An explicit focus shows a still-deferred window (the macOS
         // host's makeKeyAndOrderFront override of present-before-show).
+        self.windows[focused_index].hidden = false;
         if (!self.window_visible[focused_index]) {
             self.window_visible[focused_index] = true;
             self.show_op_seq += 1;

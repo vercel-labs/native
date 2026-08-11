@@ -1016,6 +1016,55 @@ test "startup scene adoption preserves manifest passive show policy" {
     try std.testing.expect(!runtime.windows[0].info.focused);
 }
 
+test "startup hidden policy is visible to the start hook" {
+    const TestApp = struct {
+        saw_startup_window: bool = false,
+        saw_hidden: bool = false,
+
+        fn start(context: *anyopaque, runtime: *Runtime) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var windows_buffer: [1]platform.WindowInfo = undefined;
+            const windows = runtime.listWindows(&windows_buffer);
+            self.saw_startup_window = windows.len == 1;
+            self.saw_hidden = windows.len == 1 and windows[0].hidden;
+        }
+
+        fn scene(context: *anyopaque) anyerror!app_manifest.ShellConfig {
+            _ = context;
+            return .{};
+        }
+
+        fn app(self: *@This()) App {
+            return .{
+                .context = self,
+                .name = "hidden-startup-state",
+                .start_fn = start,
+                .scene_fn = scene,
+            };
+        }
+    };
+
+    var null_platform = platform.NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Hidden Startup",
+        .main_window = .{
+            .label = "main",
+            .show = .hidden,
+        },
+    });
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    Runtime.initAt(runtime, .{ .platform = null_platform.platform() });
+    defer runtime.deinit();
+    var app_state: TestApp = .{};
+
+    try runtime.dispatchPlatformEvent(app_state.app(), .app_start);
+
+    try std.testing.expect(app_state.saw_startup_window);
+    try std.testing.expect(app_state.saw_hidden);
+    try std.testing.expect(runtime.windows[0].info.hidden);
+    try std.testing.expect(!runtime.windows[0].info.focused);
+}
+
 test "runtime loads canvas-only startup shell without implicit main webview" {
     const TestApp = struct {
         const scene_views = [_]app_manifest.ShellView{.{

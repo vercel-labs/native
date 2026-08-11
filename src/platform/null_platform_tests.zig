@@ -163,6 +163,46 @@ test "null platform emits deterministic lifecycle events" {
     try std.testing.expectEqualStrings("app_shutdown", recorder.names[5]);
 }
 
+test "null platform reports hidden startup state" {
+    const Recorder = struct {
+        startup_hidden: ?bool = null,
+
+        fn handle(context: *anyopaque, event: Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event) {
+                .window_frame_changed => |window| self.startup_hidden = window.hidden,
+                else => {},
+            }
+        }
+    };
+
+    var null_platform = NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Hidden",
+        .main_window = .{ .show = .hidden },
+    });
+    var recorder: Recorder = .{};
+    try null_platform.platform().run(Recorder.handle, &recorder);
+
+    try std.testing.expectEqual(true, recorder.startup_hidden.?);
+}
+
+test "null platform focus reveals a hidden window" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+    const window = try services.createWindow(.{
+        .id = 7,
+        .label = "panel",
+        .show = .hidden,
+    });
+
+    try std.testing.expect(window.hidden);
+    try std.testing.expect(!null_platform.window_visible[0]);
+    try services.focusWindow(window.id);
+    try std.testing.expect(!null_platform.windows[0].hidden);
+    try std.testing.expect(null_platform.windows[0].focused);
+    try std.testing.expect(null_platform.window_visible[0]);
+}
+
 test "the videoLoadUrl seam refuses non-http(s) schemes for every caller" {
     // The streaming contract holds at the seam, not just behind the
     // engine's own gated loads: hosts hand the URL to their media

@@ -185,6 +185,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             const runtime_index = try WindowViewMethods().reserveWindow(self, window.id, window.label, window.resolvedTitle(app_info.app_name), null, true, .allow_source_less);
             self.windows[runtime_index].activate_on_show = window.activate_on_show;
             self.windows[runtime_index].info.focused = window.activate_on_show and window.show == .immediate;
+            self.windows[runtime_index].info.hidden = window.show == .hidden;
             self.windows[runtime_index].main_focused = self.windows[runtime_index].info.focused;
             self.windows[runtime_index].info.frame = window.default_frame;
             self.windows[runtime_index].main_frame = geometry.RectF.init(0, 0, window.default_frame.width, window.default_frame.height);
