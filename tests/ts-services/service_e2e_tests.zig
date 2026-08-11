@@ -18,6 +18,14 @@ const Adapter = native_sdk.TsUiApp(core);
 const App = Adapter.App;
 const Bridge = Adapter.Host;
 const ServiceTransport = native_sdk.ServiceHost(registry);
+const SkewedRegistry = struct {
+    pub const protocol_version = registry.protocol_version;
+    pub const contract_fingerprint = [_]u8{0xff} ** registry.contract_fingerprint.len;
+
+    pub fn indexOf(name: []const u8) ?u16 {
+        return registry.indexOf(name);
+    }
+};
 const runtime_ns = native_sdk.runtime;
 
 const canvas_label = "ts-services-canvas";
@@ -174,6 +182,38 @@ test "service authority environment is an explicit allowlist" {
     try std.testing.expect(native_sdk.serviceEnvironmentVariableAllowed("SSL_CERT_FILE"));
     try std.testing.expect(!native_sdk.serviceEnvironmentVariableAllowed("NATIVE_SDK_CORE_COMPILER"));
     try std.testing.expect(!native_sdk.serviceEnvironmentVariableAllowed("AWS_SECRET_ACCESS_KEY"));
+}
+
+test "service host refuses a sibling built from a different registry" {
+    try resetFixtureDir();
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_root) catch {};
+    const executable_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        fixture_options.service_executable,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(executable_path);
+    const SkewedTransport = native_sdk.ServiceHost(SkewedRegistry);
+    var transport = SkewedTransport.init(
+        std.testing.allocator,
+        std.testing.io,
+        executable_path,
+        fixture_root,
+        null,
+    );
+    defer transport.deinit();
+    const binding = transport.binding();
+    binding.request_fn(binding.context, "feeds.parse", 91, "feed");
+
+    var waited_ms: usize = 0;
+    while (!(binding.pending_fn orelse unreachable)(binding.context)) : (waited_ms += 5) {
+        if (waited_ms >= 30_000) return error.TestTimedOut;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake);
+    }
+    const completion = (binding.poll_fn orelse unreachable)(binding.context) orelse return error.TestExpectedServiceCompletion;
+    try std.testing.expectEqual(@as(u64, 91), completion.key);
+    try std.testing.expect(!completion.ok);
+    try std.testing.expect(std.mem.indexOf(u8, completion.bytes, "service host exited or rejected") != null);
 }
 
 test "ordinary TypeScript service success and kind-tagged throw route through Msgs" {

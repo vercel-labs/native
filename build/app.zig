@@ -359,7 +359,13 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
 /// its own compile. The staged module directory carries core.zig (the
 /// mirror) + its staged runtime + app.native + main.zig, so the
 /// generated wiring imports one fixed shape.
-fn tsCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8, app_name: []const u8) TsCoreStage {
+fn tsCoreStage(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    app_root: []const u8,
+    app_name: []const u8,
+) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
 
@@ -447,8 +453,14 @@ fn tsCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8, 
         service_compile.addArg("--contract");
         service_compile.addFileArg(service_contract);
         service_compile.addArg("--out-exe");
-        const service_suffix = if (b.graph.host.result.os.tag == .windows) ".exe" else "";
+        const service_suffix = if (target.result.os.tag == .windows) ".exe" else "";
         service_exe = service_compile.addOutputFileArg(b.fmt("{s}_services{s}", .{ app_name, service_suffix }));
+        service_compile.addArgs(&.{
+            "--host-platform",
+            b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+            "--target-platform",
+            b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi }),
+        });
         if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
             service_compile.addArgs(&.{ "--compiler", override });
         } else {
@@ -769,7 +781,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
     }
     const ts_stage: ?TsCoreStage = if (core_tree == .ts)
-        tsCoreStage(b, dep, app_options.app_root, app_options.name)
+        tsCoreStage(b, dep, target, app_options.app_root, app_options.name)
     else
         null;
 

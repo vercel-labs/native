@@ -213,19 +213,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("warning[package.no-binary]: no app binary at zig-out/bin/{s} and no --binary flag - the package will not contain an executable\n" ++
                 "  build the app first (`zig build`) or pass --binary <path>\n", .{metadata.name});
         }
-        const explicit_service_binary_path = try flagValue(args, "--service-binary");
-        const has_service_sources = explicit_service_binary_path == null and target != .ios and target != .android and
-            try tooling.package.projectHasTypeScriptServices(allocator, init.io, project_dir);
-        const service_binary_path = explicit_service_binary_path orelse if (has_service_sources)
-            try tooling.package.discoverInstalledServiceBinary(allocator, init.io, project_dir, metadata.name, target)
-        else
-            null;
-        if (has_service_sources and service_binary_path == null) {
-            std.debug.print("warning[package.no-service-binary]: no service host at zig-out/bin/{s}_services and no --service-binary flag - service calls will fail in the package\n" ++
-                "  build the app first (`native build`) or pass --service-binary <path>\n", .{metadata.name});
-        } else if (explicit_service_binary_path == null and service_binary_path != null) {
-            std.debug.print("info[package.service-binary]: using zig-out/bin/{s}_services\n", .{metadata.name});
-        }
+        const service_binary_path = try resolvePackageServiceBinary(allocator, init.io, args, project_dir, metadata.name, target);
         if (web_engine.engine == .chromium and web_engine.cef_auto_install) {
             try tooling.cef.run(allocator, init.io, init.environ_map, &.{ "install", "--dir", web_engine.cef_dir });
         }
@@ -407,8 +395,8 @@ fn usage() void {
         \\  bundle-assets [app.zon] [assets] [output]
         \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
         \\  dev [--manifest app.zon] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
-        \\  package-windows [--output path] [--binary path]
-        \\  package-linux [--output path] [--binary path]
+        \\  package-windows [--output path] [--binary path] [--service-binary path]
+        \\  package-linux [--output path] [--binary path] [--service-binary path]
         \\  package-ios [--output path] [--binary path]
         \\  package-android [--output path] [--binary path]
         \\  markup check <file.native> [more files...] [--strict] | markup dump <file.native> [--out doc.nsui] | markup lsp
@@ -439,11 +427,11 @@ const VerbSpec = struct {
 };
 
 fn checkPackageShortcutFlags(verb: []const u8, args: []const []const u8) void {
-    var usage_buffer: [128]u8 = undefined;
-    const usage_text = std.fmt.bufPrint(&usage_buffer, "{s} [--output path] [--binary path] [--manifest app.zon] [--assets path]", .{verb}) catch verb;
+    var usage_buffer: [192]u8 = undefined;
+    const usage_text = std.fmt.bufPrint(&usage_buffer, "{s} [--output path] [--binary path] [--service-binary path] [--manifest app.zon] [--assets path]", .{verb}) catch verb;
     checkVerbFlags(verb, args, .{
         .usage = usage_text,
-        .value_flags = &.{ "--manifest", "--output", "--binary", "--assets" },
+        .value_flags = &.{ "--manifest", "--output", "--binary", "--service-binary", "--assets" },
     });
 }
 
@@ -874,13 +862,17 @@ fn splitCommand(allocator: std.mem.Allocator, value: []const u8) ![]const []cons
 }
 
 fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, args: []const []const u8, target: tooling.package.PackageTarget, default_output: []const u8) !void {
-    const metadata = try tooling.manifest.readMetadata(allocator, io, try flagValue(args, "--manifest") orelse "app.zon");
+    const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
+    const project_dir = std.fs.path.dirname(manifest_path) orelse ".";
+    const metadata = try tooling.manifest.readMetadata(allocator, io, manifest_path);
     const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
     const stats = try tooling.package.createPackage(allocator, io, .{
         .metadata = metadata,
         .target = target,
         .output_path = try flagValue(args, "--output") orelse default_output,
+        .project_dir = project_dir,
         .binary_path = try flagValue(args, "--binary"),
+        .service_binary_path = try resolvePackageServiceBinary(allocator, io, args, project_dir, metadata.name, target),
         .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
         .frontend = metadata.frontend,
         .web_engine = web_engine.engine,
@@ -888,4 +880,28 @@ fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
         .env_map = env_map,
     });
     tooling.package.printDiagnostic(stats);
+}
+
+/// One service-host resolution path for the canonical package verb and the
+/// compatibility package-{windows,linux} shortcuts. Explicit input wins;
+/// otherwise a service-bearing source tree discovers the normal build output.
+fn resolvePackageServiceBinary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    args: []const []const u8,
+    project_dir: []const u8,
+    app_name: []const u8,
+    target: tooling.package.PackageTarget,
+) !?[]const u8 {
+    if (try flagValue(args, "--service-binary")) |explicit| return explicit;
+    if (target == .ios or target == .android) return null;
+    if (!try tooling.package.projectHasTypeScriptServices(allocator, io, project_dir)) return null;
+    const discovered = try tooling.package.discoverInstalledServiceBinary(allocator, io, project_dir, app_name, target);
+    if (discovered) |_| {
+        std.debug.print("info[package.service-binary]: using zig-out/bin/{s}_services\n", .{app_name});
+    } else {
+        std.debug.print("warning[package.no-service-binary]: no service host at zig-out/bin/{s}_services and no --service-binary flag - service calls will fail in the package\n" ++
+            "  build the app first (`native build`) or pass --service-binary <path>\n", .{app_name});
+    }
+    return discovered;
 }

@@ -101,6 +101,15 @@ test("NS1066 refuses phase-1 npm imports but permits compiler-shipped Node built
 });
 
 test("NS1067 validates operation signatures, throws, and core service call names", () => {
+  const emptySurface = checkFiles({
+    "core.ts": serviceCore,
+    "services/helper.ts": `export class Helper { parse(bytes: Uint8Array): Uint8Array { return bytes; } }`,
+  });
+  const emptyDiagnostic = emptySurface.diagnostics.find((d) => d.id === "NS1067");
+  assert.ok(emptyDiagnostic, JSON.stringify(emptySurface.diagnostics));
+  assert.match(emptyDiagnostic.message, /exports no callable operations/);
+  assert.equal(emptySurface.servicesContract, null);
+
   const badSignature = checkFiles({
     "core.ts": serviceCore,
     "services/feeds.ts": `export async function parse(value: string): Promise<string> { return value; }`,
@@ -266,10 +275,38 @@ test("the service compile lane refuses a contract whose compiler echo skews from
       "--manifest", path.join(root, "package.json"),
       "--contract", path.join(root, "services.contract.json"),
       "--out-exe", path.join(root, "service-host"),
+      "--host-platform", "test-test-test",
+      "--target-platform", "test-test-test",
       "--compiler", process.execPath,
     ], { encoding: "utf8" });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /contract echoes scriptc 0\.0\.21, but packages\/core pins 0\.0\.22/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the service compile lane refuses a target that differs from the build host", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-target-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.22" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.22" }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-exe", path.join(root, "service-host.exe"),
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "x86_64-windows-gnu",
+      "--compiler", process.execPath,
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /currently compile only for the build host/);
+    assert.match(result.stderr, /x86_64-windows-gnu/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

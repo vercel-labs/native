@@ -157,13 +157,14 @@ Package the app for distribution. The manifest is picked up at `app.zon` and the
 ### Platform shortcuts
 
 ```sh
-native package-windows [--output path] [--binary path]
-native package-linux [--output path] [--binary path]
+native package-windows [--output path] [--binary path] [--service-binary path]
+native package-linux [--output path] [--binary path] [--service-binary path]
 native package-ios [--output path] [--binary path]
 native package-android [--output path] [--binary path]
 ```
 
 Per-platform shortcuts for `native package --target <platform>`.
+The desktop shortcuts use an explicit `--service-binary` when supplied; otherwise, service-bearing projects discover the normal `zig-out/bin/<app>_services[.exe]` build output just like the canonical command.
 
 ### `native bundle-assets`
 

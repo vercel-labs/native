@@ -404,9 +404,14 @@ pub fn ServiceHost(comptime Registry: type) type {
             self.child_id = child.*.?.id;
             self.child_reaping = false;
             self.mutex.unlock(self.io);
+            const stdout = child.*.?.stdout orelse return error.NoServiceStdout;
             var hello: [5]u8 = undefined;
-            try readExact(self.io, child.*.?.stdout orelse return error.NoServiceStdout, &hello);
-            if (readU32(&hello, 0) != 1 or hello[4] != Registry.protocol_version) return error.ServiceProtocolSkew;
+            try readExact(self.io, stdout, &hello);
+            if (readU32(&hello, 0) != @as(u32, @intCast(1 + Registry.contract_fingerprint.len)) or
+                hello[4] != Registry.protocol_version) return error.ServiceProtocolSkew;
+            var fingerprint: [Registry.contract_fingerprint.len]u8 = undefined;
+            try readExact(self.io, stdout, &fingerprint);
+            if (!std.mem.eql(u8, &fingerprint, &Registry.contract_fingerprint)) return error.ServiceProtocolSkew;
         }
 
         fn retireChild(self: *Self, child: *?std.process.Child) void {
@@ -467,6 +472,7 @@ fn readU32(bytes: []const u8, at: usize) u32 {
 test "service host binding is lazy and shuts down without spawning" {
     const Registry = struct {
         pub const protocol_version: u8 = 1;
+        pub const contract_fingerprint = [_]u8{0} ** 32;
         pub fn indexOf(name: []const u8) ?u16 {
             return if (std.mem.eql(u8, name, "fixture.echo")) 0 else null;
         }

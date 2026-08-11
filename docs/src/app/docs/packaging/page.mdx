@@ -332,11 +332,13 @@ native validate app.zon
 In addition to `native package --target <platform>`, the CLI provides shortcut commands:
 
 ```bash
-native package-windows [--output path] [--binary path]
-native package-linux [--output path] [--binary path]
+native package-windows [--output path] [--binary path] [--service-binary path]
+native package-linux [--output path] [--binary path] [--service-binary path]
 native package-ios [--output path] [--binary path]
 native package-android [--output path] [--binary path]
 ```
+
+The desktop shortcuts use an explicit `--service-binary` when supplied; otherwise, service-bearing projects discover the normal `zig-out/bin/<app>_services[.exe]` build output just like `native package`.
 
 ## Platform targets
 

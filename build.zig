@@ -3136,6 +3136,8 @@ fn externalServiceFixture(
     compile.addArg("--out-exe");
     const suffix = if (b.graph.host.result.os.tag == .windows) ".exe" else "";
     const executable = compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
+    const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
+    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", host_platform });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {

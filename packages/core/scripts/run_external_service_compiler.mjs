@@ -14,12 +14,12 @@ function parseArgs(argv) {
     const key = argv[i];
     const value = argv[i + 1];
     if (!key?.startsWith("--") || value === undefined) {
-      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> --out-exe <file> (--compiler <cmd> | --compiler-js <main.js>)");
+      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> --out-exe <file> --host-platform <arch-os-abi> --target-platform <arch-os-abi> (--compiler <cmd> | --compiler-js <main.js>)");
       process.exit(2);
     }
     args[key.slice(2)] = value;
   }
-  for (const required of ["stage", "manifest", "contract", "out-exe"]) {
+  for (const required of ["stage", "manifest", "contract", "out-exe", "host-platform", "target-platform"]) {
     if (!args[required]) {
       console.error(`run_external_service_compiler.mjs: missing --${required}`);
       process.exit(2);
@@ -33,6 +33,13 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv);
+if (args["target-platform"] !== args["host-platform"]) {
+  console.error(
+    `TypeScript services currently compile only for the build host (${args["host-platform"]}), but the app targets ${args["target-platform"]}. ` +
+    "Build the service app on its target platform until the pinned service compiler supports cross-target executables.",
+  );
+  process.exit(2);
+}
 for (const key of ["stage", "manifest", "contract", "out-exe", "compiler-js"]) {
   if (args[key]) args[key] = path.resolve(args[key]);
 }

@@ -198,6 +198,9 @@ export function emitServiceContract(
     visitThrows(file);
   }
 
+  if (operations.length === 0 && diagnostics.length === 0) {
+    diagnostics.push(report("The service tree exports no callable operations.", files[0]));
+  }
   if (diagnostics.length > 0) return { operations, diagnostics, contract: null };
   const document = {
     format: serviceContractFormat,

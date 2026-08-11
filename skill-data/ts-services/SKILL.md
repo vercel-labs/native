@@ -61,13 +61,14 @@ Results enter through the ordinary host-result effect queue and are journaled. D
 
 ## Authority and process contract
 
-The phase-1 carrier is a plain-scriptc executable placed beside the desktop app and spawned lazily on the first live request. One worker thread owns it and its framed stdin/stdout protocol. A crash fails the interrupted request through its error arm; the next request starts a fresh host. `Cmd.host` can use the same generated registry for fire-and-forget operations.
+The phase-1 carrier is a plain-scriptc executable placed beside the desktop app and spawned lazily on the first live request. One worker thread owns it and its framed stdin/stdout protocol. The startup hello carries the protocol version and a SHA-256 fingerprint of the operation registry; a stale or mismatched sibling fails before numeric dispatch. A crash fails the interrupted request through its error arm; the next request starts a fresh host. `Cmd.host` can use the same generated registry for fire-and-forget operations.
 
 The service process runs with the app's privileges and uses the resolved app data directory as cwd. Its environment is rebuilt from an allowlist: `PATH`, `HOME`, `USER`, temp variables, locale/time-zone variables, certificate paths, and proxy variables; Windows matches names case-insensitively and also carries `USERPROFILE`, `USERNAME`, `SystemRoot`, `COMSPEC`, and `PATHEXT`. `NATIVE_SDK_*` internals are never inherited. Standard output belongs to the frame protocol; write diagnostics to standard error.
 
 The current carrier means:
 
 - desktop only; there is no iOS/Android subprocess path;
+- service executables compile for the build host only; cross-target service builds are rejected until the compiler can emit the requested desktop target;
 - one extra signed executable in the bundle/package;
 - one process hop and two payload copies per request;
 - bytes-only request/results, no streaming, npm, or async service entry points yet.
