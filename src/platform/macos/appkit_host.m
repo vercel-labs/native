@@ -72,13 +72,19 @@ static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
     id service = NativeSdkMainAppService();
     if (!service) return -1;
     int before = NativeSdkLaunchAtLoginStatus();
-    if ((enabled && before == 1) || (!enabled && before == 0)) return before;
+    // Requires-approval is already registered in the requested enabled
+    // direction. Re-registering it returns kSMErrorAlreadyRegistered or
+    // kSMErrorLaunchDeniedByUser instead of advancing the user's consent.
+    if ((enabled && (before == 1 || before == 2)) || (!enabled && before == 0)) return before;
     SEL selector = NSSelectorFromString(enabled ? @"registerAndReturnError:" : @"unregisterAndReturnError:");
     if (![service respondsToSelector:selector]) return -1;
     NSError *error = nil;
     IMP implementation = [service methodForSelector:selector];
     BOOL succeeded = ((BOOL (*)(id, SEL, NSError **))implementation)(service, selector, &error);
-    return succeeded ? NativeSdkLaunchAtLoginStatus() : -1;
+    // -1 is reserved for an unavailable service/API. A supported service
+    // refusing the operation is a real failure so the TypeScript effect can
+    // distinguish "failed" from "unsupported".
+    return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;
 }
 static void *NativeSdkAppKitAppearanceObservationContext = &NativeSdkAppKitAppearanceObservationContext;
 /* KVO contexts for the app's single audio player: the AVPlayerItem's
@@ -7889,7 +7895,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if ([self.passiveShowWindows containsObject:@(windowId)]) {
         [window orderFront:nil];
     } else {
-        [NSApp activate];
+        [NSApp activateIgnoringOtherApps:YES];
         [window makeKeyAndOrderFront:nil];
     }
 }
@@ -7962,7 +7968,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     // the runtime asked for the window NOW.
     [self.deferredShowWindows removeObjectForKey:@(windowId)];
     [self.policyHiddenWindows removeObject:@(windowId)];
-    [NSApp activate];
+    [NSApp activateIgnoringOtherApps:YES];
     [window makeKeyAndOrderFront:nil];
     [self emitWindowFrameForWindowId:windowId open:YES];
     [self scheduleFrame];
@@ -12509,7 +12515,7 @@ int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visi
     (void)host;
     NSApplicationActivationPolicy policy = visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
     BOOL changed = [NSApp setActivationPolicy:policy];
-    if (visible) [NSApp activate];
+    if (visible) [NSApp activateIgnoringOtherApps:YES];
     return changed || NSApp.activationPolicy == policy ? 1 : 0;
 }
 

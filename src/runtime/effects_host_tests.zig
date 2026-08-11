@@ -10,6 +10,7 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const app_manifest = @import("app_manifest");
+const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
@@ -85,6 +86,14 @@ const timer_key: u64 = 9;
 
 // Set by tests before dispatching `.ask`/`.replace`.
 var test_payload: []const u8 = "";
+
+fn failLaunchAtLoginStatus(_: ?*anyopaque) anyerror!platform.LaunchAtLoginStatus {
+    return error.LaunchAtLoginFailed;
+}
+
+fn failSetLaunchAtLogin(_: ?*anyopaque, _: bool) anyerror!platform.LaunchAtLoginStatus {
+    return error.LaunchAtLoginFailed;
+}
 
 fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
     switch (msg) {
@@ -279,6 +288,23 @@ test "native launch-at-login set preserves an unsupported platform result" {
     try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
     try std.testing.expectEqualStrings("unsupported", h.app_state.model.bytesPrefix());
     try std.testing.expectEqual(@as(u32, 0), h.harness.null_platform.launch_at_login_set_count);
+}
+
+test "native launch-at-login requests distinguish operation failures from unsupported" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    h.harness.runtime.options.platform.services.launch_at_login_status_fn = failLaunchAtLoginStatus;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .query_launch_at_login);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("failed", h.app_state.model.bytesPrefix());
+
+    h.harness.runtime.options.platform.services.set_launch_at_login_fn = failSetLaunchAtLogin;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .enable_launch_at_login);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 2), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("failed", h.app_state.model.bytesPrefix());
 }
 
 test "re-issuing a live host key replaces the pending request and drops the undelivered result" {

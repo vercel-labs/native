@@ -7707,8 +7707,8 @@ pub fn Effects(comptime Msg: type) type {
                     self.feedHostResult(key, false, "invalid_request") catch {};
                     return;
                 }
-                const status = services.launchAtLoginStatus() catch {
-                    self.feedHostResult(key, false, "unsupported") catch {};
+                const status = services.launchAtLoginStatus() catch |err| {
+                    self.feedHostResult(key, false, launchAtLoginErrorName(err)) catch {};
                     return;
                 };
                 self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
@@ -7719,11 +7719,7 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             }
             const status = services.setLaunchAtLogin(payload[0] == 1) catch |err| {
-                const message = switch (err) {
-                    error.UnsupportedService => "unsupported",
-                    else => "failed",
-                };
-                self.feedHostResult(key, false, message) catch {};
+                self.feedHostResult(key, false, launchAtLoginErrorName(err)) catch {};
                 return;
             };
             self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
@@ -7735,6 +7731,13 @@ pub fn Effects(comptime Msg: type) type {
                 .enabled => "enabled",
                 .requires_approval => "requires_approval",
                 .not_found => "not_found",
+            };
+        }
+
+        fn launchAtLoginErrorName(err: anyerror) []const u8 {
+            return switch (err) {
+                error.UnsupportedService => "unsupported",
+                else => "failed",
             };
         }
 

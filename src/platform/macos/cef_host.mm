@@ -78,13 +78,19 @@ static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
     id service = NativeSdkMainAppService();
     if (!service) return -1;
     int before = NativeSdkLaunchAtLoginStatus();
-    if ((enabled && before == 1) || (!enabled && before == 0)) return before;
+    // Requires-approval is already registered in the requested enabled
+    // direction. Re-registering it returns kSMErrorAlreadyRegistered or
+    // kSMErrorLaunchDeniedByUser instead of advancing the user's consent.
+    if ((enabled && (before == 1 || before == 2)) || (!enabled && before == 0)) return before;
     SEL selector = NSSelectorFromString(enabled ? @"registerAndReturnError:" : @"unregisterAndReturnError:");
     if (![service respondsToSelector:selector]) return -1;
     NSError *error = nil;
     IMP implementation = [service methodForSelector:selector];
     BOOL succeeded = ((BOOL (*)(id, SEL, NSError **))implementation)(service, selector, &error);
-    return succeeded ? NativeSdkLaunchAtLoginStatus() : -1;
+    // -1 is reserved for an unavailable service/API. A supported service
+    // refusing the operation is a real failure so the TypeScript effect can
+    // distinguish "failed" from "unsupported".
+    return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;
 }
 static const char *NativeSdkCefBridgeScript();
 static NSRect NativeSdkConstrainFrame(NSRect frame);

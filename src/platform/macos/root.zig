@@ -1367,7 +1367,8 @@ fn launchAtLoginStatusFromInt(value: c_int) anyerror!platform_mod.LaunchAtLoginS
         1 => .enabled,
         2 => .requires_approval,
         3 => .not_found,
-        else => error.UnsupportedService,
+        -1 => error.UnsupportedService,
+        else => error.LaunchAtLoginFailed,
     };
 }
 
@@ -2667,7 +2668,7 @@ test "mac active implicit show activates before making the window key" {
         \\    if ([self.passiveShowWindows containsObject:@(windowId)]) {
         \\        [window orderFront:nil];
         \\    } else {
-        \\        [NSApp activate];
+        \\        [NSApp activateIgnoringOtherApps:YES];
         \\        [window makeKeyAndOrderFront:nil];
         \\    }
     ) != null);
@@ -2696,7 +2697,7 @@ test "mac explicit focus activates before making the window key" {
         \\    // the runtime asked for the window NOW.
         \\    [self.deferredShowWindows removeObjectForKey:@(windowId)];
         \\    [self.policyHiddenWindows removeObject:@(windowId)];
-        \\    [NSApp activate];
+        \\    [NSApp activateIgnoringOtherApps:YES];
         \\    [window makeKeyAndOrderFront:nil];
     ) != null);
 }
@@ -3021,6 +3022,16 @@ test "mac appearance event carries accessibility preferences" {
     try std.testing.expect(event.high_contrast != 0);
 }
 
+test "mac launch-at-login result keeps unsupported separate from operation failure" {
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.disabled, try launchAtLoginStatusFromInt(0));
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.enabled, try launchAtLoginStatusFromInt(1));
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.requires_approval, try launchAtLoginStatusFromInt(2));
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.not_found, try launchAtLoginStatusFromInt(3));
+    try std.testing.expectError(error.UnsupportedService, launchAtLoginStatusFromInt(-1));
+    try std.testing.expectError(error.LaunchAtLoginFailed, launchAtLoginStatusFromInt(-2));
+    try std.testing.expectError(error.LaunchAtLoginFailed, launchAtLoginStatusFromInt(99));
+}
+
 test "both mac hosts carry the menu-bar lifecycle and fullscreen hooks" {
     const hosts = [_][]const u8{
         @embedFile("appkit_host.m"),
@@ -3033,6 +3044,8 @@ test "both mac hosts carry the menu-bar lifecycle and fullscreen hooks" {
         try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_set_launch_at_login") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "registerAndReturnError:") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "unregisterAndReturnError:") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "before == 1 || before == 2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "dlopen(") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "ServiceManagement.framework/ServiceManagement") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSWindowCollectionBehaviorFullScreenNone") != null);
@@ -3045,6 +3058,8 @@ test "both mac hosts carry the menu-bar lifecycle and fullscreen hooks" {
     // reveal. An explicit hide must retire that pending reveal before it
     // records the policy-hidden state.
     const appkit_source = hosts[0];
+    try std.testing.expect(std.mem.indexOf(u8, appkit_source, "[NSApp activate]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, appkit_source, "[NSApp activateIgnoringOtherApps:YES]") != null);
     const hide_at = std.mem.indexOf(u8, appkit_source, "- (void)hideWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
     const hide_tail = appkit_source[hide_at..];
     const show_at = std.mem.indexOf(u8, hide_tail, "- (void)showWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
