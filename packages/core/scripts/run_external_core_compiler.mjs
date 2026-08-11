@@ -9,7 +9,8 @@
 // the same rule).
 //
 //   node run_external_core_compiler.mjs --stage <dir> --name <symbol name>
-//     --manifest <packages/core/package.json> --out-archive <file>
+//     --manifest <packages/core/package.json> --frontend-sidecar <file>
+//     --out-archive <file>
 //     --out-sidecar <file> (--compiler <cmd> | --compiler-js <main.js>)
 
 import { spawnSync } from "node:child_process";
@@ -23,12 +24,12 @@ function parseArgs(argv) {
     const key = argv[i];
     const value = argv[i + 1];
     if (!key.startsWith("--") || value === undefined) {
-      console.error("usage: run_external_core_compiler.mjs --stage <dir> --name <n> --manifest <package.json> --out-archive <file> --out-sidecar <file> (--compiler <cmd> | --compiler-js <main.js>)");
+      console.error("usage: run_external_core_compiler.mjs --stage <dir> --name <n> --manifest <package.json> --frontend-sidecar <file> --out-archive <file> --out-sidecar <file> (--compiler <cmd> | --compiler-js <main.js>)");
       process.exit(2);
     }
     args[key.slice(2)] = value;
   }
-  for (const required of ["stage", "name", "manifest", "out-archive", "out-sidecar"]) {
+  for (const required of ["stage", "name", "manifest", "frontend-sidecar", "out-archive", "out-sidecar"]) {
     if (!(required in args)) {
       console.error(`run_external_core_compiler.mjs: missing --${required}`);
       process.exit(2);
@@ -44,7 +45,7 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv);
 // Every path argument resolves against the INVOCATION's cwd up front:
 // the compile itself runs from a scratch directory.
-for (const key of ["stage", "manifest", "out-archive", "out-sidecar", "compiler-js"]) {
+for (const key of ["stage", "manifest", "frontend-sidecar", "out-archive", "out-sidecar", "compiler-js"]) {
   if (key in args) args[key] = path.resolve(args[key]);
 }
 // --compiler is a COMMAND: a bare executable path (possibly containing
@@ -102,7 +103,19 @@ try {
   fs.mkdirSync(path.dirname(args["out-archive"]), { recursive: true });
   fs.mkdirSync(path.dirname(args["out-sidecar"]), { recursive: true });
   fs.copyFileSync(path.join(work, produced), args["out-archive"]);
-  fs.copyFileSync(sidecar, args["out-sidecar"]);
+
+  // The pinned compiler owns the archive contract (including its build id),
+  // while the SDK frontend owns facts the compiler release predates. Carry
+  // exactly those checked persistence facts across the compile boundary.
+  const compiledContract = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+  const frontendContract = JSON.parse(fs.readFileSync(args["frontend-sidecar"], "utf8"));
+  if (!/^[0-9a-f]{16}$/.test(frontendContract.model_fingerprint ?? "") || typeof frontendContract.has_migrate !== "boolean") {
+    console.error("the frontend contract is missing its checked persistence metadata — the SDK frontend and build driver are out of sync");
+    process.exit(1);
+  }
+  compiledContract.model_fingerprint = frontendContract.model_fingerprint;
+  compiledContract.has_migrate = frontendContract.has_migrate;
+  fs.writeFileSync(args["out-sidecar"], `${JSON.stringify(compiledContract, null, 2)}\n`);
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
 }

@@ -1082,6 +1082,14 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u32, record.pty_dropped_writes);
     try cursor.writeBytes(&record.pty_blob_hash);
     try cursor.writeInt(u64, record.pty_blob_len);
+    // Model restore is the first kind-local suffix. Keeping it conditional
+    // preserves every established effect record's byte layout (tests and
+    // tooling deliberately patch those records at known offsets).
+    if (record.kind == .persist) {
+        try cursor.writeEnum(record.persist_outcome);
+        try cursor.writeBytes(&record.persist_blob_hash);
+        try cursor.writeInt(u64, record.persist_blob_len);
+    }
     return buffer[0..cursor.len];
 }
 
@@ -1140,6 +1148,11 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     record.pty_dropped_writes = try cursor.readInt(u32);
     @memcpy(&record.pty_blob_hash, try cursor.readBytes(record.pty_blob_hash.len));
     record.pty_blob_len = try cursor.readInt(u64);
+    if (record.kind == .persist) {
+        record.persist_outcome = try cursor.readEnum(runtime_effects.EffectPersistOutcome);
+        @memcpy(&record.persist_blob_hash, try cursor.readBytes(record.persist_blob_hash.len));
+        record.persist_blob_len = try cursor.readInt(u64);
+    }
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -1743,6 +1756,22 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expect(video_decoded.video_buffering);
     try testing.expectEqual(@as(u64, 1280), video_decoded.video_width);
     try testing.expectEqual(@as(u64, 720), video_decoded.video_height);
+
+    // Persistence is a kind-local suffix: successful restore bytes live in
+    // the blob store, while the journal carries its closed outcome/address.
+    const persist_hash: [runtime_effects.effect_image_blob_hash_len]u8 = @splat(0xa5);
+    const persist_encoded = try encodeEffect(.{
+        .kind = .persist,
+        .key = 0,
+        .persist_outcome = .ok,
+        .persist_blob_hash = persist_hash,
+        .persist_blob_len = 4096,
+    }, &buffer);
+    const persist_decoded = try decodeEffect(persist_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.persist, persist_decoded.kind);
+    try testing.expectEqual(runtime_effects.EffectPersistOutcome.ok, persist_decoded.persist_outcome);
+    try testing.expectEqualSlices(u8, &persist_hash, &persist_decoded.persist_blob_hash);
+    try testing.expectEqual(@as(u64, 4096), persist_decoded.persist_blob_len);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {

@@ -38,6 +38,7 @@ test {
     _ = @import("platform_bridge_tests.zig");
     _ = @import("session_journal.zig");
     _ = @import("session_blobs.zig");
+    _ = @import("persist_store.zig");
     _ = @import("session_record.zig");
     _ = @import("session_tests.zig");
 }

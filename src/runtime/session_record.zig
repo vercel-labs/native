@@ -229,6 +229,18 @@ pub const SessionRecorder = struct {
             journaled.pty_blob_len = record.payload.len;
             journaled.payload = "";
         }
+        if (record.kind == .persist and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a model restore needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.persist_blob_hash = hash;
+            journaled.persist_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
         const payload = journal.encodeEffect(journaled, &self.effect_buffer) catch {
             return self.fail("an effect result exceeded max_session_record_bytes");
         };
@@ -367,6 +379,31 @@ test "recorder orders effect results before their consuming event" {
     const end = (try reader.next()).?;
     try testing.expectEqual(@as(u64, 2), end.end.event_count);
     try testing.expectEqual(@as(u64, 1), end.end.effect_count);
+}
+
+test "recorder moves model restore snapshots into the session blob store" {
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+
+    recorder.begin(.{ .platform_name = "test", .app_name = "persisted" });
+    recorder.recordEffect(.{ .kind = .persist, .key = 0, .payload = "canonical model", .persist_outcome = .ok });
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(runtime_effects.EffectResultKind.persist, effect.kind);
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expectEqual(@as(u64, "canonical model".len), effect.persist_blob_len);
+    var scratch: [64]u8 = undefined;
+    const restored = try blobs.read(effect.persist_blob_hash, &scratch);
+    try testing.expectEqualStrings("canonical model", restored);
 }
 
 test "recorder commits nested events innermost-first" {

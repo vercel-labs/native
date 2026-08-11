@@ -318,6 +318,13 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .persist and persistRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: model-restore record claims .{s} with {d} inline bytes and a {d}-byte blob - only .ok may carry canonical snapshot bytes, always out of line and bounded at {d}; re-record the session\n",
+                        .{ report.events_replayed, @tagName(effect.persist_outcome), effect.payload.len, effect.persist_blob_len, runtime_effects.max_effect_persist_snapshot_bytes },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -332,7 +339,7 @@ pub fn replaySession(
                 var blob_scratch: ?[]u8 = null;
                 defer if (blob_scratch) |scratch| std.heap.page_allocator.free(scratch);
                 if (effect.kind == .pty and effect.pty_blob_len > 0) {
-                    const bytes = resolveBlob(effect.pty_blob_hash, effect.pty_blob_len, options.blobs, &blob_scratch) catch |err| {
+                    const bytes = resolveBlob(effect.pty_blob_hash, effect.pty_blob_len, runtime_effects.max_effect_pty_chunk_bytes, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: pty record for key {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
                             .{ report.events_replayed, effect.key, session_blobs.hexName(effect.pty_blob_hash), effect.pty_blob_len, @errorName(err) },
@@ -342,10 +349,20 @@ pub fn replaySession(
                     effect.payload = bytes;
                 }
                 if (effect.kind == .image and effect.image_blob_len > 0) {
-                    const bytes = resolveBlob(effect.image_blob_hash, effect.image_blob_len, options.blobs, &blob_scratch) catch |err| {
+                    const bytes = resolveBlob(effect.image_blob_hash, effect.image_blob_len, runtime_effects.max_effect_image_bytes, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: image record for id {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
                             .{ report.events_replayed, effect.key, session_blobs.hexName(effect.image_blob_hash), effect.image_blob_len, @errorName(err) },
+                        );
+                        return error.ReplayMissingBlob;
+                    };
+                    effect.payload = bytes;
+                }
+                if (effect.kind == .persist and effect.persist_blob_len > 0) {
+                    const bytes = resolveBlob(effect.persist_blob_hash, effect.persist_blob_len, runtime_effects.max_effect_persist_snapshot_bytes, options.blobs, &blob_scratch) catch |err| {
+                        std.debug.print(
+                            "replay refused after event {d}: model restore references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
+                            .{ report.events_replayed, session_blobs.hexName(effect.persist_blob_hash), effect.persist_blob_len, @errorName(err) },
                         );
                         return error.ReplayMissingBlob;
                     };
@@ -449,11 +466,12 @@ pub fn replaySession(
 fn resolveBlob(
     blob_hash: [runtime_effects.effect_image_blob_hash_len]u8,
     blob_len_field: u64,
+    max_bytes: usize,
     blobs: ?session_blobs.SessionBlobSource,
     scratch_out: *?[]u8,
 ) anyerror![]const u8 {
     const blob_source = blobs orelse return error.BlobMissing;
-    if (blob_len_field > session_blobs.max_blob_bytes) return error.BlobOverBudget;
+    if (blob_len_field > max_bytes) return error.BlobOverBudget;
     const blob_len: usize = @intCast(blob_len_field);
     // One spare byte proves the stored blob is not LONGER than the
     // record claims (the source reads at most the buffer).
@@ -523,6 +541,12 @@ fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
         },
     }
     return false;
+}
+
+fn persistRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.payload.len > 0) return true;
+    if (record.persist_blob_len > runtime_effects.max_effect_persist_snapshot_bytes) return true;
+    return record.persist_outcome != .ok and record.persist_blob_len > 0;
 }
 
 /// Recorder truth for pty provenance: output records always carry
@@ -707,7 +731,7 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // Launch-env deliveries are exactly what must NOT regenerate:
         // the recorded values feed the replayed envMsgs dispatch so the
         // replay launch's environment is never consulted.
-        .line, .clock, .env => false,
+        .line, .clock, .env, .persist => false,
     };
 }
 

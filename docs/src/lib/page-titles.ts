@@ -12,6 +12,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "typescript/packages": "Where Packages Go",
   "native-ui": "Native UI",
   "dynamic-images": "Dynamic Images",
+  persistence: "Model Persistence",
   terminal: "Terminal",
   state: "State & Data Flow",
   theming: "Theming",

@@ -10192,7 +10192,7 @@ test("multi-file corpus: gated cases teach, emit cases transpile clean", () => {
   }
 });
 
-test("NS1028: Cmd.persist still compiles but teaches the writeFile path as a warning", () => {
+test("NS1028: Cmd.persist compiles but requires the manifest capability", () => {
   const result = check(`
 import { Cmd } from "@native-sdk/core";
 export interface Model { readonly count: number; }
@@ -10211,7 +10211,35 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(result.diagnostics.length, 0);
   const w = result.warnings.find((d) => d.id === "NS1028");
   assert.ok(w, "reports NS1028 as a warning");
-  assert.ok(w.message.includes("writeFile"), "points at the writeFile path");
+  assert.ok(w.message.includes("persist` capability"), "points at the capability declaration");
+
+  const declared = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "add" } | { readonly kind: "noop" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "add": return [{ count: model.count + 1 }, Cmd.persist()];
+    case "noop": return model;
+  }
+}
+`, { capabilities: ["persist"] });
+  assert.equal(declared.warnings.some((d) => d.id === "NS1028"), false);
+});
+
+test("NS1028: an unused persist capability is an inverse warning", () => {
+  const result = check(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "noop" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "noop": return model; }
+}
+`, { capabilities: ["persist"] });
+  const warning = result.warnings.find((d) => d.id === "NS1028");
+  assert.ok(warning);
+  assert.ok(warning.message.includes("no `Cmd.persist()` call"));
 });
 
 test("NS1016 speaks in rule, fix, and why", () => {

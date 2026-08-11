@@ -161,6 +161,7 @@ pub const CapabilityKind = enum {
     dialog,
     clipboard,
     credentials,
+    persist,
     open_url,
     reveal_path,
     recent_documents,
@@ -186,6 +187,7 @@ pub const Capability = union(CapabilityKind) {
     dialog: void,
     clipboard: void,
     credentials: void,
+    persist: void,
     open_url: void,
     reveal_path: void,
     recent_documents: void,
@@ -637,12 +639,25 @@ pub const UpdateConfig = struct {
     check_on_start: bool = false,
 };
 
+pub const PersistRestore = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
+};
+
+pub const PersistConfig = struct {
+    version: u64,
+    debounce_ms: u32 = 500,
+    restore: PersistRestore,
+};
+
 pub const Manifest = struct {
     identity: AppIdentity,
     version: Version,
     icons: []const Icon = &.{},
     permissions: []const Permission = &.{},
     capabilities: []const Capability = &.{},
+    persist: ?PersistConfig = null,
     bridge: BridgeConfig = .{},
     frontend: ?FrontendConfig = null,
     security: SecurityConfig = .{},

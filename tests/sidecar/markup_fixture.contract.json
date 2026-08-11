@@ -1,11 +1,12 @@
 {
   "format": 1,
   "wire_version": 3,
-  "abi_version": 1,
+  "abi_version": 2,
   "compiler_version": "0.0.1",
   "entry": "tests/ts-core/markup_fixture.ts",
   "source_hash": "5eedc0de00000001",
   "build_id": "b11d1d0000000001",
+  "model_fingerprint": "a11ce00000000001",
   "types": {
     "structs": [
       {"name": "Task", "origin": "markup_fixture.ts", "fields": [
@@ -119,6 +120,7 @@
   "init_returns_cmd": false,
   "update_returns_cmd": true,
   "has_subscriptions": false,
+  "has_migrate": false,
   "channels": {
     "command_msg": false,
     "frame_msg": true,
@@ -137,7 +139,7 @@
       "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
       "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
       "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-      "helper_call", "frame_msg", "key_msg", "pinch_msg", "drop_msg"],
+      "persist_snapshot", "restore_model", "migrate_model", "helper_call", "frame_msg", "key_msg", "pinch_msg", "drop_msg"],
     "snapshot_format": 1
   },
   "integer_slots": [

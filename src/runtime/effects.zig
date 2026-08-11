@@ -74,6 +74,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const platform = @import("../platform/root.zig");
 const validation = @import("validation.zig");
 const runtime_clock = @import("clock.zig");
+const persist_store = @import("persist_store.zig");
 const pty_transport = @import("pty.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
@@ -165,6 +166,18 @@ pub const max_effect_file_path_bytes: usize = 1024;
 /// write would corrupt the file on disk, which truncation flags cannot
 /// undo.
 pub const max_effect_file_bytes: usize = 1024 * 1024;
+/// Model persistence owns a separate payload family and bound; it does not
+/// consume a file-effect slot or inherit the raw-file cap.
+pub const max_effect_persist_snapshot_bytes: usize = persist_store.max_snapshot_bytes;
+pub const EffectPersistOutcome = persist_store.Outcome;
+/// The one boot-time model-restore result delivered to a persistence-enabled
+/// Zig core. Successful bytes contain the generated snapshot body; every
+/// other outcome carries an empty slice. The bytes are instance-lived, so an
+/// app may retain them while decoding or migrating its model.
+pub const EffectPersistResult = struct {
+    outcome: EffectPersistOutcome,
+    bytes: []const u8 = "",
+};
 /// How long teardown waits (total, in milliseconds) for file workers
 /// stuck in blocking I/O before abandoning them — the default of the
 /// channel's injectable `file_join_deadline_ms`. File I/O is the one
@@ -1842,6 +1855,10 @@ pub const EffectResultKind = enum(u8) {
     /// opposite of the channel records' inline argument. Exit records
     /// ride `code`/`exit_reason` plus the pty fields.
     pty = 15,
+    /// One boot model-restore outcome. Successful canonical model bytes ride
+    /// `payload` at the live boundary and move to the session blob store;
+    /// replay feeds those exact bytes before the installing app-start event.
+    persist = 16,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -1887,6 +1904,11 @@ pub const max_effect_replay_env_entries: usize = 32;
 pub const ReplayEnvEntry = struct {
     msg: []const u8,
     value: []const u8,
+};
+
+pub const ReplayPersistEntry = struct {
+    outcome: EffectPersistOutcome,
+    bytes: []const u8,
 };
 
 /// One drained effect result, flattened for the session journal: the
@@ -1986,6 +2008,12 @@ pub const EffectResultRecord = struct {
     /// when it moves `payload` out of line (the image convention).
     pty_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
     pty_blob_len: u64 = 0,
+    /// `.persist` records: the closed restore outcome and the content address
+    /// of successful canonical model bytes (empty models honestly use no
+    /// blob). The recorder moves non-empty payloads out of line.
+    persist_outcome: EffectPersistOutcome = .none,
+    persist_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
+    persist_blob_len: u64 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -2499,6 +2527,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ExitMsgFn = *const fn (exit: EffectExit) Msg;
         pub const ResponseMsgFn = *const fn (response: EffectResponse) Msg;
         pub const FileMsgFn = *const fn (result: EffectFileResult) Msg;
+        pub const PersistMsgFn = *const fn (result: EffectPersistResult) Msg;
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
@@ -2550,6 +2579,17 @@ pub fn Effects(comptime Msg: type) type {
         pub fn fileMsg(comptime tag: std.meta.Tag(Msg)) FileMsgFn {
             return struct {
                 fn make(result: EffectFileResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for model restore delivery:
+        /// `persistMsg(.restored)` builds `Msg{ .restored = result }` — the
+        /// variant's payload type must be `native_sdk.EffectPersistResult`.
+        pub fn persistMsg(comptime tag: std.meta.Tag(Msg)) PersistMsgFn {
+            return struct {
+                fn make(result: EffectPersistResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
@@ -4209,6 +4249,12 @@ pub fn Effects(comptime Msg: type) type {
         replay_env: [max_effect_replay_env_entries]ReplayEnvEntry = undefined,
         replay_env_head: usize = 0,
         replay_env_len: usize = 0,
+        /// Exactly one restore outcome is owed to a persistence-enabled boot.
+        /// A two-entry queue makes a damaged duplicate journal detectable at
+        /// replay settle instead of overwriting the first outcome.
+        replay_persist: [2]ReplayPersistEntry = undefined,
+        replay_persist_head: usize = 0,
+        replay_persist_len: usize = 0,
         /// Set once from the loop thread before the first dispatch;
         /// workers call `services.wake()` through it (the one
         /// thread-safe PlatformServices entry). Loop-thread reads only
@@ -4535,6 +4581,9 @@ pub fn Effects(comptime Msg: type) type {
         /// vocabulary, not its rejection count.
         staged_keys: [][]u8 = &.{},
         staged_keys_len: usize = 0,
+        /// Stable backing for the single boot restore Msg. Unlike ordinary
+        /// drain scratch, a model may retain this slice after update commits.
+        persist_restore_bytes: ?[]u8 = null,
         /// Scratch the drained entry is copied into so its line slice
         /// stays valid while `update` runs (recycled per drained Msg).
         drain_scratch: Entry = .{},
@@ -5105,6 +5154,10 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(self.staged_keys);
                 self.staged_keys = &.{};
             }
+            if (self.persist_restore_bytes) |bytes| {
+                self.allocator.free(bytes);
+                self.persist_restore_bytes = null;
+            }
             // And an undrained replay write-verdict spill.
             if (self.replay_pty_write_spill.len > 0) {
                 self.allocator.free(self.replay_pty_write_spill);
@@ -5666,6 +5719,15 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return error.ReplayDivergence;
             }
+            if (self.replay_persist_len > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} journaled model-restore record(s) were never consumed - the replayed app no longer drains its persistence route\n",
+                        .{self.replay_persist_len},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
             // Fed results still awaiting delivery — EVERY kind, not one
             // family: the recorder journals every result at its live
             // DELIVERY (inside a dispatched event that follows it in the
@@ -5795,6 +5857,71 @@ pub fn Effects(comptime Msg: type) type {
             self.replay_env_head = (self.replay_env_head + 1) % max_effect_replay_env_entries;
             self.replay_env_len -= 1;
             return entry;
+        }
+
+        /// Journal the one boot restore outcome. Successful bytes are moved to
+        /// the content-addressed session blob store by SessionRecorder.
+        pub fn journalPersistRestore(self: *Self, outcome: EffectPersistOutcome, bytes: []const u8) void {
+            self.journalNote(.{ .kind = .persist, .key = 0, .payload = bytes, .persist_outcome = outcome });
+        }
+
+        /// Queue a journaled boot restore for the persistence adapter. Slices
+        /// reference replay-owned storage and outlive the installing event.
+        pub fn pushReplayPersist(self: *Self, outcome: EffectPersistOutcome, bytes: []const u8) error{EffectNotFound}!void {
+            if (self.replay_persist_len >= self.replay_persist.len) return error.EffectNotFound;
+            const index = (self.replay_persist_head + self.replay_persist_len) % self.replay_persist.len;
+            self.replay_persist[index] = .{ .outcome = outcome, .bytes = bytes };
+            self.replay_persist_len += 1;
+        }
+
+        pub fn takeReplayPersist(self: *Self) ?ReplayPersistEntry {
+            if (self.replay_persist_len == 0) return null;
+            const entry = self.replay_persist[self.replay_persist_head];
+            self.replay_persist_head = (self.replay_persist_head + 1) % self.replay_persist.len;
+            self.replay_persist_len -= 1;
+            return entry;
+        }
+
+        /// Deliver the engine-resolved boot snapshot through the ordinary
+        /// effect stream. Live delivery journals exactly what reaches the
+        /// Msg. Replay ignores the live app-data result and consumes the
+        /// recorded restore instead, so replay never depends on or mutates
+        /// the current snapshot store. The Msg is staged at this call's
+        /// command-stream position and therefore runs only after the current
+        /// model commit.
+        ///
+        /// Call once from `init_fx` after the host has resolved the snapshot.
+        /// Under replay, no queued `.persist` record means an older recording
+        /// with no persistence delivery, so no Msg is staged.
+        pub fn deliverPersistRestore(
+            self: *Self,
+            live_outcome: EffectPersistOutcome,
+            live_bytes: []const u8,
+            on_result: PersistMsgFn,
+        ) void {
+            const entry = if (self.replay)
+                self.takeReplayPersist() orelse return
+            else
+                ReplayPersistEntry{ .outcome = live_outcome, .bytes = live_bytes };
+            const source_bytes = if (entry.outcome == .ok) entry.bytes else "";
+            if (source_bytes.len > max_effect_persist_snapshot_bytes) {
+                if (!self.replay) self.journalPersistRestore(.rejected, "");
+                self.stagePendingStaged(.{
+                    .seq = self.nextPendingSeq(),
+                    .msg = on_result(.{ .outcome = .rejected }),
+                });
+                return;
+            }
+            if (self.persist_restore_bytes) |old| self.allocator.free(old);
+            const stable = self.allocator.dupe(u8, source_bytes) catch
+                @panic("effects: out of memory retaining the model restore payload");
+            self.persist_restore_bytes = stable;
+            const result: EffectPersistResult = .{ .outcome = entry.outcome, .bytes = stable };
+            if (!self.replay) self.journalPersistRestore(result.outcome, result.bytes);
+            self.stagePendingStaged(.{
+                .seq = self.nextPendingSeq(),
+                .msg = on_result(result),
+            });
         }
 
         // ------------------------------------------------------------- API
@@ -7562,6 +7689,16 @@ pub fn Effects(comptime Msg: type) type {
             if (name.len == 0 or name.len > max_effect_host_name_bytes) return;
             const binding = self.host_calls orelse return;
             binding.send_fn(binding.context, name, payload);
+        }
+
+        /// Request an engine-owned snapshot of the committed app model. This
+        /// is the Zig-core twin of TypeScript `Cmd.persist()`: fire-and-forget
+        /// command data, performed only after the model commit. A Zig host
+        /// binding owns the model codec/source and therefore receives no app
+        /// payload; the generated TS host supplies its canonical bytes at the
+        /// same named-service seam.
+        pub fn persist(self: *Self) void {
+            self.hostSend("core.persist", "");
         }
 
         /// A keyed, routed host command — the generic named host call

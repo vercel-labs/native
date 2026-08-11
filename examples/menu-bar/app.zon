@@ -4,7 +4,15 @@
     .display_name = "Menu Bar",
     .version = "0.1.0",
     .platforms = .{"macos"},
-    .capabilities = .{ "native_views", "gpu_surfaces", "tray" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "tray", "persist" },
+    .persist = .{
+        .version = 1,
+        .restore = .{
+            .ok = "restored",
+            .none = "fresh_boot",
+            .err = "restore_failed",
+        },
+    },
     .shell = .{
         .windows = .{
             .{

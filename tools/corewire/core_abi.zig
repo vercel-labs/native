@@ -41,7 +41,7 @@ const std = @import("std");
 /// The C-ABI generation these bindings implement. The generator refuses
 /// a sidecar declaring any other value; the generated shim re-checks the
 /// object's own getter at boot (the out-of-graph pairing backstop).
-pub const abi_version: u32 = 1;
+pub const abi_version: u32 = 2;
 
 /// The snapshot-encoding generation the shim's decoder implements.
 pub const snapshot_format: u32 = 1;
@@ -80,7 +80,7 @@ pub const PanicSinkFn = *const fn (
 // any kind. One bytes return keeps the one-return-slot rule intact: the
 // multi-value result needs no marshalling shape of its own.
 
-/// The full symbol set of ABI version 1, bound under `prefix`. The
+/// The full symbol set of ABI version 2, bound under `prefix`. The
 /// conditional channel entries are declared unconditionally here —
 /// `@extern` binds lazily, so a symbol is required at link time only
 /// when the generated shim actually references it, which it does
@@ -145,6 +145,18 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// init, or collect (arena truth — the buffer does NOT survive a
         /// frame reset; re-read after resetting).
         pub const model_snapshot = Symbol(fn (snap: *[*]const u8, snap_len: *usize) callconv(.c) void, "model_snapshot");
+        /// Borrow the tagged, length-delimited persistence snapshot. This is
+        /// deliberately separate from `model_snapshot`, whose positional
+        /// encoding is the hot-path core/shim ABI.
+        pub const persist_snapshot = Symbol(fn (snap: *[*]const u8, snap_len: *usize) callconv(.c) void, "persist_snapshot");
+        /// Replace the committed model from its canonical snapshot bytes.
+        /// The empty bytes return follows the compiler profile's one-return
+        /// convention; callers ignore it and re-snapshot the restored root.
+        pub const restore_model = Symbol(fn (snapshot: [*]const u8, snapshot_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "restore_model");
+        /// Run the app's pure migration hook. The returned bytes are a
+        /// status prefix (1 success, 0 failure) plus the canonical current
+        /// Model snapshot on success.
+        pub const migrate_model = Symbol(fn (snapshot: [*]const u8, snapshot_len: usize, from_version: f64, out: *[*]const u8, out_len: *usize) callconv(.c) void, "migrate_model");
         /// Call the exported helper at `helper` (index into the
         /// sidecar's model_helpers). An unknown index is a generator/
         /// sidecar skew and TRAPS through the panic sink — it is never a

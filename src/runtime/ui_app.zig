@@ -1486,6 +1486,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // envMsgs dispatch consumes the queue on the
                     // replayed installing frame (zero env reads).
                     .env => try self.effects.pushReplayEnv(record.stderr_tail, record.payload),
+                    .persist => try self.effects.pushReplayPersist(record.persist_outcome, record.payload),
                     // `.image` records deliver the RECORDED terminal
                     // verbatim (byte-identical Msg stream on any host)
                     // and re-register the journaled source bytes —

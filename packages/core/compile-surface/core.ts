@@ -449,6 +449,8 @@ export function hostArgs(name: string, args: readonly number[]): CmdData {
 export const Cmd = {
   none: { op: "none" } as CmdData,
 
+  /// Snapshot the just-committed Model through the capability-gated,
+  /// engine-owned persistence store. Wire output remains the reserved 0x01.
   persist(): CmdData {
     return { op: "persist" };
   },

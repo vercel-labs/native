@@ -512,6 +512,11 @@ class ContractEmitter {
     // payload the number_bytes family does not absorb, then helper
     // returns (first-visit order; the extractor's root order).
     this.collect({ k: "struct", name: modelName }, null, "", "");
+    // collect(Model) recursively closes over every type reachable from the
+    // model. Remember that prefix before Msg/helper-only types join the table;
+    // persistence fingerprints exactly this prefix, so a Msg-only edit does
+    // not spuriously require a snapshot schema bump.
+    const modelEntryCount = this.entries.length;
     for (const arm of msg.arms) {
       if (arm.fields.length === 0) continue;
       if (this.isNumberBytesShape(arm)) continue;
@@ -530,7 +535,8 @@ class ContractEmitter {
     let structCount = 0;
     let enumCount = 0;
     let unionCount = 0;
-    for (const entry of this.entries) {
+    const modelShapeParts: string[] = [];
+    for (const [entryIndex, entry] of this.entries.entries()) {
       if (entry.kind === "struct") {
         let fields = "";
         entry.fields.forEach((f, index) => {
@@ -540,11 +546,13 @@ class ContractEmitter {
         });
         if (structCount > 0) structs += ",\n      ";
         structs += `{"name": ${js(entry.name)}${this.originFragment(entry.name)}, "fields": [${fields}]}`;
+        if (entryIndex < modelEntryCount) modelShapeParts.push(`struct:${entry.name}:${fields}`);
         structCount += 1;
       } else if (entry.kind === "enum") {
         const members = entry.members.map((m) => js(m)).join(", ");
         if (enumCount > 0) enums += ",\n      ";
         enums += `{"name": ${js(entry.name)}${this.originFragment(entry.name)}, "members": [${members}]}`;
+        if (entryIndex < modelEntryCount) modelShapeParts.push(`enum:${entry.name}:${members}`);
         enumCount += 1;
       } else {
         let arms = "";
@@ -557,6 +565,7 @@ class ContractEmitter {
         });
         if (unionCount > 0) unions += ",\n      ";
         unions += `{"name": ${js(entry.name)}${this.originFragment(entry.name)}, "arms": [${arms}]}`;
+        if (entryIndex < modelEntryCount) modelShapeParts.push(`union:${entry.name}:${arms}`);
         unionCount += 1;
       }
     }
@@ -605,13 +614,14 @@ class ContractEmitter {
     const initReturnsBare = initReturnsCmd && this.returnsBareModel(this.entryExportedFunction("initialModel"));
     const updateReturnsBare = updateReturnsCmd && this.returnsBareModel(this.entryExportedFunction("update"));
     const hasSubscriptions = this.entryExportedFunction("subscriptions") !== null;
+    const hasMigrate = this.entryExportedFunction("migrate") !== null;
 
     let abiExports =
       '"abi_version", "build_id", "set_panic_sink", "init", "collect", ' +
       '"frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", ' +
       '"dispatch_number", "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", ' +
       '"dispatch_record", "dispatch_text_input", "dispatch_scroll_state", ' +
-      '"subscriptions", "model_snapshot", "helper_call"';
+      '"subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call"';
     if (hasCommand) abiExports += ', "command_msg"';
     if (hasFrame) abiExports += ', "frame_msg"';
     if (hasKey) abiExports += ', "key_msg"';
@@ -644,20 +654,25 @@ class ContractEmitter {
       `\x00exports=${abiExports}` +
       `\x00flags=${boolJson(initReturnsCmd)}${boolJson(updateReturnsCmd)}` +
       `${boolJson(hasSubscriptions)}${boolJson(hasCommand)}${boolJson(hasFrame)}` +
-      `${boolJson(hasKey)}${boolJson(hasPinch)}${boolJson(hasDrop)}`;
+      `${boolJson(hasKey)}${boolJson(hasPinch)}${boolJson(hasDrop)}${boolJson(hasMigrate)}`;
     const surfaceBytes = new TextEncoder().encode(surface);
     const sourceHash = wyhashHex(0x5eedc0den, surfaceBytes);
     const buildId = wyhashHex(0xb11d1d00n, surfaceBytes);
+    const modelFingerprint = wyhashHex(
+      0x5a9e5eedn,
+      new TextEncoder().encode(`model=${modelName}\x00${modelShapeParts.join("\x00")}`),
+    );
 
     return (
       "{\n" +
       '  "format": 1,\n' +
       '  "wire_version": 3,\n' +
-      '  "abi_version": 1,\n' +
+      '  "abi_version": 2,\n' +
       '  "compiler_version": "0.0.1",\n' +
       `  "entry": ${js(this.entry)},\n` +
       `  "source_hash": "${sourceHash}",\n` +
       `  "build_id": "${buildId}",\n` +
+      `  "model_fingerprint": "${modelFingerprint}",\n` +
       `  "types": ${typesJson},\n` +
       `  "model": ${js(modelName)},\n` +
       `  "model_helpers": [${helperCount > 0 ? `\n    ${helpers}\n  ` : ""}],\n` +
@@ -668,6 +683,7 @@ class ContractEmitter {
       (initReturnsBare ? '  "init_returns_bare": true,\n' : "") +
       (updateReturnsBare ? '  "update_returns_bare": true,\n' : "") +
       `  "has_subscriptions": ${boolJson(hasSubscriptions)},\n` +
+      `  "has_migrate": ${boolJson(hasMigrate)},\n` +
       '  "channels": {\n' +
       `    "command_msg": ${boolJson(hasCommand)},\n` +
       `    "frame_msg": ${boolJson(hasFrame)},\n` +

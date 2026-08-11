@@ -32,6 +32,13 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
       <td>macOS, Linux, and Windows model cores and system WebView; macOS Chromium</td>
     </tr>
     <tr>
+      <td>Model persistence</td>
+      <td><code>Cmd.persist()</code> / <code>fx.persist()</code></td>
+      <td>None. Model-core effect only.</td>
+      <td>None. Gated by the <code>persist</code> build capability.</td>
+      <td>Generated TypeScript app runners on every app-data platform; Zig-core hosts receive the same named <code>core.persist</code> effect seam</td>
+    </tr>
+    <tr>
       <td>Native dialogs</td>
       <td><code>runtime.showOpenDialog(...)</code> / <code>showSaveDialog(...)</code> / <code>showMessageDialog(...)</code></td>
       <td><code>native-sdk.dialog.openFile</code> / <code>saveFile</code> / <code>showMessage</code></td>

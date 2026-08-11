@@ -36,9 +36,10 @@
 //! command and subscription bytes are frame-arena resident and must be
 //! consumed before the reset. Wire records map onto the engine as:
 //!
-//!   persist     -> `fx.hostSend("core.persist", "")` — the host-
-//!                  snapshot verb is a named host service like any
-//!                  other; hosts that implement persistence bind it.
+//!   persist     -> `fx.hostSend("core.persist", core.persistenceSnapshot())`
+//!                  — no model bytes ride the Cmd wire; the host asks
+//!                  the already-committed core for canonical bytes while
+//!                  walking the command.
 //!   now         -> `fx.wallMs()` (the journaled clock read) captured
 //!                  during the walk; the named arm dispatches with that
 //!                  time SYNCHRONOUSLY — immediately after the issuing
@@ -770,6 +771,26 @@ pub fn TsCoreHost(comptime core: type) type {
             return model_root;
         }
 
+        /// Replace the committed core model from canonical snapshot bytes and
+        /// refresh the host mirror. Generated external cores expose the inverse
+        /// of `modelSnapshot`; hand-written test cores intentionally do not.
+        pub fn restoreSnapshot(snapshot: []const u8) void {
+            if (comptime !@hasDecl(core, "restoreModel")) {
+                @panic("ts core host: this core exposes no restoreModel entry - regenerate it with core ABI version 2");
+            } else {
+                model_root = core.restoreModel(snapshot);
+            }
+        }
+
+        /// Run the generated pure migration seam. The returned bytes are a
+        /// host-owned current-format snapshot and must be freed by `allocator`.
+        pub fn migrateSnapshot(snapshot: []const u8, from_version: u64, allocator: std.mem.Allocator) ?[]u8 {
+            if (comptime @hasDecl(core, "migrateModel")) {
+                return core.migrateModel(snapshot, from_version, allocator);
+            }
+            return null;
+        }
+
         /// Configure the caches directory audio-cache derivation uses.
         /// Call after `boot` (which clears it) and before any dispatch —
         /// wiring-time configuration, exactly like soundboard's boot-time
@@ -903,7 +924,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 at += 1;
                 switch (op) {
                     // persist [op]
-                    0x01 => fx.hostSend("core.persist", ""),
+                    0x01 => {
+                        const snapshot = if (comptime @hasDecl(core, "persistenceSnapshot")) core.persistenceSnapshot() else "";
+                        fx.hostSend("core.persist", snapshot);
+                    },
                     // now [op][msg_tag]
                     0x02 => {
                         const tag = takeByte(cmd, &at);

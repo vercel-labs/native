@@ -23,11 +23,35 @@ function main(argv: string[]): number {
   let entry: string | null = null;
   let contractOut: string | null = null;
   let contractEntry: string | null = null;
+  let persistVersion: number | null = null;
+  let persistStatePath: string | null = null;
+  const capabilities: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--contract") {
       contractOut = args[++i] ?? null;
     } else if (args[i] === "--contract-entry") {
       contractEntry = args[++i] ?? null;
+    } else if (args[i] === "--capability") {
+      const capability = args[++i] ?? null;
+      if (capability === null) {
+        console.error("--capability requires a name");
+        return 2;
+      }
+      capabilities.push(capability);
+    } else if (args[i] === "--persist-version") {
+      const spelling = args[++i] ?? "";
+      const version = Number(spelling);
+      if (!Number.isSafeInteger(version) || version <= 0) {
+        console.error("--persist-version requires a positive safe integer");
+        return 2;
+      }
+      persistVersion = version;
+    } else if (args[i] === "--persist-state") {
+      persistStatePath = args[++i] ?? null;
+      if (persistStatePath === null) {
+        console.error("--persist-state requires a path");
+        return 2;
+      }
     } else if (args[i] === "-o" || args[i] === "--out") {
       console.error(
         "-o named the removed TS-to-Zig emitter (v0.7.0 removed it): TypeScript cores compile through the external core compiler now, and this CLI checks the core and emits its contract sidecar (--contract). Drop the flag.",
@@ -50,11 +74,14 @@ function main(argv: string[]): number {
     // The document's entry spelling defaults to the argument's own,
     // POSIX separators (the sidecar/facade contract is platform-free).
     contractEntry: contractOut !== null ? (contractEntry ?? entry.split("\\").join("/")) : undefined,
+    capabilities,
+    persistVersion: persistVersion ?? undefined,
+    persistStatePath: persistStatePath ?? undefined,
   };
   const result = checkFile(entry, options);
   for (const e of result.typeErrors) console.error(e);
   for (const d of result.diagnostics) console.error(formatDiagnostic(d));
-  // Teaching notices (NS1028): printed, never failing the build.
+  // Teaching notices: printed, never failing the build.
   for (const w of result.warnings) console.error(formatDiagnostic(w, "warning"));
   if (!result.ok) return 1;
   if (contractOut !== null) {

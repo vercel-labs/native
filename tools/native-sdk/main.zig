@@ -254,10 +254,16 @@ pub fn main(init: std.process.Init) !void {
             if (tooling.ts_core.detect(init.io) == .ts) {
                 tooling.ts_core.selfHealEditorPackage(allocator, init.io, framework_root);
             }
+            const dev_metadata = try tooling.manifest.readMetadata(allocator, init.io, "app.zon");
             tooling.ts_core.runDevHost(allocator, init.io, framework_root, .{
                 .base_env = init.environ_map,
                 .script = try flagValue(args, "--script"),
                 .watch = flagBool(args, "--watch"),
+                .persist_routes = if (dev_metadata.persist) |persist| .{
+                    .ok = persist.restore.ok,
+                    .none = persist.restore.none,
+                    .err = persist.restore.err,
+                } else null,
             }) catch |err| return failVerb(err);
             return;
         }
@@ -563,6 +569,11 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         return error.MissingManifest;
     }
 
+    const manifest_result = try tooling.manifest.validateFile(allocator, io, "app.zon");
+    tooling.manifest.printDiagnostic(manifest_result);
+    if (!manifest_result.ok) return error.InvalidManifest;
+    const metadata = try tooling.manifest.readMetadata(allocator, io, "app.zon");
+
     // The core tier first: a TypeScript core runs the @native-sdk/core checker
     // (subset rules + tsc), whose NS diagnostics surface verbatim - the
     // same teaching UX Zig apps get from `zig build`/`native test`.
@@ -579,7 +590,14 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         // missing or version-skewed vs the SDK — one info line, never a
         // check failure.
         tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
-        try tooling.ts_core.checkCore(allocator, io, env_map, framework_root);
+        try tooling.ts_core.checkCore(
+            allocator,
+            io,
+            env_map,
+            framework_root,
+            metadata.capabilities,
+            if (metadata.persist) |persist| persist.version else null,
+        );
         try tooling.ts_core.compilerTypecheckCore(allocator, io, env_map, framework_root);
     }
 
@@ -592,14 +610,10 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         if (outcome.failures > 0) return error.MarkupCheckFailed;
     }
 
-    const result = try tooling.manifest.validateFile(allocator, io, "app.zon");
-    tooling.manifest.printDiagnostic(result);
-    if (!result.ok) return error.InvalidManifest;
     // The build-graph web-layer inference, surfaced where authors look:
     // whether this app ships the embedded web layer, and why. `check`
     // takes no engine flag, so the manifest's own engine is the resolved
     // engine here.
-    const metadata = try tooling.manifest.readMetadata(allocator, io, "app.zon");
     if (tooling.manifest.webLayerFromManifest(metadata)) |layer| {
         std.debug.print("web layer: {s} ({s})\n", .{ if (layer.enabled) "included" else "none", layer.sourceText() });
     } else |_| {

@@ -186,9 +186,9 @@ export const rules = {
   },
   NS1028: {
     id: "NS1028",
-    title: "Cmd.persist is not yet host-backed",
-    fix: "Persist app state yourself with `Cmd.writeFile(path, bytes, { ok, err })` and load it back at boot with `Cmd.readFile` from `initialModel`'s command.",
-    why: "No shipping host implements the persist verb yet, so the record is performed by nobody — a writeFile you control (own path, own format, a load path) is the persistence real apps use. The op still compiles and stays on the wire for hosts that add the service.",
+    title: "Cmd.persist and its capability must agree",
+    fix: "Add `\"persist\"` to app.zon's `capabilities` and configure `.persist = .{ .version = 1, .restore = .{ .ok = \"restored\", .none = \"fresh_boot\", .err = \"restore_failed\" } }`; or remove the unused capability/command.",
+    why: "The persist capability controls whether the engine-owned snapshot store and `core.persist` binding are linked into the app. Keeping the declaration and command in lockstep prevents a silently unperformed write and sheds storage code from apps that do not use it.",
   },
   NS1029: {
     id: "NS1029",
@@ -405,6 +405,12 @@ export const rules = {
     title: "asciiBytes is ASCII-only",
     fix: "Use `utf8Bytes(...)` for user-visible or Unicode text; keep `asciiBytes(...)` for guaranteed-ASCII command names, keys, paths, URLs, and protocol values.",
     why: "JavaScript strings are UTF-16 while the native text boundary is UTF-8; naming the encoding explicitly prevents a non-ASCII code unit from being truncated into a different byte sequence.",
+  },
+  NS1065: {
+    id: "NS1065",
+    title: "persistent model shapes advance monotonically",
+    fix: "Increase app.zon's `.persist.version` when the `Model` shape changes, and never decrease or reuse a version number.",
+    why: "The version selects the app's pure migration path while the model fingerprint rejects accidental shape drift; reusing a version would make old bytes ambiguous and could restore them into the wrong model layout.",
   },
 } as const satisfies Record<string, RuleCopy>;
 

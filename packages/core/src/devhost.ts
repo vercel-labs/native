@@ -14,6 +14,9 @@
 //   {"advance": 500}                     advance the virtual clock 500ms,
 //                                        firing due Sub timers and Cmd.delay
 //                                        one-shots in time order
+//   {"restart": true}                    simulate a new process boot; an
+//                                        in-memory Cmd.persist snapshot restores
+//                                        through the configured boot route
 //
 // Transcript, one line per fact:
 //   model <json>                         the committed model after a dispatch
@@ -33,7 +36,8 @@
 //   - timer/now/delay arms carry exactly one number payload field (pinned
 //     by tsc), so the harness constructs them shape-directed without
 //     needing the field's name.
-// Every other effect (files, buffered/streaming fetch, clipboard,
+// Cmd.persist snapshots the committed model in virtual-host memory; every
+// other effect (files, buffered/streaming fetch, clipboard,
 // notifications, spawn, audio, host commands)
 // is printed as `cmd ...` and NOT performed — feed its result back yourself
 // as an ordinary Msg line. That is the point: results are plain messages,
@@ -61,8 +65,14 @@ function usage(): never {
 const args = process.argv.slice(2);
 let entry: string | null = null;
 let script: string | null = null;
+let persistOk: string | null = null;
+let persistNone: string | null = null;
+let persistErr: string | null = null;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--script") script = args[++i] ?? null;
+  else if (args[i] === "--persist-ok") persistOk = args[++i] ?? null;
+  else if (args[i] === "--persist-none") persistNone = args[++i] ?? null;
+  else if (args[i] === "--persist-err") persistErr = args[++i] ?? null;
   else if (args[i] === "--help" || args[i] === "-h") usage();
   else if (!args[i].startsWith("-")) entry = args[i];
   else usage();
@@ -124,6 +134,9 @@ let now = 0;
 const timers = new Map<string, { everyMs: number; msgKind: string; nextAt: number }>();
 /// Armed one-shots (Cmd.delay), by key.
 const delays = new Map<string, { msgKind: string; at: number }>();
+/// Process-local Tier-1 store. `structuredClone` preserves Uint8Array and
+/// nested model data without making the app own a serialization format.
+let persistedModel: unknown | null = null;
 
 /// Timer/now/delay arms carry exactly one number payload field (tsc pins
 /// the shape), so a proxy that answers every non-kind read with the
@@ -133,6 +146,16 @@ function timestampMsg(kind: string, atMs: number): unknown {
     { kind },
     {
       get: (target, prop) => (prop === "kind" ? kind : atMs),
+      has: () => true,
+    },
+  );
+}
+
+function bytesMsg(kind: string, bytes: Uint8Array): unknown {
+  return new Proxy(
+    { kind },
+    {
+      get: (_target, prop) => (prop === "kind" ? kind : bytes),
       has: () => true,
     },
   );
@@ -165,6 +188,15 @@ function performCmd(cmd: Cmdish): void {
       }
       return;
     }
+    case "persist":
+      try {
+        persistedModel = structuredClone(model);
+        say("cmd persist (stored in virtual host memory)");
+      } catch {
+        say("cmd persist rejected by virtual host");
+        if (persistErr) dispatch(bytesMsg(persistErr, encoder.encode("rejected")));
+      }
+      return;
     case "show_notification": {
       const details = Object.entries(cmd)
         .filter(([k]) => k !== "op")
@@ -256,10 +288,13 @@ boot();
 function boot(): void {
   const booted = mod.initialModel();
   const [first, cmd] = Array.isArray(booted) ? booted : [booted, null];
-  say(`model ${JSON.stringify(jsonable(first))}`);
-  model = first;
+  const restored = persistedModel !== null;
+  model = restored ? structuredClone(persistedModel) : first;
+  say(`model ${JSON.stringify(jsonable(model))}`);
   if (cmd) performCmd(cmd as Cmdish);
   reconcileSubs();
+  const route = restored ? persistOk : persistNone;
+  if (route) dispatch({ kind: route });
 }
 
 function dispatch(msg: unknown): void {
@@ -284,6 +319,13 @@ function handleLine(raw: string): void {
   const record = parsed as Record<string, unknown>;
   if (typeof record.advance === "number") {
     advance(record.advance);
+    return;
+  }
+  if (record.restart === true) {
+    timers.clear();
+    delays.clear();
+    say("restart virtual host");
+    boot();
     return;
   }
   if (typeof record.kind !== "string") {

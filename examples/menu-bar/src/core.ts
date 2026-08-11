@@ -20,7 +20,10 @@ export type Msg =
   | { readonly kind: "toggle_play" }
   | { readonly kind: "next_track" }
   | { readonly kind: "open_player" }
-  | { readonly kind: "quit" };
+  | { readonly kind: "quit" }
+  | { readonly kind: "restored" }
+  | { readonly kind: "fresh_boot" }
+  | { readonly kind: "restore_failed"; readonly reason: Uint8Array };
 
 export function initialModel(): Model {
   return { playing: false, track: 0 };
@@ -29,17 +32,21 @@ export function initialModel(): Model {
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "toggle_play":
-      return { ...model, playing: !model.playing };
+      return [{ ...model, playing: !model.playing }, Cmd.persist()];
     case "next_track":
-      if (model.track === 0) return { ...model, track: 1 };
-      if (model.track === 1) return { ...model, track: 2 };
-      return { ...model, track: 0 };
+      if (model.track === 0) return [{ ...model, track: 1 }, Cmd.persist()];
+      if (model.track === 1) return [{ ...model, track: 2 }, Cmd.persist()];
+      return [{ ...model, track: 0 }, Cmd.persist()];
     case "open_player":
       // The counterpart to app.zon's close_policy = "hide".
       return [model, Cmd.showWindow("main")];
     case "quit":
       // The real graceful terminate, not merely another window close.
       return [model, Cmd.quitApp()];
+    case "restored":
+    case "fresh_boot":
+    case "restore_failed":
+      return model;
   }
 }
 
@@ -99,4 +106,10 @@ export function statusItem(model: Model): StatusItemState {
 
 /// These two Msgs are shell-bound rather than markup-bound. `statusItem`
 /// itself is marked shell-bound automatically by the compiler contract.
-export const viewUnbound = ["open_player", "quit"] as const;
+export const viewUnbound = [
+  "open_player",
+  "quit",
+  "restored",
+  "fresh_boot",
+  "restore_failed",
+] as const;

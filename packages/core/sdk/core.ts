@@ -1190,7 +1190,9 @@ export const Cmd = {
   /// No effects. `return model` is sugar for `return [model, Cmd.none]`.
   none: { op: "none" } as Cmd<never>,
 
-  /// Ask the host to persist the committed model.
+  /// Snapshot the just-committed Model through the engine-owned store.
+  /// Requires app.zon's `persist` capability and restore-route config;
+  /// the host owns coalescing, atomic placement, and journal/replay.
   persist(): Cmd<never> {
     return { op: "persist" };
   },
