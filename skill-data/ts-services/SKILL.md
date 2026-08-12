@@ -5,7 +5,7 @@ description: Authoring guide for Native SDK TypeScript services under src/servic
 
 # Author TypeScript services behind the effect boundary
 
-Use `src/services/**/*.ts` for imperative work that needs ordinary TypeScript beyond the deterministic core subset: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, JSON, `Map`/`Set`, `Date`, and classes supported by the pinned scriptc static tier. Both classes compile with the exact scriptc version in `packages/core/package.json`; neither enables `--dynamic` or ships a JavaScript engine. The exact per-surface verdict — every module, member, and syntax form with its status and refusal code — is `references/service-surface.md`, generated from the pinned compiler's own manifest; consult it rather than guessing compiler capability.
+Use `src/services/**/*.ts` for imperative work that needs ordinary TypeScript beyond the deterministic core subset: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, JSON, `Map`/`Set`, `Date`, and classes supported by the pinned scriptc static tier. Both classes compile with the exact scriptc version in `packages/core/package.json`; neither enables `--dynamic` or ships a JavaScript engine. The exact verdict for every surface the compiler currently projects — with each status and refusal code, plus the manifest's explicit coverage limits — is `references/service-surface.md`, generated from the pinned compiler's own manifest; consult it rather than guessing compiler capability.
 
 The class line is hard:
 

@@ -28,9 +28,10 @@
 //
 // <old>/<new> each resolve, in order: a surface-manifest.json path; a
 // directory containing one (directly, or under its
-// node_modules/@scriptc/compiler/); the word "pinned" (this package's
-// installed compiler); or a version X.Y.Z, accepted only if it matches
-// the installed compiler — other versions must be fetched by hand
+// node_modules/@scriptc/compiler/); the word "pinned" (the compiler
+// declared in this package, with stale installs refused); or a version
+// X.Y.Z, accepted only if it matches the installed compiler — other
+// versions must be fetched by hand
 // (`npm pack @scriptc/compiler@X.Y.Z`, extract package/surface-manifest.json)
 // so this tool stays offline like the builds it serves.
 //
@@ -45,6 +46,7 @@ const KNOWN_SCHEMA_VERSION = 1;
 const coreRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pinnedManifestPath = path.join(
   coreRoot, "node_modules", "@scriptc", "compiler", "surface-manifest.json");
+const packagePath = path.join(coreRoot, "package.json");
 
 // Entries whose flip to `static` retires concrete machinery or teaching
 // in this repository, so the diff can say "this flip has a chore
@@ -83,12 +85,29 @@ function loadManifest(file, spec) {
   return { file, manifest };
 }
 
+function declaredCompilerPin() {
+  let pkg;
+  try {
+    pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  } catch (error) {
+    fail(`cannot read the scriptc pin from ${packagePath}: ${error.message}`);
+  }
+  const pin = pkg.dependencies?.scriptc;
+  if (typeof pin !== "string") fail(`${packagePath} has no dependencies.scriptc pin`);
+  return pin;
+}
+
 function resolveSpec(spec) {
   if (spec === "pinned") {
     if (!fs.existsSync(pinnedManifestPath)) {
       fail("the pinned compiler is not installed — run `npm ci --include=dev` in the SDK's packages/core");
     }
-    return loadManifest(pinnedManifestPath, spec);
+    const pinned = loadManifest(pinnedManifestPath, spec);
+    const declared = declaredCompilerPin();
+    if (pinned.manifest.compilerVersion !== declared) {
+      fail(`installed compiler manifest is ${pinned.manifest.compilerVersion} but packages/core/package.json pins scriptc ${declared} — run \`npm ci --include=dev\` in packages/core`);
+    }
+    return pinned;
   }
   if (fs.existsSync(spec)) {
     const stat = fs.statSync(spec);

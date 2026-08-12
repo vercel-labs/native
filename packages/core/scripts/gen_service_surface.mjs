@@ -93,6 +93,11 @@ for (const e of manifest.entries) counts[e.status] = (counts[e.status] ?? 0) + 1
 const isBuiltinModule = (entry) => !entry.name.includes(".");
 const builtinModules = kinds["node-builtin"].filter(isBuiltinModule);
 const builtinMembers = kinds["node-builtin"].filter((entry) => !isBuiltinModule(entry));
+const missingLoweringFence = kinds["diagnostic-fence"].find((entry) =>
+  entry.name === "standard-library or @types/node surface with no lowering");
+const constrainedCallRefusal = missingLoweringFence?.code
+  ? `outside the lowered set are refused per site with \`${missingLoweringFence.code}\`.`
+  : "outside the lowered set are refused with the applicable diagnostic fence listed below.";
 
 const sections = [];
 sections.push(`<!-- GENERATED FILE — do not edit by hand.
@@ -123,7 +128,7 @@ How to read the tables:
   decision tables yet", never "unsupported".
 - Standard-library and node-builtin rows name surface whose lowered
   call forms are constrained (arity, argument shapes); call forms
-  outside the lowered set are refused per site with \`SC2020\`.`);
+  ${constrainedCallRefusal}`);
 
 sections.push(`## Syntax
 
@@ -203,13 +208,13 @@ if (manifest.compilerVersion !== pin) {
 
 // 3+4. Claim scan: SC codes and scriptc version literals in prose.
 function proseFiles() {
-  const roots = ["docs/src", "skills", "skill-data"];
+  const roots = ["docs", "skills", "skill-data"];
   const files = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === "node_modules") continue;
+        if (entry.name === "node_modules" || entry.name.startsWith(".next")) continue;
         walk(full);
       } else if (/\.(md|mdx)$/.test(entry.name)) {
         files.push(full);
@@ -226,12 +231,12 @@ function proseFiles() {
 // Only semver literals in explicit compiler context are scriptc claims.
 // Package examples such as `some-package@0.0.1` are unrelated and must
 // remain legal in authoring docs.
-const semver = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`;
-const markdownTicks = "`*";
-const compilerContext = String.raw`(?:scriptc(?:\s+compiler)?|compiler)(?:'s)?(?:\s+(?:version|pin))?`;
-const versionJoin = String.raw`\s*(?:(?:is|at)\s*)?[:=]?\s*`;
+const semver = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`;
+const markdownWrapper = "(?:`{1,3}|\\*{1,3}|_{1,3})?";
+const scriptcContext = String.raw`scriptc(?:\s+compiler)?(?:'s)?(?:\s+(?:version|pin))?`;
+const versionJoin = String.raw`(?:\s+(?:(?:is|at)\s*)?[:=]?\s*|[:=]\s*)`;
 const versionClaim = new RegExp(
-  String.raw`\b${compilerContext}${versionJoin}${markdownTicks}\b(?<before>${semver})\b${markdownTicks}|${markdownTicks}\b(?<after>${semver})\b${markdownTicks}\s+(?:calibration|spike)\b`,
+  String.raw`\b${scriptcContext}${versionJoin}${markdownWrapper}(?<![\d.])(?<before>${semver})(?!\d|\.\d)${markdownWrapper}|${markdownWrapper}(?<![\d.])(?<after>${semver})(?!\d|\.\d)${markdownWrapper}\s+(?:calibration|spike)\b`,
   "gi",
 );
 const scClaim = /\bSC\d{4}\b/g;

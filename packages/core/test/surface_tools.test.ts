@@ -19,6 +19,7 @@ const repo = path.resolve(pkg, "..", "..");
 const diffScript = path.join(pkg, "scripts", "surface_manifest_diff.mjs");
 const genScript = path.join(pkg, "scripts", "gen_service_surface.mjs");
 const surfaceReference = path.join(repo, "skill-data", "ts-services", "references", "service-surface.md");
+const serviceSkill = path.join(repo, "skill-data", "ts-services", "SKILL.md");
 
 function writeManifest(
   dir: string,
@@ -52,6 +53,24 @@ function generatorFixture(entries: unknown[]) {
     script: path.join(scriptDir, "gen_service_surface.mjs"),
     output: path.join(root, "skill-data", "ts-services", "references", "service-surface.md"),
   };
+}
+
+function diffToolFixture(pin: string, manifestVersion: string) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "surface-diff-tool-"));
+  const core = path.join(root, "packages", "core");
+  const scriptDir = path.join(core, "scripts");
+  const manifestDir = path.join(core, "node_modules", "@scriptc", "compiler");
+  fs.mkdirSync(scriptDir, { recursive: true });
+  fs.mkdirSync(manifestDir, { recursive: true });
+  fs.copyFileSync(diffScript, path.join(scriptDir, "surface_manifest_diff.mjs"));
+  fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ dependencies: { scriptc: pin } }));
+  fs.writeFileSync(path.join(manifestDir, "surface-manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    compilerVersion: manifestVersion,
+    coverage: [],
+    entries: [],
+  }));
+  return path.join(scriptDir, "surface_manifest_diff.mjs");
 }
 
 test("surface_manifest_diff categorizes every change class by stable id", () => {
@@ -115,6 +134,14 @@ test("surface_manifest_diff refuses unknown schema versions", () => {
   assert.match(run.stderr, /schemaVersion 2/);
 });
 
+test("surface_manifest_diff refuses a stale install for the pinned spec", () => {
+  const script = diffToolFixture("0.0.26", "0.0.25");
+  const run = spawnSync(process.execPath, [script, "pinned", "pinned"], { encoding: "utf8" });
+  assert.equal(run.status, 2);
+  assert.match(run.stderr, /installed compiler manifest is 0\.0\.25/);
+  assert.match(run.stderr, /package\.json pins scriptc 0\.0\.26/);
+});
+
 test("identical manifests diff to no differences", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "surface-diff-"));
   const entries = [{ id: "stdlib.math.abs", kind: "stdlib", name: "Math.abs", status: "static" }];
@@ -153,6 +180,13 @@ test("the committed service-surface reference passes the claim check", () => {
     0,
     `the gate's surface-claims step would fail:\n${run.stdout}${run.stderr}`,
   );
+});
+
+test("service authoring describes the manifest as a projection, not a complete language census", () => {
+  const skill = fs.readFileSync(serviceSkill, "utf8");
+  assert.match(skill, /every surface the compiler currently projects/);
+  assert.match(skill, /explicit coverage limits/);
+  assert.doesNotMatch(skill, /every module, member, and syntax form/);
 });
 
 test("the generated reference keeps subpath modules and unknown kinds visible", () => {
@@ -194,7 +228,25 @@ test("the generated reference escapes manifest text for Markdown tables", () => 
   assert.doesNotMatch(rendered, /generic <T>|ReadableStream<Uint8Array>/);
 });
 
-test("the claim scan ignores package versions but catches formatted, wrapped, and punctuated stale compiler versions", () => {
+test("the generated reference derives the missing-lowering refusal code from the manifest", () => {
+  const fixture = generatorFixture([
+    {
+      id: "diagnostic.custom-lowering-fence",
+      kind: "diagnostic-fence",
+      name: "standard-library or @types/node surface with no lowering",
+      status: "unsupported",
+      code: "SC2998",
+    },
+  ]);
+  const run = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+
+  const rendered = fs.readFileSync(fixture.output, "utf8");
+  assert.match(rendered, /outside the lowered set are refused per site with `SC2998`/);
+  assert.doesNotMatch(rendered, /SC2020/);
+});
+
+test("the claim scan covers Markdown formatting and docs while ignoring unrelated compiler versions", () => {
   const fixture = generatorFixture([]);
   const write = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
   assert.equal(write.status, 0, write.stderr);
@@ -222,11 +274,30 @@ test("the claim scan ignores package versions but catches formatted, wrapped, an
   assert.match(punctuated.stderr, /skills\/example\/SKILL\.md:1:/);
   assert.match(punctuated.stderr, /compiler version 0\.0\.24 but the pin is 0\.0\.26/);
 
-  fs.writeFileSync(skill, "The compiler pin is 0.0.23.\n");
+  fs.writeFileSync(skill, "The scriptc compiler pin is 0.0.23.\n");
   const pinClaim = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(pinClaim.status, 1);
   assert.match(pinClaim.stderr, /skills\/example\/SKILL\.md:1:/);
   assert.match(pinClaim.stderr, /compiler version 0\.0\.23 but the pin is 0\.0\.26/);
+
+  fs.writeFileSync(skill, "The Zig compiler version is 0.16.0.\n");
+  const otherCompiler = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(otherCompiler.status, 0, otherCompiler.stderr);
+
+  for (const formattedVersion of ["**0.0.22**", "_0.0.21_", "```0.0.20```"]) {
+    fs.writeFileSync(skill, `The scriptc version is ${formattedVersion}.\n`);
+    const formatted = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+    assert.equal(formatted.status, 1, `${formattedVersion} was not caught: ${formatted.stderr}`);
+    assert.match(formatted.stderr, /skills\/example\/SKILL\.md:1:/);
+  }
+
+  fs.writeFileSync(skill, "The Zig compiler version is 0.16.0.\n");
+  const docsDir = path.join(fixture.root, "docs");
+  fs.mkdirSync(docsDir, { recursive: true });
+  fs.writeFileSync(path.join(docsDir, "README.md"), "The scriptc version is **0.0.19**.\n");
+  const topLevelDocs = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(topLevelDocs.status, 1);
+  assert.match(topLevelDocs.stderr, /docs\/README\.md:1:/);
 });
 
 test("every recognized built-in module is in the committed module table", () => {
