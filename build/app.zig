@@ -1662,6 +1662,10 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("dwrite", .{});
         app_mod.linkSystemLibrary("imm32", .{});
         app_mod.linkSystemLibrary("comctl32", .{});
+        // timeBeginPeriod: the host holds 1 ms system timer resolution for
+        // the message loop's lifetime, so the frame grid is not quantized
+        // to the default ~15.6 ms tick (which would cap it near 64 Hz).
+        app_mod.linkSystemLibrary("winmm", .{});
         app_mod.linkSystemLibrary("ole32", .{});
         app_mod.linkSystemLibrary("oleacc", .{});
         app_mod.linkSystemLibrary("shell32", .{});
