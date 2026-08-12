@@ -27,6 +27,7 @@ const unprefixedNavSections: NavSection[] = [
     items: [
       { name: "App Model", href: "/app-model" },
       { name: "TypeScript Cores", href: "/typescript" },
+      { name: "TypeScript Services", href: "/typescript/services" },
       { name: "Where Packages Go", href: "/typescript/packages" },
       { name: "Native UI", href: "/native-ui" },
       { name: "Dynamic Images", href: "/dynamic-images" },
