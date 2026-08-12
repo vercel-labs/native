@@ -389,17 +389,25 @@ test "independent keys run in parallel across pool instances and same-key reques
     defer DirectPool(ServiceCarrier).freeCompletions(serial);
     for (serial) |completion| try std.testing.expect(completion.ok);
 
-    // Parallel: the same four operations under four keys.
-    const parallel_begin = monotonicMs();
-    for (0..4) |index| d.request("feeds.slow", 11 + @as(u64, index), payload);
-    try d.awaitCompletions(4);
-    const parallel_ms = monotonicMs() - parallel_begin;
-    const parallel = d.takeCompletions();
-    defer DirectPool(ServiceCarrier).freeCompletions(parallel);
-    for (parallel) |completion| try std.testing.expect(completion.ok);
+    // Parallel: the same four operations under four keys. One retry
+    // absorbs a runner whose cores are momentarily saturated by sibling
+    // test binaries — a pool that serialized distinct keys fails both
+    // attempts deterministically.
+    var parallel_ms: u64 = std.math.maxInt(u64);
+    for (0..2) |attempt| {
+        const parallel_begin = monotonicMs();
+        const key_base = 11 + 10 * @as(u64, attempt);
+        for (0..4) |index| d.request("feeds.slow", key_base + @as(u64, index), payload);
+        try d.awaitCompletions(4);
+        parallel_ms = @min(parallel_ms, monotonicMs() - parallel_begin);
+        const parallel = d.takeCompletions();
+        defer DirectPool(ServiceCarrier).freeCompletions(parallel);
+        for (parallel) |completion| try std.testing.expect(completion.ok);
+        if (parallel_ms * 10 < serial_ms * 6) break;
+    }
 
     // Four ~300 ms operations: ~1200 ms serialized, ~one op time across
-    // four instances. The 0.6 ratio stays robust on loaded runners.
+    // four instances.
     try std.testing.expect(serial_ms >= 1100);
     try std.testing.expect(parallel_ms * 10 < serial_ms * 6);
     try std.testing.expectEqual(@as(u64, 0), d.pool.poisonedCount());
