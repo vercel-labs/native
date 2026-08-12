@@ -2298,10 +2298,21 @@ test "windows packet renderer requires deterministic font and caption seams" {
         renderer_source,
         "layout2->SetFontFallback(renderer_->fontFallback())",
     ) != null);
+    // The caption sample reads one real backing pixel. It used to do that
+    // through GDI interop, which forced the whole backing surface to be
+    // D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_GDI_COMPATIBLE; a device-context
+    // target cannot carry that flag, so the read is a CPU-readable staging
+    // bitmap now. What this pins is the property that mattered — an actual
+    // pixel read, not the retained-command estimate.
     try std.testing.expect(std.mem.indexOf(
         u8,
         renderer_source,
-        "D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_GDI_COMPATIBLE",
+        "D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "readback_bitmap_->Map(D2D1_MAP_OPTIONS_READ, &mapped)",
     ) != null);
 
     const host_source = @embedFile("webview2_host.cpp");
@@ -2327,7 +2338,7 @@ test "windows packet renderer preserves text baselines and disjoint dirty region
     try std.testing.expect(std.mem.indexOf(
         u8,
         renderer_source,
-        "backing_target_->DrawGlyphRun(\n                    D2D1::Point2F(glyph.x, glyph.baseline)",
+        "ctx()->DrawGlyphRun(\n                    D2D1::Point2F(glyph.x, glyph.baseline)",
     ) != null);
 
     const draw_list_at = std.mem.indexOf(
@@ -2344,7 +2355,7 @@ test "windows packet renderer preserves text baselines and disjoint dirty region
     const segment_end_at = std.mem.indexOf(
         u8,
         draw_list,
-        "const HRESULT segment = backing_target_->EndDraw();",
+        "const HRESULT segment = ctx()->EndDraw();",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expect(blur_target_at < segment_end_at);
 
@@ -2363,6 +2374,51 @@ test "windows packet renderer preserves text baselines and disjoint dirty region
         u8,
         host_source,
         "InvalidateRect(view.hwnd, &info.dirty_rects[index], FALSE)",
+    ) != null);
+}
+
+test "windows flip-model presentation keeps its two correctness rules" {
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+
+    // Rule 1: FLIP_SEQUENTIAL, never FLIP_DISCARD. The renderer's
+    // incremental path repaints only damaged regions and copies the rest
+    // forward, so a back buffer whose undamaged content DXGI is free to
+    // discard would corrupt every patch frame — intermittently, and only
+    // on real hardware, which is the worst way to find out.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;",
+    ) != null);
+    // The full constant, not the bare word: prose explaining why DISCARD is
+    // wrong is exactly what a comment should say, and matching on "FLIP_DISCARD"
+    // would fail on it. (The GDI pin this replaced had the mirror-image bug —
+    // it kept passing on a comment after the code was gone.)
+    try std.testing.expect(std.mem.indexOf(u8, renderer_source, "DXGI_SWAP_EFFECT_FLIP_DISCARD") == null);
+
+    // Rule 2: a partial copy refreshes THIS paint's damage plus the
+    // PREVIOUS paint's. With BufferCount = 2 the buffer being drawn was
+    // presented two frames ago, so copying only the current damage leaves
+    // a stale alternating image outside it. Both loops must be there.
+    const copy_at = std.mem.indexOf(
+        u8,
+        renderer_source,
+        "for (const RECT &region : damage) copy_region(region);",
+    ) orelse return error.TestExpectedEqual;
+    const carry_at = std.mem.indexOf(
+        u8,
+        renderer_source,
+        "for (const RECT &region : swap_last_damage_) copy_region(region);",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(copy_at < carry_at);
+
+    // ...and the dirty rects handed to Present1 are this paint's damage
+    // alone, because they describe the delta against the previously
+    // PRESENTED frame, which is a different set from the copied union.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "parameters.pDirtyRects = damage.data();",
     ) != null);
 }
 
