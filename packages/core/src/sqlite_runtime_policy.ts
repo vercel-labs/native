@@ -22,6 +22,11 @@ interface SqlToken {
   readonly kind: "word" | "identifier" | "literal" | "symbol";
 }
 
+export interface RelationalTableReference {
+  readonly schema: string | null;
+  readonly table: string;
+}
+
 const relationalOwnedPragmas = new Set([
   "user_version", "schema_version", "writable_schema", "query_only",
   "journal_mode", "synchronous", "locking_mode", "foreign_keys",
@@ -115,6 +120,80 @@ function tokenName(token: SqlToken | undefined): string | null {
 
 function sqliteName(token: SqlToken | undefined): string | null {
   return token?.kind === "literal" ? token.text : tokenName(token);
+}
+
+const relationalFromTerminators = new Set([
+  "where", "group", "having", "window", "order", "limit", "returning",
+  "union", "intersect", "except",
+]);
+
+function tableReferenceAt(tokens: readonly SqlToken[], start: number): RelationalTableReference | null {
+  const first = sqliteName(tokens[start]);
+  if (first === null) return null;
+  if (tokens[start + 1]?.text !== ".") return { schema: null, table: first };
+  const table = sqliteName(tokens[start + 2]);
+  return table === null ? null : { schema: first, table };
+}
+
+/// Table factors named by one SQLite statement. The scanner follows FROM
+/// lists at each parenthesis depth, including comma joins, and preserves
+/// quoted identifiers as one token. SQLite remains the grammar authority;
+/// this is the shared compatibility/dependency view used where Node 22 has no
+/// authorizer callback and where EXPLAIN text loses identifier boundaries.
+export function relationalTableReferences(sql: string): readonly RelationalTableReference[] {
+  const tokens = sqlTokens(sql);
+  const references: RelationalTableReference[] = [];
+  const fromDepths = new Set<number>();
+  const expectingAtDepth = new Set<number>();
+  let depth = 0;
+
+  for (let at = 0; at < tokens.length; at++) {
+    const token = tokens[at]!;
+    if (token.text === "(") {
+      expectingAtDepth.delete(depth);
+      depth += 1;
+      continue;
+    }
+    if (token.text === ")") {
+      fromDepths.delete(depth);
+      expectingAtDepth.delete(depth);
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+
+    if (expectingAtDepth.has(depth)) {
+      const reference = tableReferenceAt(tokens, at);
+      expectingAtDepth.delete(depth);
+      if (reference !== null) references.push(reference);
+    }
+
+    if (token.kind === "word" && token.text === "from") {
+      fromDepths.add(depth);
+      expectingAtDepth.add(depth);
+      continue;
+    }
+    if (token.kind === "word" && token.text === "join") {
+      fromDepths.add(depth);
+      expectingAtDepth.add(depth);
+      continue;
+    }
+    if (fromDepths.has(depth) && token.text === ",") {
+      expectingAtDepth.add(depth);
+      continue;
+    }
+    if (fromDepths.has(depth) && token.kind === "word" && relationalFromTerminators.has(token.text)) {
+      fromDepths.delete(depth);
+      expectingAtDepth.delete(depth);
+      continue;
+    }
+    if (token.kind === "word" && (token.text === "update" || token.text === "into")) {
+      let tableAt = at + 1;
+      if (token.text === "update" && tokens[tableAt]?.kind === "word" && tokens[tableAt]?.text === "or") tableAt += 2;
+      const reference = tableReferenceAt(tokens, tableAt);
+      if (reference !== null) references.push(reference);
+    }
+  }
+  return references;
 }
 
 function cteNamesAndMainToken(tokens: readonly SqlToken[], start: number): { ctes: Set<string>; declarations: Set<number>; main: number } {
@@ -232,20 +311,12 @@ export function inspectRelationalSql(sql: string, denyTransactions: boolean): Re
     }
   }
 
-  for (let at = 0; at + 1 < tokens.length; at++) {
-    if (tokens[at]?.kind !== "word" || !["from", "join", "update", "into"].includes(tokens[at]!.text)) continue;
-    let tableAt = at + 1;
-    let qualified = false;
-    if (tokens[tableAt + 1]?.text === ".") {
-      if (sqliteName(tokens[tableAt]) === "temp") {
-        return { error: "TEMP schema objects are not authorized because native reads use a separate connection", writes };
-      }
-      tableAt += 2;
-      qualified = true;
+  for (const reference of relationalTableReferences(sql)) {
+    if (reference.schema === "temp") {
+      return { error: "TEMP schema objects are not authorized because native reads use a separate connection", writes };
     }
-    const table = sqliteName(tokens[tableAt]);
-    if (table !== null && relationalUnavailableReadTables.has(table) && (qualified || !ctes.has(table))) {
-      return { error: `SQLite table ${table} is not authorized because it is unavailable in the packaged runtime`, writes };
+    if (relationalUnavailableReadTables.has(reference.table) && (reference.schema !== null || !ctes.has(reference.table))) {
+      return { error: `SQLite table ${reference.table} is not authorized because it is unavailable in the packaged runtime`, writes };
     }
   }
   return { error: null, writes };

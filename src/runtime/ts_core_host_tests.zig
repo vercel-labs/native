@@ -330,6 +330,7 @@ const mini_core = struct {
         dock_off, // 95: dock_presence false
         arm_db_live, // 96: install a live query under wire key "shared-db"
         query_over_db_live, // 97: a one-shot query collides with that live key
+        stop_db_live_with_cancel, // 98: remove the Sub while Cmd.cancel names its key
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -819,6 +820,11 @@ const mini_core = struct {
                 return .{ .model = out, .cmd = "" };
             },
             .query_over_db_live => return .{ .model = model, .cmd = cmdDbQuery("shared-db", 7, 12, 8, "SELECT id FROM item") },
+            .stop_db_live_with_cancel => {
+                const out = frameCreate(model.*);
+                out.db_live = false;
+                return .{ .model = out, .cmd = cmdCancel("shared-db") };
+            },
         }
     }
 
@@ -1442,6 +1448,25 @@ test "a one-shot database query cannot overwrite a live subscription slot with t
     Host.drain(fx);
     try std.testing.expectEqual(errors_before + 1, Host.model().errs);
     try std.testing.expectEqualStrings("rejected", Host.model().last_err);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+}
+
+test "Cmd.cancel leaves a live query to declarative subscription reconciliation" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+
+    // The command walk sees Cmd.cancel first, then reconciliation sees that
+    // the committed model no longer declares the Sub. Cancel must leave the
+    // bridge entry intact so that reconciliation can retire the engine slot.
+    Host.dispatch(fx, .stop_db_live_with_cancel);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingDbCount());
+
+    // The same bridge/engine slot is immediately reusable by a one-shot read.
+    Host.dispatch(fx, .query_over_db_live);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
 }
 

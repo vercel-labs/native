@@ -270,6 +270,27 @@ test("live queries require an invalidation dependency", () => {
   }
 });
 
+test("quoted table names remain typed live-query dependencies", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-check-"));
+  try {
+    fs.mkdirSync(path.join(root, "schema"));
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      'CREATE TABLE "user notes"(id INTEGER PRIMARY KEY, title TEXT NOT NULL) STRICT;\n',
+    );
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      '-- name: matchingNotes :live\nSELECT id, title FROM "user notes" WHERE title = :title;\n',
+    );
+    const result = analyzeSqlite(root);
+    assert.deepEqual(result.diagnostics, []);
+    assert.deepEqual(result.queries[0]?.tables, ["user notes"]);
+    assert.deepEqual(result.queries[0]?.params, [{ name: "title", sqlType: "TEXT", nullable: false }]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("COUNT inference follows the selected aggregate rather than its alias", () => {
   const root = fixture();
   try {
@@ -345,6 +366,10 @@ test("the Node 22 policy fallback rejects TEMP access and load_extension", () =>
   ]) {
     assert.match(inspectRelationalSql(sql, true).error ?? "", /not authorized|unavailable/i);
   }
+  assert.match(
+    inspectRelationalSql("SELECT d.name FROM sqlite_schema AS s, dbstat AS d;", true).error ?? "",
+    /unavailable/i,
+  );
   assert.equal(inspectRelationalSql("SELECT main.note.id FROM main.note;", true).error, null);
 });
 

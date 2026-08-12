@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { constants as sqliteConstants, DatabaseSync, type StatementSync } from "node:sqlite";
-import { inspectRelationalSql, relationalRuntimePolicy, setRelationalAuthorizer } from "./sqlite_runtime_policy.ts";
+import { inspectRelationalSql, relationalRuntimePolicy, relationalTableReferences, setRelationalAuthorizer } from "./sqlite_runtime_policy.ts";
 
 export interface SqliteDiagnostic {
   readonly rule: `NS14${number}`;
@@ -531,9 +531,11 @@ function topLevelSelectExpressions(sql: string): string[] {
 
 function inferParams(db: DatabaseSync, sql: string, names: readonly string[]): QueryField[] {
   const tables = new Map<string, Array<Record<string, unknown>>>();
-  for (const match of sql.matchAll(/\b(?:from|join|update|into)\s+(?:main\.)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)/gi)) {
-    const table = match[1]!;
-    tables.set(table, tableInfo(db, table));
+  const mainTables = canonicalMainTables(db);
+  for (const reference of relationalTableReferences(sql)) {
+    if (reference.schema !== null && reference.schema !== "main") continue;
+    const table = mainTables.get(reference.table);
+    if (table !== undefined) tables.set(table, tableInfo(db, table));
   }
   const allColumns = [...tables.values()].flat();
   return names.map((name) => {
@@ -569,7 +571,9 @@ function dummyBindings(names: readonly string[]): Record<string, null> {
 
 function dependencyTables(db: DatabaseSync, sql: string, params: readonly string[]): string[] {
   const found = new Set<string>();
-  for (const match of sql.matchAll(/\b(?:from|join|update|into)\s+(?:main\.)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)/gi)) found.add(match[1]!);
+  for (const reference of relationalTableReferences(sql)) {
+    if (reference.schema === null || reference.schema === "main") found.add(reference.table);
+  }
   try {
     const rows = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(dummyBindings(params)) as Array<Record<string, unknown>>;
     for (const row of rows) {
@@ -579,8 +583,12 @@ function dependencyTables(db: DatabaseSync, sql: string, params: readonly string
   } catch {}
   const tableRows = (db.prepare("PRAGMA table_list;").all() as Array<Record<string, unknown>>)
     .filter((row) => String(row.schema) === "main");
-  const realTables = new Set(tableRows.map((row) => String(row.name)));
-  const dependencies = new Set([...found].filter((name) => !name.startsWith("sqlite_") && realTables.has(name)));
+  const realTables = new Map(tableRows.map((row) => [String(row.name).toLowerCase(), String(row.name)]));
+  const dependencies = new Set(
+    [...found]
+      .map((name) => realTables.get(name.toLowerCase()))
+      .filter((name): name is string => name !== undefined && !name.toLowerCase().startsWith("sqlite_")),
+  );
   // sqlite3_update_hook names FTS shadow tables, not the virtual table the
   // SELECT spells. Carry those generated dependencies too so FTS live
   // queries invalidate on every committed index mutation.
@@ -593,6 +601,15 @@ function dependencyTables(db: DatabaseSync, sql: string, params: readonly string
     }
   }
   return [...dependencies].sort();
+}
+
+function canonicalMainTables(db: DatabaseSync): Map<string, string> {
+  const rows = db.prepare("PRAGMA table_list;").all() as Array<Record<string, unknown>>;
+  return new Map(
+    rows
+      .filter((row) => String(row.schema) === "main")
+      .map((row) => [String(row.name).toLowerCase(), String(row.name)]),
+  );
 }
 
 function tsType(field: QueryField, parameter = false): string {

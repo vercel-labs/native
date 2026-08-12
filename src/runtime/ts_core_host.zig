@@ -2616,7 +2616,12 @@ pub fn TsCoreHost(comptime core: type) type {
                 return;
             }
             if (findDb(key)) |index| {
-                if (dbs[index].query) {
+                // Declarative live queries belong exclusively to subscription
+                // reconciliation. Cmd.cancel may share their public key, but
+                // it must neither hide the bridge entry nor strand the
+                // engine's `.live` slot; dropping the Sub below performs the
+                // matching dbUnsubscribe.
+                if (dbs[index].query and !dbs[index].live) {
                     fx.cancelDbQuery(db_key_base + index);
                     dbs[index].used = false;
                 }
