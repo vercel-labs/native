@@ -109,6 +109,65 @@ fn retainedTextExists(runtime: *core.Runtime, text: []const u8) !bool {
     return false;
 }
 
+const RelationalUiModel = struct {
+    pages: u32 = 0,
+    rows: u32 = 0,
+    done: u32 = 0,
+    execs: u32 = 0,
+};
+
+const RelationalUiMsg = union(enum) {
+    add,
+    db: effects_mod.EffectDbResult,
+};
+
+const RelationalUiApp = ui_app_model.UiApp(RelationalUiModel, RelationalUiMsg);
+const RelationalUiEffects = RelationalUiApp.Effects;
+
+fn relationalUiInit(_: *RelationalUiModel, fx: *RelationalUiEffects) void {
+    fx.dbExec(.{
+        .key = 101,
+        .statements = &.{.{ .sql = "CREATE TABLE note(id INTEGER PRIMARY KEY) STRICT;" }},
+        .on_result = RelationalUiEffects.dbMsg(.db),
+    });
+    fx.dbSubscribe(.{
+        .key = 102,
+        .sql = "SELECT id FROM note ORDER BY id;",
+        .tables = &.{"note"},
+        .on_result = RelationalUiEffects.dbMsg(.db),
+    });
+    fx.dbExec(.{
+        .key = 103,
+        .statements = &.{.{ .sql = "INSERT INTO note(id) VALUES(1);" }},
+        .on_result = RelationalUiEffects.dbMsg(.db),
+    });
+}
+
+fn relationalUiUpdate(model: *RelationalUiModel, msg: RelationalUiMsg, fx: *RelationalUiEffects) void {
+    switch (msg) {
+        .add => fx.dbExec(.{
+            .key = 104,
+            .statements = &.{.{ .sql = "INSERT INTO note(id) VALUES(2);" }},
+            .on_result = RelationalUiEffects.dbMsg(.db),
+        }),
+        .db => |result| {
+            if (result.outcome != .ok) return;
+            switch (result.kind) {
+                .page => {
+                    model.pages += 1;
+                    model.rows += std.mem.readInt(u32, result.bytes[4..8], .little);
+                },
+                .done => model.done += 1,
+                .exec => model.execs += 1,
+            }
+        },
+    }
+}
+
+fn relationalUiView(ui: *RelationalUiApp.Ui, model: *const RelationalUiModel) RelationalUiApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("{d} relational pages", .{model.pages}));
+}
+
 test "record-store test harness binds one hermetic in-memory database" {
     const harness = try core.TestHarness().createWithRecordStore(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
@@ -150,6 +209,53 @@ test "relational test harness binds one hermetic in-memory database" {
     try harness.start(app);
     try app_state.dispatch(&harness.runtime, 1, .increment);
     try std.testing.expect(app_state.effects.relational_store_binding != null);
+    try harness.stop(app);
+}
+
+test "ui app flushes relational live queries after init and update command batches" {
+    const harness = try core.TestHarness().createWithRelationalStore(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(RelationalUiApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = RelationalUiApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-relational-live",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update_fx = relationalUiUpdate,
+        .init_fx = relationalUiInit,
+        .view = relationalUiView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // init_fx creates the table, subscribes while it is empty, then inserts.
+    // Its one flush therefore delivers the initial empty page and one
+    // refreshed one-row page.
+    try app_state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.pages);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.rows);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.done);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.execs);
+
+    // A later update_fx transaction must invalidate and rerun the same live
+    // query without the Zig app manually reaching into the effects host.
+    try app_state.dispatch(&harness.runtime, 1, .add);
+    try app_state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.pages);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.rows);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.done);
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.execs);
     try harness.stop(app);
 }
 

@@ -740,6 +740,29 @@ export function formatSqliteDiagnostic(d: SqliteDiagnostic): string {
 
 export interface MigrationState { readonly version: number; readonly hashes: readonly string[]; readonly schema_hash: string }
 
+function validMigrationState(value: unknown): value is MigrationState {
+  if (value === null || typeof value !== "object") return false;
+  const state = value as Partial<MigrationState>;
+  return Number.isSafeInteger(state.version)
+    && (state.version ?? -1) >= 0
+    && Array.isArray(state.hashes)
+    && state.hashes.length === state.version
+    && state.hashes.every((hash) => typeof hash === "string" && hash.length > 0)
+    && typeof state.schema_hash === "string"
+    && state.schema_hash.length > 0;
+}
+
+function damagedMigrationState(stateFile: string): SqliteDiagnostic {
+  return diag(
+    "NS1408",
+    stateFile,
+    1,
+    "The migration lock is unreadable or malformed.",
+    "Restore src/schema/migrations.lock.json from version control; do not regenerate it over an unknown history.",
+    "The lock is the append-only authority for migrations already applied to installed databases, so damaged state must never be silently re-baselined.",
+  );
+}
+
 export function checkMigrationState(analysis: SqliteAnalysis, stateFile: string): SqliteDiagnostic[] {
   // Never bless a chain that the real-SQLite/schema pass rejected. The CLI
   // still prints those primary diagnostics; the append-only lock remains at
@@ -747,7 +770,24 @@ export function checkMigrationState(analysis: SqliteAnalysis, stateFile: string)
   // broken history as the new baseline.
   if (analysis.diagnostics.length > 0) return [];
   let prior: MigrationState | null = null;
-  try { prior = JSON.parse(fs.readFileSync(stateFile, "utf8")) as MigrationState; } catch {}
+  let stateSource: string | null = null;
+  try {
+    stateSource = fs.readFileSync(stateFile, "utf8");
+  } catch (error) {
+    if (!(error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT")) {
+      return [damagedMigrationState(stateFile)];
+    }
+  }
+  if (stateSource !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stateSource);
+    } catch {
+      return [damagedMigrationState(stateFile)];
+    }
+    if (!validMigrationState(parsed)) return [damagedMigrationState(stateFile)];
+    prior = parsed;
+  }
   const errors: SqliteDiagnostic[] = [];
   if (prior) {
     for (let i = 0; i < prior.hashes.length; i++) {

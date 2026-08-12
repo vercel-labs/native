@@ -659,7 +659,7 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         // check failure.
         tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
         const sqlite_sdk = if (sqlite_enabled)
-            try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root)
+            try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root, true)
         else
             null;
         defer if (sqlite_sdk) |path| allocator.free(path);
@@ -695,7 +695,7 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
             return error.MissingFramework;
         };
         defer allocator.free(framework_root);
-        const generated = try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root);
+        const generated = try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root, false);
         allocator.free(generated);
     }
 

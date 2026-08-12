@@ -422,6 +422,7 @@ pub fn generateSqliteSurface(
     io: std.Io,
     base_env: *std.process.Environ.Map,
     framework_root: []const u8,
+    install_editor_surface: bool,
 ) ![]u8 {
     const sqlite_cli = try transpilerPath(allocator, io, framework_root, "src/sqlite_cli.ts");
     defer allocator.free(sqlite_cli);
@@ -452,6 +453,9 @@ pub fn generateSqliteSurface(
     const term = try child.wait(io);
     switch (term) {
         .exited => |code| if (code == 0) {
+            if (install_editor_surface) {
+                materializeSqliteEditorSurface(allocator, io, ".", sdk_out) catch {};
+            }
             const absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, ".native/cache/sqlite/core.d.ts", allocator);
             allocator.free(sdk_out);
             return absolute;
@@ -643,7 +647,7 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     defer if (sqlite_source) |path_value| allocator.free(path_value);
     for (options.capabilities) |capability| {
         if (!std.mem.eql(u8, capability, "sqlite")) continue;
-        sqlite_declarations = try generateSqliteSurface(allocator, io, options.base_env, framework_root);
+        sqlite_declarations = try generateSqliteSurface(allocator, io, options.base_env, framework_root, true);
         sqlite_source = try std.Io.Dir.cwd().realPathFileAlloc(io, ".native/cache/sqlite/core.ts", allocator);
         break;
     }
@@ -754,6 +758,7 @@ pub const editor_package_dir = "node_modules/@native-sdk/core";
 /// packages/core/test/package_manifest.test.ts pins the manifest to this
 /// shape, so copy and tarball cannot drift apart.
 const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/text.ts", "sdk/events.ts", "sdk/bytes_text_methods.d.ts" };
+const sqlite_editor_overlay_marker = ".native/cache/sqlite/editor-overlay";
 
 /// Extract the top-level "version" of a package.json. A targeted scan, not
 /// a JSON parse: both inputs are our own manifest and npm's byte-identical
@@ -791,6 +796,8 @@ pub const EditorPackageStatus = struct {
     /// The app copy's version, or null when the copy is missing or
     /// incomplete (owned when present).
     installed: ?[]const u8,
+    /// The package's core.ts is the current app-specific relational overlay.
+    sqlite_overlay: bool,
 
     pub fn fresh(self: EditorPackageStatus) bool {
         const installed = self.installed orelse return false;
@@ -805,10 +812,13 @@ pub const EditorPackageStatus = struct {
 
 /// Compare `<app_root>/node_modules/@native-sdk/core` against the SDK's
 /// bundled package. Cheap by design (the refresh trigger runs on every
-/// check/dev/build): two one-field manifest reads plus two stats.
+/// check/dev/build): small manifest/source reads plus file stats.
 pub fn editorPackageStatus(allocator: std.mem.Allocator, io: std.Io, framework_root: []const u8, app_root: []const u8) !EditorPackageStatus {
     const bundled = try bundledSdkVersion(allocator, io, framework_root);
     errdefer allocator.free(bundled);
+    const overlay_path = try std.fs.path.join(allocator, &.{ app_root, sqlite_editor_overlay_marker });
+    defer allocator.free(overlay_path);
+    const sqlite_overlay = buildgraph.fileExists(io, overlay_path);
 
     const installed: ?[]const u8 = read: {
         const manifest_path = try std.fs.path.join(allocator, &.{ app_root, editor_package_dir, "package.json" });
@@ -825,10 +835,10 @@ pub fn editorPackageStatus(allocator: std.mem.Allocator, io: std.Io, framework_r
         }
         break :read try allocator.dupe(u8, version);
     };
-    return .{ .bundled = bundled, .installed = installed };
+    return .{ .bundled = bundled, .installed = installed, .sqlite_overlay = sqlite_overlay };
 }
 
-pub const EnsureOutcome = enum { fresh, materialized };
+pub const EnsureOutcome = enum { fresh, materialized, restored_overlay };
 
 /// Make `<app_root>/node_modules/@native-sdk/core` a current copy of the
 /// SDK's bundled package: leave a version-matching copy alone (that is the
@@ -838,7 +848,10 @@ pub const EnsureOutcome = enum { fresh, materialized };
 pub fn ensureEditorPackage(allocator: std.mem.Allocator, io: std.Io, framework_root: []const u8, app_root: []const u8) !EnsureOutcome {
     const status = try editorPackageStatus(allocator, io, framework_root, app_root);
     defer status.deinit(allocator);
-    if (status.fresh()) return .fresh;
+    // Restore an app-specific overlay before deciding whether sqlite still
+    // applies. A sqlite verb regenerates it immediately; a non-sqlite verb
+    // leaves the ordinary package behind.
+    if (status.fresh() and !status.sqlite_overlay) return .fresh;
 
     for (editor_package_files) |sub_path| {
         const source_path = try std.fs.path.join(allocator, &.{ framework_root, "packages", "core", sub_path });
@@ -853,7 +866,30 @@ pub fn ensureEditorPackage(allocator: std.mem.Allocator, io: std.Io, framework_r
         }
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dest_path, .data = data });
     }
-    return .materialized;
+    const overlay_path = try std.fs.path.join(allocator, &.{ app_root, sqlite_editor_overlay_marker });
+    defer allocator.free(overlay_path);
+    std.Io.Dir.cwd().deleteFile(io, overlay_path) catch {};
+    return if (status.sqlite_overlay) .restored_overlay else .materialized;
+}
+
+/// Install the app-specific generated relational SDK where stock editor
+/// TypeScript resolves @native-sdk/core. Build truth continues to use the
+/// ignored cache output; this copy is only the editor overlay.
+pub fn materializeSqliteEditorSurface(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    app_root: []const u8,
+    generated_core_path: []const u8,
+) !void {
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, generated_core_path, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(source);
+    const overlay_path = try std.fs.path.join(allocator, &.{ app_root, sqlite_editor_overlay_marker });
+    defer allocator.free(overlay_path);
+    if (std.fs.path.dirname(overlay_path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = overlay_path, .data = "generated relational editor surface\n" });
+    const destination = try std.fs.path.join(allocator, &.{ app_root, editor_package_dir, "sdk/core.ts" });
+    defer allocator.free(destination);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = destination, .data = source });
 }
 
 /// The self-heal hook `native check|dev|build|test` run over a TS app (cwd
@@ -955,6 +991,25 @@ test "editor package: materialize, heal, and the npm-install handoff" {
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/text.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/events.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/bytes_text_methods.d.ts"));
+
+    // A generated relational surface overlays the editor-resolved core and
+    // deliberately makes the package stale. The next verb restores the base
+    // first, so removing sqlite from app.zon cannot leave q<Name> APIs behind.
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/generated-core.ts", .data = "// app-specific qNotes surface" });
+    try materializeSqliteEditorSurface(allocator, io, app, root ++ "/generated-core.ts");
+    const generated = try cwd.readFileAlloc(io, app ++ "/node_modules/@native-sdk/core/sdk/core.ts", allocator, .limited(1024));
+    defer allocator.free(generated);
+    try std.testing.expectEqualStrings("// app-specific qNotes surface", generated);
+    {
+        const overlaid = try editorPackageStatus(allocator, io, sdk, app);
+        defer overlaid.deinit(allocator);
+        try std.testing.expect(overlaid.fresh());
+        try std.testing.expect(overlaid.sqlite_overlay);
+    }
+    try std.testing.expectEqual(EnsureOutcome.restored_overlay, try ensureEditorPackage(allocator, io, sdk, app));
+    const restored = try cwd.readFileAlloc(io, app ++ "/node_modules/@native-sdk/core/sdk/core.ts", allocator, .limited(1024));
+    defer allocator.free(restored);
+    try std.testing.expectEqualStrings("// core module", restored);
 
     // Current copy: untouched (this is also the post-publish handoff — a
     // real `npm install` writes identical content at the same version, so

@@ -60,6 +60,23 @@ test("migration history is append-only and SQL errors point into authored files"
   }
 });
 
+test("a damaged migration lock is rejected without replacing its history", () => {
+  const root = fixture();
+  try {
+    const result = analyzeSqlite(root);
+    const state = path.join(root, "schema", "migrations.lock.json");
+    fs.writeFileSync(state, "{ definitely not json\n");
+    assert.equal(checkMigrationState(result, state)[0]?.rule, "NS1408");
+    assert.equal(fs.readFileSync(state, "utf8"), "{ definitely not json\n");
+
+    fs.writeFileSync(state, JSON.stringify({ version: 1, hashes: [], schema_hash: "hash" }));
+    assert.equal(checkMigrationState(result, state)[0]?.rule, "NS1408");
+    assert.deepEqual(JSON.parse(fs.readFileSync(state, "utf8")), { version: 1, hashes: [], schema_hash: "hash" });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("STRICT tables and contiguous migration versions are hard gates", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-check-"));
   try {

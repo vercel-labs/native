@@ -1293,7 +1293,9 @@ function encodeDbPages(columnNames: ReadonlyArray<string>, rows: Iterable<Readon
 }
 
 function dbBindArgs(sql: string, params: ReadonlyArray<DbBindValue>): ReadonlyArray<unknown> {
-  const names: string[] = [];
+  const namedIndexes = new Map<string, number>();
+  const positionalIndexes = new Set<number>();
+  let maxIndex = 0;
   let at = 0;
   while (at < sql.length) {
     const char = sql[at]!;
@@ -1323,21 +1325,45 @@ function dbBindArgs(sql: string, params: ReadonlyArray<DbBindValue>): ReadonlyAr
       at = end < 0 ? sql.length : end + 2;
       continue;
     }
-    if (char === ":" && /[A-Za-z_]/.test(sql[at + 1] ?? "")) {
+    if (char === "?") {
+      let end = at + 1;
+      while (/[0-9]/.test(sql[end] ?? "")) end += 1;
+      const explicit = end > at + 1 ? Number(sql.slice(at + 1, end)) : null;
+      const index = explicit ?? maxIndex + 1;
+      if (!Number.isSafeInteger(index) || index <= 0) throw new Error("SQLite positional parameter index is invalid");
+      maxIndex = Math.max(maxIndex, index);
+      positionalIndexes.add(index);
+      at = end;
+      continue;
+    }
+    if ((char === ":" || char === "@" || char === "$") && /[A-Za-z_]/.test(sql[at + 1] ?? "")) {
       let end = at + 2;
       while (/[A-Za-z0-9_]/.test(sql[end] ?? "")) end += 1;
-      const name = sql.slice(at + 1, end);
-      if (!names.includes(name)) names.push(name);
+      const name = sql.slice(at, end);
+      if (!namedIndexes.has(name)) namedIndexes.set(name, ++maxIndex);
       at = end;
       continue;
     }
     at += 1;
   }
-  if (names.length === 0) return params;
-  if (names.length !== params.length) throw new Error("SQLite named parameter count does not match its value array");
+  if (maxIndex !== params.length) throw new Error("SQLite parameter count does not match its value array");
+  if (namedIndexes.size === 0) return params;
   const named: Record<string, DbBindValue> = {};
-  for (let i = 0; i < names.length; i++) named[names[i]!] = params[i]!;
-  return [named];
+  const indexesClaimedByName = new Set<number>();
+  for (const [name, index] of namedIndexes) {
+    named[name] = params[index - 1]!;
+    indexesClaimedByName.add(index);
+  }
+  const positional: DbBindValue[] = [];
+  const lastPositionalIndex = positionalIndexes.size === 0 ? 0 : Math.max(...positionalIndexes);
+  for (let index = 1; index <= maxIndex; index++) {
+    if (indexesClaimedByName.has(index)) continue;
+    // Numbered placeholders can leave holes. Node's SQLite binding API
+    // counts those holes among its anonymous arguments, exactly as the C
+    // API's 1..parameter_count index walk does.
+    if (index <= lastPositionalIndex) positional.push(params[index - 1]!);
+  }
+  return [named, ...positional];
 }
 
 function beginDbOperation(cmd: Cmdish, query: boolean): PendingDbOperation | null {
@@ -1910,7 +1936,7 @@ function handleLine(raw: string): void {
   if (record.restart === true) {
     timers.clear();
     delays.clear();
-    for (const live of liveDbByKey.values()) live.operation.active = false;
+    for (const live of liveDbByKey.values()) releaseDbOperation(live.operation, true);
     liveDbByKey.clear();
     dirtyLiveDbKeys.clear();
     say("restart virtual host");

@@ -1664,6 +1664,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             } else {
                 self.options.update.?(&self.model, msg);
             }
+            // One update call is one complete command batch. Re-run live
+            // relational reads only after the batch has walked so several
+            // writes touching the same table still coalesce into one result.
+            self.effects.flushDbSubscriptions();
         }
 
         /// Drain the effect completion queue on the loop thread: every
@@ -4258,6 +4262,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         self.init_fx_ran = true;
                         self.bindEffectsChannel(runtime);
                         init_fx(&self.model, &self.effects);
+                        // init_fx has the same batch contract as update_fx;
+                        // subscriptions dirtied by boot transactions must be
+                        // current before their staged results are drained.
+                        self.effects.flushDbSubscriptions();
                         self.publishAudioState(runtime);
                         // Launch lap (env-gated): boot-effect cost (asset
                         // decode/registration) splits out of the

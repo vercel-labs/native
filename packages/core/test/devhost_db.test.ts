@@ -59,6 +59,46 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   }
 });
 
+test("the devhost binds mixed named, anonymous, and numbered SQLite parameters like native", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-parameters-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly pages: number; readonly done: boolean; readonly failed: boolean; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { pages: 0, done: false, failed: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.db.query(
+      "SELECT 1 AS valid WHERE ? = 1 AND :named = 2 AND $third = 3 AND @fourth = 4 AND ?6 = 6",
+      [1, 2, 3, 4, 5, 6],
+      { page: "page", done: "done", err: "failed" },
+    )];
+    case "page": return { ...model, pages: model.pages + 1 };
+    case "done": return { ...model, done: true };
+    case "failed": return { ...model, failed: true };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /cmd db_query  \(1 rows in 1 page\)/);
+    assert.match(run.stdout, /"pages":1,"done":true,"failed":false/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("the devhost coalesces and re-delivers live queries after matching commits", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-live-"));
@@ -444,6 +484,44 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     assert.equal(run.status, 0, run.stderr);
     assert.equal((run.stdout.match(/cmd db_query rejected rejected/g) ?? []).length, 1, run.stdout);
     assert.match(run.stdout, /"liveDone":15,"commandDone":1,"rejected":1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("virtual-host restarts release every live relational operation slot", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-restart-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Sub } from "@native-sdk/core";
+export interface Model { readonly pages: number; readonly done: number; }
+export type Msg =
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { pages: 0, done: 0 }; }
+export function subscriptions(_model: Model): Sub<Msg> {
+  return { op: "db_live", key: "notes", pageKind: "page", doneKind: "done", errKind: "failed",
+    sql: "SELECT 1 AS value", params: [], tables: ["note"] };
+}
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "page": return { ...model, pages: model.pages + 1 };
+    case "done": return { ...model, done: model.done + 1 };
+    case "failed": return model;
+  }
+}
+`);
+    fs.writeFileSync(script, `${Array.from({ length: 20 }, () => '{"restart":true}').join("\n")}\n`);
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.doesNotMatch(run.stderr, /database slot family/);
+    assert.equal((run.stdout.match(/restart virtual host/g) ?? []).length, 20, run.stdout);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
