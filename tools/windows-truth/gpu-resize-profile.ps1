@@ -28,6 +28,11 @@ param(
     # Fixture knobs (ignored by any other -AppDir): texture count and edge.
     [int]$Images = 0,
     [int]$Extent = 0,
+    # Arguments for the app under test. A real app that stops on a startup
+    # dialog measures the dialog, not the app — alchemist-native wants
+    # -AppArgs '--restore-session' so the same project comes back on every
+    # launch of a before/after pair with nothing to click.
+    [string[]]$AppArgs = @(),
     # After the sweep, hold the window still and jiggle the pointer inside
     # it for this long. Resize steps are all full-surface repaints, so they
     # say nothing about partial-update cost; this phase is what exercises
@@ -44,6 +49,11 @@ param(
     # partial path can be A/B'd against itself on one build.
     [switch]$FullPresent,
     [switch]$Drag,
+    # Run -Drag alone. The sweep/drag boundary is a single global sequence
+    # number, and sequence numbers are PER SURFACE — fine for a one-surface
+    # fixture, meaningless for an app with twenty. Skipping the sweep makes
+    # the whole logged population the modal drag, so no boundary is needed.
+    [switch]$SkipSweep,
     [switch]$KeepRunning
 )
 
@@ -244,7 +254,9 @@ $env:NATIVE_SDK_GPU_PROFILE = $logPath
 if ($Images -gt 0) { $env:NATIVE_SDK_FIXTURE_IMAGES = "$Images" }
 if ($Extent -gt 0) { $env:NATIVE_SDK_FIXTURE_EXTENT = "$Extent" }
 if ($FullPresent) { $env:NATIVE_SDK_GPU_FULL_PRESENT = "1" }
-$launched = Start-Process -FilePath (Resolve-Path $exePath) -WorkingDirectory (Resolve-Path $AppDir) -PassThru
+$startArgs = @{ FilePath = (Resolve-Path $exePath); WorkingDirectory = (Resolve-Path $AppDir); PassThru = $true }
+if ($AppArgs.Count -gt 0) { $startArgs.ArgumentList = $AppArgs }
+$launched = Start-Process @startArgs
 Remove-Item Env:\NATIVE_SDK_GPU_PROFILE
 Remove-Item Env:\NATIVE_SDK_FIXTURE_IMAGES -ErrorAction SilentlyContinue
 Remove-Item Env:\NATIVE_SDK_FIXTURE_EXTENT -ErrorAction SilentlyContinue
@@ -271,7 +283,7 @@ try {
     # the whole client area the way a real drag's growth edge does.
     $swpFlags = 0x0004 -bor 0x0010 -bor 0x0100
 
-    for ($step = 0; $step -lt $Steps; $step++) {
+    for ($step = 0; ($step -lt $Steps) -and (-not $SkipSweep); $step++) {
         # Triangle sweep: grow to the ceiling, shrink back. Both directions
         # matter — growth reallocates upward, shrink still rebuilds.
         $phase = [double]$step / [double]$Steps
