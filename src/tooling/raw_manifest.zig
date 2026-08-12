@@ -11,6 +11,7 @@ pub const RawManifest = struct {
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
     persist: ?RawPersist = null,
+    service_packages: []const RawServicePackage = &.{},
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
     webview_layer: []const u8 = "auto",
@@ -32,6 +33,12 @@ pub const RawManifest = struct {
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
     dmg: RawDmg = .{},
+};
+
+pub const RawServicePackage = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
 };
 
 pub const RawPersist = struct {

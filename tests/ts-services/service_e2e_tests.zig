@@ -25,10 +25,14 @@ const SkewedRegistry = struct {
     pub fn indexOf(name: []const u8) ?u16 {
         return registry.indexOf(name);
     }
+
+    pub fn operationAt(index: u16) ?registry.Operation {
+        return registry.operationAt(index);
+    }
 };
 const runtime_ns = native_sdk.runtime;
 
-const canvas_label = "ts-services-canvas";
+const canvas_label = "fixture-canvas";
 const views = [_]native_sdk.ShellView{.{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal }};
 const windows = [_]native_sdk.ShellWindow{.{
     .label = "main",
@@ -47,7 +51,14 @@ fn command(name: []const u8) ?core.Msg {
     if (std.mem.eql(u8, name, "service.parse")) return .parse;
     if (std.mem.eql(u8, name, "service.fail")) return .fail;
     if (std.mem.eql(u8, name, "service.hang")) return .hang;
+    if (std.mem.eql(u8, name, "service.queued-deadline")) return .queued_deadline;
     if (std.mem.eql(u8, name, "service.replace-hang")) return .replace_hang;
+    if (std.mem.eql(u8, name, "service.stream")) return .stream;
+    if (std.mem.eql(u8, name, "service.stream-hang")) return .stream_hang;
+    if (std.mem.eql(u8, name, "service.cancel-stream")) return .cancel_stream;
+    if (std.mem.eql(u8, name, "service.duplicate-parse")) return .duplicate_parse;
+    if (std.mem.eql(u8, name, "service.unkeyed-parse")) return .unkeyed_parse;
+    if (std.mem.eql(u8, name, "service.duplicate-stream")) return .duplicate_stream;
     return null;
 }
 
@@ -63,6 +74,9 @@ fn appOptions() App.Options {
 
 const fixture_root = ".zig-cache/tmp/ts-services-e2e";
 const hang_marker = fixture_root ++ "/hang.started";
+const stream_hang_marker = fixture_root ++ "/stream-hang.started";
+const queued_blocker_marker = fixture_root ++ "/queued-blocker.started";
+const queued_probe_marker = fixture_root ++ "/queued-probe.started";
 
 fn resetFixtureDir() !void {
     const cwd = std.Io.Dir.cwd();
@@ -107,6 +121,7 @@ const Harness = struct {
         errdefer std.testing.allocator.destroy(self.app_state);
         self.app_state.* = Adapter.init(std.heap.page_allocator, .{
             .host_calls = self.transport.binding(),
+            .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
         }, appOptions());
         errdefer self.app_state.deinit();
         self.app = self.app_state.app();
@@ -162,11 +177,31 @@ const Harness = struct {
         return error.TestTimedOut;
     }
 
+    fn waitForStreamHangMarker(self: *Harness) !void {
+        _ = self;
+        var waited_ms: usize = 0;
+        while (waited_ms < 30_000) : (waited_ms += 5) {
+            std.Io.Dir.cwd().access(std.testing.io, stream_hang_marker, .{}) catch {
+                try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake);
+                continue;
+            };
+            return;
+        }
+        return error.TestTimedOut;
+    }
+
     fn settleBoot(self: *Harness) !void {
         try self.waitPending();
         try self.wake();
         try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 1), Bridge.model().successes);
         try std.testing.expect(!Bridge.model().failed);
+    }
+
+    fn settleCounts(self: *Harness, successes: i64, failures: i64) !void {
+        while (Bridge.model().successes < successes or Bridge.model().failures < failures) {
+            try self.waitPending();
+            try self.wake();
+        }
     }
 };
 
@@ -231,6 +266,36 @@ test "ordinary TypeScript service success and kind-tagged throw route through Ms
     try std.testing.expect(std.mem.indexOf(u8, Bridge.model().bytes, "\"message\":\"requested failure\"") != null);
 }
 
+test "duplicate typed service keys reject without disturbing the original request" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.duplicate-parse");
+    try h.settleCounts(2, 1);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().failures), 1), Bridge.model().failures);
+}
+
+test "unkeyed typed service requests each receive an independent slot" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.unkeyed-parse");
+    try h.settleCounts(3, 0);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 3), Bridge.model().successes);
+}
+
+test "duplicate streaming channel admission rejects the newcomer without hijacking the original" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.duplicate-stream");
+    try h.settleCounts(2, 1);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chunks), 3), Bridge.model().chunks);
+}
+
 test "kill during a request fails it and the next request starts a fresh host" {
     const h = try Harness.create(null);
     defer h.destroy();
@@ -259,15 +324,51 @@ test "cancelling an active request cannot complete a replacement with the same k
 
     try h.menu("service.hang");
     try h.waitForHangMarker();
+    const original_child = h.transport.processId() orelse return error.TestExpectedServiceChild;
     try h.menu("service.replace-hang");
     try h.waitPending();
     try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 2), Bridge.model().successes);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().failures), 0), Bridge.model().failures);
     try std.testing.expect(!Bridge.model().failed);
+    try std.testing.expectEqual(original_child, h.transport.processId().?);
 }
 
-test "a hung operation times out, retires the child, and preserves restart" {
+test "streaming service frames use an external channel before the typed terminal" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.stream");
+    while (Bridge.model().successes < 2) {
+        try h.waitPending();
+        try h.wake();
+    }
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chunks), 3), Bridge.model().chunks);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 2), Bridge.model().successes);
+    try std.testing.expect(!Bridge.model().failed);
+}
+
+test "cancelling a streaming service is loud and closes its channel" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.stream-hang");
+    try h.waitForStreamHangMarker();
+    try h.waitPending();
+    try h.wake();
+    const chunks_before_cancel = Bridge.model().chunks;
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chunks), 1), chunks_before_cancel);
+    try h.menu("service.cancel-stream");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqual(chunks_before_cancel, Bridge.model().chunks);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().failures), 1), Bridge.model().failures);
+    try std.testing.expect(std.mem.eql(u8, Bridge.model().bytes, "cancelled"));
+}
+
+test "a cooperative deadline reports timeout and preserves the child" {
     const h = try Harness.create(null);
     defer h.destroy();
     try h.settleBoot();
@@ -275,15 +376,29 @@ test "a hung operation times out, retires the child, and preserves restart" {
 
     try h.menu("service.hang");
     try h.waitForHangMarker();
+    const original_child = h.transport.processId() orelse return error.TestExpectedServiceChild;
     try h.waitPending();
     try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().failures), 1), Bridge.model().failures);
-    try std.testing.expect(std.mem.indexOf(u8, Bridge.model().bytes, "service_timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, Bridge.model().bytes, "\"kind\":\"timeout\"") != null);
 
     try h.menu("service.parse");
     try h.waitPending();
     try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 2), Bridge.model().successes);
+    try std.testing.expectEqual(original_child, h.transport.processId().?);
+}
+
+test "service deadlines include time spent queued behind another operation" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.queued-deadline");
+    try h.settleCounts(1, 2);
+    try std.Io.Dir.cwd().access(std.testing.io, queued_blocker_marker, .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, queued_probe_marker, .{}));
+    try std.testing.expect(std.mem.indexOf(u8, Bridge.model().bytes, "\"kind\":\"timeout\"") != null);
 }
 
 const JournalBuffer = struct {
@@ -370,6 +485,7 @@ test "journal replay reproduces service results without starting a host" {
     defer std.testing.allocator.destroy(app_state);
     app_state.* = Adapter.init(std.heap.page_allocator, .{
         .host_calls = absent_transport.binding(),
+        .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
     }, appOptions());
     defer app_state.deinit();
 
@@ -381,4 +497,78 @@ test "journal replay reproduces service results without starting a host" {
     try std.testing.expectEqual(@as(u64, 2), report.effects_fed);
     try std.testing.expectEqual(@as(?std.process.Child.Id, null), absent_transport.processId());
     try std.testing.expectEqualDeep(recorded, Snapshot.take());
+}
+
+test "a devhost-recorded service session replays in the packaged runtime without a host" {
+    const journal_path = ".zig-cache/tmp/ts-services-devhost-session.journal";
+    std.Io.Dir.cwd().deleteFile(std.testing.io, journal_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, journal_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache/tmp");
+
+    var recorder_process = try std.process.spawn(std.testing.io, .{
+        .argv = &.{
+            fixture_options.node_executable,
+            "packages/core/src/devhost.ts",
+            "tests/ts-services/ok/src/core.ts",
+            "--script",
+            "tests/ts-services/ok/devhost_journal.ndjson",
+            "--service-package",
+            "escape-string-regexp|5.0.0|705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d",
+            "--record-journal",
+            journal_path,
+            "--app-name",
+            "ts-services-e2e",
+            "--canvas-label",
+            canvas_label,
+            "--window-width",
+            "320",
+            "--window-height",
+            "200",
+        },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+    });
+    const term = try recorder_process.wait(std.testing.io);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+    const journal = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        journal_path,
+        std.testing.allocator,
+        .limited(runtime_ns.max_session_journal_bytes),
+    );
+    defer std.testing.allocator.free(journal);
+
+    try resetFixtureDir();
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_root) catch {};
+    var absent_transport = ServiceTransport.init(
+        std.testing.allocator,
+        std.testing.io,
+        ".zig-cache/tmp/ts-services-e2e/deleted-service-host",
+        fixture_root,
+        null,
+    );
+    defer absent_transport.deinit();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
+        .size = native_sdk.geometry.SizeF.init(320, 200),
+    });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = Adapter.init(std.heap.page_allocator, .{
+        .host_calls = absent_transport.binding(),
+        .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
+    }, appOptions());
+    defer app_state.deinit();
+
+    const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), journal, .{
+        .verify = false,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(?std.process.Child.Id, null), absent_transport.processId());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 3), Bridge.model().successes);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().failures), 0), Bridge.model().failures);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chunks), 3), Bridge.model().chunks);
 }

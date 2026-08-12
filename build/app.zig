@@ -371,6 +371,7 @@ fn tsCoreStage(
     store_capability: bool,
     relational_capability: bool,
     persist_version: ?u64,
+    service_packages: []const ServicePackageConfig,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
@@ -433,6 +434,12 @@ fn tsCoreStage(
         break :services_contract check.addOutputFileArg("services.contract.json");
     } else null;
     if (persist_capability) check.addArgs(&.{ "--capability", "persist" });
+    for (service_packages) |package_entry| {
+        check.addArgs(&.{
+            "--service-package",
+            b.fmt("{s}|{s}|{s}", .{ package_entry.name, package_entry.version, package_entry.content_hash }),
+        });
+    }
     if (store_capability) check.addArgs(&.{ "--capability", "store" });
     if (relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (relational_capability) {
@@ -448,6 +455,10 @@ fn tsCoreStage(
     for (frontend_sources) |source| {
         check.addFileInput(dep.path(b.fmt("packages/core/src/{s}", .{source})));
     }
+    // Service contracts echo the exact scriptc pin read from this manifest.
+    // Declare that runtime read explicitly so a compiler bump invalidates a
+    // warm build cache before the compile lane checks the echoed version.
+    if (has_services) check.addFileInput(dep.path("packages/core/package.json"));
 
     // corewire, compiled from the SDK dependency for the build host: one
     // invocation projects the generated compile entry and its profile,
@@ -466,6 +477,7 @@ fn tsCoreStage(
     // name/index registry never rediscover facts from author source.
     var service_registry: std.Build.LazyPath = dep.path("src/app_runner/no_services.zig");
     var service_exe: ?std.Build.LazyPath = null;
+    var service_client: ?std.Build.LazyPath = null;
     if (services_contract) |service_contract| {
         const service_project = b.addRunArtifact(corewire_exe);
         service_project.addArg("--services-sidecar");
@@ -474,10 +486,12 @@ fn tsCoreStage(
         const service_host_main = service_project.addOutputFileArg("service_host_main.ts");
         service_project.addArg("--service-registry");
         service_registry = service_project.addOutputFileArg("services.zig");
+        service_project.addArg("--service-client");
+        service_client = service_project.addOutputFileArg("services.gen.ts");
 
         // Ordinary service TypeScript is staged without core-subset rewrites.
         // The one service-boundary lowering turns NS1067's `{ kind, message }`
-        // throw into the tagged Error shape scriptc 0.0.22 can catch from an
+        // throw into the tagged Error shape scriptc 0.0.26 can catch from an
         // imported op; no deterministic profile fences participate here.
         const service_stage_run = b.addSystemCommand(&.{node});
         service_stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_services.mjs"));
@@ -485,6 +499,8 @@ fn tsCoreStage(
         service_stage_run.addDirectoryArg(b.path(appPath(b, app_root, "src")));
         service_stage_run.addArg("--host-main");
         service_stage_run.addFileArg(service_host_main);
+        service_stage_run.addArg("--contract");
+        service_stage_run.addFileArg(service_contract);
         service_stage_run.addArg("--out");
         const service_stage_dir = service_stage_run.addOutputDirectoryArg("services-stage");
         // The staging script discovers nested service modules recursively;
@@ -531,6 +547,10 @@ fn tsCoreStage(
     stage_run.addFileArg(facade);
     stage_run.addArg("--profile");
     stage_run.addFileArg(profile);
+    if (service_client) |client| {
+        stage_run.addArg("--services-client");
+        stage_run.addFileArg(client);
+    }
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 
@@ -893,6 +913,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_config.store_capability,
             app_config.relational_capability,
             app_config.persist_version,
+            app_config.service_packages,
         )
     else
         null;
@@ -1841,6 +1862,7 @@ const AppManifestBuildConfig = struct {
     system_audio_permission: bool = false,
     persist_capability: bool = false,
     persist_version: ?u64 = null,
+    service_packages: []const ServicePackageConfig = &.{},
     store_capability: bool = false,
     relational_capability: bool = false,
     sqlite_capability: bool = false,
@@ -1848,6 +1870,12 @@ const AppManifestBuildConfig = struct {
     /// when app.zon declares no web use. `web_engine = "system"` alone is
     /// NOT web intent — it is the default in many canvas manifests.
     web_declaration: ?web_layer_contract.Declaration = null,
+};
+
+const ServicePackageConfig = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
 };
 
 /// The lenient app.zon shape the build graph parses for inference: web
@@ -1868,6 +1896,7 @@ const InferenceManifest = struct {
     persist: ?struct {
         version: u64,
     } = null,
+    service_packages: []const ServicePackageConfig = &.{},
     shell: struct {
         windows: []const struct {
             views: []const struct {
@@ -1918,6 +1947,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .system_audio_permission = hasManifestPermission(raw.permissions, "system_audio"),
         .persist_capability = hasManifestCapability(raw.capabilities, "persist"),
         .persist_version = if (raw.persist) |persist| persist.version else null,
+        .service_packages = raw.service_packages,
         .store_capability = hasManifestCapability(raw.capabilities, "store"),
         .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),

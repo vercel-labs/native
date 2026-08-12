@@ -369,6 +369,7 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
     var input: ?[]const u8 = null;
     var host_out: ?[]const u8 = null;
     var registry_out: ?[]const u8 = null;
+    var client_out: ?[]const u8 = null;
     var saw_service_flag = false;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -385,6 +386,10 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
             saw_service_flag = true;
             index += 1;
             registry_out = args[index];
+        } else if (std.mem.eql(u8, arg, "--service-client") and index + 1 < args.len) {
+            saw_service_flag = true;
+            index += 1;
+            client_out = args[index];
         } else if (saw_service_flag) {
             try stderr.print("corewire: unknown service projection argument \"{s}\"\n", .{arg});
             try stderr.flush();
@@ -393,12 +398,12 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
     }
     if (!saw_service_flag) return false;
     const sidecar_path = input orelse {
-        try stderr.print("usage: corewire --services-sidecar <services.contract.json> --service-host-main <service_host_main.ts> --service-registry <services.zig>\n", .{});
+        try stderr.print("usage: corewire --services-sidecar <services.contract.json> [--service-host-main <service_host_main.ts>] [--service-registry <services.zig>] [--service-client <services.gen.ts>]\n", .{});
         try stderr.flush();
         std.process.exit(2);
     };
-    if (host_out == null and registry_out == null) {
-        try stderr.print("corewire: the service projection needs --service-host-main and/or --service-registry\n", .{});
+    if (host_out == null and registry_out == null and client_out == null) {
+        try stderr.print("corewire: the service projection needs at least one output\n", .{});
         try stderr.flush();
         std.process.exit(2);
     }
@@ -431,6 +436,14 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
     }
     if (registry_out) |path| {
         const generated = try emit_service_mod.emitRegistry(arena, contract);
+        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
+            try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+    }
+    if (client_out) |path| {
+        const generated = try emit_service_mod.emitClient(arena, contract);
         std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
             try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
             try stderr.flush();

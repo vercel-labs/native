@@ -54,7 +54,10 @@ function tsFilesUnder(dir) {
   const walk = (sub) => {
     for (const entry of fs.readdirSync(path.join(dir, sub), { withFileTypes: true })) {
       const rel = sub === "" ? entry.name : `${sub}/${entry.name}`;
-      if (entry.isDirectory()) walk(rel);
+      // The service class has its own compile lane. Keeping it out of the
+      // core scratch tree also prevents vendored package declarations from
+      // participating in the core surface's mechanical alias dedupe.
+      if (entry.isDirectory() && rel !== "services") walk(rel);
       else if (entry.isFile() && rel.endsWith(".ts") && !rel.endsWith(".d.ts")) out.push(rel);
     }
   };
@@ -73,6 +76,7 @@ function resolveSpecifiers(text, rel) {
     .replaceAll('"@native-sdk/core/text"', `"${toSdk("text.ts")}"`)
     .replaceAll('"@native-sdk/core/events"', `"${toSdk("events.ts")}"`)
     .replaceAll('"@native-sdk/core"', `"${toSdk("core.ts")}"`)
+    .replaceAll('"@native-sdk/services"', `"${path.posix.relative(path.posix.dirname(rel), "services.gen.ts").startsWith(".") ? path.posix.relative(path.posix.dirname(rel), "services.gen.ts") : `./${path.posix.relative(path.posix.dirname(rel), "services.gen.ts")}`}"`)
     .replace(/readonly ([A-Za-z_][A-Za-z0-9_]*(?:<[A-Za-z_, ]*>)?)\[\]/g, "$1[]")
     .replace(/(?<![A-Za-z0-9_])Bytes(?![A-Za-z0-9_])/g, "Uint8Array")
     .split("\n")
@@ -146,3 +150,7 @@ fs.writeFileSync(path.join(args.out, "sdk", "core.ts"), dedupeAliases(fs.readFil
 // the profile's entry spelling expects.
 fs.copyFileSync(args.facade, path.join(args.out, "core_facade.ts"));
 fs.copyFileSync(args.profile, path.join(args.out, "profile.json"));
+if (args["services-client"]) {
+  const client = resolveSpecifiers(fs.readFileSync(args["services-client"], "utf8"), "services.gen.ts");
+  fs.writeFileSync(path.join(args.out, "services.gen.ts"), client);
+}

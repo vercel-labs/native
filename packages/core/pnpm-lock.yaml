@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       scriptc:
-        specifier: 0.0.22
-        version: 0.0.22
+        specifier: 0.0.26
+        version: 0.0.26
     devDependencies:
       '@typescript/old':
         specifier: npm:typescript@6.0.3
@@ -18,11 +18,11 @@ importers:
 
 packages:
 
-  '@scriptc/compiler@0.0.22':
-    resolution: {integrity: sha512-cZil7ZgK64yRpSk1X3BSq1Q2DBru53KfC4X0i/qa0vHNk/rvk3teDzykSP5l3nb5wY2ckh0Es3fojfD0kUp/gA==}
+  '@scriptc/compiler@0.0.26':
+    resolution: {integrity: sha512-JCLQbW5ZLTDOwlSbUwfA8ZYcsHUb1SJzzpAwNFNPOlf+mw8kvTMKFnQaDzCD+bK/eOAzLhn2U6jO95fiYsNJxQ==}
 
-  '@scriptc/runtime@0.0.22':
-    resolution: {integrity: sha512-UytlS/6vxWXYIpIO2lQYVh4xTzMoybX0Uz1wKA41ezq62sMeuhHT6JVappUG55DgVNAWGgMI/WAHun2TeRutNg==}
+  '@scriptc/runtime@0.0.26':
+    resolution: {integrity: sha512-M035p4yYbnxTkgIt+hKVO4ekWc0iAicMXpsBEgxmpr2fAUHgM7UI/r8V9nHtzAXb8rB2kQEe/l6nbzSeUmIgSg==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -144,8 +144,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  scriptc@0.0.22:
-    resolution: {integrity: sha512-gJQ5Johx477Al1EqZOTeXOPsPgwzSOvVljIc9l1S0BqhaffyZtxXa1Mm3YFKZaCV3u4YNAEMsbO9EBgvW1awDg==}
+  scriptc@0.0.26:
+    resolution: {integrity: sha512-UqqmtrdYV0cS7lA/hOfx+DLhWwglHjxSwKXUqUez6l2TnFo8D12dSickGp0oo7dPxBhVcvrLHIG8aOZ0PunmqQ==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -166,13 +166,13 @@ packages:
 
 snapshots:
 
-  '@scriptc/compiler@0.0.22':
+  '@scriptc/compiler@0.0.26':
     dependencies:
-      '@scriptc/runtime': 0.0.22
+      '@scriptc/runtime': 0.0.26
       typescript: 7.0.2
       typescript5: typescript@5.9.3
 
-  '@scriptc/runtime@0.0.22': {}
+  '@scriptc/runtime@0.0.26': {}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -234,9 +234,9 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  scriptc@0.0.22:
+  scriptc@0.0.26:
     dependencies:
-      '@scriptc/compiler': 0.0.22
+      '@scriptc/compiler': 0.0.26
 
   typescript@5.9.3: {}
 

@@ -11,9 +11,13 @@
 // inside the core's src/ are real files node resolves itself.
 
 let generatedCoreUrl = null;
+let servicesClientUrl = null;
+let servicePackages = {};
 
 export function initialize(data) {
   generatedCoreUrl = data?.generatedCoreUrl ?? null;
+  servicesClientUrl = data?.servicesClientUrl ?? null;
+  servicePackages = data?.servicePackages ?? {};
 }
 
 export async function resolve(specifier, context, nextResolve) {
@@ -23,6 +27,12 @@ export async function resolve(specifier, context, nextResolve) {
   if (specifier.startsWith("@native-sdk/core/")) {
     const lib = specifier.slice("@native-sdk/core/".length);
     return { shortCircuit: true, url: new URL(`../sdk/${lib}.ts`, import.meta.url).href };
+  }
+  if (specifier === "@native-sdk/services" && servicesClientUrl) {
+    return { shortCircuit: true, url: servicesClientUrl };
+  }
+  if (Object.hasOwn(servicePackages, specifier)) {
+    return { shortCircuit: true, url: servicePackages[specifier] };
   }
   return nextResolve(specifier, context);
 }

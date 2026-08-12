@@ -14,7 +14,10 @@
 //! imports are real files; the resolver hook maps only the SDK names).
 
 const std = @import("std");
+const app_dirs = @import("app_dirs");
 const buildgraph = @import("buildgraph.zig");
+const debug = @import("debug");
+const package_tool = @import("package.zig");
 const process_tree = @import("process_tree.zig");
 
 pub const Error = error{
@@ -458,6 +461,12 @@ pub fn generateSqliteSurface(
     return error.SqliteCheckFailed;
 }
 
+pub const ServicePackage = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
+};
+
 /// Run the TypeScript frontend in check-only mode on src/core.ts — and,
 /// through it, the core's whole import graph under src/ — and surface its NS
 /// diagnostics verbatim. Manifest-owned routes ride into the same typed Msg
@@ -468,6 +477,7 @@ pub fn checkCore(
     base_env: *std.process.Environ.Map,
     framework_root: []const u8,
     capabilities: []const []const u8,
+    service_packages: []const ServicePackage,
     persist_version: ?u64,
     persist_routes: ?PersistRoutes,
     sdk_core_path: ?[]const u8,
@@ -484,6 +494,21 @@ pub fn checkCore(
     defer if (persist_version_arg) |value| allocator.free(value);
     try argv.appendSlice(allocator, &.{ "node", runner_path, cli_path, "src/core.ts" });
     for (capabilities) |capability| try argv.appendSlice(allocator, &.{ "--capability", capability });
+    var service_package_args: std.ArrayList([]u8) = .empty;
+    defer {
+        for (service_package_args.items) |value| allocator.free(value);
+        service_package_args.deinit(allocator);
+    }
+    for (service_packages) |package_entry| {
+        const spelling = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ package_entry.name, package_entry.version, package_entry.content_hash });
+        try service_package_args.append(allocator, spelling);
+        try argv.appendSlice(allocator, &.{ "--service-package", spelling });
+    }
+    if (try package_tool.projectHasTypeScriptServices(allocator, io, ".")) {
+        try argv.appendSlice(allocator, &.{ "--services-editor-client", "node_modules/@native-sdk/services/index.ts" });
+    } else {
+        std.Io.Dir.cwd().deleteTree(io, "node_modules/@native-sdk/services") catch {};
+    }
     if (persist_version) |version| {
         persist_version_arg = try std.fmt.allocPrint(allocator, "{d}", .{version});
         try argv.appendSlice(allocator, &.{
@@ -557,6 +582,11 @@ pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env:
 
 pub const DevHostOptions = struct {
     base_env: *std.process.Environ.Map,
+    app_id: []const u8,
+    app_name: []const u8 = "app",
+    canvas_label: []const u8 = "canvas",
+    window_width: f32 = 800,
+    window_height: f32 = 600,
     /// app.zon capabilities installed by the shipping host. The virtual host
     /// receives the same set so capability-shed effects reject identically.
     capabilities: []const []const u8 = &.{},
@@ -566,6 +596,7 @@ pub const DevHostOptions = struct {
     /// Requires a script (a re-run replays it against the edited core).
     watch: bool = false,
     persist_routes: ?PersistRoutes = null,
+    service_packages: []const ServicePackage = &.{},
 };
 
 /// `native dev --core`: the node dev-harness over src/core.ts — the
@@ -580,6 +611,27 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     defer allocator.free(devhost_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
+    const app_root = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(app_root);
+    const core_path = try std.fs.path.join(allocator, &.{ app_root, "src/core.ts" });
+    defer allocator.free(core_path);
+    var script_path: ?[]u8 = null;
+    defer if (script_path) |value| allocator.free(value);
+    if (options.script) |script| {
+        script_path = if (std.fs.path.isAbsolute(script))
+            try allocator.dupe(u8, script)
+        else
+            try std.fs.path.join(allocator, &.{ app_root, script });
+    }
+    var app_data_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const app_data_dir = app_dirs.resolveOne(
+        .{ .name = options.app_id },
+        app_dirs.currentPlatform(),
+        debug.envFromMap(options.base_env),
+        .data,
+        &app_data_buffer,
+    ) catch "";
+    if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(io, app_data_dir) catch {};
     // The harness runs the frontend tier under node, so it needs the
     // TypeScript toolchain to resolve exactly like check/build do.
     try ensureResolvedTranspiler(allocator, io, framework_root);
@@ -607,9 +659,26 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     }
     try argv.append(allocator, runner_path);
     try argv.append(allocator, devhost_path);
-    try argv.append(allocator, "src/core.ts");
-    if (options.script) |script| {
+    try argv.append(allocator, core_path);
+    const window_width_arg = try std.fmt.allocPrint(allocator, "{d}", .{options.window_width});
+    defer allocator.free(window_width_arg);
+    const window_height_arg = try std.fmt.allocPrint(allocator, "{d}", .{options.window_height});
+    defer allocator.free(window_height_arg);
+    try argv.appendSlice(allocator, &.{
+        "--app-name",
+        options.app_name,
+        "--canvas-label",
+        options.canvas_label,
+        "--window-width",
+        window_width_arg,
+        "--window-height",
+        window_height_arg,
+    });
+    if (script_path) |script| {
         try argv.appendSlice(allocator, &.{ "--script", script });
+    }
+    if (app_data_dir.len > 0) {
+        try argv.appendSlice(allocator, &.{ "--service-cwd", app_data_dir });
     }
     for (options.capabilities) |capability| {
         try argv.appendSlice(allocator, &.{ "--capability", capability });
@@ -626,6 +695,16 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
             "--persist-err",
             routes.err,
         });
+    }
+    var service_package_args: std.ArrayList([]u8) = .empty;
+    defer {
+        for (service_package_args.items) |value| allocator.free(value);
+        service_package_args.deinit(allocator);
+    }
+    for (options.service_packages) |package_entry| {
+        const spelling = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ package_entry.name, package_entry.version, package_entry.content_hash });
+        try service_package_args.append(allocator, spelling);
+        try argv.appendSlice(allocator, &.{ "--service-package", spelling });
     }
 
     std.debug.print("native dev --core: the core-logic loop under node (update/effects, virtual clock) - not a renderer; `native dev` runs the app\n", .{});

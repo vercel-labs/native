@@ -3399,11 +3399,14 @@ test "normal build service host is discovered only for a service-bearing app" {
     const root = ".zig-cache/test-package-service-discovery";
     try cwd.deleteTree(std.testing.io, root);
     defer cwd.deleteTree(std.testing.io, root) catch {};
-    try cwd.createDirPath(std.testing.io, root ++ "/src/services");
+    try cwd.createDirPath(std.testing.io, root ++ "/src/services/nested");
     try cwd.createDirPath(std.testing.io, root ++ "/zig-out/bin");
-    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/feeds.ts", .data = "export function parse(): Uint8Array { return new Uint8Array(0); }" });
     try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/zig-out/bin/service-demo_services", .data = "service" });
 
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/types.d.ts", .data = "export interface Ignored {}" });
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/nested/feeds.ts", .data = "export function parse(): Uint8Array { return new Uint8Array(0); }" });
     try std.testing.expect(try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
     const discovered = (try discoverInstalledServiceBinary(std.testing.allocator, std.testing.io, root, "service-demo", .linux)).?;
     defer std.testing.allocator.free(discovered);

@@ -390,8 +390,17 @@ pub const HostCallBinding = struct {
     pending_fn: ?*const fn (context: *anyopaque) bool = null,
     /// Supplies the platform's thread-safe wake handle after UiApp binds it.
     bind_services_fn: ?*const fn (context: *anyopaque, services: *const platform.PlatformServices) void = null,
+    /// Service transports acquire an already-open external channel on the
+    /// loop thread, then retain its thread-safe handle while a streaming
+    /// operation posts interim frames.
+    bind_channels_fn: ?*const fn (context: *anyopaque, channels: HostChannelBinding) void = null,
     /// Quiesce carrier workers/children before PlatformServices is severed.
     shutdown_fn: ?*const fn (context: *anyopaque) void = null,
+};
+
+pub const HostChannelBinding = struct {
+    context: *anyopaque,
+    acquire_fn: *const fn (context: *anyopaque, key: u64) ?ChannelHandle,
 };
 
 pub const HostCallCompletion = struct {
@@ -5838,9 +5847,25 @@ pub fn Effects(comptime Msg: type) type {
         pub fn bindHostCalls(self: *Self, binding: HostCallBinding) void {
             if (self.host_calls != null) return;
             self.host_calls = binding;
+            if (binding.bind_channels_fn) |bind_fn| bind_fn(binding.context, .{
+                .context = self,
+                .acquire_fn = acquireHostChannel,
+            });
             if (self.services) |services| {
                 if (binding.bind_services_fn) |bind_fn| bind_fn(binding.context, services);
             }
+        }
+
+        /// Whether this host binding uses reject-on-duplicate admission for
+        /// keyed requests. Bridges consult this before rewriting their route
+        /// table so a rejection cannot orphan the original completion.
+        pub fn rejectsDuplicateHostRequestKeys(self: *const Self) bool {
+            return self.host_calls != null and self.host_calls.?.reject_duplicate_keys;
+        }
+
+        fn acquireHostChannel(context: *anyopaque, key: u64) ?ChannelHandle {
+            const self: *Self = @ptrCast(@alignCast(context));
+            return self.channelHandle(key);
         }
 
         /// Bind the engine-owned Tier-2 store. Loop-thread only; first bind

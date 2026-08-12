@@ -52,13 +52,13 @@ function edgesOf(file: ts.SourceFile): Edge[] {
   return out;
 }
 
-function tsFilesUnder(dir: string): string[] {
+function tsFilesUnder(dir: string, excludedRoot?: string): string[] {
   if (!fs.existsSync(dir)) return [];
   const out: string[] = [];
   const walk = (current: string): void => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const child = path.join(current, entry.name);
-      if (entry.isDirectory()) walk(child);
+      if (entry.isDirectory() && path.resolve(child) !== excludedRoot) walk(child);
       else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) out.push(path.resolve(child));
     }
   };
@@ -75,7 +75,11 @@ function diag(id: RuleId, site: string, file: ts.SourceFile, node: ts.Node): Sub
 /// path property, never inferred from which root happened to reach a file:
 /// this is what makes a service->core shared-shape edge legal while a
 /// core->service edge is NS1065.
-export function resolveModuleGraph(entry: string, coreModulePath: string = sdkCoreModulePath): ModuleGraph {
+export function resolveModuleGraph(
+  entry: string,
+  servicePackages: readonly string[] = [],
+  coreModulePath: string = sdkCoreModulePath,
+): ModuleGraph {
   const entryPath = path.resolve(entry);
   const boundary = path.dirname(entryPath);
   const servicesBoundary = path.join(boundary, "services");
@@ -88,6 +92,7 @@ export function resolveModuleGraph(entry: string, coreModulePath: string = sdkCo
   const runtimeEdges = new Map<string, string[]>();
   const done = new Set<string>();
   const visiting = new Set<string>();
+  const allowedServicePackages = new Set(servicePackages);
 
   const insideBoundary = (p: string, root: string, includeRoot = false): boolean => {
     const rel = path.relative(root, p);
@@ -133,16 +138,19 @@ export function resolveModuleGraph(entry: string, coreModulePath: string = sdkCo
     for (const edge of edgesOf(parsed)) {
       const spec = edge.specifier;
 
-      // Services are ordinary static-tier TypeScript, but phase 1 stays
-      // vendored-source-only: every bare specifier, including SDK modules,
-      // gets the service-specific NS1066 teaching.
-      if (fileClass === "service" && !spec.startsWith(".") && !serviceBuiltins.has(spec)) {
+      // Services are ordinary static-tier TypeScript. A bare package import
+      // is legal only when app.zon supplied its exact vendored package fact;
+      // every undeclared bare specifier gets the NS1066 teaching.
+      const generatedServiceTypes = fileClass === "service" && edge.typeOnly && spec === "@native-sdk/core";
+      if (fileClass === "service" && !spec.startsWith(".") && !serviceBuiltins.has(spec) && !allowedServicePackages.has(spec) && !generatedServiceTypes) {
         diagnostics.push(diag("NS1066", `\`import ... from "${spec}"\` is a bare service import.`, parsed, edge.node));
         continue;
       }
       if (fileClass === "service" && serviceBuiltins.has(spec)) continue;
+      if (fileClass === "service" && allowedServicePackages.has(spec)) continue;
 
       if (spec === "@native-sdk/core") continue;
+      if (fileClass === "core" && spec === "@native-sdk/services") continue;
       if (sdkLibraryModules.has(spec)) {
         const target = path.resolve(sdkLibraryModules.get(spec)!);
         if (!fs.existsSync(target)) {
@@ -194,7 +202,10 @@ export function resolveModuleGraph(entry: string, coreModulePath: string = sdkCo
 
   if (!fs.existsSync(entryPath)) return { files: [], coreFiles, serviceFiles, serviceHostFiles: [], sdkFiles, diagnostics };
   visit(entryPath, []);
-  const serviceRoots = tsFilesUnder(servicesBoundary);
+  // Vendored package sources are package-manager inputs, not service
+  // operation roots. They enter the staged node_modules tree only after the
+  // contract's hash gate accepts them.
+  const serviceRoots = tsFilesUnder(servicesBoundary, path.resolve(servicesBoundary, "vendor"));
   for (const serviceRoot of serviceRoots) visit(serviceRoot, []);
 
   const serviceReachable = new Set<string>();

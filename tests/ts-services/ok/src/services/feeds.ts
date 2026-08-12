@@ -1,22 +1,59 @@
 import * as fs from "node:fs";
-import { sharedFailure } from "../shared.ts";
+import escapeStringRegexp from "escape-string-regexp";
+import type { ServiceCancellation } from "@native-sdk/core";
+import { sharedFailure, type ParseChunk, type ParseRequest, type ParseResult } from "../shared.ts";
 
-export function parse(payload: Uint8Array): Uint8Array {
+export function parse(request: ParseRequest): ParseResult {
   const facts = new Map<string, number>();
   facts.set("now", Date.now());
   facts.set("cwd", fs.existsSync(".") ? 1 : 0);
+  const decoded = new TextDecoder().decode(request.source);
+  const escaped = escapeStringRegexp(decoded);
+  const matches = request.caseSensitive ? /feed/.test(decoded) : /feed/i.test(decoded);
   const text = JSON.stringify({
-    matches: /feed/i.test(new TextDecoder().decode(payload)),
+    matches,
+    escaped,
     facts: facts.size,
   });
-  return new TextEncoder().encode(text);
+  return { bytes: new TextEncoder().encode(text), matches, facts: facts.size };
 }
 
-export function fail(): Uint8Array {
+export function fail(): ParseResult {
   return sharedFailure();
 }
 
-export function hang(): Uint8Array {
+export function exitClean(): ParseResult {
+  process.exit(0);
+  return { bytes: new Uint8Array(0), matches: false, facts: 0 };
+}
+
+/** @deadlineMs 75 */
+export function hang(cancel: ServiceCancellation): ParseResult {
   fs.writeFileSync("hang.started", "ready");
-  while (true) {}
+  while (true) cancel.throwIfCancelled();
+}
+
+/** @deadlineMs 250 */
+export function queuedBlocker(cancel: ServiceCancellation): ParseResult {
+  fs.writeFileSync("queued-blocker.started", "ready");
+  while (true) cancel.throwIfCancelled();
+}
+
+/** @deadlineMs 100 */
+export function queuedProbe(): ParseResult {
+  fs.writeFileSync("queued-probe.started", "unexpected");
+  return parse({ source: new Uint8Array([102, 101, 101, 100]), caseSensitive: false });
+}
+
+/** @streamBuffer 4 */
+export function stream(request: ParseRequest, emit: (chunk: ParseChunk) => void): ParseResult {
+  for (let index = 0; index < 3; index++) emit({ bytes: request.source, index });
+  return parse(request);
+}
+
+/** @streamBuffer 4 */
+export function streamHang(request: ParseRequest, emit: (chunk: ParseChunk) => void, cancel: ServiceCancellation): ParseResult {
+  emit({ bytes: request.source, index: 0 });
+  fs.writeFileSync("stream-hang.started", "ready");
+  while (true) cancel.throwIfCancelled();
 }

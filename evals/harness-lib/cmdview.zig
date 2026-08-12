@@ -1,5 +1,5 @@
 //! Decoder over the app-core Cmd/Sub wire format (rt.zig, cmd_format_version
-//! 3), shared by the ts-track behavioral harnesses. The graders copy this
+//! 4), shared by the ts-track behavioral harnesses. The graders copy this
 //! file next to each case's harness so assertions read decoded ops — "a
 //! fetch with key `feed` targeting this URL", "the delay re-armed" — instead
 //! of hand-built byte strings, which keeps harnesses lenient about the parts
@@ -15,7 +15,17 @@ pub const Op = union(enum) {
     now: struct { msg_tag: u8 },
     host: Host,
     host_bytes: struct { name: []const u8, payload: []const u8 },
-    request: struct { name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8 },
+    request: struct { name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, typed_service: bool, payload: []const u8 },
+    service_stream_request: struct {
+        channel_key: f64,
+        event_tag: u8,
+        max_pending: u8,
+        name: []const u8,
+        key: []const u8,
+        ok_tag: u8,
+        err_tag: u8,
+        payload: []const u8,
+    },
     cancel: struct { key: []const u8 },
     read_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
     write_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8, bytes: []const u8 },
@@ -39,7 +49,7 @@ pub const Op = union(enum) {
     image_load: struct { id: f64, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
     image_cancel: struct { id: f64 },
     image_unregister: struct { id: f64 },
-    channel_open: struct { key: f64, event_tag: u8 },
+    channel_open: struct { key: f64, event_tag: u8, max_pending: u8 },
     channel_close: struct { key: f64 },
     pty_spawn: PtySpawn,
     pty_write: struct { key: []const u8, bytes: []const u8 },
@@ -203,9 +213,10 @@ pub const CmdIter = struct {
                 const key = shortBytes(b, &off);
                 const ok = b[off];
                 const err = b[off + 1];
-                off += 2;
+                const typed_service = b[off + 2] != 0;
+                off += 3;
                 const payload = longBytes(b, &off);
-                break :blk .{ .request = .{ .name = name, .key = key, .ok_tag = ok, .err_tag = err, .payload = payload } };
+                break :blk .{ .request = .{ .name = name, .key = key, .ok_tag = ok, .err_tag = err, .typed_service = typed_service, .payload = payload } };
             },
             0x06 => blk: {
                 const key = shortBytes(b, &off);
@@ -329,16 +340,15 @@ pub const CmdIter = struct {
                 off += 8;
                 break :blk .{ .image_unregister = .{ .id = id } };
             },
-            // channel_open [op][key f64 LE][event_tag u8] — the bytes
+            // channel_open [op][key f64 LE][event_tag u8][max_pending u8] — the bytes
             // rt.zig's cmdChannelOpen builds (ts_core_host.zig, 0x15).
-            // No max_pending rides the wire: the host opens with the
-            // engine default.
             0x15 => blk: {
                 const key: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
                 off += 8;
                 const event_tag = b[off];
-                off += 1;
-                break :blk .{ .channel_open = .{ .key = key, .event_tag = event_tag } };
+                const max_pending = b[off + 1];
+                off += 2;
+                break :blk .{ .channel_open = .{ .key = key, .event_tag = event_tag, .max_pending = max_pending } };
             },
             // channel_close [op][key f64 LE] (ts_core_host.zig, 0x16).
             0x16 => blk: {
@@ -473,6 +483,30 @@ pub const CmdIter = struct {
                 const visible = b[off] != 0;
                 off += 1;
                 break :blk .{ .dock_presence = .{ .visible = visible } };
+            },
+            // Atomic typed streaming-service admission.
+            0x28 => blk: {
+                const channel_key: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const event_tag = b[off];
+                const max_pending = b[off + 1];
+                off += 2;
+                const name = shortBytes(b, &off);
+                const key = shortBytes(b, &off);
+                const ok_tag = b[off];
+                const err_tag = b[off + 1];
+                off += 2;
+                const payload = longBytes(b, &off);
+                break :blk .{ .service_stream_request = .{
+                    .channel_key = channel_key,
+                    .event_tag = event_tag,
+                    .max_pending = max_pending,
+                    .name = name,
+                    .key = key,
+                    .ok_tag = ok_tag,
+                    .err_tag = err_tag,
+                    .payload = payload,
+                } };
             },
             0x23 => blk: {
                 const head = routedHead(b, &off);
@@ -716,15 +750,16 @@ test "the image records decode, alone and inside a batch" {
 }
 
 test "the channel records decode, alone and inside a batch" {
-    // channel_open: [op 0x15][key f64 LE][event_tag u8] — the bytes
-    // rt.zig's cmdChannelOpen pins (no max_pending on the wire).
-    var open_bytes: [10]u8 = undefined;
+    // channel_open: [op 0x15][key f64 LE][event_tag u8][max_pending u8].
+    var open_bytes: [11]u8 = undefined;
     open_bytes[0] = 0x15;
     open_bytes[1..9].* = @bitCast(@as(f64, 41));
     open_bytes[9] = 5; // event_tag
+    open_bytes[10] = 7; // max_pending
     const opened = findOp(&open_bytes, .channel_open) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f64, 41), opened.key);
     try std.testing.expectEqual(@as(u8, 5), opened.event_tag);
+    try std.testing.expectEqual(@as(u8, 7), opened.max_pending);
 
     // channel_close: [op 0x16][key f64 LE].
     var close_bytes: [9]u8 = undefined;
@@ -734,13 +769,13 @@ test "the channel records decode, alone and inside a batch" {
     try std.testing.expectEqual(@as(f64, 41), closed.key);
 
     // A batch of open + close + a trailing now record: each record must
-    // advance the iterator exactly its own length (ten bytes, then
+    // advance the iterator exactly its own length (eleven bytes, then
     // nine) for the tail to decode.
-    var batch: [21]u8 = undefined;
-    batch[0..10].* = open_bytes;
-    batch[10..19].* = close_bytes;
-    batch[19] = 0x02;
-    batch[20] = 7;
+    var batch: [22]u8 = undefined;
+    batch[0..11].* = open_bytes;
+    batch[11..20].* = close_bytes;
+    batch[20] = 0x02;
+    batch[21] = 7;
     var iter = CmdIter.init(&batch);
     const first = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f64, 41), first.channel_open.key);
@@ -749,6 +784,40 @@ test "the channel records decode, alone and inside a batch" {
     const third = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 7), third.now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "typed request metadata and atomic streaming service records decode" {
+    const a = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(a);
+
+    try bytes.append(a, 0x05);
+    try bytes.append(a, 5);
+    try bytes.appendSlice(a, "parse");
+    try bytes.append(a, 3);
+    try bytes.appendSlice(a, "one");
+    try bytes.appendSlice(a, &.{ 4, 5, 1, 2, 0, 0, 0, 'o', 'k' });
+    const request = findOp(bytes.items, .request) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("parse", request.name);
+    try std.testing.expect(request.typed_service);
+    try std.testing.expectEqualStrings("ok", request.payload);
+
+    bytes.clearRetainingCapacity();
+    try bytes.append(a, 0x28);
+    try bytes.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 79))));
+    try bytes.appendSlice(a, &.{ 6, 3 });
+    try bytes.append(a, 6);
+    try bytes.appendSlice(a, "stream");
+    try bytes.append(a, 3);
+    try bytes.appendSlice(a, "two");
+    try bytes.appendSlice(a, &.{ 7, 8, 3, 0, 0, 0, 1, 2, 3 });
+    const stream = findOp(bytes.items, .service_stream_request) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 79), stream.channel_key);
+    try std.testing.expectEqual(@as(u8, 6), stream.event_tag);
+    try std.testing.expectEqual(@as(u8, 3), stream.max_pending);
+    try std.testing.expectEqualStrings("stream", stream.name);
+    try std.testing.expectEqualStrings("two", stream.key);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, stream.payload);
 }
 
 test "the audio capture records decode and advance a batch exactly" {

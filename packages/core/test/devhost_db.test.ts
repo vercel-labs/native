@@ -154,21 +154,21 @@ test("the devhost preserves command-stream order across store and relational res
     const script = path.join(tmp, "msgs.ndjson");
     fs.writeFileSync(core, `
 import { Cmd, asciiBytes } from "@native-sdk/core";
-export interface Model { readonly order: string; }
+export interface Model { readonly order: number; }
 export type Msg =
   | { readonly kind: "go" }
   | { readonly kind: "dbDone" }
   | { readonly kind: "storeDone" }
   | { readonly kind: "failed"; readonly reason: Uint8Array };
-export function initialModel(): Model { return { order: "" }; }
+export function initialModel(): Model { return { order: 0 }; }
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.batch([
       Cmd.db.exec([["CREATE TABLE ordered(id INTEGER PRIMARY KEY)", []]], { key: "db", ok: "dbDone", err: "failed" }),
       Cmd.store.set("ordered", asciiBytes("yes"), { key: "store", ok: "storeDone", err: "failed" }),
     ])];
-    case "dbDone": return { order: model.order + "db" };
-    case "storeDone": return { order: model.order + "store" };
+    case "dbDone": return { order: model.order * 10 + 1 };
+    case "storeDone": return { order: model.order * 10 + 2 };
     case "failed": return model;
   }
 }
@@ -179,7 +179,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       "--capability", "sqlite", "--capability", "store",
     ], { cwd: tmp, encoding: "utf8" });
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /"order":"dbstore"/);
+    assert.match(run.stdout, /"order":12/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

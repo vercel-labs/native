@@ -261,6 +261,11 @@ pub fn main(init: std.process.Init) !void {
         .boot_images = boot_images_buffer[0..boot_image_count],
         .env_values = env_values_buffer[0..env_value_count],
         .host_calls = if (comptime services.enabled) service_transport.binding() else null,
+        .service_results = if (comptime services.enabled) .{
+            .index_fn = services.indexOf,
+            .streaming_fn = services.isStreaming,
+            .decode_fn = services.resultDecoder(core),
+        } else null,
         .persist = persist_options,
     }, options);
     defer app_state.destroy();

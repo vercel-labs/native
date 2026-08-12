@@ -651,6 +651,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "cannot resolve its TypeScript toolchain" },
         .{ .path = "build/app.zig", .pattern = "std.process.exit(1);" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-pin-cache-inputs", "Verify both TypeScript service build graphs invalidate frontend contracts when the exact scriptc pin changes", &.{
+        .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
+        .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
         .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
         .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },
@@ -3093,6 +3097,7 @@ fn tsCoreE2eArtifact(
         .src_dir = b.path("tests/ts-services/ok/src"),
         .name = "services_fixture_core",
         .emit_services = true,
+        .service_packages = &.{"escape-string-regexp|5.0.0|705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d"},
     });
     const service_host_fixture = externalServiceFixture(
         b,
@@ -3110,6 +3115,7 @@ fn tsCoreE2eArtifact(
     services_e2e_mod.addImport("ts_services_registry", service_host_fixture.registry);
     const service_test_options = b.addOptions();
     service_test_options.addOptionPath("service_executable", service_host_fixture.executable);
+    service_test_options.addOption([]const u8, "node_executable", node);
     services_e2e_mod.addOptions("ts_services_options", service_test_options);
 
     // Sidecar-shim conformance: a corewire-generated mirror per corpus
@@ -3232,6 +3238,8 @@ fn externalServiceFixture(
     stage.addDirectoryArg(src_dir);
     stage.addArg("--host-main");
     stage.addFileArg(host_main);
+    stage.addArg("--contract");
+    stage.addFileArg(contract);
     stage.addArg("--out");
     const stage_dir = stage.addOutputDirectoryArg("services-stage");
     // A LazyPath directory records only its producer dependency; source-tree
@@ -3373,6 +3381,7 @@ const ExternalCoreFixtureSpec = struct {
     /// applied to the compile profile and every downstream projection.
     f64_slots: []const []const u8 = &.{},
     emit_services: bool = false,
+    service_packages: []const []const u8 = &.{},
 };
 
 /// Compile one TS fixture core through the external core compiler at
@@ -3406,6 +3415,14 @@ fn externalCoreFixtureModule(
         check.addArg("--services-contract");
         break :services check.addOutputFileArg("services.contract.json");
     } else null;
+    for (spec.service_packages) |package_entry| check.addArgs(&.{ "--service-package", package_entry });
+    const services_client: ?std.Build.LazyPath = if (services_contract) |service_contract| client: {
+        const service_project = b.addRunArtifact(corewire_exe);
+        service_project.addArg("--services-sidecar");
+        service_project.addFileArg(service_contract);
+        service_project.addArg("--service-client");
+        break :client service_project.addOutputFileArg("services.gen.ts");
+    } else null;
     if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
     if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
@@ -3417,6 +3434,10 @@ fn externalCoreFixtureModule(
     for (frontend_sources) |source| {
         check.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));
     }
+    // Service contracts echo the exact scriptc pin read from this manifest.
+    // Declare that runtime read explicitly so a compiler bump invalidates a
+    // warm build cache before the compile lane checks the echoed version.
+    if (spec.emit_services) check.addFileInput(b.path("packages/core/package.json"));
 
     // corewire projects the generated compile entry and its profile in
     // one invocation, so the profile's entry spelling and the facade
@@ -3447,6 +3468,10 @@ fn externalCoreFixtureModule(
     stage_run.addFileArg(facade);
     stage_run.addArg("--profile");
     stage_run.addFileArg(profile);
+    if (services_client) |client| {
+        stage_run.addArg("--services-client");
+        stage_run.addFileArg(client);
+    }
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 

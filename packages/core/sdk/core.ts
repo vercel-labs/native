@@ -34,7 +34,8 @@
 //   Cmd.cancel(key)              drop the in-flight keyed effect — request,
 //                                readFile/writeFile/fetch/clipboardRead, or
 //                                delay — SILENTLY (no terminal arm dispatch).
-//                                Aimed at a live spawn or streaming fetch it
+//                                Aimed at a live spawn, streaming fetch, or
+//                                streaming service it
 //                                stays LOUD: the err arm runs with
 //                                "cancelled" — ending a stream is observable
 //   Cmd.batch([a, b, ...])       several commands from one dispatch
@@ -365,6 +366,14 @@ export function utf8Bytes(s: string): Uint8Array {
 /// Every app Msg is a discriminated union on a string `kind` tag.
 export type Msgish = { readonly kind: string };
 
+/** Cooperative cancellation capability supplied by generated service hosts. */
+export interface ServiceCancellation {
+  /** True after Cmd.cancel or the operation deadline requests cancellation. */
+  readonly cancelled: () => boolean;
+  /** Throw a boundary-tagged cancellation error when cancellation was requested. */
+  readonly throwIfCancelled: () => void;
+}
+
 /// The Msg arms `Cmd.now` may target: arms whose payload is exactly one
 /// number-typed field (the runtime dispatches the arm with the timestamp in
 /// that field). Anything else is unrepresentable — the runtime has only a
@@ -391,6 +400,38 @@ export type BytesKind<M extends Msgish> = M extends Msgish
         : never;
     }[Exclude<keyof M, "kind">]
   : never;
+
+/// The Msg arms a generated typed service client may target: exactly one
+/// payload field whose type is the operation's declared result shape.
+export type ServiceKind<M extends Msgish, P> = M extends Msgish
+  ? {
+      [K in Exclude<keyof M, "kind">]-?: M[K] extends P
+        ? P extends M[K]
+          ? [Exclude<keyof M, "kind">] extends [K]
+            ? M["kind"]
+            : never
+          : never
+        : never;
+    }[Exclude<keyof M, "kind">]
+  : never;
+
+/// Routing for a generated typed service call. Success carries the
+/// operation's declared record/value shape; failures remain UTF-8 bytes so
+/// transport, timeout, cancellation, and service `{ kind, message }` errors
+/// share one stable error channel.
+export interface ServiceRoute<M extends Msgish, P> {
+  readonly key?: string;
+  readonly ok: ServiceKind<M, P>;
+  readonly err: BytesKind<M>;
+}
+
+/// A streaming service opens an external-source channel before issuing the
+/// request. Interim chunks arrive as canonical bytes on `event`; `ok` is the
+/// one typed terminal and `err` is the loud cancellation/timeout/error arm.
+export interface ServiceStreamRoute<M extends Msgish, P> extends ServiceRoute<M, P> {
+  readonly channelKey: number;
+  readonly event: ChannelEventKind<M>;
+}
 
 /// The Msg arms a payload-less routed result may target: arms with no
 /// payload fields at all (`Cmd.writeFile`'s ok route — a successful write
@@ -1027,6 +1068,19 @@ export type Cmd<M extends Msgish> =
       readonly key: string;
       readonly okKind: string;
       readonly errKind: string;
+      readonly typedService: boolean;
+      readonly payload: Uint8Array;
+    }
+  | {
+      readonly op: "service_stream_request";
+      readonly name: string;
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly typedService: true;
+      readonly channelKey: number;
+      readonly eventKind: string;
+      readonly maxPending: number;
       readonly payload: Uint8Array;
     }
   | { readonly op: "cancel"; readonly key: string }
@@ -1186,7 +1240,7 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
-  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
+  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
   | { readonly op: "channel_close"; readonly key: number }
   | {
       readonly op: "audio_capture_start";
@@ -1245,6 +1299,74 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
     }
   }
   return out;
+}
+
+function serviceU32(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  out[0] = value & 255;
+  out[1] = (value >>> 8) & 255;
+  out[2] = (value >>> 16) & 255;
+  out[3] = (value >>> 24) & 255;
+  return out;
+}
+
+/// Canonical service-value codec primitives. Generated clients compose these
+/// in declaration order; the service host and Zig result dispatcher consume
+/// the same format as shim_rt (LE scalars, length-prefixed bytes/slices,
+/// declaration-order enum/union tags).
+export function serviceConcat(parts: readonly Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const part of parts) length += part.length;
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+export function serviceBoolBytes(value: boolean): Uint8Array {
+  return new Uint8Array([value ? 1 : 0]);
+}
+
+export function serviceF64Bytes(value: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  view.setFloat64(0, Number.isNaN(value) ? Number.NaN : value, true);
+  return out;
+}
+
+export function serviceI64Bytes(value: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  const base = 4294967296;
+  let low = value % base;
+  if (low < 0) low += base;
+  const high = Math.floor(value / base);
+  view.setUint32(0, low, true);
+  view.setInt32(4, high, true);
+  return out;
+}
+
+export function serviceBytes(value: Uint8Array): Uint8Array {
+  return serviceConcat([serviceU32(value.length), value]);
+}
+
+export function serviceEnumBytes(index: number): Uint8Array {
+  return serviceU32(index);
+}
+
+export function serviceUnionBytes(index: number): Uint8Array {
+  return new Uint8Array([index]);
+}
+
+export function serviceOptionalBytes(value: Uint8Array | null): Uint8Array {
+  return value === null ? new Uint8Array([0]) : serviceConcat([new Uint8Array([1]), value]);
+}
+
+export function serviceSliceBytes(values: readonly Uint8Array[]): Uint8Array {
+  return serviceConcat([serviceU32(values.length), ...values]);
 }
 
 function lowerHostPayload(payload: Uint8Array | HostRecord): Uint8Array {
@@ -1342,13 +1464,54 @@ export const Cmd = {
       key: route.key ?? "",
       okKind: route.ok,
       errKind: route.err,
+      typedService: false,
       payload: lowerHostPayload(payload),
+    };
+  },
+
+  /// Generated typed service clients use this constructor after encoding the
+  /// request shape. It lowers to the ordinary request wire record with the
+  /// typed-result bit set so the host decodes the success payload.
+  serviceRequest<M extends Msgish, P>(
+    name: string,
+    payload: Uint8Array,
+    route: ServiceRoute<M, P>,
+  ): Cmd<M> {
+    return {
+      op: "request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      payload,
+    };
+  },
+
+  serviceStreamRequest<M extends Msgish, P>(
+    name: string,
+    channelKey: number,
+    payload: Uint8Array,
+    route: ServiceStreamRoute<M, P>,
+    maxPending: number,
+  ): Cmd<M> {
+    return {
+      op: "service_stream_request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      channelKey,
+      eventKind: route.event,
+      maxPending,
+      payload: serviceConcat([serviceF64Bytes(channelKey), payload]),
     };
   },
 
   /// Drop the in-flight keyed effect — request, named engine op, or delay —
   /// with this key, if any, SILENTLY (neither routing arm is dispatched for
-  /// it). Live spawn and streaming-fetch operations are the exceptions:
+  /// it). Live spawn, streaming-fetch, and streaming-service operations are the exceptions:
   /// cancel ends the stream and its err arm runs with "cancelled".
   cancel(key: string): Cmd<never> {
     return { op: "cancel", key };
@@ -1786,7 +1949,7 @@ export const Cmd = {
   /// one that consults the handle's live() before launching never
   /// starts, keeping replay fully offline.
   channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M> {
-    return { op: "channel_open", key, eventKind: route.event };
+    return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
   },
 
   /// Close the open channel under `key`: posts stop landing, the

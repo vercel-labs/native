@@ -39,3 +39,39 @@ test("a type error fails with the compiler's diagnostic", () => {
   assert.equal(r.status, 1, r.out);
   assert.match(r.out, /TypeScript error|SC0001/);
 });
+
+test("an npm package outside the static tier fails check with the compiler note and Native SDK teaching", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ctc-npm-refusal-"));
+  try {
+    const entry = path.join(dir, "core.ts");
+    const services = path.join(dir, "services");
+    const vendor = path.join(services, "vendor", "dynamic-only");
+    fs.mkdirSync(vendor, { recursive: true });
+    fs.writeFileSync(entry, green);
+    fs.writeFileSync(path.join(services, "probe.ts"), 'import probe from "dynamic-only";\nexport function run(): string { return probe("x"); }\n');
+    fs.writeFileSync(path.join(vendor, "package.json"), JSON.stringify({
+      name: "dynamic-only", version: "1.0.0", type: "module", types: "index.d.ts", exports: "./index.js",
+    }));
+    fs.writeFileSync(path.join(vendor, "index.d.ts"), "export default function probe(value: string): string;\n");
+    // randomFillSync is typed but has no static lowering in scriptc 0.0.26.
+    // The package itself remains marked "static" in coverage, so this pins
+    // Native SDK's stricter requirement that the total be 100%.
+    fs.writeFileSync(path.join(vendor, "index.js"), [
+      'import { randomFillSync } from "node:crypto";',
+      "const pool = new Uint8Array(8);",
+      "export default function probe(x) {",
+      "  randomFillSync(pool);",
+      "  return x;",
+      "}",
+      "",
+    ].join("\n"));
+    const probe = spawnSync(process.execPath, [script, entry], { encoding: "utf8" });
+    const out = `${probe.stdout ?? ""}${probe.stderr ?? ""}`;
+    assert.equal(probe.status, 1, out);
+    assert.match(out, /SC2020|deferred to runtime|compile statically/i);
+    assert.match(out, /does not clear scriptc's static tier/);
+    assert.match(out, /never enables npm auto-fallback or --dynamic/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1,7 +1,7 @@
 //! Bridge coverage for `TsCoreHost` against a hand-written core that
 //! replicates the transpiler's emitted ABI (rt kernel, commit walker,
 //! `UpdateResult`/`InitResult`, wire-encoded commands and
-//! subscriptions). Hand-encoding the wire records here pins the v2
+//! subscriptions). Hand-encoding the wire records here pins the v4
 //! byte layout independently of the rt builders that normally produce
 //! it; the transpiled-fixture end-to-end suite (tests/ts-core) drives
 //! the same bridge with genuinely emitted code through a full UiApp.
@@ -17,7 +17,7 @@ const ts_core_host = @import("ts_core_host.zig");
 //
 // The emitted-core ABI in miniature: a two-region kernel, a poller
 // model, and an update that exercises every wire record. Cmd/Sub bytes
-// are hand-encoded to the documented v2 layout. Polling starts OFF so
+// are hand-encoded to the documented v4 layout. Polling starts OFF so
 // the real-executor tests below (which bind no platform timer service)
 // never arm a timer; the e2e suite covers boot-time subscriptions
 // through a full UiApp with live null-platform services.
@@ -847,7 +847,7 @@ const mini_core = struct {
         return out;
     }
 
-    // Hand-encoded v2 wire records (rt.zig's documented layout).
+    // Hand-encoded v4 wire records (rt.zig's documented layout).
 
     fn cmdNow(msg_tag: u8) []const u8 {
         const out = rt.frameAlloc(u8, 2);
@@ -879,7 +879,7 @@ const mini_core = struct {
     }
 
     fn cmdRequest(name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) []const u8 {
-        const out = rt.frameAlloc(u8, 2 + name.len + 1 + key.len + 2 + 4 + payload.len);
+        const out = rt.frameAlloc(u8, 2 + name.len + 1 + key.len + 3 + 4 + payload.len);
         out[0] = 0x05;
         out[1] = @intCast(name.len);
         @memcpy(out[2..][0..name.len], name);
@@ -889,8 +889,9 @@ const mini_core = struct {
         off += 1 + key.len;
         out[off] = ok_tag;
         out[off + 1] = err_tag;
-        std.mem.writeInt(u32, out[off + 2 ..][0..4], @intCast(payload.len), .little);
-        @memcpy(out[off + 6 ..][0..payload.len], payload);
+        out[off + 2] = 0; // raw byte request, not a generated typed service call
+        std.mem.writeInt(u32, out[off + 3 ..][0..4], @intCast(payload.len), .little);
+        @memcpy(out[off + 7 ..][0..payload.len], payload);
         return out;
     }
 
@@ -1118,10 +1119,11 @@ const mini_core = struct {
     }
 
     fn cmdChannelOpen(key: f64, event_tag: u8) []const u8 {
-        const out = rt.frameAlloc(u8, 1 + 8 + 1);
+        const out = rt.frameAlloc(u8, 1 + 8 + 1 + 1);
         out[0] = 0x15;
         std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
         out[9] = event_tag;
+        out[10] = 64;
         return out;
     }
 

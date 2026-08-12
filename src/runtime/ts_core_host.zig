@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 3) onto the real effect engine
+//! emits (`cmd_format_version` 4) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -459,6 +459,15 @@ pub fn TsCoreHost(comptime core: type) type {
         pub const Msg = core.Msg;
         pub const Fx = runtime_effects.Effects(Msg);
 
+        /// Generated service contracts bind their operation table and the
+        /// canonical result decoder here. Ordinary HostCallBinding users do
+        /// not install this seam, so raw Cmd.request keeps its byte result.
+        pub const ServiceResultBinding = struct {
+            index_fn: *const fn (name: []const u8) ?u16,
+            streaming_fn: *const fn (operation: u16) bool,
+            decode_fn: *const fn (operation: u16, tag: u8, bytes: []const u8) Msg,
+        };
+
         const msg_arms = @typeInfo(Msg).@"union".fields;
 
         const update_returns_cmd = @typeInfo(@TypeOf(core.update)).@"fn".return_type.? != *const Model;
@@ -476,6 +485,8 @@ pub fn TsCoreHost(comptime core: type) type {
             key: [max_wire_key_bytes]u8 = undefined,
             ok_tag: u8 = 0,
             err_tag: u8 = 0,
+            service_operation: ?u16 = null,
+            service_channel: ?u64 = null,
             ok_void: bool = false,
 
             fn wireKey(entry: *const RequestEntry) []const u8 {
@@ -707,6 +718,12 @@ pub fn TsCoreHost(comptime core: type) type {
         /// `TsCoreHost.drain` and the `TsUiApp` update_fx seam — keep
         /// that adjacency).
         var swallow_next_dispatch: bool = false;
+        var service_results: ?ServiceResultBinding = null;
+        var pending_service_channel_close: ?u64 = null;
+
+        pub fn bindServiceResults(binding: ?ServiceResultBinding) void {
+            service_results = binding;
+        }
 
         /// A `now` record captured during the command walk, dispatched
         /// after the issuing cycle's frame reset.
@@ -883,6 +900,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 swallow_next_dispatch = false;
                 return;
             }
+            if (pending_service_channel_close) |channel_key| {
+                pending_service_channel_close = null;
+                fx.closeChannel(channel_key);
+            }
             dispatchDepth(fx, msg, 0);
         }
 
@@ -977,14 +998,16 @@ pub fn TsCoreHost(comptime core: type) type {
                         fx.hostSend(name, payload);
                     },
                     // request [op][name_len][name][key_len][key]
-                    //         [ok_tag][err_tag][len u32 LE][payload]
+                    //         [ok_tag][err_tag][typed_service][len u32 LE][payload]
                     0x05 => {
                         const name = takeShortBytes(cmd, &at);
                         const key = takeShortBytes(cmd, &at);
                         const ok_tag = takeByte(cmd, &at);
                         const err_tag = takeByte(cmd, &at);
+                        const typed_service = takeByte(cmd, &at);
+                        if (typed_service > 1) @panic("ts core host: invalid typed-service request flag");
                         const payload = takeLongBytes(cmd, &at);
-                        issueRequest(fx, name, key, ok_tag, err_tag, payload);
+                        issueRequest(fx, name, key, ok_tag, err_tag, typed_service == 1, payload);
                     },
                     // cancel [op][key_len][key]
                     0x06 => {
@@ -1186,12 +1209,13 @@ pub fn TsCoreHost(comptime core: type) type {
                         const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
                         runImageUnregister(fx, id_value);
                     },
-                    // channel_open [op][key f64 LE][event_tag]
+                    // channel_open [op][key f64 LE][event_tag][max_pending]
                     0x15 => {
                         const key_bits = takeBytes(cmd, &at, 8);
                         const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
                         const event_tag = takeByte(cmd, &at);
-                        issueChannelOpen(fx, key_value, event_tag);
+                        const max_pending = takeByte(cmd, &at);
+                        _ = issueChannelOpen(fx, key_value, event_tag, max_pending);
                     },
                     // channel_close [op][key f64 LE]
                     0x16 => {
@@ -1398,6 +1422,23 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // dock_presence [op][visible u8]
                     0x22 => fx.setDockPresence(takeByte(cmd, &at) != 0),
+                    // service_stream_request [op][channel_key f64 LE]
+                    //                        [event_tag][max_pending]
+                    //                        [name_len][name][key_len][key]
+                    //                        [ok_tag][err_tag]
+                    //                        [payload_len u32 LE][payload]
+                    0x28 => {
+                        const channel_bits = takeBytes(cmd, &at, 8);
+                        const channel_value: f64 = @bitCast(std.mem.readInt(u64, channel_bits[0..8], .little));
+                        const event_tag = takeByte(cmd, &at);
+                        const max_pending = takeByte(cmd, &at);
+                        const name = takeShortBytes(cmd, &at);
+                        const key = takeShortBytes(cmd, &at);
+                        const ok_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const payload = takeLongBytes(cmd, &at);
+                        issueServiceStreamRequest(fx, name, key, ok_tag, err_tag, channel_value, event_tag, max_pending, payload);
+                    },
                     // store_set [op][route][scope u32][key bytes][value bytes]
                     0x23 => {
                         const head = takeRoutedHead(cmd, &at);
@@ -1483,7 +1524,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // db_query [op][key][page][done][err][sql bytes]
                     //          [param count u32][tagged params]
-                    0x28 => {
+                    0x29 => {
                         const key = takeShortBytes(cmd, &at);
                         const page_tag = takeByte(cmd, &at);
                         const done_tag = takeByte(cmd, &at);
@@ -1509,7 +1550,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // db_exec [op][key][ok][err][statement count u32]
                     //         [statement sql bytes][param count u32][params]...
-                    0x29 => {
+                    0x2A => {
                         const key = takeShortBytes(cmd, &at);
                         const ok_tag = takeByte(cmd, &at);
                         const err_tag = takeByte(cmd, &at);
@@ -2152,22 +2193,23 @@ pub fn TsCoreHost(comptime core: type) type {
             fx: *Fx,
             key_value: f64,
             event_tag: u8,
-        ) void {
+            max_pending: u8,
+        ) bool {
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
             if (!representable) {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
-                return;
+                return false;
             }
             const key: u64 = @intFromFloat(key_value);
             if (findChannel(key) != null) {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return;
+                return false;
             }
             const index = freeChannelIndex() orelse {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return;
+                return false;
             };
             const entry = &channels[index];
             entry.used = true;
@@ -2176,7 +2218,13 @@ pub fn TsCoreHost(comptime core: type) type {
             _ = fx.openChannel(.{
                 .key = key,
                 .on_event = channelEventMsg,
+                .max_pending = max_pending,
             });
+            // A non-null lookup means the engine accepted the occupancy in
+            // both live execution and replay (whose accepted handle is inert).
+            // Validation and capacity refusals stage their rejection without
+            // leaving an open slot.
+            return fx.channelHandle(key) != null;
         }
 
         fn findChannel(key: u64) ?usize {
@@ -2538,8 +2586,13 @@ pub fn TsCoreHost(comptime core: type) type {
         fn cancelWireKey(fx: *Fx, key: []const u8) void {
             if (key.len == 0) return;
             if (findRequest(key)) |index| {
+                const entry = requests[index];
                 fx.cancelHostRequest(request_key_base + index);
                 requests[index].used = false;
+                if (entry.service_channel) |channel_key| {
+                    fx.closeChannel(channel_key);
+                    fx.stageLoopMsg(msgFromTagStaticBytes(entry.err_tag, "cancelled"));
+                }
                 return;
             }
             if (findEffect(key)) |index| {
@@ -2569,11 +2622,9 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         }
 
-        /// Issue (or replace) a routed request. Keyed requests reuse
-        /// their live table entry — re-routing the tags in place while
-        /// the engine replaces the in-flight call under the same engine
-        /// key. Unkeyed requests (`key.len == 0`) each take a fresh
-        /// entry: nothing can replace or cancel them.
+        /// Allocate a routed request slot. The regular host-request and
+        /// record-store pools are disjoint, while their wire keys still share
+        /// one replacement namespace.
         fn allocRequestEntry(
             fx: *Fx,
             key: []const u8,
@@ -2600,6 +2651,8 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.ok_tag = ok_tag;
             entry.err_tag = err_tag;
             entry.ok_void = ok_void;
+            entry.service_operation = null;
+            entry.service_channel = null;
             return index;
         }
 
@@ -2611,17 +2664,90 @@ pub fn TsCoreHost(comptime core: type) type {
             return request_key_base + index;
         }
 
-        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+        /// Issue (or replace) a routed request. Raw keyed requests reuse their
+        /// live table entry when the bound host supports replacement. Typed
+        /// services and reject-on-duplicate host bindings refuse before
+        /// touching the original entry, so its eventual terminal still owns
+        /// the route and table slot it started with. Unkeyed requests each
+        /// take a fresh entry.
+        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, typed_service: bool, payload: []const u8) void {
+            if (key.len > 0 and findRequest(key) != null and (typed_service or fx.rejectsDuplicateHostRequestKeys())) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
             const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, false) orelse {
-                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                stageRequestRejected(fx, err_tag);
                 return;
             };
+            const entry = &requests[index];
+            if (typed_service) if (service_results) |binding| {
+                entry.service_operation = binding.index_fn(name);
+            };
+            if (entry.service_operation) |operation| {
+                const binding = service_results.?;
+                if (binding.streaming_fn(operation) and payload.len >= 8) {
+                    entry.service_channel = exactEngineKey(readF64(payload, 0));
+                }
+            }
             fx.hostRequest(.{
                 .key = request_key_base + index,
                 .name = name,
                 .payload = payload,
                 .on_result = hostResultMsg,
             });
+        }
+
+        /// Streaming services are one admission, not a channel-open/request
+        /// batch. A duplicate route key or an already-open channel rejects
+        /// before either table changes; otherwise the ordinary channel and
+        /// request issuers retain their journal/replay behavior. An engine-side
+        /// channel refusal is followed by the service err arm's matching
+        /// rejection without starting the service transport.
+        fn issueServiceStreamRequest(
+            fx: *Fx,
+            name: []const u8,
+            key: []const u8,
+            ok_tag: u8,
+            err_tag: u8,
+            channel_value: f64,
+            event_tag: u8,
+            max_pending: u8,
+            payload: []const u8,
+        ) void {
+            if (key.len > 0 and findRequest(key) != null) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            // Fail the existing request-table bound before opening a channel;
+            // an admission failure must not leave an orphaned stream.
+            if (freeRequestIndex() == null) {
+                @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
+            }
+
+            const channel_key = exactEngineKey(channel_value);
+            if (channel_key) |value| {
+                // `findChannel` covers every TS bridge occupancy, including a
+                // rejected terminal waiting to drain. `channelHandle` also
+                // sees an open embedder-owned channel and replay's parked
+                // occupancy. Never let this service acquire either one.
+                if (findChannel(value) != null or fx.channelHandle(value) != null) {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = value, .kind = .rejected }));
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                }
+            }
+
+            // Validation/table refusals generated by the bridge are final for
+            // this combined command, so no service request may follow them.
+            if (!issueChannelOpen(fx, channel_value, event_tag, max_pending)) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            issueRequest(fx, name, key, ok_tag, err_tag, true, payload);
+        }
+
+        fn stageRequestRejected(fx: *Fx, err_tag: u8) void {
+            fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
         }
 
         fn findRequest(key: []const u8) ?usize {
@@ -2660,6 +2786,14 @@ pub fn TsCoreHost(comptime core: type) type {
             }
             const entry = &requests[index];
             entry.used = false;
+            if (entry.service_channel) |channel_key| pending_service_channel_close = channel_key;
+            if (result.ok) {
+                if (entry.service_operation) |operation| {
+                    const binding = service_results orelse
+                        @panic("ts core host: a typed service result arrived after its decoder was unbound");
+                    return binding.decode_fn(operation, entry.ok_tag, result.bytes);
+                }
+            }
             if (result.ok and entry.ok_void) return msgFromTagVoid(entry.ok_tag);
             return msgFromTagBytes(if (result.ok) entry.ok_tag else entry.err_tag, result.bytes);
         }
@@ -3530,6 +3664,16 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         // ------------------------------------------------- wire cursor
+
+        fn readF64(bytes: []const u8, at: usize) f64 {
+            if (at + 8 > bytes.len) @panic("ts core host: truncated f64 service metadata");
+            return @bitCast(std.mem.readInt(u64, bytes[at..][0..8], .little));
+        }
+
+        fn exactEngineKey(value: f64) ?u64 {
+            if (!std.math.isFinite(value) or value < 1 or value >= 9007199254740992.0 or @floor(value) != value) return null;
+            return @intFromFloat(value);
+        }
 
         fn takeByte(bytes: []const u8, at: *usize) u8 {
             if (at.* >= bytes.len) @panic("ts core host: truncated wire record");
