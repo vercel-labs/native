@@ -27,6 +27,7 @@
         "src",
         "templates",
         "tests",
+        "third_party/sqlite",
         "tools",
     },
 }

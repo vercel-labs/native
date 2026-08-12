@@ -310,6 +310,7 @@ pub fn main(init: std.process.Init) !void {
                 .canvas_label = dev_canvas_label,
                 .window_width = dev_window_width,
                 .window_height = dev_window_height,
+                .capabilities = dev_metadata.capabilities,
                 .script = try flagValue(args, "--script"),
                 .watch = flagBool(args, "--watch"),
                 .persist_routes = if (dev_metadata.persist) |persist| .{

@@ -1468,6 +1468,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const app_mod = localModule(b, target, optimize, "src/main.zig");
         \\    app_mod.addImport("native_sdk", native_sdk_mod);
         \\    app_mod.addImport("runner", runner_mod);
+        \\    if (app_config.sqlite_capability) addSqliteEngine(b, app_mod, native_sdk_path);
         \\    addMacosPrivacyInfoPlist(b, app_mod, target, app_config);
         \\    const exe = b.addExecutable(.{
         \\        .name = app_exe_name,
@@ -1530,6 +1531,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        const package_app_mod = localModule(b, target, package_optimize, "src/main.zig");
         \\        package_app_mod.addImport("native_sdk", package_sdk_mod);
         \\        package_app_mod.addImport("runner", package_runner_mod);
+        \\        if (app_config.sqlite_capability) addSqliteEngine(b, package_app_mod, native_sdk_path);
         \\        addMacosPrivacyInfoPlist(b, package_app_mod, target, app_config);
         \\        const built = b.addExecutable(.{
         \\            .name = app_exe_name,
@@ -1705,6 +1707,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    debug_mod.addImport("trace", trace_mod);
         \\
         \\    const native_sdk_mod = externalModule(b, target, optimize, native_sdk_path, "src/root.zig");
+        \\    native_sdk_mod.addIncludePath(nativeSdkPath(b, native_sdk_path, "third_party/sqlite"));
         \\    native_sdk_mod.addImport("geometry", geometry_mod);
         \\    native_sdk_mod.addImport("assets", assets_mod);
         \\    native_sdk_mod.addImport("app_dirs", app_dirs_mod);
@@ -1715,6 +1718,15 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    native_sdk_mod.addImport("json", json_mod);
         \\    native_sdk_mod.addImport("canvas", canvas_mod);
         \\    return native_sdk_mod;
+        \\}
+        \\
+        \\fn addSqliteEngine(b: *std.Build, app_mod: *std.Build.Module, native_sdk_path: []const u8) void {
+        \\    app_mod.addIncludePath(nativeSdkPath(b, native_sdk_path, "third_party/sqlite"));
+        \\    app_mod.addCSourceFile(.{
+        \\        .file = nativeSdkPath(b, native_sdk_path, "third_party/sqlite/sqlite3.c"),
+        \\        .flags = &.{ "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_MEMSTATUS=0" },
+        \\    });
+        \\    app_mod.link_libc = true;
         \\}
         \\
         \\fn externalModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, native_sdk_path: []const u8, path: []const u8) *std.Build.Module {
@@ -1992,6 +2004,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    webview_layer: WebLayerOption = .auto,
         \\    microphone_permission: bool = false,
         \\    system_audio_permission: bool = false,
+        \\    sqlite_capability: bool = false,
         \\    /// The first web declaration found (for teaching messages), or
         \\    /// null when app.zon declares no web use. `web_engine = "system"`
         \\    /// alone is NOT web intent — it is the default in many canvas
@@ -2045,6 +2058,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        .webview_layer = parseWebLayer(raw.webview_layer) orelse @panic("app.zon .webview_layer must be \"auto\", \"include\", or \"exclude\""),
         \\        .microphone_permission = hasManifestPermission(raw.permissions, "microphone"),
         \\        .system_audio_permission = hasManifestPermission(raw.permissions, "system_audio"),
+        \\        .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         \\    };
         \\    config.web_declaration = blk: {
         \\        if (raw.frontend != null) break :blk "a .frontend block";
@@ -2064,6 +2078,13 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\fn hasManifestPermission(permissions: []const []const u8, name: []const u8) bool {
         \\    for (permissions) |permission| {
         \\        if (std.mem.eql(u8, permission, name)) return true;
+        \\    }
+        \\    return false;
+        \\}
+        \\
+        \\fn hasManifestCapability(capabilities: []const []const u8, name: []const u8) bool {
+        \\    for (capabilities) |capability| {
+        \\        if (std.mem.eql(u8, capability, name)) return true;
         \\    }
         \\    return false;
         \\}
@@ -2272,6 +2293,7 @@ fn runnerZig() []const u8 {
     \\    commands: ?[]const native_sdk.Command = null,
     \\    menus: ?[]const native_sdk.Menu = null,
     \\    shortcuts: ?[]const native_sdk.Shortcut = null,
+    \\    record_store: ?native_sdk.RecordStoreBinding = null,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
     \\        var info: native_sdk.AppInfo = .{
@@ -2606,6 +2628,15 @@ fn runnerZig() []const u8 {
     \\    return false;
     \\}
     \\
+    \\fn manifestDeclaresStore() bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    \\    inline for (app_manifest.capabilities) |capability| {
+    \\        const name: []const u8 = capability;
+    \\        if (comptime std.mem.eql(u8, name, "store")) return true;
+    \\    }
+    \\    return false;
+    \\}
+    \\
     \\fn menuItem(comptime item: anytype) native_sdk.MenuItem {
     \\    return .{
     \\        .label = if (@hasField(@TypeOf(item), "label")) item.label else "",
@@ -2644,14 +2675,35 @@ fn runnerZig() []const u8 {
     \\    if (build_options.debug_overlay) {
     \\        std.debug.print("debug-overlay=true backend={s} web-engine={s} trace={s}\n", .{ build_options.platform, build_options.web_engine, build_options.trace });
     \\    }
+    \\    const RecordStoreType = if (comptime manifestDeclaresStore()) native_sdk.RecordStore else void;
+    \\    var record_store_value: RecordStoreType = undefined;
+    \\    var record_store_open = false;
+    \\    var resolved_options = options;
+    \\    if (comptime manifestDeclaresStore()) {
+    \\        var data_dir_buffer: [512]u8 = undefined;
+    \\        const app_data_dir = native_sdk.app_dirs.resolveOne(
+    \\            .{ .name = options.bundle_id },
+    \\            native_sdk.app_dirs.currentPlatform(),
+    \\            native_sdk.debug.envFromMap(init.environ_map),
+    \\            .data,
+    \\            &data_dir_buffer,
+    \\        ) catch return error.StoreDataDirUnavailable;
+    \\        try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
+    \\        record_store_value = try native_sdk.RecordStore.open(std.heap.page_allocator, app_data_dir);
+    \\        record_store_open = true;
+    \\        resolved_options.record_store = record_store_value.binding();
+    \\    }
+    \\    defer if (comptime manifestDeclaresStore()) {
+    \\        if (record_store_open) record_store_value.deinit();
+    \\    };
     \\    if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
-    \\        try runMacos(app, options, init);
+    \\        try runMacos(app, resolved_options, init);
     \\    } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
-    \\        try runLinux(app, options, init);
+    \\        try runLinux(app, resolved_options, init);
     \\    } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
-    \\        try runWindows(app, options, init);
+    \\        try runWindows(app, resolved_options, init);
     \\    } else {
-    \\        try runNull(app, options, init);
+    \\        try runNull(app, resolved_options, init);
     \\    }
     \\}
     \\
@@ -2703,6 +2755,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .record_store = options.record_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2757,6 +2810,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .record_store = options.record_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2811,6 +2865,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .record_store = options.record_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2865,6 +2920,7 @@ fn runnerZig() []const u8 {
     \\        .shortcuts = shortcuts,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
+    \\        .record_store = options.record_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -3876,6 +3932,8 @@ test "writeDefaultApp emits Vite project files" {
     // as the managed graph (for both dev and the separately optimized exe).
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "permissions: []const []const u8") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "hasManifestPermission(raw.permissions, \"microphone\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "hasManifestCapability(raw.capabilities, \"store\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "addSqliteEngine(b, app_mod, native_sdk_path)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSMicrophoneUsageDescription") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSAudioCaptureUsageDescription") != null);
     try std.testing.expect(std.mem.count(u8, build_zig_text, "addMacosPrivacyInfoPlist(b, ") == 2);
@@ -3929,6 +3987,9 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "menus: ?[]const native_sdk.Menu = null") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "resolvedMenus") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "shortcuts: ?[]const native_sdk.Shortcut = null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "record_store: ?native_sdk.RecordStoreBinding = null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDeclaresStore()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".record_store = options.record_store") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "resolvedShortcuts") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "const manifest_windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn appInfo(self: RunOptions, buffers: *StateBuffers)") != null);

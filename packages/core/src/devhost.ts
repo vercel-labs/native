@@ -36,11 +36,14 @@
 //   - timer/now/delay arms carry exactly one number payload field (pinned
 //     by tsc), so the harness constructs them shape-directed without
 //     needing the field's name.
-// Cmd.persist snapshots the committed model in virtual-host memory and typed
-// app services execute directly through their generated contract. Other
-// effects (files, fetch, clipboard, notifications, spawn, audio, raw host
-// commands) are printed as `cmd ...` and NOT performed — feed their result
-// back yourself as an ordinary Msg line. Results remain plain messages.
+// Cmd.persist snapshots the committed model in virtual-host memory, and
+// capability-enabled Cmd.store performs against a process-local byte map;
+// typed app services execute directly through their generated contract.
+// Every other effect (files, buffered/streaming fetch, clipboard,
+// notifications, spawn, audio, raw host commands)
+// is printed as `cmd ...` and NOT performed — feed its result back yourself
+// as an ordinary Msg line. That is the point: results are plain messages,
+// and the loop stays deterministic.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -60,7 +63,7 @@ interface Cmdish {
 }
 
 function usage(): never {
-  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>] [--service-cwd <app-data-dir>]");
+  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>] [--service-cwd <app-data-dir>] [--capability <name>]...");
   console.error("core-logic loop only (update/effects under a virtual host) - not a renderer;");
   console.error("run the real app with `native dev`.");
   process.exit(2);
@@ -80,8 +83,14 @@ let windowWidth = 800;
 let windowHeight = 600;
 let appName: string | null = null;
 const servicePackages: { name: string; version: string; content_hash: string }[] = [];
+const capabilities = new Set<string>();
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--script") script = args[++i] ?? null;
+  else if (args[i] === "--capability") {
+    const capability = args[++i] ?? null;
+    if (capability === null) usage();
+    capabilities.add(capability);
+  }
   else if (args[i] === "--persist-ok") persistOk = args[++i] ?? null;
   else if (args[i] === "--persist-none") persistNone = args[++i] ?? null;
   else if (args[i] === "--persist-err") persistErr = args[++i] ?? null;
@@ -119,12 +128,12 @@ if (serviceCwd !== null) {
 const persistRouteCount = [persistOk, persistNone, persistErr].filter((route) => route !== null).length;
 if (persistRouteCount !== 0 && persistRouteCount !== 3) usage();
 let checked: ReturnType<typeof checkFile> | null = null;
-if ((persistOk !== null && persistNone !== null && persistErr !== null) || fs.existsSync(path.join(path.dirname(path.resolve(entry)), "services"))) {
+if (capabilities.size > 0 || (persistOk !== null && persistNone !== null && persistErr !== null) || fs.existsSync(path.join(path.dirname(path.resolve(entry)), "services"))) {
   // Type information is erased by the time this module imports the app core.
   // Run the frontend inside the watched process so every node --watch restart
   // revalidates manifest-owned routes against the newly edited Msg union.
   checked = checkFile(entry, {
-    capabilities: persistOk === null ? [] : ["persist"],
+    capabilities: [...new Set([...capabilities, ...(persistOk === null ? [] : ["persist"])])],
     persistRoutes: persistOk !== null && persistNone !== null && persistErr !== null ? { ok: persistOk, none: persistNone, err: persistErr } : undefined,
     servicesContract: true,
     servicePackages,
@@ -245,6 +254,7 @@ if (typeof mod.initialModel !== "function" || typeof mod.update !== "function") 
 // ---------------------------------------------------------- transcript i/o
 
 const decoder = new TextDecoder();
+const strictDecoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
 
 function jsonable(value: unknown): unknown {
@@ -287,6 +297,43 @@ const serviceChannels = new Map<number, string>();
 /// Process-local Tier-1 store. `structuredClone` preserves Uint8Array and
 /// nested model data without making the app own a serialization format.
 let persistedModel: unknown | null = null;
+interface VirtualStoreRecord {
+  readonly key: Uint8Array;
+  readonly value: Uint8Array;
+}
+
+/// Process-local Tier-2 store. Like SQLite, record identity is the encoded
+/// UTF-8 key rather than the source JavaScript string. That distinction is
+/// observable for ill-formed UTF-16: TextEncoder canonicalizes every lone
+/// surrogate to U+FFFD, so strings with the same encoded bytes must address
+/// one record here just as they do in the native host.
+const recordStore = new Map<string, VirtualStoreRecord>();
+
+interface PendingStoreResult {
+  readonly routeKey: string;
+  readonly okKind: string;
+  readonly errKind: string;
+  readonly ok: boolean;
+  readonly okVoid: boolean;
+  readonly bytes: Uint8Array;
+  active: boolean;
+}
+
+/// Store operations are performed in command-stream order, but their routed
+/// results wait until the dispatch's complete command walk has returned. This
+/// is the native effect boundary: a later command in one Cmd.batch can replace
+/// or cancel an earlier result before either arm runs.
+const pendingStoreResults: PendingStoreResult[] = [];
+const pendingStoreByKey = new Map<string, PendingStoreResult>();
+let dispatchDepth = 0;
+let drainingStoreResults = false;
+
+const maxStoreKeyBytes = 512;
+const maxStoreValueBytes = 1024 * 1024;
+const maxStoreBatchEntries = 64;
+const maxStoreBatchBytes = 8 * 1024 * 1024;
+const maxStoreScanLimit = 256;
+const maxStoreResultBytes = maxStoreValueBytes + (2 * maxStoreKeyBytes) + 32;
 
 /// Timer/now/delay arms carry exactly one number payload field (tsc pins
 /// the shape), so a proxy that answers every non-kind read with the
@@ -720,6 +767,213 @@ function cancelService(key: string): boolean {
   return true;
 }
 
+function emptyMsg(kind: string): unknown {
+  return { kind };
+}
+
+function storeKeyBytes(key: string, allowEmpty = false): Uint8Array | null {
+  const bytes = encoder.encode(key);
+  if ((!allowEmpty && bytes.length === 0) || bytes.length > maxStoreKeyBytes) return null;
+  return bytes;
+}
+
+function storeKeyIdentity(bytes: Uint8Array): string {
+  let identity = "";
+  for (const byte of bytes) identity += String.fromCharCode(byte);
+  return identity;
+}
+
+function validStoreKeyBytes(bytes: Uint8Array, allowEmpty = false): Uint8Array | null {
+  if ((!allowEmpty && bytes.length === 0) || bytes.length > maxStoreKeyBytes) return null;
+  try {
+    strictDecoder.decode(bytes);
+  } catch {
+    return null;
+  }
+  return bytes;
+}
+
+function compareBytes(left: Uint8Array, right: Uint8Array): number {
+  const count = Math.min(left.length, right.length);
+  for (let i = 0; i < count; i++) {
+    if (left[i]! !== right[i]!) return left[i]! - right[i]!;
+  }
+  return left.length - right.length;
+}
+
+function startsWithBytes(value: Uint8Array, prefix: Uint8Array): boolean {
+  if (prefix.length > value.length) return false;
+  for (let i = 0; i < prefix.length; i++) if (value[i] !== prefix[i]) return false;
+  return true;
+}
+
+function frameStoreScan(entries: ReadonlyArray<readonly [Uint8Array, Uint8Array]>, next: Uint8Array): Uint8Array {
+  let length = 8 + next.length;
+  for (const [key, value] of entries) length += 8 + key.length + value.length;
+  const output = new Uint8Array(length);
+  const view = new DataView(output.buffer);
+  let at = 0;
+  const writeU32 = (value: number): void => {
+    view.setUint32(at, value, true);
+    at += 4;
+  };
+  const writeBytes = (bytes: Uint8Array): void => {
+    writeU32(bytes.length);
+    output.set(bytes, at);
+    at += bytes.length;
+  };
+  writeU32(entries.length);
+  for (const [key, value] of entries) {
+    writeBytes(key);
+    writeBytes(value);
+  }
+  writeBytes(next);
+  return output;
+}
+
+function queueStoreResult(cmd: Cmdish, ok: boolean, bytes: Uint8Array, okVoid: boolean): void {
+  const routeKey = cmd.key as string;
+  if (routeKey.length > 0) {
+    const replaced = pendingStoreByKey.get(routeKey);
+    if (replaced) replaced.active = false;
+  }
+  const result: PendingStoreResult = {
+    routeKey,
+    okKind: cmd.okKind as string,
+    errKind: cmd.errKind as string,
+    ok,
+    okVoid,
+    bytes,
+    active: true,
+  };
+  pendingStoreResults.push(result);
+  if (routeKey.length > 0) pendingStoreByKey.set(routeKey, result);
+}
+
+function cancelPendingStore(routeKey: string): boolean {
+  const pending = pendingStoreByKey.get(routeKey);
+  if (!pending) return false;
+  pending.active = false;
+  pendingStoreByKey.delete(routeKey);
+  return true;
+}
+
+function drainStoreResults(): void {
+  if (dispatchDepth !== 0 || drainingStoreResults) return;
+  drainingStoreResults = true;
+  try {
+    while (pendingStoreResults.length > 0) {
+      const result = pendingStoreResults.shift()!;
+      if (!result.active) continue;
+      if (result.routeKey.length > 0) {
+        if (pendingStoreByKey.get(result.routeKey) !== result) continue;
+        pendingStoreByKey.delete(result.routeKey);
+      }
+      result.active = false;
+      if (!result.ok) dispatch(bytesMsg(result.errKind, result.bytes));
+      else if (result.okVoid) dispatch(emptyMsg(result.okKind));
+      else dispatch(bytesMsg(result.okKind, result.bytes));
+    }
+  } finally {
+    drainingStoreResults = false;
+  }
+}
+
+function rejectStore(cmd: Cmdish, reason: string): void {
+  say(`cmd ${cmd.op} rejected ${reason}`);
+  queueStoreResult(cmd, false, encoder.encode(reason), false);
+}
+
+function performStoreCmd(cmd: Cmdish): void {
+  const routeKey = cmd.key as string;
+  if (!capabilities.has("store")) return rejectStore(cmd, "rejected");
+  switch (cmd.op) {
+    case "store_set": {
+      const key = cmd.storeKey as string;
+      const keyBytes = storeKeyBytes(key);
+      const bytes = cmd.bytes;
+      if (!keyBytes) return rejectStore(cmd, "bad_key");
+      if (!(bytes instanceof Uint8Array) || bytes.length > maxStoreValueBytes) return rejectStore(cmd, "over_bound");
+      recordStore.set(storeKeyIdentity(keyBytes), { key: keyBytes.slice(), value: bytes.slice() });
+      say(`cmd store_set ${routeKey} ${key} (stored in virtual host memory)`);
+      queueStoreResult(cmd, true, new Uint8Array(0), true);
+      return;
+    }
+    case "store_get": {
+      const key = cmd.storeKey as string;
+      const keyBytes = storeKeyBytes(key);
+      if (!keyBytes) return rejectStore(cmd, "bad_key");
+      const value = recordStore.get(storeKeyIdentity(keyBytes))?.value;
+      const result = new Uint8Array(value === undefined ? 1 : value.length + 1);
+      if (value !== undefined) {
+        result[0] = 1;
+        result.set(value, 1);
+      }
+      say(`cmd store_get ${routeKey} ${key} (${value === undefined ? "miss" : "hit"})`);
+      queueStoreResult(cmd, true, result, false);
+      return;
+    }
+    case "store_delete": {
+      const key = cmd.storeKey as string;
+      const keyBytes = storeKeyBytes(key);
+      if (!keyBytes) return rejectStore(cmd, "bad_key");
+      recordStore.delete(storeKeyIdentity(keyBytes));
+      say(`cmd store_delete ${routeKey} ${key} (deleted from virtual host memory)`);
+      queueStoreResult(cmd, true, new Uint8Array(0), true);
+      return;
+    }
+    case "store_scan": {
+      const prefix = cmd.prefix as string;
+      const after = cmd.after as string | Uint8Array;
+      const prefixBytes = storeKeyBytes(prefix, true);
+      const afterBytes = typeof after === "string"
+        ? (after === "" ? new Uint8Array(0) : storeKeyBytes(after))
+        : validStoreKeyBytes(after, true);
+      const requested = cmd.limit as number;
+      const limit = requested === 0 ? 100 : requested;
+      if (!prefixBytes || !afterBytes) return rejectStore(cmd, "bad_key");
+      if (!Number.isInteger(limit) || limit < 1 || limit > maxStoreScanLimit) return rejectStore(cmd, "over_bound");
+      const matches = [...recordStore.values()]
+        .map(({ key, value }) => [key, value] as const)
+        .filter(([key]) => startsWithBytes(key, prefixBytes) && (afterBytes.length === 0 || compareBytes(key, afterBytes) > 0))
+        .sort(([left], [right]) => compareBytes(left, right));
+      const page: Array<readonly [Uint8Array, Uint8Array]> = [];
+      let framedLength = 8;
+      for (const entry of matches) {
+        if (page.length >= limit) break;
+        const rowLength = 8 + entry[0].length + entry[1].length;
+        if (framedLength + rowLength + entry[0].length > maxStoreResultBytes && page.length > 0) break;
+        page.push(entry);
+        framedLength += rowLength;
+      }
+      const hasMore = page.length < matches.length;
+      const next = hasMore ? page.at(-1)![0] : new Uint8Array(0);
+      say(`cmd store_scan ${routeKey} ${prefix} (${page.length} records${hasMore ? ", more" : ""})`);
+      queueStoreResult(cmd, true, frameStoreScan(page, next), false);
+      return;
+    }
+    case "store_set_many": {
+      const entries = cmd.entries as ReadonlyArray<readonly [string, Uint8Array]>;
+      if (!Array.isArray(entries) || entries.length === 0 || entries.length > maxStoreBatchEntries) return rejectStore(cmd, "over_bound");
+      let encodedLength = 8;
+      for (const [key, value] of entries) {
+        const keyBytes = storeKeyBytes(key);
+        if (!keyBytes) return rejectStore(cmd, "bad_key");
+        if (!(value instanceof Uint8Array) || value.length > maxStoreValueBytes) return rejectStore(cmd, "over_bound");
+        encodedLength += 8 + keyBytes.length + value.length;
+        if (encodedLength > maxStoreBatchBytes) return rejectStore(cmd, "over_bound");
+      }
+      for (const [key, value] of entries) {
+        const keyBytes = storeKeyBytes(key)!;
+        recordStore.set(storeKeyIdentity(keyBytes), { key: keyBytes.slice(), value: value.slice() });
+      }
+      say(`cmd store_set_many ${routeKey} (${entries.length} records stored atomically)`);
+      queueStoreResult(cmd, true, new Uint8Array(0), true);
+      return;
+    }
+  }
+}
+
 function performCmd(cmd: Cmdish): void {
   switch (cmd.op) {
     case "none":
@@ -740,7 +994,9 @@ function performCmd(cmd: Cmdish): void {
     }
     case "cancel": {
       const key = cmd.key as string;
-      if (delays.delete(key)) {
+      if (cancelPendingStore(key)) {
+        say(`cmd cancel ${key} (store result dropped)`);
+      } else if (delays.delete(key)) {
         say(`cmd cancel ${key} (delay dropped)`);
       } else if (cancelService(key)) {
         say(`cmd cancel ${key} (service cancellation requested)`);
@@ -836,6 +1092,13 @@ function performCmd(cmd: Cmdish): void {
       }
       return;
     }
+    case "store_set":
+    case "store_get":
+    case "store_delete":
+    case "store_scan":
+    case "store_set_many":
+      performStoreCmd(cmd);
+      return;
     case "show_notification": {
       const details = Object.entries(cmd)
         .filter(([k]) => k !== "op")
@@ -941,19 +1204,31 @@ function boot(): void {
   const restored = persistedModel !== null;
   model = restored ? structuredClone(persistedModel) : first;
   say(`model ${JSON.stringify(jsonable(model))}`);
-  if (cmd) performCmd(cmd as Cmdish);
-  reconcileSubs();
+  dispatchDepth += 1;
+  try {
+    if (cmd) performCmd(cmd as Cmdish);
+    reconcileSubs();
+  } finally {
+    dispatchDepth -= 1;
+  }
+  drainStoreResults();
   const route = restored ? persistOk : persistNone;
   if (route) dispatch({ kind: route });
 }
 
 function dispatch(msg: unknown): void {
-  const result = mod.update(model, msg);
-  const [next, cmd] = Array.isArray(result) ? result : [result, null];
-  model = next;
-  say(`model ${JSON.stringify(jsonable(model))}`);
-  if (cmd) performCmd(cmd as Cmdish);
-  reconcileSubs();
+  dispatchDepth += 1;
+  try {
+    const result = mod.update(model, msg);
+    const [next, cmd] = Array.isArray(result) ? result : [result, null];
+    model = next;
+    say(`model ${JSON.stringify(jsonable(model))}`);
+    if (cmd) performCmd(cmd as Cmdish);
+    reconcileSubs();
+  } finally {
+    dispatchDepth -= 1;
+  }
+  drainStoreResults();
 }
 
 function handleLine(raw: string): void {

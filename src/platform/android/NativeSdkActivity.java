@@ -237,6 +237,11 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
         // section below.
         nativeSetImageService(nativeApp);
 
+        // `getFilesDir()` is app_dirs `.data` on Android. Store-capability
+        // builds open store.db here before start; other builds accept the
+        // same stable host call as a capability-shed no-op.
+        nativeSetDataRoot(nativeApp, getFilesDir().getAbsolutePath());
+
         // Verification harness: `am start --ez native-sdk-automation true`
         // publishes snapshot.txt into the app's files dir, same protocol
         // as the desktop -Dautomation=true runners (readable over
@@ -1361,6 +1366,7 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     private native boolean nativeTextInputState(long app, long[] widgetId, float[] frame);
     private native boolean nativeScrollableWidgetAt(long app, float x, float y);
     private native void nativeSetAssetRoot(long app, String path);
+    private native void nativeSetDataRoot(long app, String path);
     private native void nativeSetAutomationDir(long app, String path);
     private native void nativeSetTextMeasure(long app);
     private native void nativeSetAudioService(long app);

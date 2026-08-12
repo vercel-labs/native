@@ -1404,6 +1404,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn bindEffectsChannel(self: *Self, runtime: *Runtime) void {
             self.effects.bindServices(&runtime.options.platform.services);
             self.effects.bindEnviron(runtime.options.environ);
+            if (runtime.options.record_store) |binding| {
+                self.effects.bindRecordStore(binding);
+            }
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
             self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{

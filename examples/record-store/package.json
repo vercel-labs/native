@@ -1,0 +1,8 @@
+{
+  "name": "record-store",
+  "private": true,
+  "description": "Editor surface for the TypeScript core; the native CLI builds without node_modules.",
+  "dependencies": {
+    "@native-sdk/core": "0.8.3"
+  }
+}

@@ -531,6 +531,9 @@ pub const DevHostOptions = struct {
     canvas_label: []const u8 = "canvas",
     window_width: f32 = 800,
     window_height: f32 = 600,
+    /// app.zon capabilities installed by the shipping host. The virtual host
+    /// receives the same set so capability-shed effects reject identically.
+    capabilities: []const []const u8 = &.{},
     /// NDJSON message script; null = interactive stdin.
     script: ?[]const u8 = null,
     /// Re-run the harness whenever any module of the core changes.
@@ -609,6 +612,9 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     }
     if (app_data_dir.len > 0) {
         try argv.appendSlice(allocator, &.{ "--service-cwd", app_data_dir });
+    }
+    for (options.capabilities) |capability| {
+        try argv.appendSlice(allocator, &.{ "--capability", capability });
     }
     if (options.persist_routes) |routes| {
         try argv.appendSlice(allocator, &.{

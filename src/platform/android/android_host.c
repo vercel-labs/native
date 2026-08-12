@@ -403,6 +403,16 @@ JNIEXPORT jboolean JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeScr
 
 // ------------------------------------------------------- assets/automation
 
+JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetDataRoot(JNIEnv *env, jobject self, jlong app, jstring path) {
+    (void)self;
+    if (!path) return;
+    const char *chars = (*env)->GetStringUTFChars(env, path, NULL);
+    if (!chars) return;
+    native_sdk_app_set_data_root((void *)app, chars, strlen(chars));
+    host_log_error((void *)app, "data_root");
+    (*env)->ReleaseStringUTFChars(env, path, chars);
+}
+
 JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetAssetRoot(JNIEnv *env, jobject self, jlong app, jstring path) {
     (void)self;
     if (!path) return;

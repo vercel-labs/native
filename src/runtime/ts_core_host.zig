@@ -483,6 +483,7 @@ pub fn TsCoreHost(comptime core: type) type {
             err_tag: u8 = 0,
             service_operation: ?u16 = null,
             service_channel: ?u64 = null,
+            ok_void: bool = false,
 
             fn wireKey(entry: *const RequestEntry) []const u8 {
                 return entry.key[0..entry.key_len];
@@ -668,7 +669,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var audio_cache_dir_len: usize = 0;
         var audio_cache_dir_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
         var audio_cache_path_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
-        var requests: [runtime_effects.max_effects]RequestEntry = @splat(.{});
+        var requests: [runtime_effects.max_effects + runtime_effects.max_store_effects]RequestEntry = @splat(.{});
         var timers: [runtime_effects.max_effect_timers]TimerEntry = @splat(.{});
         var effects_table: [runtime_effects.max_effects]EffectEntry = @splat(.{});
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
@@ -1403,7 +1404,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     //                        [name_len][name][key_len][key]
                     //                        [ok_tag][err_tag]
                     //                        [payload_len u32 LE][payload]
-                    0x23 => {
+                    0x28 => {
                         const channel_bits = takeBytes(cmd, &at, 8);
                         const channel_value: f64 = @bitCast(std.mem.readInt(u64, channel_bits[0..8], .little));
                         const event_tag = takeByte(cmd, &at);
@@ -1414,6 +1415,89 @@ pub fn TsCoreHost(comptime core: type) type {
                         const err_tag = takeByte(cmd, &at);
                         const payload = takeLongBytes(cmd, &at);
                         issueServiceStreamRequest(fx, name, key, ok_tag, err_tag, channel_value, event_tag, max_pending, payload);
+                    },
+                    // store_set [op][route][scope u32][key bytes][value bytes]
+                    0x23 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeSet(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .bytes = bytes,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_get [op][route][scope u32][key bytes]
+                    0x24 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, false) orelse continue;
+                        fx.storeGet(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_delete [op][route][scope u32][key bytes]
+                    0x25 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeDelete(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_scan [op][route][scope u32][prefix bytes]
+                    //            [limit u32][after bytes]
+                    0x26 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const prefix = takeLongBytes(cmd, &at);
+                        const limit = takeU32(cmd, &at);
+                        const after = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, false) orelse continue;
+                        fx.storeScan(.{
+                            .key = request_key,
+                            .prefix = prefix,
+                            .limit = limit,
+                            .after = after,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_set_many [op][route][scope u32][count u32]
+                    //                [count * (key bytes,value bytes)]
+                    0x27 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const count: usize = @intCast(takeU32(cmd, &at));
+                        var entries: [runtime_effects.max_effect_store_batch_entries]Fx.StoreEntry = undefined;
+                        var kept: usize = 0;
+                        for (0..count) |_| {
+                            const record_key = takeLongBytes(cmd, &at);
+                            const bytes = takeLongBytes(cmd, &at);
+                            if (kept < entries.len) {
+                                entries[kept] = .{ .key = record_key, .bytes = bytes };
+                                kept += 1;
+                            }
+                        }
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeSetMany(.{
+                            .key = request_key,
+                            .entries = if (count <= entries.len) entries[0..kept] else &.{},
+                            .on_result = hostResultMsg,
+                        });
                     },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
@@ -2351,24 +2435,27 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         }
 
-        /// Issue (or replace) a routed request. Raw keyed requests reuse their
-        /// live table entry when the bound host supports replacement. Typed
-        /// services and reject-on-duplicate host bindings refuse before
-        /// touching the original entry, so its eventual terminal still owns
-        /// the route and table slot it started with. Unkeyed requests
-        /// (`key.len == 0`) each take a fresh entry: nothing can replace or
-        /// cancel them.
-        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, typed_service: bool, payload: []const u8) void {
-            if (key.len > 0 and findRequest(key) != null and (typed_service or fx.rejectsDuplicateHostRequestKeys())) {
-                stageRequestRejected(fx, err_tag);
-                return;
-            }
+        /// Allocate a routed request slot. The regular host-request and
+        /// record-store pools are disjoint, while their wire keys still share
+        /// one replacement namespace.
+        fn allocRequestEntry(
+            fx: *Fx,
+            key: []const u8,
+            ok_tag: u8,
+            err_tag: u8,
+            ok_void: bool,
+            store_request: bool,
+        ) ?u64 {
             const index = blk: {
                 if (key.len > 0) {
-                    if (findRequest(key)) |existing| break :blk existing;
+                    if (findRequest(key)) |existing| {
+                        const existing_is_store = existing >= runtime_effects.max_effects;
+                        if (existing_is_store == store_request) break :blk existing;
+                        fx.cancelHostRequest(request_key_base + existing);
+                        requests[existing].used = false;
+                    }
                 }
-                break :blk freeRequestIndex() orelse
-                    @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
+                break :blk (if (store_request) freeStoreRequestIndex() else freeRequestIndex()) orelse return null;
             };
             const entry = &requests[index];
             entry.used = true;
@@ -2376,15 +2463,43 @@ pub fn TsCoreHost(comptime core: type) type {
             @memcpy(entry.key[0..key.len], key);
             entry.ok_tag = ok_tag;
             entry.err_tag = err_tag;
+            entry.ok_void = ok_void;
             entry.service_operation = null;
+            entry.service_channel = null;
+            return index;
+        }
+
+        fn allocStoreRequestEntry(fx: *Fx, head: RoutedHead, ok_void: bool) ?u64 {
+            const index = allocRequestEntry(fx, head.key, head.ok_tag, head.err_tag, ok_void, true) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return null;
+            };
+            return request_key_base + index;
+        }
+
+        /// Issue (or replace) a routed request. Raw keyed requests reuse their
+        /// live table entry when the bound host supports replacement. Typed
+        /// services and reject-on-duplicate host bindings refuse before
+        /// touching the original entry, so its eventual terminal still owns
+        /// the route and table slot it started with. Unkeyed requests each
+        /// take a fresh entry.
+        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, typed_service: bool, payload: []const u8) void {
+            if (key.len > 0 and findRequest(key) != null and (typed_service or fx.rejectsDuplicateHostRequestKeys())) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, false) orelse {
+                stageRequestRejected(fx, err_tag);
+                return;
+            };
+            const entry = &requests[index];
             if (typed_service) if (service_results) |binding| {
                 entry.service_operation = binding.index_fn(name);
             };
-            entry.service_channel = null;
             if (entry.service_operation) |operation| {
                 const binding = service_results.?;
-                if (binding.streaming_fn(operation)) {
-                    if (payload.len >= 8) entry.service_channel = exactEngineKey(readF64(payload, 0));
+                if (binding.streaming_fn(operation) and payload.len >= 8) {
+                    entry.service_channel = exactEngineKey(readF64(payload, 0));
                 }
             }
             fx.hostRequest(.{
@@ -2456,7 +2571,14 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn freeRequestIndex() ?usize {
-            for (&requests, 0..) |*entry, index| {
+            for (requests[0..runtime_effects.max_effects], 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        fn freeStoreRequestIndex() ?usize {
+            for (requests[runtime_effects.max_effects..], runtime_effects.max_effects..) |*entry, index| {
                 if (!entry.used) return index;
             }
             return null;
@@ -2485,6 +2607,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     return binding.decode_fn(operation, entry.ok_tag, result.bytes);
                 }
             }
+            if (result.ok and entry.ok_void) return msgFromTagVoid(entry.ok_tag);
             return msgFromTagBytes(if (result.ok) entry.ok_tag else entry.err_tag, result.bytes);
         }
 
@@ -3325,6 +3448,12 @@ pub fn TsCoreHost(comptime core: type) type {
             const slice = bytes[at.* .. at.* + len];
             at.* += len;
             return slice;
+        }
+
+        /// A fixed-width little-endian integer.
+        fn takeU32(bytes: []const u8, at: *usize) u32 {
+            const raw = takeBytes(bytes, at, 4);
+            return std.mem.readInt(u32, raw[0..4], .little);
         }
 
         /// A one-byte-length-prefixed field (names and keys).

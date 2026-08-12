@@ -344,6 +344,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Snapshot the just-committed Model through the engine-owned, capability-gated atomic store; restore arrives through the manifest's configured boot Msg route — see <a href="/docs/persistence">Model Persistence</a></td>
     </tr>
     <tr>
+      <td><code>Cmd.store.set/get/delete/scan/setMany</code></td>
+      <td>Persist independent byte records in the engine-owned, capability-gated record store; every result returns through the declared Msg route — see <a href="/docs/record-store">Record Store</a></td>
+    </tr>
+    <tr>
       <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
       <td>App-defined host commands by literal name: fire-and-forget, or routed with exactly one result Msg back</td>
     </tr>
@@ -359,6 +363,8 @@ Result arms are ordinary Msg arms with the shape the effect produces — one `Ui
 Platform state stays on the same effect boundary. `Cmd.openExternalUrl(url)` enforces [`security.navigation.external_links`](/docs/security#external-links) before entering the browser; `Cmd.revealPath(path)` uses the desktop file manager. Credential operations take byte `service` and `account` identifiers plus the standard `{ key?, ok, err }` route: set/delete return empty bytes on `ok`, get returns the secret, and a missing item routes `not_found`. `Cmd.formatLocalTime(timestampMs, "date" | "time" | "datetime", route)` returns localized UTF-8 bytes using the current host locale and time zone. That formatting is deliberately a Cmd—not a pure helper—so session recording captures the observed text and replay never re-reads ambient locale or timezone state.
 
 Durable in-memory state uses `Cmd.persist()`: declare the `persist` capability, configure the boot routes and schema version, then return the command beside the committed model. The engine owns canonical serialization, trailing-edge coalescing, atomic app-data placement, backup recovery, migration, and journal/replay. See [Model Persistence](/docs/persistence) for the complete setup. `Cmd.readFile` and `Cmd.writeFile` remain for user-visible files, exports, and blobs; when using them, request the framework-provided app-data directory through `envMsgs` instead of depending on process cwd.
+
+Independent byte records use `Cmd.store`: declare the `store` capability, then route set/get/delete/scan/setMany results back to Msg arms. The engine owns the app-data path, SQLite schema, atomic batches, pagination, and replay boundary. See [Record Store](/docs/record-store).
 
 External sources — sockets, file watchers, native worker threads — reach `update` through a channel. `Cmd.channelOpen(key, { event })` opens a long-lived stream under an app-chosen numeric key, and every event dispatches the one `event` arm as a five-field record; `state` must be a named string-literal-union alias carrying exactly the three members — a narrower union would silently drop states the host emits, so the build refuses it. Posting is not a TS verb: compiled cores are single-threaded by design, so the posting handle lives on the native side (`Effects.channelHandle(key)`), where embedders and platform-services extensions post bytes from their own threads. Back-pressure is honest — posts the native handle refused count into `droppedPending`/`droppedTotal` on the next delivered event, never silence — and a duplicate open on a live key dispatches `rejected`. `Cmd.channelClose(key)` ends the stream: staged posts flush, exactly one `closed` event carries the final totals, and the key frees.
 

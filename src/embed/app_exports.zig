@@ -5,7 +5,11 @@
 //! (window 1, label "mobile-surface").
 
 const native_sdk = @import("native_sdk");
+const mobile_build_options = @import("mobile_build_options");
 
 comptime {
-    native_sdk.embed.exportMobileCApi(native_sdk.embed.UiAppHost(@import("app")));
+    native_sdk.embed.exportMobileCApi(native_sdk.embed.UiAppHostWithRecordStore(
+        @import("app"),
+        mobile_build_options.store_capability,
+    ));
 }

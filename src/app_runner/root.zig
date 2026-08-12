@@ -54,6 +54,10 @@ pub const RunOptions = struct {
     security: native_sdk.SecurityPolicy = .{},
     menus: []const native_sdk.Menu = &.{},
     shortcuts: ?[]const native_sdk.Shortcut = null,
+    /// Filled by `runWithOptions` from the manifest capability. App entry
+    /// points do not set this themselves; the field only carries the owned
+    /// binding uniformly into each platform's runtime options.
+    record_store: ?native_sdk.RecordStoreBinding = null,
 
     fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
         var info: native_sdk.AppInfo = .{
@@ -435,6 +439,17 @@ fn manifestDeclaresTrayCapability() bool {
     return false;
 }
 
+/// Whether app.zon declares the Tier-2 record store. This is comptime so
+/// apps without the capability never analyze the SQLite open/deinit path.
+fn manifestDeclaresStore() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    inline for (app_manifest.capabilities) |capability| {
+        const name: []const u8 = capability;
+        if (comptime std.mem.eql(u8, name, "store")) return true;
+    }
+    return false;
+}
+
 fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
     const values = if (@hasField(@TypeOf(shortcut), "modifiers")) shortcut.modifiers else .{};
     var modifiers: native_sdk.ShortcutModifiers = .{};
@@ -466,14 +481,35 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY")) |journal_path| {
         return runSessionReplay(app, options, init, journal_path);
     }
+    const RecordStoreType = if (comptime manifestDeclaresStore()) native_sdk.RecordStore else void;
+    var record_store_value: RecordStoreType = undefined;
+    var record_store_open = false;
+    var resolved_options = options;
+    if (comptime manifestDeclaresStore()) {
+        var data_dir_buffer: [512]u8 = undefined;
+        const app_data_dir = native_sdk.app_dirs.resolveOne(
+            .{ .name = options.bundle_id },
+            native_sdk.app_dirs.currentPlatform(),
+            native_sdk.debug.envFromMap(init.environ_map),
+            .data,
+            &data_dir_buffer,
+        ) catch return error.StoreDataDirUnavailable;
+        try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
+        record_store_value = try native_sdk.RecordStore.open(std.heap.page_allocator, app_data_dir);
+        record_store_open = true;
+        resolved_options.record_store = record_store_value.binding();
+    }
+    defer if (comptime manifestDeclaresStore()) {
+        if (record_store_open) record_store_value.deinit();
+    };
     if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
-        try runMacos(app, options, init);
+        try runMacos(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
-        try runLinux(app, options, init);
+        try runLinux(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
-        try runWindows(app, options, init);
+        try runWindows(app, resolved_options, init);
     } else {
-        try runNull(app, options, init);
+        try runNull(app, resolved_options, init);
     }
 }
 
@@ -529,6 +565,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -593,6 +630,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -654,6 +692,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -714,6 +753,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });

@@ -31,6 +31,7 @@ const unprefixedNavSections: NavSection[] = [
       { name: "Native UI", href: "/native-ui" },
       { name: "Dynamic Images", href: "/dynamic-images" },
       { name: "Model Persistence", href: "/persistence" },
+      { name: "Record Store", href: "/record-store" },
       { name: "Terminal", href: "/terminal" },
       { name: "State & Data Flow", href: "/state" },
       { name: "Theming", href: "/theming" },

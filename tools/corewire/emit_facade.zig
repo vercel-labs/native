@@ -147,6 +147,7 @@ const Codec = enum {
     w_bool,
     w_bytes,
     short_text,
+    utf8_text,
     trunc_toward_zero,
     enum_index,
     ascii_string,
@@ -203,8 +204,9 @@ const FacadeEmitter = struct {
             .w_u64 => &.{ .w_u32, .trunc_toward_zero, .trap },
             .w_bytes => &.{.w_u32},
             .short_text => &.{ .sink, .trap },
+            .utf8_text => &.{},
             .enum_index => &.{.trap},
-            .cmd_encoder => &.{ .w_u8, .w_f64, .w_bytes, .short_text, .enum_index, .trap },
+            .cmd_encoder => &.{ .w_u8, .w_f64, .w_bytes, .short_text, .utf8_text, .enum_index, .trap },
             .sub_encoder => &.{ .w_u8, .w_f64, .short_text },
             else => &.{},
         };
@@ -2565,6 +2567,62 @@ const FacadeEmitter = struct {
                 \\
             );
         }
+        if (self.used_codec.contains(.utf8_text)) {
+            try self.raw(
+                \\
+                \\// Store keys are ordinary UTF-8 text, not the ASCII-only
+                \\// short names used by command routing. This mirrors the SDK's
+                \\// utf8Bytes intrinsic, including U+FFFD for lone surrogates.
+                \\function nscfUtf8TextBytes(text: string): Uint8Array {
+                \\  let byteLength = 0;
+                \\  for (let i = 0; i < text.length; i++) {
+                \\    const code = text.charCodeAt(i);
+                \\    if (code <= 0x7f) byteLength += 1;
+                \\    else if (code <= 0x7ff) byteLength += 2;
+                \\    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+                \\      const next = text.charCodeAt(i + 1);
+                \\      if (next >= 0xdc00 && next <= 0xdfff) {
+                \\        byteLength += 4;
+                \\        i += 1;
+                \\      } else byteLength += 3;
+                \\    } else byteLength += 3;
+                \\  }
+                \\  const out = new Uint8Array(byteLength);
+                \\  let at = 0;
+                \\  for (let i = 0; i < text.length; i++) {
+                \\    let code = text.charCodeAt(i);
+                \\    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+                \\      const next = text.charCodeAt(i + 1);
+                \\      if (next >= 0xdc00 && next <= 0xdfff) {
+                \\        code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+                \\        i += 1;
+                \\      } else code = 0xfffd;
+                \\    } else if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
+                \\    if (code <= 0x7f) {
+                \\      out[at] = code;
+                \\      at += 1;
+                \\    } else if (code <= 0x7ff) {
+                \\      out[at] = 0xc0 | (code >> 6);
+                \\      out[at + 1] = 0x80 | (code & 0x3f);
+                \\      at += 2;
+                \\    } else if (code <= 0xffff) {
+                \\      out[at] = 0xe0 | (code >> 12);
+                \\      out[at + 1] = 0x80 | ((code >> 6) & 0x3f);
+                \\      out[at + 2] = 0x80 | (code & 0x3f);
+                \\      at += 3;
+                \\    } else {
+                \\      out[at] = 0xf0 | (code >> 18);
+                \\      out[at + 1] = 0x80 | ((code >> 12) & 0x3f);
+                \\      out[at + 2] = 0x80 | ((code >> 6) & 0x3f);
+                \\      out[at + 3] = 0x80 | (code & 0x3f);
+                \\      at += 4;
+                \\    }
+                \\  }
+                \\  return out;
+                \\}
+                \\
+            );
+        }
         if (self.used_codec.contains(.ascii_string)) {
             try self.raw(
                 \\
@@ -2613,6 +2671,14 @@ const FacadeEmitter = struct {
             \\const nscfAudioCaptureSources = ["microphone", "system"];
             \\const nscfVideoVerbs = ["play", "pause", "stop", "seek", "volume", "muted", "loop"];
             \\
+            \\// Preserve the store err route for dynamic invalid limits. Writing a
+            \\// fractional or out-of-u32 number directly into the byte sink would
+            \\// truncate/wrap it into a different, potentially valid request. 257
+            \\// is the host's stable over-bound sentinel (the public maximum is 256).
+            \\function nscfStoreScanLimit(value: number): number {{
+            \\  return Number.isInteger(value) && value >= 0 && value <= 256 ? value : 257;
+            \\}}
+            \\
             \\function nscfEncodeCmd(sink: nscfSink, cmd: nscfCmd<{s}>): void {{
             \\
         , .{msg});
@@ -2654,7 +2720,7 @@ const FacadeEmitter = struct {
             \\      nscfWBytes(sink, cmd.payload);
             \\      return;
             \\    case "service_stream_request":
-            \\      nscfWU8(sink, 0x23);
+            \\      nscfWU8(sink, 0x28);
             \\      nscfWF64(sink, cmd.channelKey);
             \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
             \\      nscfWU8(sink, cmd.maxPending);
@@ -2763,6 +2829,46 @@ const FacadeEmitter = struct {
             \\    case "dock_presence":
             \\      nscfWU8(sink, 0x22);
             \\      nscfWU8(sink, cmd.visible ? 1 : 0);
+            \\      return;
+            \\    case "store_set":
+            \\      nscfWU8(sink, 0x23);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.storeKey));
+            \\      nscfWBytes(sink, cmd.bytes);
+            \\      return;
+            \\    case "store_get":
+            \\    case "store_delete":
+            \\      nscfWU8(sink, cmd.op === "store_get" ? 0x24 : 0x25);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.storeKey));
+            \\      return;
+            \\    case "store_scan":
+            \\      nscfWU8(sink, 0x26);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.prefix));
+            \\      nscfWU32(sink, nscfStoreScanLimit(cmd.limit));
+            \\      nscfWBytes(sink, typeof cmd.after === "string" ? nscfUtf8TextBytes(cmd.after) : cmd.after);
+            \\      return;
+            \\    case "store_set_many":
+            \\      nscfWU8(sink, 0x27);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWU32(sink, cmd.entries.length);
+            \\      for (let i = 0; i < cmd.entries.length; i++) {
+            \\        nscfWBytes(sink, nscfUtf8TextBytes(cmd.entries[i]![0]));
+            \\        nscfWBytes(sink, cmd.entries[i]![1]);
+            \\      }
             \\      return;
             \\    case "quit_app":
             \\      nscfWU8(sink, 0x11);
@@ -3598,6 +3704,8 @@ test "facade emission is deterministic and carries the adapter surface" {
     // collide with them.
     try testing.expect(std.mem.indexOf(u8, first, "type nscfSink = number[];") != null);
     try testing.expect(std.mem.indexOf(u8, first, "import type { Cmd as nscfCmd }") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "Number.isInteger(value) && value >= 0 && value <= 256 ? value : 257") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "nscfWU32(sink, nscfStoreScanLimit(cmd.limit));") != null);
     try testing.expect(std.mem.indexOf(u8, first, "NscfSink") == null);
     try testing.expect(std.mem.indexOf(u8, first, "NSCF_TAG_") == null);
 }

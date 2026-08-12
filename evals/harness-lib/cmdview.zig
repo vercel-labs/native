@@ -40,6 +40,11 @@ pub const Op = union(enum) {
     window_show: struct { label: []const u8 },
     window_hide: struct { label: []const u8 },
     dock_presence: struct { visible: bool },
+    store_set: struct { key: []const u8, ok_tag: u8, err_tag: u8, scope: u32, store_key: []const u8, bytes: []const u8 },
+    store_get: struct { key: []const u8, ok_tag: u8, err_tag: u8, scope: u32, store_key: []const u8 },
+    store_delete: struct { key: []const u8, ok_tag: u8, err_tag: u8, scope: u32, store_key: []const u8 },
+    store_scan: struct { key: []const u8, ok_tag: u8, err_tag: u8, scope: u32, prefix: []const u8, limit: u32, after: []const u8 },
+    store_set_many: StoreSetMany,
     quit_app,
     image_load: struct { id: f64, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
     image_cancel: struct { id: f64 },
@@ -144,6 +149,26 @@ pub const Op = union(enum) {
                 if (i == index) return self.argv_bytes[off + 4 ..][0..len];
                 off += 4 + len;
                 i += 1;
+            }
+        }
+    };
+
+    pub const StoreSetMany = struct {
+        key: []const u8,
+        ok_tag: u8,
+        err_tag: u8,
+        scope: u32,
+        count: u32,
+        /// Raw entries: `[key_len u32][key][value_len u32][value]`.
+        entry_bytes: []const u8,
+
+        pub fn entry(self: StoreSetMany, index: usize) struct { key: []const u8, bytes: []const u8 } {
+            var off: usize = 0;
+            var i: usize = 0;
+            while (true) : (i += 1) {
+                const key = longBytes(self.entry_bytes, &off);
+                const bytes = longBytes(self.entry_bytes, &off);
+                if (i == index) return .{ .key = key, .bytes = bytes };
             }
         }
     };
@@ -460,7 +485,7 @@ pub const CmdIter = struct {
                 break :blk .{ .dock_presence = .{ .visible = visible } };
             },
             // Atomic typed streaming-service admission.
-            0x23 => blk: {
+            0x28 => blk: {
                 const channel_key: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
                 off += 8;
                 const event_tag = b[off];
@@ -482,6 +507,44 @@ pub const CmdIter = struct {
                     .err_tag = err_tag,
                     .payload = payload,
                 } };
+            },
+            0x23 => blk: {
+                const head = routedHead(b, &off);
+                const scope = readU32(b, &off);
+                const store_key = longBytes(b, &off);
+                const bytes = longBytes(b, &off);
+                break :blk .{ .store_set = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .scope = scope, .store_key = store_key, .bytes = bytes } };
+            },
+            0x24 => blk: {
+                const head = routedHead(b, &off);
+                const scope = readU32(b, &off);
+                const store_key = longBytes(b, &off);
+                break :blk .{ .store_get = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .scope = scope, .store_key = store_key } };
+            },
+            0x25 => blk: {
+                const head = routedHead(b, &off);
+                const scope = readU32(b, &off);
+                const store_key = longBytes(b, &off);
+                break :blk .{ .store_delete = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .scope = scope, .store_key = store_key } };
+            },
+            0x26 => blk: {
+                const head = routedHead(b, &off);
+                const scope = readU32(b, &off);
+                const prefix = longBytes(b, &off);
+                const limit = readU32(b, &off);
+                const after = longBytes(b, &off);
+                break :blk .{ .store_scan = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .scope = scope, .prefix = prefix, .limit = limit, .after = after } };
+            },
+            0x27 => blk: {
+                const head = routedHead(b, &off);
+                const scope = readU32(b, &off);
+                const count = readU32(b, &off);
+                const entries_start = off;
+                for (0..count) |_| {
+                    _ = longBytes(b, &off);
+                    _ = longBytes(b, &off);
+                }
+                break :blk .{ .store_set_many = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .scope = scope, .count = count, .entry_bytes = b[entries_start..off] } };
             },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
@@ -542,6 +605,12 @@ fn longBytes(b: []const u8, off: *usize) []const u8 {
     const out = b[off.* + 4 ..][0..len];
     off.* += 4 + len;
     return out;
+}
+
+fn readU32(b: []const u8, off: *usize) u32 {
+    const value = std.mem.readInt(u32, b[off.*..][0..4], .little);
+    off.* += 4;
+    return value;
 }
 
 // ------------------------------------------------------------------ helpers
@@ -615,6 +684,30 @@ test "window_hide and dock_presence decode, alone and inside a batch" {
     try std.testing.expectEqualStrings("hud", (iter.next() orelse return error.TestUnexpectedResult).window_hide.label);
     try std.testing.expect((iter.next() orelse return error.TestUnexpectedResult).dock_presence.visible);
     try std.testing.expectEqual(@as(u8, 9), (iter.next() orelse return error.TestUnexpectedResult).now.msg_tag);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "record store command records decode and advance exactly" {
+    const batch = [_]u8{
+        0x23, 1, 'r', 2,   3,    0, 0,   0, 0, 1,    0,  0, 0,   'k', 1, 0, 0, 0, 'v',
+        0x26, 0, 4,   5,   0,    0, 0,   0, 2, 0,    0,  0, 'p', '/', 7, 0, 0, 0, 1,
+        0,    0, 0,   'a', 0x27, 1, 'b', 6, 7, 0,    0,  0, 0,   1,   0, 0, 0, 1, 0,
+        0,    0, 'x', 2,   0,    0, 0,   8, 9, 0x02, 10,
+    };
+    var iter = CmdIter.init(&batch);
+    const set = (iter.next() orelse return error.TestUnexpectedResult).store_set;
+    try std.testing.expectEqualStrings("r", set.key);
+    try std.testing.expectEqualStrings("k", set.store_key);
+    try std.testing.expectEqualSlices(u8, "v", set.bytes);
+    const scan = (iter.next() orelse return error.TestUnexpectedResult).store_scan;
+    try std.testing.expectEqualStrings("p/", scan.prefix);
+    try std.testing.expectEqual(@as(u32, 7), scan.limit);
+    try std.testing.expectEqualStrings("a", scan.after);
+    const many = (iter.next() orelse return error.TestUnexpectedResult).store_set_many;
+    try std.testing.expectEqual(@as(u32, 1), many.count);
+    try std.testing.expectEqualStrings("x", many.entry(0).key);
+    try std.testing.expectEqualSlices(u8, &.{ 8, 9 }, many.entry(0).bytes);
+    try std.testing.expectEqual(@as(u8, 10), (iter.next() orelse return error.TestUnexpectedResult).now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
 
@@ -710,7 +803,7 @@ test "typed request metadata and atomic streaming service records decode" {
     try std.testing.expectEqualStrings("ok", request.payload);
 
     bytes.clearRetainingCapacity();
-    try bytes.append(a, 0x23);
+    try bytes.append(a, 0x28);
     try bytes.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 79))));
     try bytes.appendSlice(a, &.{ 6, 3 });
     try bytes.append(a, 6);

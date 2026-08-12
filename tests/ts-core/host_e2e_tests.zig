@@ -101,6 +101,12 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.mixreject")) return .mix_reject;
     if (std.mem.eql(u8, name, "core.mixrejectflip")) return .mix_reject_flip;
     if (std.mem.eql(u8, name, "core.notify")) return .notify;
+    if (std.mem.eql(u8, name, "core.storeput")) return .store_put;
+    if (std.mem.eql(u8, name, "core.storeget")) return .store_get;
+    if (std.mem.eql(u8, name, "core.storedelete")) return .store_delete;
+    if (std.mem.eql(u8, name, "core.storescan")) return .store_scan;
+    if (std.mem.eql(u8, name, "core.storescaninvalid")) return .store_scan_invalid;
+    if (std.mem.eql(u8, name, "core.storemany")) return .store_many;
     return null;
 }
 
@@ -135,6 +141,19 @@ const tick_platform_id: u64 = runtime_ns.effect_timer_platform_id_base + 0;
 /// The first named engine op (readFile/writeFile/fetch/clipboardRead)
 /// takes bridge op slot 0, deterministically in issue order.
 const first_effect_key: u64 = runtime_ns.ts_core_effect_key_base + 0;
+
+fn storePayloadU32(bytes: []const u8, at: *usize) u32 {
+    const value = std.mem.readInt(u32, bytes[at.*..][0..4], .little);
+    at.* += 4;
+    return value;
+}
+
+fn storePayloadField(bytes: []const u8, at: *usize) []const u8 {
+    const len: usize = @intCast(storePayloadU32(bytes, at));
+    const field = bytes[at.*..][0..len];
+    at.* += len;
+    return field;
+}
 
 /// The delay's platform id: with the subscription tick occupying
 /// engine timer slot 0 from boot, the first armed delay lands in
@@ -540,6 +559,74 @@ test "writeFile and readFile round-trip real disk through the compiled core" {
     try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
     try std.testing.expectEqualStrings("not_found", Bridge.model().lastErr);
     try std.testing.expectEqualStrings("ready", Bridge.model().status);
+}
+
+test "every Cmd.store factory emits its bounded v3 record through the external core" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    try h.menu("core.storeput");
+    var request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.set", request.name);
+    var at: usize = 0;
+    try std.testing.expectEqual(@as(u32, 0), storePayloadU32(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/one", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("ready", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+
+    try h.menu("core.storeget");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.get", request.name);
+    at = 4;
+    try std.testing.expectEqualStrings("fixture/one", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, &.{ 1, 'o', 'n', 'e' });
+    try h.wake();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 'o', 'n', 'e' }, Bridge.model().status);
+
+    try h.menu("core.storescan");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.scan", request.name);
+    at = 4;
+    try std.testing.expectEqualStrings("fixture/café/", storePayloadField(request.payload, &at));
+    try std.testing.expectEqual(@as(u32, 7), storePayloadU32(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/café/🚀", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, "page");
+    try h.wake();
+
+    // A dynamic fractional limit must not truncate to zero (the default page
+    // size) in the facade. It reaches the host as the over-bound sentinel and
+    // takes the declared error route without issuing a storage request.
+    try h.menu("core.storescaninvalid");
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("over_bound", Bridge.model().lastErr);
+
+    try h.menu("core.storemany");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.setMany", request.name);
+    at = 4;
+    try std.testing.expectEqual(@as(u32, 3), storePayloadU32(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/one", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("one", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/two", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("page", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/café/🚀/next", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("page", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+
+    try h.menu("core.storedelete");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.delete", request.name);
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
 }
 
 test "clipboardWrite and clipboardRead ride the platform pasteboard" {
@@ -1458,9 +1545,12 @@ fn recordSession(buffer: *JournalBuffer) !CoreSnapshot {
 
     HostStub.reset();
     removeStore();
+    var record_store = try native_sdk.RecordStore.openMemory(std.testing.allocator);
+    defer record_store.deinit();
     const h = try Harness.createRecorded(recorder);
     defer h.destroy();
     const fx = &h.app_state.effects;
+    fx.bindRecordStore(record_store.binding());
 
     try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
 
@@ -1489,6 +1579,26 @@ fn recordSession(buffer: *JournalBuffer) !CoreSnapshot {
     try h.menu("core.load");
     try h.waitPending();
     try h.wake();
+    // Real SQLite-backed writes, a hit, and a non-empty scan page all enter
+    // the ordinary journaled host-result stream. Replay below binds no
+    // database at all, so those recorded terminals are the sole result source.
+    try h.menu("core.storeput");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.storemany");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.storeget");
+    try h.wake();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 'o', 'n', 'e' }, Bridge.model().status);
+    try h.menu("core.storescan");
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, Bridge.model().status[0..4], .little));
+    // Restore a human-readable final model value after the scan's framed
+    // binary page so the snapshot remains easy to diagnose.
+    try h.menu("core.load");
+    try h.waitPending();
+    try h.wake();
     try h.menu("core.share");
     try h.menu("core.paste");
     try h.wake();
@@ -1511,7 +1621,7 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     try std.testing.expectEqual(@as(f64, 50_000), recorded.stampMs);
     try std.testing.expectEqual(@as(i64, 1), recorded.failures);
     try std.testing.expectEqualStrings("ready", recorded.status[0..recorded.statusLen]);
-    try std.testing.expectEqual(@as(i64, 1), recorded.saved);
+    try std.testing.expectEqual(@as(i64, 3), recorded.saved);
     try std.testing.expectEqual(@as(f64, 450), recorded.firedAt);
 
     // Determinism pin: the same driven session records byte-identical
@@ -1524,7 +1634,7 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     try std.testing.expectEqualSlices(u8, buffer.journalBytes(), second.journalBytes());
 
     // Replay into a fresh app: journaled `.host`/`.file`/`.clipboard`
-    // results and the journaled clock feed the stub executor; the
+    // results (including SQLite writes, get hit, and scan page) and the journaled clock feed the stub executor; the
     // platform timer events (subscription ticks AND the delay fire)
     // replay from the event log; the host binding is NEVER called.
     // Deleting the store first proves the replayed file ops touch no
@@ -1556,7 +1666,7 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     // of running. (Timer fires ride the event log.) Nothing touched
     // the stub host — and the deleted store proves nothing touched
     // the disk.
-    try std.testing.expectEqual(@as(u64, 7), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 12), report.effects_fed);
     try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
     try std.testing.expectEqual(@as(usize, 0), HostStub.send_count);
     try std.testing.expectEqualDeep(recorded, CoreSnapshot.take());

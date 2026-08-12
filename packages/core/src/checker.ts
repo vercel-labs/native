@@ -460,6 +460,7 @@ export class SubsetChecker {
   private readonly capabilities: Set<string>;
   private readonly persistRoutes: PersistRoutes | undefined;
   private usesPersist = false;
+  private usesStore = false;
 
   constructor(
     tast: TypedAst,
@@ -501,6 +502,9 @@ export class SubsetChecker {
     for (const file of this.files) this.walk(file);
     if (this.capabilities.has("persist") && !this.usesPersist) {
       this.warn("NS1028", "app.zon declares the `persist` capability, but this core has no `Cmd.persist()` call.", this.entry);
+    }
+    if (this.capabilities.has("store") && !this.usesStore) {
+      this.warn("NS1069", "app.zon declares the `store` capability, but this core has no `Cmd.store.*` call.", this.entry);
     }
     this.checkExceptions();
     return {
@@ -2488,6 +2492,24 @@ export class SubsetChecker {
         this.usesPersist = true;
         if (!this.capabilities.has("persist")) {
           this.warn("NS1028", "`Cmd.persist()` requires the `persist` capability in app.zon.", node);
+        }
+      }
+
+      // NS1069 — the nested record-store factories remain capability-bound;
+      // recognizing the SDK Cmd symbol (rather than its spelling alone) keeps
+      // local objects named Cmd out of this cross-file contract check.
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isPropertyAccessExpression(node.expression.expression) &&
+        node.expression.expression.name.text === "store" &&
+        ts.isIdentifier(node.expression.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression.expression)
+      ) {
+        this.usesStore = true;
+        if (!this.capabilities.has("store")) {
+          this.warn("NS1069", "`Cmd.store.*` requires the `store` capability in app.zon.", node);
         }
       }
 

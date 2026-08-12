@@ -1675,6 +1675,28 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     native_sdk_app_set_image_service(self.nativeApp, &imageService, NULL);
     [self logNativeErrorIfAny:@"image_service"];
 
+    // Engine-owned durable storage lives in the platform app-data
+    // directory. The ABI accepts this for every app; capability-shed builds
+    // treat it as a no-op, while `store` builds open store.db before start.
+    NSString *dataRoot = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+                                                               NSUserDomainMask,
+                                                               YES).firstObject;
+    if (dataRoot) {
+        NSError *dataRootError = nil;
+        [NSFileManager.defaultManager createDirectoryAtPath:dataRoot
+                                withIntermediateDirectories:YES
+                                                 attributes:nil
+                                                      error:&dataRootError];
+        if (dataRootError) {
+            NSLog(@"native-sdk: app data directory unavailable: %@", dataRootError);
+        } else {
+            native_sdk_app_set_data_root(self.nativeApp,
+                                         dataRoot.UTF8String,
+                                         [dataRoot lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+            [self logNativeErrorIfAny:@"data_root"];
+        }
+    }
+
     // Verification harness: with NATIVE_SDK_AUTOMATION set (simctl launch
     // exports SIMCTL_CHILD_* into the app) the embedded runtime publishes
     // snapshot.txt into the app's data container, same protocol as the

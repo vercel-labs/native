@@ -245,6 +245,7 @@ typedef struct native_sdk_image_service {
 } native_sdk_image_service_t;
 int native_sdk_app_set_image_service(void *app, const native_sdk_image_service_t *service, void *context);
 int native_sdk_app_set_automation_dir(void *app, const char *path, uintptr_t len);
+int native_sdk_app_set_data_root(void *app, const char *path, uintptr_t len);
 void native_sdk_app_set_asset_root(void *app, const char *path, uintptr_t len);
 uintptr_t native_sdk_app_widget_semantics_count(void *app);
 int native_sdk_app_widget_semantics_at(void *app, uintptr_t index, native_sdk_widget_semantics_t *out);

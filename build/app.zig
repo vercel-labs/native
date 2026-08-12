@@ -4,6 +4,7 @@
 //! come from the native-sdk dependency.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// The shared web-layer inference contract: this build graph is one thin
 /// adapter over it (the CLI's manifest tooling and the app runner are the
@@ -366,6 +367,7 @@ fn tsCoreStage(
     app_root: []const u8,
     app_name: []const u8,
     persist_capability: bool,
+    store_capability: bool,
     persist_version: ?u64,
     service_packages: []const ServicePackageConfig,
 ) TsCoreStage {
@@ -406,6 +408,7 @@ fn tsCoreStage(
             b.fmt("{s}|{s}|{s}", .{ package_entry.name, package_entry.version, package_entry.content_hash }),
         });
     }
+    if (store_capability) check.addArgs(&.{ "--capability", "store" });
     if (persist_version) |version| {
         check.addArgs(&.{ "--persist-version", b.fmt("{d}", .{version}) });
         check.addArgs(&.{ "--persist-state", appPath(b, app_root, ".native/cache/persist-schema.json") });
@@ -641,6 +644,7 @@ pub const mobile_export_symbol_names = [_][]const u8{
     "native_sdk_app_audio_event",
     "native_sdk_app_set_image_service",
     "native_sdk_app_set_automation_dir",
+    "native_sdk_app_set_data_root",
     "native_sdk_app_touch",
     "native_sdk_app_scroll",
     "native_sdk_app_key",
@@ -688,6 +692,10 @@ pub const MobileLibOptions = struct {
     /// `src/embed/ui_host.zig`. Ignored for `.scene = .webview`.
     main: []const u8 = "src/main.zig",
     scene: MobileSceneOption = .canvas,
+    /// Link and install the engine-owned Tier-2 record store. Standard
+    /// `addApp` builds infer this from app.zon; direct `addMobileLib`
+    /// callers state it here because that lower-level API has no manifest.
+    store_capability: bool = false,
 };
 
 /// Mobile counterpart of `addApp`: produce the embed static library
@@ -725,9 +733,20 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
     });
     exports_mod.addImport("native_sdk", native_sdk_mod);
     if (options.scene == .canvas) {
+        const mobile_options = b.addOptions();
+        mobile_options.addOption(bool, "store_capability", options.store_capability);
+        exports_mod.addImport("mobile_build_options", mobile_options.createModule());
         const app_mod = localModule(b, target, optimize, options.main);
         app_mod.addImport("native_sdk", native_sdk_mod);
         exports_mod.addImport("app", app_mod);
+    }
+    if (options.store_capability) {
+        exports_mod.addIncludePath(dep.path("third_party/sqlite"));
+        exports_mod.addCSourceFile(.{
+            .file = dep.path("third_party/sqlite/sqlite3.c"),
+            .flags = sqliteCFlags(b, target),
+        });
+        exports_mod.link_libc = true;
     }
     exports_mod.export_symbol_names = &mobile_export_symbol_names;
 
@@ -806,7 +825,17 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
     }
     const ts_stage: ?TsCoreStage = if (core_tree == .ts)
-        tsCoreStage(b, dep, target, app_options.app_root, app_options.name, app_config.persist_capability, app_config.persist_version, app_config.service_packages)
+        tsCoreStage(
+            b,
+            dep,
+            target,
+            app_options.app_root,
+            app_options.name,
+            app_config.persist_capability,
+            app_config.store_capability,
+            app_config.persist_version,
+            app_config.service_packages,
+        )
     else
         null;
 
@@ -819,6 +848,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
             .main = appPath(b, app_options.app_root, app_options.main),
+            .store_capability = app_config.store_capability,
         });
     }
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
@@ -1130,6 +1160,23 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         app_mod.link_libc = true;
         app_mod.addObjectFile(stage.archive);
     }
+    if (app_config.sqlite_capability) {
+        // `store` and the relational `sqlite` tier share this exact object.
+        // The source is absent from every artifact declaring neither
+        // capability, which keeps capability inference a real binary-size
+        // boundary rather than a runtime flag.
+        app_mod.addIncludePath(dep.path("third_party/sqlite"));
+        app_mod.addCSourceFile(.{
+            .file = dep.path("third_party/sqlite/sqlite3.c"),
+            .flags = &.{
+                "-DSQLITE_THREADSAFE=1",
+                "-DSQLITE_OMIT_LOAD_EXTENSION",
+                "-DSQLITE_DQS=0",
+                "-DSQLITE_DEFAULT_MEMSTATUS=0",
+            },
+        });
+        app_mod.link_libc = true;
+    }
     addMacosPrivacyInfoPlist(b, app_mod, target, app_config);
     return app_mod;
 }
@@ -1174,6 +1221,163 @@ fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
     query.os_tag = .macos;
     query.os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } };
     return b.resolveTargetQuery(query);
+}
+
+const sqlite_c_defines = [_][]const u8{
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_OMIT_LOAD_EXTENSION",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_DEFAULT_MEMSTATUS=0",
+};
+
+/// Zig deliberately supplies no libc headers for Apple/Android cross targets.
+/// Store-capable mobile libraries therefore compile the vendored amalgamation
+/// against the same platform SDK the host tier will use to link the archive.
+/// Desktop targets keep Zig's ordinary libc discovery.
+fn sqliteCFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
+    if (target.result.os.tag == .ios) {
+        const sysroot = b.sysroot orelse iosSdkPath(b, target.result.abi == .simulator) orelse
+            std.debug.panic("a store-capable iOS library needs the Apple SDK; install Xcode or pass --sysroot <iphone SDK path>", .{});
+        return b.dupeStrings(&.{
+            sqlite_c_defines[0],
+            sqlite_c_defines[1],
+            sqlite_c_defines[2],
+            sqlite_c_defines[3],
+            "-isysroot",
+            sysroot,
+            b.fmt("-isystem{s}/usr/include", .{sysroot}),
+        });
+    }
+    if (target.result.abi.isAndroid()) {
+        const sysroot = b.sysroot orelse androidNdkSysrootPath(b) orelse
+            std.debug.panic("a store-capable Android library needs the NDK; set ANDROID_NDK_ROOT or ANDROID_HOME, or pass --sysroot <NDK sysroot>", .{});
+        const triple = target.result.linuxTriple(b.allocator) catch @panic("out of memory");
+        return b.dupeStrings(&.{
+            sqlite_c_defines[0],
+            sqlite_c_defines[1],
+            sqlite_c_defines[2],
+            sqlite_c_defines[3],
+            b.fmt("-isystem{s}/usr/include/{s}", .{ sysroot, triple }),
+            b.fmt("-isystem{s}/usr/include", .{sysroot}),
+        });
+    }
+    return &sqlite_c_defines;
+}
+
+fn iosSdkPath(b: *std.Build, simulator: bool) ?[]const u8 {
+    const result = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ "xcrun", "--sdk", if (simulator) "iphonesimulator" else "iphoneos", "--show-sdk-path" },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return null;
+    defer b.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        b.allocator.free(result.stdout);
+        return null;
+    }
+    return std.mem.trimEnd(u8, result.stdout, "\r\n");
+}
+
+fn androidNdkSysrootPath(b: *std.Build) ?[]const u8 {
+    for ([_][]const u8{ "ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK_LATEST_HOME" }) |name| {
+        if (b.graph.environ_map.get(name)) |root| {
+            if (root.len > 0) {
+                if (ndkSysrootUnder(b, root)) |sysroot| return sysroot;
+            }
+        }
+    }
+
+    const sdk_root = androidSdkRoot(b) orelse return null;
+    const ndk_root = latestVersionSubdir(b, sdk_root, "ndk") orelse blk: {
+        const legacy = b.pathJoin(&.{ sdk_root, "ndk-bundle" });
+        break :blk if (buildDirExists(b, legacy)) legacy else return null;
+    };
+    return ndkSysrootUnder(b, ndk_root);
+}
+
+fn androidSdkRoot(b: *std.Build) ?[]const u8 {
+    for ([_][]const u8{ "ANDROID_HOME", "ANDROID_SDK_ROOT" }) |name| {
+        if (b.graph.environ_map.get(name)) |root| {
+            if (root.len > 0 and buildDirExists(b, root)) return root;
+        }
+    }
+    return switch (builtin.os.tag) {
+        .macos => if (b.graph.environ_map.get("HOME")) |home|
+            b.pathJoin(&.{ home, "Library", "Android", "sdk" })
+        else
+            null,
+        .windows => if (b.graph.environ_map.get("LOCALAPPDATA")) |local_app_data|
+            b.pathJoin(&.{ local_app_data, "Android", "Sdk" })
+        else
+            null,
+        else => if (b.graph.environ_map.get("HOME")) |home|
+            b.pathJoin(&.{ home, "Android", "Sdk" })
+        else
+            null,
+    };
+}
+
+fn ndkSysrootUnder(b: *std.Build, ndk_root: []const u8) ?[]const u8 {
+    const prebuilt_path = b.pathJoin(&.{ ndk_root, "toolchains", "llvm", "prebuilt" });
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(b.graph.io, prebuilt_path, .{ .iterate = true }) catch return null;
+    defer dir.close(b.graph.io);
+    var iterator = dir.iterate();
+    while (iterator.next(b.graph.io) catch return null) |entry| {
+        if (entry.kind != .directory) continue;
+        const sysroot = b.pathJoin(&.{ prebuilt_path, entry.name, "sysroot" });
+        if (buildDirExists(b, b.pathJoin(&.{ sysroot, "usr", "include" }))) return sysroot;
+    }
+    return null;
+}
+
+fn latestVersionSubdir(b: *std.Build, root: []const u8, parent: []const u8) ?[]const u8 {
+    const parent_path = b.pathJoin(&.{ root, parent });
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(b.graph.io, parent_path, .{ .iterate = true }) catch return null;
+    defer dir.close(b.graph.io);
+    var best: ?[]const u8 = null;
+    defer if (best) |name| b.allocator.free(name);
+    var iterator = dir.iterate();
+    while (iterator.next(b.graph.io) catch return null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (best) |current| {
+            if (!versionLess(current, entry.name)) continue;
+            b.allocator.free(current);
+            best = null;
+        }
+        best = b.allocator.dupe(u8, entry.name) catch @panic("out of memory");
+    }
+    const name = best orelse return null;
+    return b.pathJoin(&.{ parent_path, name });
+}
+
+fn versionLess(a: []const u8, b: []const u8) bool {
+    var a_parts = std.mem.splitScalar(u8, a, '.');
+    var b_parts = std.mem.splitScalar(u8, b, '.');
+    while (true) {
+        const a_part = a_parts.next();
+        const b_part = b_parts.next();
+        if (a_part == null and b_part == null) return false;
+        if (a_part == null) return true;
+        if (b_part == null) return false;
+        const a_num = std.fmt.parseUnsigned(u64, a_part.?, 10) catch null;
+        const b_num = std.fmt.parseUnsigned(u64, b_part.?, 10) catch null;
+        if (a_num != null and b_num != null) {
+            if (a_num.? != b_num.?) return a_num.? < b_num.?;
+        } else switch (std.mem.order(u8, a_part.?, b_part.?)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+    }
+}
+
+fn buildDirExists(b: *std.Build, path: []const u8) bool {
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(b.graph.io, path, .{}) catch return false;
+    dir.close(b.graph.io);
+    return true;
 }
 
 fn macosSdkPath(b: *std.Build) ?[]const u8 {
@@ -1223,6 +1427,10 @@ fn nativeSdkModuleWithTerminal(b: *std.Build, dep: *std.Build.Dependency, target
     debug_mod.addImport("trace", trace_mod);
 
     const native_sdk_mod = externalModule(b, dep, target, optimize, "src/root.zig");
+    // The header makes the internal wrapper parsable even when lazy exports
+    // are reflected; the amalgamation itself is attached below only for an
+    // opted-in store/sqlite artifact.
+    native_sdk_mod.addIncludePath(dep.path("third_party/sqlite"));
     native_sdk_mod.addImport("geometry", geometry_mod);
     native_sdk_mod.addImport("assets", assets_mod);
     native_sdk_mod.addImport("app_dirs", app_dirs_mod);
@@ -1558,6 +1766,8 @@ const AppManifestBuildConfig = struct {
     persist_capability: bool = false,
     persist_version: ?u64 = null,
     service_packages: []const ServicePackageConfig = &.{},
+    store_capability: bool = false,
+    sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
     /// NOT web intent — it is the default in many canvas manifests.
@@ -1640,6 +1850,8 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .persist_capability = hasManifestCapability(raw.capabilities, "persist"),
         .persist_version = if (raw.persist) |persist| persist.version else null,
         .service_packages = raw.service_packages,
+        .store_capability = hasManifestCapability(raw.capabilities, "store"),
+        .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };
 }

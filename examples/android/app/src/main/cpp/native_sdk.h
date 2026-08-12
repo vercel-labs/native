@@ -266,6 +266,7 @@ int native_sdk_app_text_input_state(void *app, native_sdk_text_input_state_t *ou
 typedef double (*native_sdk_text_measure_fn)(void *context, uint64_t font_id, double size, const char *text, uintptr_t text_len);
 int native_sdk_app_set_text_measure(void *app, native_sdk_text_measure_fn measure, void *context);
 int native_sdk_app_set_automation_dir(void *app, const char *path, uintptr_t len);
+int native_sdk_app_set_data_root(void *app, const char *path, uintptr_t len);
 int native_sdk_app_render_pixel_size(void *app, float scale, native_sdk_canvas_pixels_t *out);
 int native_sdk_app_render_pixels(void *app, float scale, uint8_t *pixels, uintptr_t pixels_len, native_sdk_canvas_pixels_t *out);
 // Incremental sibling of native_sdk_app_render_pixels for a host that

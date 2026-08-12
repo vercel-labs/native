@@ -112,7 +112,9 @@ test("NS1066 permits only manifest-declared npm imports and compiler-shipped Nod
     "core.ts": serviceCore,
     "services/feeds.ts": `import thing from "left-pad"; export function parse(bytes: Uint8Array): Uint8Array { void thing; return bytes; }`,
   });
-  assert.ok(npm.diagnostics.some((d) => d.id === "NS1066"), JSON.stringify(npm.diagnostics));
+  const diagnostic = npm.diagnostics.find((d) => d.id === "NS1066");
+  assert.ok(diagnostic, JSON.stringify(npm.diagnostics));
+  assert.equal(diagnostic.title, "service package imports are exact vendored facts");
 
   const declared = checkFiles({
     "core.ts": serviceCore,
