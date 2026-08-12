@@ -204,12 +204,15 @@ pub const Database = struct {
         self.write_db.exec("BEGIN IMMEDIATE;") catch return .{ .outcome = .migrate_failed, .version = current };
         var committed = false;
         defer if (!committed) self.write_db.exec("ROLLBACK;") catch {};
+        self.write_db.installRelationalMigrationAuthorizer() catch return .{ .outcome = .migrate_failed, .version = current };
+        defer self.write_db.setRelationalAuthorizer(false) catch {};
         for (migrations) |migration| {
             if (migration.version <= current) continue;
             const sql_z = self.allocator.dupeZ(u8, migration.sql) catch return .{ .outcome = .migrate_failed, .version = current };
             defer self.allocator.free(sql_z);
             self.write_db.exec(sql_z) catch return .{ .outcome = .migrate_failed, .version = current };
         }
+        self.write_db.setRelationalAuthorizer(false) catch return .{ .outcome = .migrate_failed, .version = current };
         var version_sql_buf: [64]u8 = undefined;
         const version_sql = std.fmt.bufPrintZ(&version_sql_buf, "PRAGMA user_version={d};", .{target}) catch
             return .{ .outcome = .migrate_failed, .version = current };
@@ -308,6 +311,9 @@ pub const Database = struct {
         self.write_db.exec("BEGIN IMMEDIATE;") catch |err| return failure(err);
         var committed = false;
         defer if (!committed) self.write_db.exec("ROLLBACK;") catch {};
+        var observer: sqlite.RelationalWriteObserver = .{ .context = self, .write_fn = observeWrite };
+        self.write_db.installRelationalExecAuthorizer(&observer) catch |err| return failure(err);
+        defer self.write_db.installRelationalAuthorizer() catch {};
 
         for (statements) |item| {
             const sql_z = self.allocator.dupeZ(u8, item.sql) catch return .io_failed;
@@ -318,6 +324,7 @@ pub const Database = struct {
             bindAll(&statement, item.params) catch |err| return failure(err);
             if ((statement.step() catch |err| return failure(err)) != .done) return .misuse;
         }
+        self.write_db.installRelationalAuthorizer() catch |err| return failure(err);
         self.write_db.exec("COMMIT;") catch |err| return failure(err);
         committed = true;
         self.publishTransactionChanges();
@@ -385,7 +392,12 @@ fn updateHook(context: ?*anyopaque, action: c_int, _: ?[*:0]const u8, table_z: ?
     _ = sqlite.updateOperation(action) orelse return;
     const self: *Database = @ptrCast(@alignCast(context orelse return));
     const table = if (table_z) |name| std.mem.span(name) else return;
-    if (table.len == 0 or table.len > max_table_name_bytes) return;
+    observeWrite(self, table);
+}
+
+fn observeWrite(context: *anyopaque, table: []const u8) void {
+    const self: *Database = @ptrCast(@alignCast(context));
+    if (table.len == 0 or table.len > max_table_name_bytes or std.mem.startsWith(u8, table, "sqlite_")) return;
     for (self.transaction_tables[0..self.transaction_table_count]) |entry| {
         if (std.mem.eql(u8, entry.name(), table)) return;
     }
@@ -718,6 +730,57 @@ test "relational committed transactions publish their changed table set" {
     const second = database.binding().changes_fn(&database, first.revision);
     try std.testing.expectEqual(@as(usize, 1), second.tables.len);
     try std.testing.expectEqualStrings("note", second.tables[0].name());
+}
+
+test "authorizer write targets invalidate WITHOUT ROWID and truncate deletes" {
+    var database = try Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+    try std.testing.expectEqual(Outcome.ok, database.exec(&.{.{
+        .sql = "CREATE TABLE compact(key TEXT PRIMARY KEY) STRICT, WITHOUT ROWID;",
+    }}));
+    var revision = database.binding().changes_fn(&database, 0).revision;
+
+    try std.testing.expectEqual(Outcome.ok, database.exec(&.{.{
+        .sql = "INSERT INTO compact(key) VALUES(?1);",
+        .params = &.{.{ .text = "present" }},
+    }}));
+    var changes = database.binding().changes_fn(&database, revision);
+    try std.testing.expectEqual(@as(usize, 1), changes.tables.len);
+    try std.testing.expectEqualStrings("compact", changes.tables[0].name());
+    revision = changes.revision;
+
+    try std.testing.expectEqual(Outcome.ok, database.exec(&.{.{ .sql = "DELETE FROM compact;" }}));
+    changes = database.binding().changes_fn(&database, revision);
+    try std.testing.expectEqual(@as(usize, 1), changes.tables.len);
+    try std.testing.expectEqualStrings("compact", changes.tables[0].name());
+}
+
+test "relational exec members cannot terminate the engine transaction" {
+    var database = try Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+    try std.testing.expectEqual(Outcome.ok, database.exec(&.{.{ .sql = "CREATE TABLE item(id INTEGER PRIMARY KEY) STRICT;" }}));
+    try std.testing.expectEqual(Outcome.misuse, database.exec(&.{
+        .{ .sql = "INSERT INTO item(id) VALUES(1);" },
+        .{ .sql = "COMMIT;" },
+        .{ .sql = "INSERT INTO item(id) VALUES(2);" },
+    }));
+
+    var captured: CapturedPages = .{ .allocator = std.testing.allocator };
+    defer captured.deinit();
+    try std.testing.expectEqual(Outcome.ok, database.query("SELECT id FROM item;", &.{}, &captured, CapturedPages.capture));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, captured.pages.items[0][4..8], .little));
+}
+
+test "relational migrations cannot terminate the engine transaction" {
+    var database = try Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+    const migrations = [_]Migration{.{
+        .version = 1,
+        .name = "bad_commit",
+        .sql = "CREATE TABLE item(id INTEGER PRIMARY KEY) STRICT; COMMIT;",
+    }};
+    try std.testing.expectEqual(OpenOutcome.migrate_failed, database.applyMigrations(&migrations).outcome);
+    try std.testing.expectEqual(@as(u32, 0), try database.schemaVersion());
 }
 
 test "relational SQLite build enables the documented FTS5 and JSON features" {

@@ -368,11 +368,16 @@ const relationalOwnedPragmas = new Set([
   "temp_store_directory", "data_store_directory",
 ]);
 let relationalTrackWrites = false;
+let relationalAllowTransaction = false;
 const relationalChangedTables = new Set<string>();
 const relationalAuthorizer = (action: number, first: string | null, second: string | null): number => {
   if (relationalTrackWrites && first !== null &&
       (action === sqliteConstants.SQLITE_INSERT || action === sqliteConstants.SQLITE_UPDATE || action === sqliteConstants.SQLITE_DELETE)) {
     relationalChangedTables.add(first);
+  }
+  if (!relationalAllowTransaction &&
+      (action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT)) {
+    return sqliteConstants.SQLITE_DENY;
   }
   if (action === sqliteConstants.SQLITE_ATTACH || action === sqliteConstants.SQLITE_DETACH) return sqliteConstants.SQLITE_DENY;
   if (action === sqliteConstants.SQLITE_PRAGMA && second !== null && relationalOwnedPragmas.has((first ?? "").toLowerCase())) {
@@ -395,12 +400,15 @@ function applyDevMigrations(src: string): void {
   relationalDb.setAuthorizer(null);
   try {
     relationalDb.exec("BEGIN IMMEDIATE;");
+    relationalDb.setAuthorizer(relationalAuthorizer);
     for (let i = 0; i < names.length; i++) {
       relationalDb.exec(fs.readFileSync(path.join(schemaDir, names[i]!), "utf8"));
-      relationalDb.exec(`PRAGMA user_version=${i + 1};`);
     }
+    relationalDb.setAuthorizer(null);
+    relationalDb.exec(`PRAGMA user_version=${names.length};`);
     relationalDb.exec("COMMIT;");
   } catch (reason) {
+    relationalDb.setAuthorizer(null);
     try { relationalDb.exec("ROLLBACK;"); } catch {}
     throw reason;
   } finally {
@@ -416,6 +424,15 @@ function setRelationalQueryOnly(enabled: boolean): void {
     relationalDb.exec(`PRAGMA query_only=${enabled ? "ON" : "OFF"};`);
   } finally {
     relationalDb.setAuthorizer(relationalAuthorizer);
+  }
+}
+
+function relationalTransaction(sql: "BEGIN IMMEDIATE;" | "COMMIT;" | "ROLLBACK;"): void {
+  relationalAllowTransaction = true;
+  try {
+    relationalDb.exec(sql);
+  } finally {
+    relationalAllowTransaction = false;
   }
 }
 const pendingDbResults: PendingDbResult[] = [];
@@ -1398,7 +1415,7 @@ function performDbCmd(cmd: Cmdish): void {
   try {
     relationalChangedTables.clear();
     relationalTrackWrites = true;
-    relationalDb.exec("BEGIN IMMEDIATE;");
+    relationalTransaction("BEGIN IMMEDIATE;");
     began = true;
     for (const [sql, params] of validated) {
       const statement = relationalDb.prepare(sql);
@@ -1406,7 +1423,7 @@ function performDbCmd(cmd: Cmdish): void {
       if (statement.columns().length !== 0) throw new Error("relational exec statement yields rows");
       statement.run(...dbBindArgs(sql, params));
     }
-    relationalDb.exec("COMMIT;");
+    relationalTransaction("COMMIT;");
     began = false;
     for (const [key, live] of liveDbByKey) {
       if (live.tables.some((table) => relationalChangedTables.has(table))) dirtyLiveDbKeys.add(key);
@@ -1415,7 +1432,7 @@ function performDbCmd(cmd: Cmdish): void {
     queueDbResult(operation, "exec", "ok");
   } catch (reason) {
     if (began) {
-      try { relationalDb.exec("ROLLBACK;"); } catch {}
+      try { relationalTransaction("ROLLBACK;"); } catch {}
     }
     rejectDbOperation(cmd, false, dbErrorOutcome(reason), operation);
   } finally {

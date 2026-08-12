@@ -159,6 +159,7 @@ const mini_core = struct {
         // Unsigned-class mirrors (u64-classed arm routing).
         ustamp_ms: u64,
         ucode: u64,
+        db_live: bool,
     };
 
     pub const Msg = union(enum) {
@@ -327,6 +328,8 @@ const mini_core = struct {
         fill_streams, // 93: seventeen distinct streams exceed the bridge table
         hide_win, // 94: window_hide "player"
         dock_off, // 95: dock_presence false
+        arm_db_live, // 96: install a live query under wire key "shared-db"
+        query_over_db_live, // 97: a one-shot query collides with that live key
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -412,6 +415,7 @@ const mini_core = struct {
                 .video2_events = 0,
                 .ustamp_ms = 0,
                 .ucode = 0,
+                .db_live = false,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -809,6 +813,12 @@ const mini_core = struct {
                 out.capture_events = model.capture_events + 1;
                 return .{ .model = out, .cmd = "" };
             },
+            .arm_db_live => {
+                const out = frameCreate(model.*);
+                out.db_live = true;
+                return .{ .model = out, .cmd = "" };
+            },
+            .query_over_db_live => return .{ .model = model, .cmd = cmdDbQuery("shared-db", 7, 12, 8, "SELECT id FROM item") },
         }
     }
 
@@ -820,8 +830,14 @@ const mini_core = struct {
     }
 
     pub fn subscriptions(model: *const Model) []const u8 {
-        if (!model.polling) return "";
-        return subTimer("tick", if (model.fast) 40 else 100, 9);
+        const timer = if (model.polling) subTimer("tick", if (model.fast) 40 else 100, 9) else "";
+        const live = if (model.db_live) subDbLive("shared-db", 7, 12, 8, "SELECT id FROM item", "item") else "";
+        if (timer.len == 0) return live;
+        if (live.len == 0) return timer;
+        const out = rt.frameAlloc(u8, timer.len + live.len);
+        @memcpy(out[0..timer.len], timer);
+        @memcpy(out[timer.len..], live);
+        return out;
     }
 
     pub fn commitModelRoot(next: *const Model) *const Model {
@@ -1200,6 +1216,27 @@ const mini_core = struct {
         return out;
     }
 
+    fn cmdDbQuery(key: []const u8, page_tag: u8, done_tag: u8, err_tag: u8, sql: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 1 + 1 + key.len + 3 + 4 + sql.len + 4);
+        var at: usize = 0;
+        out[at] = 0x29;
+        at += 1;
+        out[at] = @intCast(key.len);
+        at += 1;
+        @memcpy(out[at..][0..key.len], key);
+        at += key.len;
+        out[at] = page_tag;
+        out[at + 1] = done_tag;
+        out[at + 2] = err_tag;
+        at += 3;
+        std.mem.writeInt(u32, out[at..][0..4], @intCast(sql.len), .little);
+        at += 4;
+        @memcpy(out[at..][0..sql.len], sql);
+        at += sql.len;
+        std.mem.writeInt(u32, out[at..][0..4], 0, .little);
+        return out;
+    }
+
     fn subTimer(key: []const u8, every_ms: f64, msg_tag: u8) []const u8 {
         const out = rt.frameAlloc(u8, 2 + key.len + 8 + 1);
         out[0] = 0x01;
@@ -1207,6 +1244,33 @@ const mini_core = struct {
         @memcpy(out[2..][0..key.len], key);
         std.mem.writeInt(u64, out[2 + key.len ..][0..8], @bitCast(every_ms), .little);
         out[2 + key.len + 8] = msg_tag;
+        return out;
+    }
+
+    fn subDbLive(key: []const u8, page_tag: u8, done_tag: u8, err_tag: u8, sql: []const u8, table: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 1 + 1 + key.len + 3 + 4 + sql.len + 4 + 4 + 1 + table.len);
+        var at: usize = 0;
+        out[at] = 0x02;
+        at += 1;
+        out[at] = @intCast(key.len);
+        at += 1;
+        @memcpy(out[at..][0..key.len], key);
+        at += key.len;
+        out[at] = page_tag;
+        out[at + 1] = done_tag;
+        out[at + 2] = err_tag;
+        at += 3;
+        std.mem.writeInt(u32, out[at..][0..4], @intCast(sql.len), .little);
+        at += 4;
+        @memcpy(out[at..][0..sql.len], sql);
+        at += sql.len;
+        std.mem.writeInt(u32, out[at..][0..4], 0, .little);
+        at += 4;
+        std.mem.writeInt(u32, out[at..][0..4], 1, .little);
+        at += 4;
+        out[at] = @intCast(table.len);
+        at += 1;
+        @memcpy(out[at..][0..table.len], table);
         return out;
     }
 };
@@ -1363,6 +1427,22 @@ test "subscription reconcile arms, pauses, resumes, and re-arms on interval chan
     try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
     try std.testing.expectEqual(tick_timer_key, fx.pendingTimerAt(0).?.key);
     try std.testing.expectEqual(@as(u64, 40), fx.pendingTimerAt(0).?.interval_ms);
+}
+
+test "a one-shot database query cannot overwrite a live subscription slot with the same wire key" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+
+    const errors_before = Host.model().errs;
+    Host.dispatch(fx, .query_over_db_live);
+    Host.drain(fx);
+    try std.testing.expectEqual(errors_before + 1, Host.model().errs);
+    try std.testing.expectEqualStrings("rejected", Host.model().last_err);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
 }
 
 test "timer fires dispatch the named arm with the fire time" {

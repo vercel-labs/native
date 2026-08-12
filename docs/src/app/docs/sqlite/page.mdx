@@ -38,7 +38,7 @@ CREATE TABLE note (
 ) STRICT;
 ```
 
-`native check` applies the complete chain to a real in-memory SQLite database. It rejects gaps, edited published migrations, invalid SQLite, non-STRICT tables, and a schema change that is not represented by a new version. At launch the runtime compares the chain with `PRAGMA user_version` and applies all pending files in one transaction. A migration failure refuses the database open; a database newer than the binary is `version_unknown` and is never repaired or downgraded automatically.
+`native check` applies the complete chain to a real in-memory SQLite database. It rejects gaps, edited published migrations, invalid SQLite, non-STRICT tables, and a schema change that is not represented by a new version. The accepted hashes are written to `src/schema/migrations.lock.json`; commit that file with the migrations so append-only validation has the same authority in every checkout and in CI. At launch the runtime compares the chain with `PRAGMA user_version` and applies all pending files in one transaction. A migration failure refuses the database open; a database newer than the binary is `version_unknown` and is never repaired or downgraded automatically.
 
 `native db status` compares source and installed versions. `native db reset --yes` deletes the development `app.db`, WAL, and shared-memory files; the next launch reapplies the chain. Reset never accepts an arbitrary path.
 
@@ -104,7 +104,7 @@ SQLite `INTEGER` and `REAL` map to `number`; generated decoders reject an `INTEG
 
 ## Live queries
 
-A `:live` query runs when subscribed and runs again after a committed transaction touches one of its generated table dependencies. The runtime collects `sqlite3_update_hook` writes until commit, coalesces invalidations once per command frame, and never reruns an unrelated subscription. FTS5 shadow tables are included automatically.
+A `:live` query runs when subscribed and runs again after a committed transaction touches one of its generated table dependencies. The runtime combines SQLite authorizer write targets with row-update notifications until commit, so `WITHOUT ROWID` tables and truncate-optimized deletes invalidate reliably; it coalesces invalidations once per command frame and never reruns an unrelated subscription. FTS5 shadow tables are included automatically. A `:live` declaration with no table dependency is rejected because it could never refresh.
 
 Each delivery uses the same bounded page route as a one-shot query: zero or more `page` messages followed by `done`. Keep temporary pages in the Model and replace the visible result set on `done`. Changing a subscription's key, parameters, routes, SQL, or dependencies re-arms it; omitting the key cancels it. Dependencies are table-level in this release.
 

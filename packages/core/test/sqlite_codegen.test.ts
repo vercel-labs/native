@@ -45,7 +45,7 @@ test("migration history is append-only and SQL errors point into authored files"
   const root = fixture();
   try {
     const first = analyzeSqlite(root);
-    const state = path.join(root, ".native", "sqlite-schema.json");
+    const state = path.join(root, "schema", "migrations.lock.json");
     assert.deepEqual(checkMigrationState(first, state), []);
     fs.appendFileSync(path.join(root, "schema", "0001_init.sql"), "\n-- edited\n");
     const changed = analyzeSqlite(root);
@@ -162,6 +162,75 @@ test("unnamed SQL is rejected while views resolve to underlying live dependencie
     const view = analyzeSqlite(root);
     assert.deepEqual(view.diagnostics, []);
     assert.ok(view.queries[0]?.tables.includes("note"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("SQLite authorizer events enforce declared query and exec shapes", () => {
+  const root = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: writableQuery\nINSERT INTO note(id,folder_id,title) VALUES(1,1,'x') RETURNING id;\n",
+    );
+    const writable = analyzeSqlite(root);
+    assert.equal(writable.diagnostics[0]?.rule, "NS1414");
+    assert.match(writable.diagnostics[0]?.message ?? "", /writable statement must be declared with :exec/);
+
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: readOnlyExec :exec\nSELECT id FROM note;\n",
+    );
+    const readOnly = analyzeSqlite(root);
+    assert.equal(readOnly.diagnostics[0]?.rule, "NS1414");
+    assert.match(readOnly.diagnostics[0]?.message ?? "", /:exec statement is read-only/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("live queries require an invalidation dependency", () => {
+  const root = fixture();
+  try {
+    fs.writeFileSync(path.join(root, "queries.sql"), "-- name: staticValue :live\nSELECT 1 AS value;\n");
+    const result = analyzeSqlite(root);
+    assert.equal(result.diagnostics[0]?.rule, "NS1421");
+    assert.equal(result.warnings.some((warning) => warning.rule === "NS1421"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COUNT inference follows the selected aggregate rather than its alias", () => {
+  const root = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: totals\nSELECT count(*) AS count, NULL AS count_hint FROM note;\n",
+    );
+    const result = analyzeSqlite(root);
+    assert.deepEqual(result.diagnostics, []);
+    assert.deepEqual(result.queries[0]?.columns, [
+      { name: "count", sqlType: "INTEGER", nullable: false },
+      { name: "count_hint", sqlType: "ANY", nullable: true },
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("migrations cannot terminate the analyzer-owned transaction", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-check-"));
+  try {
+    fs.mkdirSync(path.join(root, "schema"));
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      "CREATE TABLE note(id INTEGER PRIMARY KEY) STRICT;\nCOMMIT;\n",
+    );
+    const result = analyzeSqlite(root);
+    assert.equal(result.diagnostics[0]?.rule, "NS1404");
+    assert.match(result.diagnostics[0]?.message ?? "", /not authorized|transaction/i);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

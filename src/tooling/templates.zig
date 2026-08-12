@@ -1738,7 +1738,10 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    generate.addDirectoryArg(b.path("src"));
         \\    generate.addArg("--zig-out");
         \\    const migrations = generate.addOutputFileArg("migrations.zig");
-        \\    generate.addArgs(&.{ "--state", ".native/cache/sqlite-schema.json" });
+        \\    generate.addArgs(&.{ "--state", "src/schema/migrations.lock.json" });
+        \\    if (b.build_root.handle.access(b.graph.io, "src/schema/migrations.lock.json", .{})) |_| {
+        \\        generate.addFileInput(b.path("src/schema/migrations.lock.json"));
+        \\    } else |_| {}
         \\    generate.addFileInput(nativeSdkPath(b, native_sdk_path, "packages/core/src/sqlite_codegen.ts"));
         \\    return migrations;
         \\}

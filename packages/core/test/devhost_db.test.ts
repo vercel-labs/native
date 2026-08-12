@@ -222,3 +222,52 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("the devhost rejects transaction control inside an exec batch and rolls it all back", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-transaction-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly clean: boolean; readonly dirty: boolean; readonly retrying: boolean; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "attack" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array }
+  | { readonly kind: "clean" }
+  | { readonly kind: "dirty" };
+export function initialModel(): Model { return { clean: false, dirty: false, retrying: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.db.exec([
+      ["CREATE TABLE item(id INTEGER PRIMARY KEY) STRICT", []],
+    ], { ok: "attack", err: "failed" })];
+    case "attack": return [model, Cmd.db.exec([
+      ["INSERT INTO item(id) VALUES(1)", []],
+      ["COMMIT", []],
+      ["INSERT INTO item(id) VALUES(2)", []],
+    ], { ok: "dirty", err: "failed" })];
+    case "failed": {
+      if (model.retrying) return { clean: false, dirty: true, retrying: true };
+      return [{ ...model, retrying: true }, Cmd.db.exec([
+        ["INSERT INTO item(id) VALUES(1)", []],
+      ], { ok: "clean", err: "failed" })];
+    }
+    case "clean": return { clean: true, dirty: false, retrying: true };
+    case "dirty": return { clean: false, dirty: true, retrying: true };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /cmd db_exec rejected misuse/);
+    assert.match(run.stdout, /"clean":true,"dirty":false,"retrying":true/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

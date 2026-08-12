@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { constants as sqliteConstants, DatabaseSync, type StatementSync } from "node:sqlite";
 
 export interface SqliteDiagnostic {
   readonly rule: `NS14${number}`;
@@ -175,8 +175,17 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
   db.exec("PRAGMA foreign_keys=ON;");
   if (diagnostics.length === 0) {
     db.exec("BEGIN IMMEDIATE;");
+    let migrationAuthorizerInstalled = false;
+    let activeMigration: MigrationSource | undefined;
     try {
+      db.setAuthorizer((action) =>
+        action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT
+          ? sqliteConstants.SQLITE_DENY
+          : sqliteConstants.SQLITE_OK,
+      );
+      migrationAuthorizerInstalled = true;
       for (const migration of migrations) {
+        activeMigration = migration;
         try {
           db.exec(migration.sql);
           db.exec(`PRAGMA user_version=${migration.version};`);
@@ -185,10 +194,26 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
           break;
         }
       }
+      db.setAuthorizer(null);
+      migrationAuthorizerInstalled = false;
       if (diagnostics.length === 0) db.exec("COMMIT;");
       else db.exec("ROLLBACK;");
-    } catch {
+    } catch (error) {
+      if (migrationAuthorizerInstalled) {
+        try { db.setAuthorizer(null); } catch {}
+      }
       try { db.exec("ROLLBACK;"); } catch {}
+      if (diagnostics.length === 0) {
+        const migration = activeMigration ?? migrations.at(-1);
+        diagnostics.push(diag(
+          "NS1404",
+          migration?.file ?? schemaDir,
+          1,
+          `SQLite could not commit the migration chain: ${sqliteMessage(error)}.`,
+          "Remove transaction-control SQL from migrations and fix the reported SQLite error.",
+          "The runtime owns the one transaction that applies the complete pending migration chain.",
+        ));
+      }
     }
   }
 
@@ -206,6 +231,13 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
   const queriesFile = path.join(srcDir, "queries.sql");
   const queries: DeclaredQuery[] = [];
   if (fs.existsSync(queriesFile) && diagnostics.length === 0) {
+    let statementWrites = false;
+    let statementControlsTransaction = false;
+    db.setAuthorizer((action) => {
+      if (action === sqliteConstants.SQLITE_INSERT || action === sqliteConstants.SQLITE_UPDATE || action === sqliteConstants.SQLITE_DELETE) statementWrites = true;
+      if (action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT) statementControlsTransaction = true;
+      return sqliteConstants.SQLITE_OK;
+    });
     const source = fs.readFileSync(queriesFile, "utf8").replaceAll("\r\n", "\n");
     const lines = source.split("\n");
     const headers: Array<{ name: string; exec: boolean; live: boolean; line: number; headerStart: number; start: number }> = [];
@@ -246,9 +278,16 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
         continue;
       }
       try {
+        statementWrites = false;
+        statementControlsTransaction = false;
         const statement = db.prepare(sql);
+        const writes = statementWrites;
+        const controlsTransaction = statementControlsTransaction;
         if (tailHasStatement(sql, statement.sourceSQL)) throw new Error("declared query contains more than one statement");
         const columns = statement.columns();
+        if (controlsTransaction) throw new Error("transaction control is engine-owned and cannot be declared");
+        if (header.exec && !writes) throw new Error(":exec statement is read-only");
+        if (!header.exec && writes) throw new Error("writable statement must be declared with :exec and cannot return rows");
         if (header.exec && columns.length > 0) throw new Error(":exec statement returns rows");
         if (!header.exec && columns.length === 0) throw new Error("query returns no columns; declare writes with :exec");
         const columnNames = new Set<string>();
@@ -262,9 +301,9 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
         const explain = db.prepare(`EXPLAIN ${sql}`);
         if (params.length === 0) explain.all();
         else explain.all(dummyBindings(params.map((param) => param.name)));
-        const result = columns.map((column) => inferColumn(db, column, sql));
+        const result = columns.map((column, index) => inferColumn(db, column, sql, index, columns.length));
         const tables = dependencyTables(db, sql, params.map((p) => p.name));
-        if (header.live && tables.length === 0) warnings.push(diag("NS1421", queriesFile, header.line, `Live query \`${header.name}\` has no table dependency and will run only on subscribe.`, "Remove :live for a one-shot query, or select from a schema table.", undefined, true));
+        if (header.live && tables.length === 0) diagnostics.push(diag("NS1421", queriesFile, header.line, `Live query \`${header.name}\` has no table dependency and cannot refresh.`, "Remove :live for a one-shot query, or select from a schema table.", "A live subscription must have at least one generated table dependency so committed writes can invalidate it."));
         for (const field of [...params, ...result]) {
           if (field.sqlType === "INTEGER" && /(^id$|_id$|Id$)/.test(field.name)) {
             warnings.push(diag("NS1422", queriesFile, header.line, `INTEGER identifier \`${field.name}\` in \`${header.name}\` maps to an exact TypeScript number.`, "Keep identifier values within -(2^53-1)..(2^53-1); generated page decoders reject wider i64 values instead of rounding them.", "Choosing number keeps the app-core API uniform; an explicit bigint tier can be added later without silently changing existing generated contracts.", true));
@@ -294,14 +333,14 @@ function tableInfo(db: DatabaseSync, table: string): Array<Record<string, unknow
   return db.prepare(`PRAGMA table_xinfo('${quoted}');`).all() as Array<Record<string, unknown>>;
 }
 
-function inferColumn(db: DatabaseSync, column: ReturnType<StatementSync["columns"]>[number], sql: string): QueryField {
+function inferColumn(db: DatabaseSync, column: ReturnType<StatementSync["columns"]>[number], sql: string, index: number, columnCount: number): QueryField {
   let sqlType = normalizeType(column.type);
   let nullable = true;
   if (column.table && column.column) {
     const row = tableInfo(db, column.table).find((entry) => String(entry.name) === column.column);
     if (row) nullable = Number(row.notnull ?? 0) !== 1 && Number(row.pk ?? 0) === 0;
   }
-  if (/^count(?:\(|$|_)/i.test(column.name)) {
+  if (isDirectCountColumn(sql, index, columnCount)) {
     nullable = false;
     sqlType = "INTEGER";
   }
@@ -311,6 +350,85 @@ function inferColumn(db: DatabaseSync, column: ReturnType<StatementSync["columns
   // reject a legal row merely to claim a narrower type.
   if (/\b(?:left|right|full)(?:\s+outer)?\s+join\b/i.test(sql)) nullable = true;
   return { name: column.name, sqlType, nullable };
+}
+
+function isDirectCountColumn(sql: string, index: number, columnCount: number): boolean {
+  const expressions = topLevelSelectExpressions(sql);
+  if (expressions.length !== columnCount) return false;
+  const expression = expressions[index]?.trim().replace(/^distinct\s+/i, "") ?? "";
+  const count = /^count\s*\(/i.exec(expression);
+  if (!count) return false;
+  let depth = 0;
+  let quote = "";
+  for (let at = expression.indexOf("(", count.index); at < expression.length; at++) {
+    const char = expression[at]!;
+    if (quote) {
+      if (char === quote && expression[at + 1] === quote) { at += 1; continue; }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") { quote = char; continue; }
+    if (char === "(") depth += 1;
+    else if (char === ")" && --depth === 0) {
+      const suffix = expression.slice(at + 1).trim();
+      return suffix.length === 0 || /^(?:as\s+)?(?:[A-Za-z_][A-Za-z0-9_]*|"(?:[^"]|"")+"|`(?:[^`]|``)+`|\[(?:[^\]]|\]\])+\])$/i.test(suffix);
+    }
+  }
+  return false;
+}
+
+function topLevelSelectExpressions(sql: string): string[] {
+  let depth = 0;
+  let quote = "";
+  let selectEnd = -1;
+  let expressionStart = -1;
+  const expressions: string[] = [];
+  for (let at = 0; at < sql.length; at++) {
+    const char = sql[at]!;
+    if (quote) {
+      if (char === quote && sql[at + 1] === quote) { at += 1; continue; }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") { quote = char; continue; }
+    if (char === "[") {
+      const end = sql.indexOf("]", at + 1);
+      at = end < 0 ? sql.length : end;
+      continue;
+    }
+    if (char === "-" && sql[at + 1] === "-") {
+      const end = sql.indexOf("\n", at + 2);
+      at = end < 0 ? sql.length : end;
+      continue;
+    }
+    if (char === "/" && sql[at + 1] === "*") {
+      const end = sql.indexOf("*/", at + 2);
+      at = end < 0 ? sql.length : end + 1;
+      continue;
+    }
+    if (char === "(") { depth += 1; continue; }
+    if (char === ")") { depth -= 1; continue; }
+    if (depth !== 0) continue;
+    const wordBoundary = !/[A-Za-z0-9_]/.test(sql[at - 1] ?? "");
+    if (selectEnd < 0 && wordBoundary && /^select\b/i.test(sql.slice(at))) {
+      selectEnd = at + 6;
+      expressionStart = selectEnd;
+      at += 5;
+      continue;
+    }
+    if (selectEnd < 0) continue;
+    if (char === ",") {
+      expressions.push(sql.slice(expressionStart, at));
+      expressionStart = at + 1;
+      continue;
+    }
+    if (wordBoundary && /^(?:from|union|intersect|except)\b/i.test(sql.slice(at))) {
+      expressions.push(sql.slice(expressionStart, at));
+      return expressions;
+    }
+  }
+  if (expressionStart >= 0) expressions.push(sql.slice(expressionStart));
+  return expressions;
 }
 
 function inferParams(db: DatabaseSync, sql: string, names: readonly string[]): QueryField[] {
@@ -509,7 +627,7 @@ export interface MigrationState { readonly version: number; readonly hashes: rea
 
 export function checkMigrationState(analysis: SqliteAnalysis, stateFile: string): SqliteDiagnostic[] {
   // Never bless a chain that the real-SQLite/schema pass rejected. The CLI
-  // still prints those primary diagnostics; the append-only cache remains at
+  // still prints those primary diagnostics; the append-only lock remains at
   // the last valid chain so fixing the SQL cannot accidentally establish a
   // broken history as the new baseline.
   if (analysis.diagnostics.length > 0) return [];

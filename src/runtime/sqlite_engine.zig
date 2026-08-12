@@ -35,8 +35,10 @@ const c = struct {
     const SQLITE_OK_AUTHORIZER: c_int = 0;
     const SQLITE_DENY_AUTHORIZER: c_int = 1;
     const SQLITE_PRAGMA: c_int = 19;
+    const SQLITE_TRANSACTION: c_int = 22;
     const SQLITE_ATTACH: c_int = 24;
     const SQLITE_DETACH: c_int = 25;
+    const SQLITE_SAVEPOINT: c_int = 32;
 
     const SQLITE_INSERT: c_int = 18;
     const SQLITE_DELETE: c_int = 9;
@@ -94,6 +96,11 @@ pub const Error = error{
 
 pub const Step = enum { row, done };
 
+pub const RelationalWriteObserver = struct {
+    context: *anyopaque,
+    write_fn: *const fn (context: *anyopaque, table: []const u8) void,
+};
+
 pub const Connection = struct {
     handle: *c.sqlite3,
 
@@ -131,6 +138,23 @@ pub const Connection = struct {
     pub fn setRelationalAuthorizer(self: *Connection, enabled: bool) Error!void {
         const callback: ?*const @TypeOf(relationalAuthorizer) = if (enabled) relationalAuthorizer else null;
         const result = c.sqlite3_set_authorizer(self.handle, callback, null);
+        if (result != c.SQLITE_OK) return classify(result, error.Misuse);
+    }
+
+    /// Install the app-exec policy while a statement array is being prepared
+    /// and stepped. Authorizer write events cover cases sqlite3_update_hook
+    /// deliberately omits, including WITHOUT ROWID tables and truncate
+    /// optimization. Transaction control remains engine-owned so a batch
+    /// member cannot commit or roll back the surrounding transaction.
+    pub fn installRelationalExecAuthorizer(self: *Connection, observer: *RelationalWriteObserver) Error!void {
+        const result = c.sqlite3_set_authorizer(self.handle, relationalExecAuthorizer, observer);
+        if (result != c.SQLITE_OK) return classify(result, error.Misuse);
+    }
+
+    /// Migrations may change schema, but they may not escape the relational
+    /// sandbox or terminate the runtime's all-pending-migrations transaction.
+    pub fn installRelationalMigrationAuthorizer(self: *Connection) Error!void {
+        const result = c.sqlite3_set_authorizer(self.handle, relationalMigrationAuthorizer, null);
         if (result != c.SQLITE_OK) return classify(result, error.Misuse);
     }
 
@@ -324,6 +348,39 @@ fn relationalAuthorizer(
     _: ?[*:0]const u8,
     _: ?[*:0]const u8,
 ) callconv(.c) c_int {
+    return relationalPolicy(action, first, second);
+}
+
+fn relationalExecAuthorizer(
+    context: ?*anyopaque,
+    action: c_int,
+    first: ?[*:0]const u8,
+    second: ?[*:0]const u8,
+    _: ?[*:0]const u8,
+    _: ?[*:0]const u8,
+) callconv(.c) c_int {
+    if (action == c.SQLITE_TRANSACTION or action == c.SQLITE_SAVEPOINT) return c.SQLITE_DENY_AUTHORIZER;
+    if (updateOperation(action) != null) {
+        const observer: *RelationalWriteObserver = @ptrCast(@alignCast(context orelse return c.SQLITE_DENY_AUTHORIZER));
+        const table = if (first) |value| std.mem.span(value) else "";
+        if (table.len > 0) observer.write_fn(observer.context, table);
+    }
+    return relationalPolicy(action, first, second);
+}
+
+fn relationalMigrationAuthorizer(
+    _: ?*anyopaque,
+    action: c_int,
+    first: ?[*:0]const u8,
+    second: ?[*:0]const u8,
+    _: ?[*:0]const u8,
+    _: ?[*:0]const u8,
+) callconv(.c) c_int {
+    if (action == c.SQLITE_TRANSACTION or action == c.SQLITE_SAVEPOINT) return c.SQLITE_DENY_AUTHORIZER;
+    return relationalPolicy(action, first, second);
+}
+
+fn relationalPolicy(action: c_int, first: ?[*:0]const u8, second: ?[*:0]const u8) c_int {
     if (action == c.SQLITE_ATTACH or action == c.SQLITE_DETACH) return c.SQLITE_DENY_AUTHORIZER;
     if (action == c.SQLITE_PRAGMA and second != null) {
         const name = if (first) |value| std.mem.span(value) else "";

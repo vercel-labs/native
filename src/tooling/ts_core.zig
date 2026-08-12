@@ -414,8 +414,9 @@ pub const PersistRoutes = struct {
 
 /// Run the real-SQLite schema/query lane used by the build and return the
 /// generated SDK core path that exposes this app's Cmd.q/Sub.q surface.
-/// Outputs live under ignored .native/cache so `native check`, devhost, and
-/// the build all enforce the same append-only migration history.
+/// Generated outputs live under ignored .native/cache. The append-only
+/// migration authority lives beside the authored migrations so it is visible
+/// to version control and survives a clean checkout.
 pub fn generateSqliteSurface(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -441,7 +442,7 @@ pub fn generateSqliteSurface(
             "--sdk-out",                          sdk_out,                               "--dts-out",
             ".native/cache/sqlite/core.d.ts",     "--static-out",                        ".native/cache/sqlite/core_static.ts",
             "--zig-out",                          ".native/cache/sqlite/migrations.zig", "--metadata-out",
-            ".native/cache/sqlite/metadata.json", "--state",                             ".native/cache/sqlite-schema.json",
+            ".native/cache/sqlite/metadata.json", "--state",                             "src/schema/migrations.lock.json",
         },
         .stdin = .ignore,
         .stdout = .inherit,

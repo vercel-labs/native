@@ -2513,7 +2513,12 @@ pub fn TsCoreHost(comptime core: type) type {
             const index = blk: {
                 if (key.len > 0) {
                     if (findDb(key)) |existing| {
-                        if (query and dbs[existing].query) break :blk existing;
+                        // One-shot queries replace only earlier one-shot
+                        // queries. A live subscription owns its slot until
+                        // subscription reconciliation removes or re-arms it;
+                        // a command with the same wire key must reject rather
+                        // than silently erase that subscription.
+                        if (query and dbs[existing].query and !dbs[existing].live) break :blk existing;
                         fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
                         return null;
                     }
