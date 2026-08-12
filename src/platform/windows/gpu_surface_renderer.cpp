@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -75,6 +77,104 @@ static uint64_t gpuClockNs() {
     const uint64_t ticks = static_cast<uint64_t>(counter.QuadPart);
     return (ticks / ticks_per_second) * 1000000000ULL +
         ((ticks % ticks_per_second) * 1000000000ULL) / ticks_per_second;
+}
+
+/* Env-gated presentation profiler.
+ *
+ * `NATIVE_SDK_GPU_PROFILE` names a log path; with it unset (every shipped
+ * run) the file is opened once per process as null, `gpuProfileActive()` is
+ * false, and each probe below costs one predicted branch and writes
+ * nothing. It exists because the Direct2D path's real
+ * costs are invisible from the outside: `ensureTargets` drops the whole
+ * per-surface texture cache on any dimension change, and only an app that
+ * actually holds textures pays for it. See `tools/gpu-image-fixture/`.
+ *
+ * Lines are key=value, one per event, in the shape the repo's automation
+ * snapshots already use:
+ *
+ *   present seq=12 pw=1200 ph=800 rebuild=1 flushed=16 targets_us=170 \
+ *           images_us=940 images_n=16 image_kib=16384 render_us=1210 \
+ *           decode_us=40 total_us=2400
+ *   paint   seq=12 pw=1200 ph=800 rects=1 blit_us=694
+ *
+ * `images_us` is CONTAINED IN `render_us` — the uploads happen inside the
+ * display-list walk, so a reducer that wants exclusive draw cost subtracts.
+ * `flushed` is how many cached bitmaps that step's target rebuild threw
+ * away, which is the count `images_n` then re-uploads. */
+class GpuProfileLog {
+public:
+    static GpuProfileLog &shared() {
+        static GpuProfileLog log;
+        return log;
+    }
+
+    bool active() const { return file_ != nullptr; }
+
+    void line(const char *format, ...) {
+        if (!file_) return;
+        char text[512];
+        va_list args;
+        va_start(args, format);
+        const int written = vsnprintf(text, sizeof(text), format, args);
+        va_end(args);
+        if (written <= 0) return;
+        fputs(text, file_);
+        fputc('\n', file_);
+        /* Buffered, not per-line flushed: a synchronous write inside a
+         * measured frame would show up in the very numbers being measured.
+         * 64 lines is well under a second of drag at any refresh rate, and
+         * the destructor closes the file on a clean exit. */
+        if (++pending_ >= 64) {
+            fflush(file_);
+            pending_ = 0;
+        }
+    }
+
+private:
+    GpuProfileLog() {
+        wchar_t path[MAX_PATH] = {};
+        const DWORD length = GetEnvironmentVariableW(L"NATIVE_SDK_GPU_PROFILE", path, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) return;
+        file_ = _wfopen(path, L"w");
+        if (!file_) return;
+        fputs("# native-sdk gpu surface profile: times in microseconds, images_us is inside render_us\n", file_);
+    }
+
+    ~GpuProfileLog() {
+        if (!file_) return;
+        fflush(file_);
+        fclose(file_);
+    }
+
+    FILE *file_ = nullptr;
+    unsigned pending_ = 0;
+};
+
+static bool gpuProfileActive() {
+    return GpuProfileLog::shared().active();
+}
+
+/* Adds its scope's elapsed span to `sink`. The probed functions have
+ * several return paths each, and a hand-placed stop before every one of
+ * them is exactly the kind of thing that silently stops covering a path
+ * someone adds later. Constructed inactive it reads no clock at all. */
+class GpuProfileSpan {
+public:
+    GpuProfileSpan(bool active, uint64_t *sink)
+        : sink_(active ? sink : nullptr), begin_ns_(sink_ ? gpuClockNs() : 0) {}
+    ~GpuProfileSpan() {
+        if (sink_) *sink_ += gpuClockNs() - begin_ns_;
+    }
+    GpuProfileSpan(const GpuProfileSpan &) = delete;
+    GpuProfileSpan &operator=(const GpuProfileSpan &) = delete;
+
+private:
+    uint64_t *sink_;
+    uint64_t begin_ns_;
+};
+
+static uint64_t gpuProfileMicros(uint64_t nanoseconds) {
+    return (nanoseconds + 500) / 1000;
 }
 
 struct Point {
@@ -1153,6 +1253,14 @@ public:
     uint32_t representativeColorAt(double logical_x, double logical_y) const override;
 
 private:
+    /* The real bodies. `present`/`paint` are thin wrappers that exist only
+     * so the `NATIVE_SDK_GPU_PROFILE` accumulators are reset and emitted on
+     * exactly one path each — these two have a dozen refusal returns
+     * between them, and per-return bookkeeping would rot on the first one
+     * someone adds. */
+    int presentPacket(const WindowsGpuPacketPresent &present, WindowsGpuPresentInfo *info);
+    bool paintRects(const RECT *paint_rects, size_t paint_rect_count);
+
     struct CachedBitmap {
         uint64_t serial = 0;
         ID2D1Bitmap *bitmap = nullptr;
@@ -1202,9 +1310,15 @@ private:
     }
 
     bool ensureTargets(double surface_width, double surface_height, double scale, uint32_t pixel_width, uint32_t pixel_height) {
+        const bool profiling = gpuProfileActive();
+        const GpuProfileSpan profile_span(profiling, &profile_targets_ns_);
         const bool dimensions_changed = backing_target_ &&
             (pixel_width_ != pixel_width || pixel_height_ != pixel_height || scale_ != scale ||
              surface_width_ != surface_width || surface_height_ != surface_height);
+        if (profiling) {
+            profile_target_rebuild_ = dimensions_changed;
+            profile_flushed_bitmaps_ = dimensions_changed ? image_bitmaps_.size() : 0;
+        }
         if (dimensions_changed) {
             releaseImageBitmaps();
             releaseCom(blur_snapshot_);
@@ -1348,9 +1462,19 @@ private:
         cached.serial = 0;
         const D2D1_BITMAP_PROPERTIES properties = D2D1::BitmapProperties(
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+        /* The measured cost this migration is about: a cache miss here is a
+         * full CPU->GPU texture upload, and a resize step misses on every
+         * live image because `ensureTargets` dropped the whole map. */
+        const bool profiling = gpuProfileActive();
+        const uint64_t upload_begin_ns = profiling ? gpuClockNs() : 0;
         HRESULT result = backing_target_->CreateBitmap(
             D2D1::SizeU(resource->width, resource->height), resource->bgra.data(),
             resource->width * 4, properties, &cached.bitmap);
+        if (profiling) {
+            profile_image_ns_ += gpuClockNs() - upload_begin_ns;
+            profile_image_uploads_ += 1;
+            profile_image_bytes_ += resource->bgra.size();
+        }
         if (FAILED(result) || !cached.bitmap) return false;
         cached.serial = resource->serial;
         *bitmap = cached.bitmap;
@@ -1927,6 +2051,7 @@ private:
     }
 
     bool renderCommands(const std::vector<const Command *> &commands, const DecodedPacket &packet, Color clear, bool full_surface) {
+        const GpuProfileSpan profile_span(gpuProfileActive(), &profile_render_ns_);
         backing_target_->BeginDraw();
         backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
         bool ok = true;
@@ -1997,9 +2122,52 @@ private:
     uint32_t pixel_width_ = 0;
     uint32_t pixel_height_ = 0;
     bool content_valid_ = false;
+
+    /* `NATIVE_SDK_GPU_PROFILE` accumulators, reset per present. Untouched
+     * and never read when the profiler is off (see `GpuProfileLog`). */
+    uint64_t profile_sequence_ = 0;
+    uint64_t profile_targets_ns_ = 0;
+    uint64_t profile_image_ns_ = 0;
+    uint64_t profile_render_ns_ = 0;
+    uint64_t profile_image_bytes_ = 0;
+    size_t profile_flushed_bitmaps_ = 0;
+    uint32_t profile_image_uploads_ = 0;
+    bool profile_target_rebuild_ = false;
 };
 
 int GpuSurfaceImpl::present(const WindowsGpuPacketPresent &present, WindowsGpuPresentInfo *info) {
+    if (!gpuProfileActive()) return presentPacket(present, info);
+    profile_sequence_ += 1;
+    profile_targets_ns_ = 0;
+    profile_image_ns_ = 0;
+    profile_render_ns_ = 0;
+    profile_image_bytes_ = 0;
+    profile_flushed_bitmaps_ = 0;
+    profile_image_uploads_ = 0;
+    profile_target_rebuild_ = false;
+    const uint64_t begin_ns = gpuClockNs();
+    const int outcome = presentPacket(present, info);
+    const uint64_t total_ns = gpuClockNs() - begin_ns;
+    GpuProfileLog::shared().line(
+        "present seq=%llu outcome=%d pw=%u ph=%u rebuild=%d flushed=%llu targets_us=%llu "
+        "images_us=%llu images_n=%u image_kib=%llu render_us=%llu decode_us=%llu total_us=%llu",
+        static_cast<unsigned long long>(profile_sequence_),
+        outcome,
+        pixel_width_,
+        pixel_height_,
+        profile_target_rebuild_ ? 1 : 0,
+        static_cast<unsigned long long>(profile_flushed_bitmaps_),
+        static_cast<unsigned long long>(gpuProfileMicros(profile_targets_ns_)),
+        static_cast<unsigned long long>(gpuProfileMicros(profile_image_ns_)),
+        profile_image_uploads_,
+        static_cast<unsigned long long>(profile_image_bytes_ / 1024),
+        static_cast<unsigned long long>(gpuProfileMicros(profile_render_ns_)),
+        static_cast<unsigned long long>(gpuProfileMicros(info ? info->decode_ns : 0)),
+        static_cast<unsigned long long>(gpuProfileMicros(total_ns)));
+    return outcome;
+}
+
+int GpuSurfaceImpl::presentPacket(const WindowsGpuPacketPresent &present, WindowsGpuPresentInfo *info) {
     if (info) *info = {};
     /* A no-change packet is normally a cheap completion. After device
      * loss there is no retained bitmap to paint, though: decode the same
@@ -2169,6 +2337,28 @@ int GpuSurfaceImpl::present(const WindowsGpuPacketPresent &present, WindowsGpuPr
 }
 
 bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
+    if (!gpuProfileActive()) return paintRects(paint_rects, paint_rect_count);
+    /* `content` and `rects` together separate a real blit from the two
+     * shapes that return in nanoseconds without drawing: no retained
+     * bitmap yet, and an empty update region. Both report ok=1, so without
+     * these a reducer averages them in and understates the copy. */
+    const bool had_content = content_valid_ && backing_bitmap_ != nullptr;
+    const uint64_t begin_ns = gpuClockNs();
+    const bool ok = paintRects(paint_rects, paint_rect_count);
+    const uint64_t blit_ns = gpuClockNs() - begin_ns;
+    GpuProfileLog::shared().line(
+        "paint seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu",
+        static_cast<unsigned long long>(profile_sequence_),
+        ok ? 1 : 0,
+        had_content ? 1 : 0,
+        pixel_width_,
+        pixel_height_,
+        static_cast<unsigned long long>(paint_rect_count),
+        static_cast<unsigned long long>(gpuProfileMicros(blit_ns)));
+    return ok;
+}
+
+bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count) {
     if (!content_valid_ || !backing_bitmap_) return true;
     if (paint_rect_count > 0 && paint_rects == nullptr) return false;
     if (!ensureWindowTarget()) return false;

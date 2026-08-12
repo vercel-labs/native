@@ -1720,6 +1720,12 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-service-feed-reader", "Run TypeScript service feed-reader example tests", "examples/service-feed-reader", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
+        // Not an example — a measurement fixture (tools/gpu-image-fixture),
+        // registered here because its whole job is to hold the runtime's
+        // registered-image ceiling and its tests are what catch that
+        // ceiling moving out from under it. `scripts/gate.sh fast` already
+        // maps a tools/ diff to this group, so this is where it belongs.
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-tool-gpu-image-fixture", "Run GPU image fixture limit pins", "tools/gpu-image-fixture", .managed),
     };
     for (native_example_shard_steps) |shard_step| {
         native_examples_step.dependOn(shard_step);
