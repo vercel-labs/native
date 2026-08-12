@@ -4,7 +4,17 @@
 // vendored app engine does not ship, so this gate narrows it to the runtime's
 // documented FTS5 + JSON surface.
 
-import { constants as sqliteConstants } from "node:sqlite";
+import { constants as sqliteConstants, type DatabaseSync } from "node:sqlite";
+
+type SqliteAuthorizer = (action: number, first: string | null, second: string | null) => number;
+type AuthorizerDatabase = DatabaseSync & {
+  setAuthorizer?: (callback: SqliteAuthorizer | null) => void;
+};
+
+interface SqlToken {
+  readonly text: string;
+  readonly kind: "word" | "identifier" | "literal" | "symbol";
+}
 
 const relationalOwnedPragmas = new Set([
   "user_version", "schema_version", "writable_schema", "query_only",
@@ -28,6 +38,194 @@ const relationalOptionalFunctions = new Set([
   // reject their scalar inspection helpers as well.
   "rtreecheck", "rtreedepth", "rtreenode",
 ]);
+
+function sqlTokens(sql: string): SqlToken[] {
+  const tokens: SqlToken[] = [];
+  let at = 0;
+  while (at < sql.length) {
+    const char = sql[at]!;
+    if (/\s/.test(char)) { at += 1; continue; }
+    if (char === ";") { at += 1; continue; }
+    if (char === "-" && sql[at + 1] === "-") {
+      const end = sql.indexOf("\n", at + 2);
+      at = end < 0 ? sql.length : end + 1;
+      continue;
+    }
+    if (char === "/" && sql[at + 1] === "*") {
+      const end = sql.indexOf("*/", at + 2);
+      at = end < 0 ? sql.length : end + 2;
+      continue;
+    }
+    if (char === "'") {
+      let text = "";
+      at += 1;
+      while (at < sql.length) {
+        if (sql[at] !== "'") { text += sql[at]!; at += 1; continue; }
+        if (sql[at + 1] === "'") { text += "'"; at += 2; continue; }
+        at += 1;
+        break;
+      }
+      tokens.push({ text: text.toLowerCase(), kind: "literal" });
+      continue;
+    }
+    if (char === "\"" || char === "`" || char === "[") {
+      const close = char === "[" ? "]" : char;
+      let text = "";
+      at += 1;
+      while (at < sql.length) {
+        if (sql[at] !== close) { text += sql[at]!; at += 1; continue; }
+        if (sql[at + 1] === close) { text += close; at += 2; continue; }
+        at += 1;
+        break;
+      }
+      tokens.push({ text: text.toLowerCase(), kind: "identifier" });
+      continue;
+    }
+    if (/[A-Za-z_]/.test(char)) {
+      let end = at + 1;
+      while (/[A-Za-z0-9_$]/.test(sql[end] ?? "")) end += 1;
+      tokens.push({ text: sql.slice(at, end).toLowerCase(), kind: "word" });
+      at = end;
+      continue;
+    }
+    tokens.push({ text: char, kind: "symbol" });
+    at += 1;
+  }
+  return tokens;
+}
+
+function tokenName(token: SqlToken | undefined): string | null {
+  return token?.kind === "word" || token?.kind === "identifier" ? token.text : null;
+}
+
+function sqliteName(token: SqlToken | undefined): string | null {
+  return token?.kind === "literal" ? token.text : tokenName(token);
+}
+
+function cteNamesAndMainToken(tokens: readonly SqlToken[], start: number): { ctes: Set<string>; declarations: Set<number>; main: number } {
+  const ctes = new Set<string>();
+  const declarations = new Set<number>();
+  if (tokens[start]?.kind !== "word" || tokens[start]?.text !== "with") return { ctes, declarations, main: start };
+  let at = tokens[start + 1]?.kind === "word" && tokens[start + 1]?.text === "recursive" ? start + 2 : start + 1;
+  while (at < tokens.length) {
+    const name = sqliteName(tokens[at]);
+    if (name === null) break;
+    ctes.add(name);
+    declarations.add(at);
+    at += 1;
+    if (tokens[at]?.text === "(") {
+      let depth = 1;
+      while (++at < tokens.length && depth > 0) {
+        if (tokens[at]?.text === "(") depth += 1;
+        else if (tokens[at]?.text === ")") depth -= 1;
+      }
+    }
+    if (tokens[at]?.kind !== "word" || tokens[at]?.text !== "as") break;
+    at += 1;
+    if (tokens[at]?.kind === "word" && tokens[at]?.text === "not") at += 1;
+    if (tokens[at]?.kind === "word" && tokens[at]?.text === "materialized") at += 1;
+    if (tokens[at]?.text !== "(") break;
+    let depth = 1;
+    while (++at < tokens.length && depth > 0) {
+      if (tokens[at]?.text === "(") depth += 1;
+      else if (tokens[at]?.text === ")") depth -= 1;
+    }
+    if (tokens[at]?.text !== ",") break;
+    at += 1;
+  }
+  return { ctes, declarations, main: at };
+}
+
+/// Node 22 ships `node:sqlite` without DatabaseSync.setAuthorizer. Keep the
+/// native authorizer when the host provides it, and let callers pair this with
+/// `inspectRelationalSql` on older supported Node releases.
+export function setRelationalAuthorizer(
+  db: DatabaseSync,
+  callback: SqliteAuthorizer | null,
+): boolean {
+  const setAuthorizer = (db as AuthorizerDatabase).setAuthorizer;
+  if (typeof setAuthorizer !== "function") return false;
+  setAuthorizer.call(db, callback);
+  return true;
+}
+
+export interface RelationalSqlInspection {
+  readonly error: string | null;
+  readonly writes: boolean;
+}
+
+/// Preflight one SQLite statement without executing it. SQLite remains the
+/// grammar authority; this compatibility inspection covers the policy events
+/// that Node 22 cannot expose through an authorizer callback.
+export function inspectRelationalSql(sql: string, denyTransactions: boolean): RelationalSqlInspection {
+  const tokens = sqlTokens(sql);
+  let start = 0;
+  if (tokens[start]?.kind === "word" && tokens[start]?.text === "explain") {
+    start += 1;
+    if (tokens[start]?.kind === "word" && tokens[start]?.text === "query" && tokens[start + 1]?.kind === "word" && tokens[start + 1]?.text === "plan") start += 2;
+  }
+  const { ctes, declarations, main } = cteNamesAndMainToken(tokens, start);
+  const keyword = tokens[main]?.kind === "word" ? tokens[main]?.text ?? "" : "";
+  const writes = keyword === "insert" || keyword === "update" || keyword === "delete" || keyword === "replace" ||
+    keyword === "create" || keyword === "drop" || keyword === "alter";
+
+  if (keyword === "attach" || keyword === "detach" || keyword === "vacuum") {
+    return { error: "not authorized to access databases outside the relational store", writes };
+  }
+  if (denyTransactions && (keyword === "begin" || keyword === "commit" || keyword === "end" || keyword === "rollback" || keyword === "savepoint" || keyword === "release")) {
+    return { error: "transaction control is not authorized", writes };
+  }
+  if (keyword === "pragma") {
+    let nameAt = main + 1;
+    if (tokens[nameAt + 1]?.text === ".") nameAt += 2;
+    const name = sqliteName(tokens[nameAt]);
+    const value = tokens[nameAt + 1];
+    if (name !== null && relationalOwnedPragmas.has(name) && value !== undefined) {
+      return { error: `PRAGMA ${name} is not authorized`, writes };
+    }
+  }
+
+  if (keyword === "create") {
+    const virtualAt = tokens.findIndex((token, index) => index > main && token.kind === "word" && token.text === "virtual");
+    const usingAt = tokens.findIndex((token, index) => index > virtualAt && token.kind === "word" && token.text === "using");
+    if (virtualAt >= 0 && usingAt >= 0) {
+      const module = sqliteName(tokens[usingAt + 1]) ?? "";
+      if (!relationalVirtualTableModules.has(module)) {
+        return { error: `virtual table module ${module || "<unknown>"} is not authorized`, writes };
+      }
+    }
+  }
+
+  let declaredTableAt = -1;
+  if (keyword === "create") {
+    const tableAt = tokens.findIndex((token, index) => index > main && token.kind === "word" && token.text === "table");
+    if (tableAt >= 0) {
+      declaredTableAt = tableAt + 1;
+      if (tokens[declaredTableAt]?.kind === "word" && tokens[declaredTableAt]?.text === "if") declaredTableAt += 3;
+      if (tokens[declaredTableAt + 1]?.text === ".") declaredTableAt += 2;
+    }
+  }
+
+  for (let at = 0; at + 1 < tokens.length; at++) {
+    const name = tokenName(tokens[at]);
+    if (name === null || tokens[at + 1]?.text !== "(") continue;
+    if (at !== declaredTableAt && !declarations.has(at) && (relationalOptionalFunctions.has(name) || name.startsWith("geopoly_"))) {
+      return { error: `SQLite function ${name} is not authorized because it is unavailable in the packaged runtime`, writes };
+    }
+  }
+
+  for (let at = 0; at + 1 < tokens.length; at++) {
+    if (tokens[at]?.kind !== "word" || !["from", "join", "update", "into"].includes(tokens[at]!.text)) continue;
+    let tableAt = at + 1;
+    let qualified = false;
+    if (tokens[tableAt + 1]?.text === ".") { tableAt += 2; qualified = true; }
+    const table = sqliteName(tokens[tableAt]);
+    if (table !== null && relationalUnavailableReadTables.has(table) && (qualified || !ctes.has(table))) {
+      return { error: `SQLite table ${table} is not authorized because it is unavailable in the packaged runtime`, writes };
+    }
+  }
+  return { error: null, writes };
+}
 
 export function relationalRuntimePolicy(
   action: number,

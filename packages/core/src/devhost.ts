@@ -58,7 +58,7 @@ import { Worker } from "node:worker_threads";
 import { installTextMethods } from "./text_polyfill.ts";
 import { checkFile, formatDiagnostic } from "./frontend.ts";
 import { DevhostJournalWriter, readDevhostJournal, requestKeyBase } from "./devhost_journal.mjs";
-import { relationalRuntimePolicy } from "./sqlite_runtime_policy.ts";
+import { inspectRelationalSql, relationalRuntimePolicy, setRelationalAuthorizer } from "./sqlite_runtime_policy.ts";
 
 interface Cmdish {
   readonly op: string;
@@ -390,7 +390,7 @@ const relationalAuthorizer = (action: number, first: string | null, second: stri
   }
   return relationalRuntimePolicy(action, first, second);
 };
-relationalDb.setAuthorizer(relationalAuthorizer);
+const relationalAuthorizerAvailable = setRelationalAuthorizer(relationalDb, relationalAuthorizer);
 
 function applyDevMigrations(src: string): void {
   const schemaDir = path.join(src, "schema");
@@ -402,33 +402,40 @@ function applyDevMigrations(src: string): void {
     const expected = String(i + 1).padStart(4, "0") + "_";
     if (!names[i]!.startsWith(expected)) throw new Error(`SQLite migration chain must be contiguous at ${expected}*.sql`);
   }
-  relationalDb.setAuthorizer(null);
+  if (relationalAuthorizerAvailable) setRelationalAuthorizer(relationalDb, null);
   try {
     relationalDb.exec("BEGIN IMMEDIATE;");
-    relationalDb.setAuthorizer(relationalAuthorizer);
+    if (relationalAuthorizerAvailable) setRelationalAuthorizer(relationalDb, relationalAuthorizer);
     for (let i = 0; i < names.length; i++) {
-      relationalDb.exec(fs.readFileSync(path.join(schemaDir, names[i]!), "utf8"));
+      let tail = fs.readFileSync(path.join(schemaDir, names[i]!), "utf8");
+      while (dbTailHasStatement(tail, "")) {
+        const statement = relationalDb.prepare(tail);
+        const inspection = inspectRelationalSql(statement.sourceSQL, true);
+        if (inspection.error !== null) throw new Error(inspection.error);
+        statement.run();
+        tail = tail.slice(statement.sourceSQL.length);
+      }
     }
-    relationalDb.setAuthorizer(null);
+    if (relationalAuthorizerAvailable) setRelationalAuthorizer(relationalDb, null);
     relationalDb.exec(`PRAGMA user_version=${names.length};`);
     relationalDb.exec("COMMIT;");
   } catch (reason) {
-    relationalDb.setAuthorizer(null);
+    if (relationalAuthorizerAvailable) setRelationalAuthorizer(relationalDb, null);
     try { relationalDb.exec("ROLLBACK;"); } catch {}
     throw reason;
   } finally {
-    relationalDb.setAuthorizer(relationalAuthorizer);
+    if (relationalAuthorizerAvailable) setRelationalAuthorizer(relationalDb, relationalAuthorizer);
   }
 }
 
 if (sqliteSrc !== null) applyDevMigrations(sqliteSrc);
 
 function setRelationalQueryOnly(enabled: boolean): void {
-  relationalDb.setAuthorizer(null);
+  if (relationalAuthorizerAvailable) setRelationalAuthorizer(relationalDb, null);
   try {
     relationalDb.exec(`PRAGMA query_only=${enabled ? "ON" : "OFF"};`);
   } finally {
-    relationalDb.setAuthorizer(relationalAuthorizer);
+    if (relationalAuthorizerAvailable) setRelationalAuthorizer(relationalDb, relationalAuthorizer);
   }
 }
 
@@ -1360,6 +1367,8 @@ function runDbQuery(sql: unknown, rawParams: unknown, operation: PendingDbOperat
     return;
   }
   try {
+    const inspection = inspectRelationalSql(sql, true);
+    if (inspection.error !== null) throw new Error(inspection.error);
     setRelationalQueryOnly(true);
     const statement = relationalDb.prepare(sql);
     if (dbTailHasStatement(sql, statement.sourceSQL)) {
@@ -1425,10 +1434,13 @@ function performDbCmd(cmd: Cmdish): void {
     relationalTransaction("BEGIN IMMEDIATE;");
     began = true;
     for (const [sql, params] of validated) {
+      const inspection = inspectRelationalSql(sql, true);
+      if (inspection.error !== null) throw new Error(inspection.error);
       const statement = relationalDb.prepare(sql);
       if (dbTailHasStatement(sql, statement.sourceSQL)) throw new Error("relational exec statement contains stacked SQL");
       if (statement.columns().length !== 0) throw new Error("relational exec statement yields rows");
       statement.run(...dbBindArgs(sql, params));
+      if (!relationalAuthorizerAvailable) relationalChangedAllTables = true;
     }
     relationalTransaction("COMMIT;");
     began = false;

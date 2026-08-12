@@ -228,6 +228,12 @@ test("SQLite authorizer events enforce declared query and exec shapes", () => {
     const readOnly = analyzeSqlite(root);
     assert.equal(readOnly.diagnostics[0]?.rule, "NS1414");
     assert.match(readOnly.diagnostics[0]?.message ?? "", /:exec statement is read-only/);
+
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: insertFromCte :exec\nWITH input(id, folder_id, title) AS (VALUES(1, 1, 'x')) INSERT INTO note SELECT * FROM input;\n",
+    );
+    assert.deepEqual(analyzeSqlite(root).diagnostics, []);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -285,7 +291,7 @@ test("migration analysis applies the packaged runtime SQLite sandbox", () => {
     fs.mkdirSync(path.join(root, "schema"));
     fs.writeFileSync(
       path.join(root, "schema", "0001_init.sql"),
-      "PRAGMA user_version=99;\nCREATE TABLE note(id INTEGER PRIMARY KEY) STRICT;\n",
+      "PRAGMA 'user_version'=99;\nCREATE TABLE note(id INTEGER PRIMARY KEY) STRICT;\n",
     );
     const pragma = analyzeSqlite(root);
     assert.equal(pragma.diagnostics[0]?.rule, "NS1404");
@@ -334,6 +340,12 @@ test("analysis rejects Node-only SQLite modules and functions", () => {
     const table = analyzeSqlite(root);
     assert.equal(table.diagnostics[0]?.rule, "NS1414");
     assert.match(table.diagnostics[0]?.message ?? "", /not authorized|prohibited/i);
+
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: localPages\nWITH dbstat(name) AS (VALUES('local')), sqrt(value) AS (VALUES(4)) SELECT name FROM dbstat CROSS JOIN sqrt;\n",
+    );
+    assert.deepEqual(analyzeSqlite(root).diagnostics, []);
 
     fs.writeFileSync(
       path.join(root, "schema", "0001_init.sql"),

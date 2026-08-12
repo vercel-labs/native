@@ -258,7 +258,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "page": return model;
     case "failed": {
       const next = { refused: model.refused + 1 };
-      if (next.refused === 1) return [next, Cmd.db.exec([["PRAGMA user_version=9", []]], { ok: "next", err: "failed" })];
+      if (next.refused === 1) return [next, Cmd.db.exec([["PRAGMA 'user_version'=9", []]], { ok: "next", err: "failed" })];
       if (next.refused === 2) return [next, Cmd.db.query("SELECT sqrt(4)", [], { page: "page", done: "next", err: "failed" })];
       return next;
     }

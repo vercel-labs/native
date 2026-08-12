@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { constants as sqliteConstants, DatabaseSync, type StatementSync } from "node:sqlite";
-import { relationalRuntimePolicy } from "./sqlite_runtime_policy.ts";
+import { inspectRelationalSql, relationalRuntimePolicy, setRelationalAuthorizer } from "./sqlite_runtime_policy.ts";
 
 export interface SqliteDiagnostic {
   readonly rule: `NS14${number}`;
@@ -138,6 +138,17 @@ function tailHasStatement(sql: string, sourceSQL: string): boolean {
   return false;
 }
 
+function execMigrationSql(db: DatabaseSync, sql: string): void {
+  let tail = sql;
+  while (tailHasStatement(tail, "")) {
+    const statement = db.prepare(tail);
+    const inspection = inspectRelationalSql(statement.sourceSQL, true);
+    if (inspection.error !== null) throw new Error(inspection.error);
+    statement.run();
+    tail = tail.slice(statement.sourceSQL.length);
+  }
+}
+
 function sha256(parts: readonly string[]): string {
   const hash = crypto.createHash("sha256");
   for (const part of parts) hash.update(part).update("\0");
@@ -179,23 +190,22 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
     let migrationAuthorizerInstalled = false;
     let activeMigration: MigrationSource | undefined;
     try {
-      db.setAuthorizer((action, first, second) => {
+      migrationAuthorizerInstalled = setRelationalAuthorizer(db, (action, first, second) => {
         if (action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT) {
           return sqliteConstants.SQLITE_DENY;
         }
         return relationalRuntimePolicy(action, first, second);
       });
-      migrationAuthorizerInstalled = true;
       for (const migration of migrations) {
         activeMigration = migration;
         try {
-          db.exec(migration.sql);
+          execMigrationSql(db, migration.sql);
         } catch (error) {
           diagnostics.push(diag("NS1404", migration.file, 1, `SQLite rejected migration ${String(migration.version).padStart(4, "0")}: ${sqliteMessage(error)}.`, "Fix the SQL at this migration; native check applies the real SQLite dialect in memory.", "Shipping a migration that fails would prevent the app database from opening."));
           break;
         }
       }
-      db.setAuthorizer(null);
+      if (migrationAuthorizerInstalled) setRelationalAuthorizer(db, null);
       migrationAuthorizerInstalled = false;
       if (diagnostics.length === 0) {
         db.exec(`PRAGMA user_version=${migrations.at(-1)?.version ?? 0};`);
@@ -204,7 +214,7 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
       else db.exec("ROLLBACK;");
     } catch (error) {
       if (migrationAuthorizerInstalled) {
-        try { db.setAuthorizer(null); } catch {}
+        try { setRelationalAuthorizer(db, null); } catch {}
       }
       try { db.exec("ROLLBACK;"); } catch {}
       if (diagnostics.length === 0) {
@@ -237,7 +247,7 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
   if (fs.existsSync(queriesFile) && diagnostics.length === 0) {
     let statementWrites = false;
     let statementControlsTransaction = false;
-    db.setAuthorizer((action, first, second) => {
+    const queryAuthorizerInstalled = setRelationalAuthorizer(db, (action, first, second) => {
       if (action === sqliteConstants.SQLITE_INSERT || action === sqliteConstants.SQLITE_UPDATE || action === sqliteConstants.SQLITE_DELETE) statementWrites = true;
       if (action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT) statementControlsTransaction = true;
       return relationalRuntimePolicy(action, first, second);
@@ -284,8 +294,10 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
       try {
         statementWrites = false;
         statementControlsTransaction = false;
+        const inspection = inspectRelationalSql(sql, true);
+        if (inspection.error !== null) throw new Error(inspection.error);
         const statement = db.prepare(sql);
-        const writes = statementWrites;
+        const writes = queryAuthorizerInstalled ? statementWrites : inspection.writes;
         const controlsTransaction = statementControlsTransaction;
         if (tailHasStatement(sql, statement.sourceSQL)) throw new Error("declared query contains more than one statement");
         const columns = statement.columns();
