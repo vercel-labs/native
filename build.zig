@@ -637,6 +637,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "cannot resolve its TypeScript toolchain" },
         .{ .path = "build/app.zig", .pattern = "std.process.exit(1);" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-pin-cache-inputs", "Verify both TypeScript service build graphs invalidate frontend contracts when the exact scriptc pin changes", &.{
+        .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
+        .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
         .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
         .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },
@@ -3395,6 +3399,10 @@ fn externalCoreFixtureModule(
     for (frontend_sources) |source| {
         check.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));
     }
+    // Service contracts echo the exact scriptc pin read from this manifest.
+    // Declare that runtime read explicitly so a compiler bump invalidates a
+    // warm build cache before the compile lane checks the echoed version.
+    if (spec.emit_services) check.addFileInput(b.path("packages/core/package.json"));
 
     // corewire projects the generated compile entry and its profile in
     // one invocation, so the profile's entry spelling and the facade

@@ -418,6 +418,10 @@ fn tsCoreStage(
     for (frontend_sources) |source| {
         check.addFileInput(dep.path(b.fmt("packages/core/src/{s}", .{source})));
     }
+    // Service contracts echo the exact scriptc pin read from this manifest.
+    // Declare that runtime read explicitly so a compiler bump invalidates a
+    // warm build cache before the compile lane checks the echoed version.
+    if (has_services) check.addFileInput(dep.path("packages/core/package.json"));
 
     // corewire, compiled from the SDK dependency for the build host: one
     // invocation projects the generated compile entry and its profile,
@@ -450,7 +454,7 @@ fn tsCoreStage(
 
         // Ordinary service TypeScript is staged without core-subset rewrites.
         // The one service-boundary lowering turns NS1067's `{ kind, message }`
-        // throw into the tagged Error shape scriptc 0.0.22 can catch from an
+        // throw into the tagged Error shape scriptc 0.0.26 can catch from an
         // imported op; no deterministic profile fences participate here.
         const service_stage_run = b.addSystemCommand(&.{node});
         service_stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_services.mjs"));
