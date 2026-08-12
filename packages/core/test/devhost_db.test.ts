@@ -489,6 +489,52 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   }
 });
 
+test("the devhost retires stale live-query slots before arming disjoint replacements", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-live-churn-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    const oldSubs = Array.from({ length: 16 }, (_, index) => `
+      { op: "db_live", key: "old-${index}", pageKind: "page", doneKind: "done", errKind: "failed",
+        sql: "SELECT ${index} AS value", params: [], tables: ["note"] }`).join(",");
+    fs.writeFileSync(core, `
+import { Sub } from "@native-sdk/core";
+export interface Model { readonly replaced: boolean; readonly replacementDone: number; }
+export type Msg =
+  | { readonly kind: "replace" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { replaced: false, replacementDone: 0 }; }
+export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.replaced) return Sub.batch([${oldSubs}
+  ]);
+  return { op: "db_live", key: "new", pageKind: "page", doneKind: "done", errKind: "failed",
+    sql: "SELECT 100 AS value", params: [], tables: ["note"] };
+}
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "replace": return { ...model, replaced: true };
+    case "done": return model.replaced ? { ...model, replacementDone: model.replacementDone + 1 } : model;
+    case "page":
+    case "failed": return model;
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"replace"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal((run.stdout.match(/sub cancel db_live old-/g) ?? []).length, 16, run.stdout);
+    assert.match(run.stdout, /sub arm db_live new/);
+    assert.match(run.stdout, /"replaced":true,"replacementDone":1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("virtual-host restarts release every live relational operation slot", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-restart-"));

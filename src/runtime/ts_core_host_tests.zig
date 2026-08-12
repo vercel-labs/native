@@ -160,6 +160,7 @@ const mini_core = struct {
         ustamp_ms: u64,
         ucode: u64,
         db_live: bool,
+        db_live_set: u8,
     };
 
     pub const Msg = union(enum) {
@@ -331,6 +332,8 @@ const mini_core = struct {
         arm_db_live, // 96: install a live query under wire key "shared-db"
         query_over_db_live, // 97: a one-shot query collides with that live key
         stop_db_live_with_cancel, // 98: remove the Sub while Cmd.cancel names its key
+        arm_full_db_live_set, // 99: fill all relational slots with live keys
+        replace_full_db_live_set, // 100: replace them with one disjoint key
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -339,6 +342,13 @@ const mini_core = struct {
         "fill-08", "fill-09", "fill-10", "fill-11",
         "fill-12", "fill-13", "fill-14", "fill-15",
         "fill-16",
+    };
+
+    const db_live_set_a_keys = [_][]const u8{
+        "old-db-00", "old-db-01", "old-db-02", "old-db-03",
+        "old-db-04", "old-db-05", "old-db-06", "old-db-07",
+        "old-db-08", "old-db-09", "old-db-10", "old-db-11",
+        "old-db-12", "old-db-13", "old-db-14", "old-db-15",
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -417,6 +427,7 @@ const mini_core = struct {
                 .ustamp_ms = 0,
                 .ucode = 0,
                 .db_live = false,
+                .db_live_set = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -825,6 +836,16 @@ const mini_core = struct {
                 out.db_live = false;
                 return .{ .model = out, .cmd = cmdCancel("shared-db") };
             },
+            .arm_full_db_live_set => {
+                const out = frameCreate(model.*);
+                out.db_live_set = 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .replace_full_db_live_set => {
+                const out = frameCreate(model.*);
+                out.db_live_set = 2;
+                return .{ .model = out, .cmd = "" };
+            },
         }
     }
 
@@ -838,11 +859,21 @@ const mini_core = struct {
     pub fn subscriptions(model: *const Model) []const u8 {
         const timer = if (model.polling) subTimer("tick", if (model.fast) 40 else 100, 9) else "";
         const live = if (model.db_live) subDbLive("shared-db", 7, 12, 8, "SELECT id FROM item", "item") else "";
-        if (timer.len == 0) return live;
-        if (live.len == 0) return timer;
-        const out = rt.frameAlloc(u8, timer.len + live.len);
-        @memcpy(out[0..timer.len], timer);
-        @memcpy(out[timer.len..], live);
+        const live_set = switch (model.db_live_set) {
+            1 => subDbLiveBatch(&db_live_set_a_keys),
+            2 => subDbLive("new-db", 7, 12, 8, "SELECT id FROM item", "item"),
+            else => "",
+        };
+        const parts = [_][]const u8{ timer, live, live_set };
+        var total: usize = 0;
+        for (parts) |part| total += part.len;
+        if (total == 0) return "";
+        const out = rt.frameAlloc(u8, total);
+        var at: usize = 0;
+        for (parts) |part| {
+            @memcpy(out[at..][0..part.len], part);
+            at += part.len;
+        }
         return out;
     }
 
@@ -1279,6 +1310,23 @@ const mini_core = struct {
         @memcpy(out[at..][0..table.len], table);
         return out;
     }
+
+    fn subDbLiveBatch(keys: []const []const u8) []const u8 {
+        var records: [effects_mod.max_db_effects][]const u8 = undefined;
+        std.debug.assert(keys.len <= records.len);
+        var total: usize = 0;
+        for (keys, 0..) |key, index| {
+            records[index] = subDbLive(key, 7, 12, 8, "SELECT id FROM item", "item");
+            total += records[index].len;
+        }
+        const out = rt.frameAlloc(u8, total);
+        var at: usize = 0;
+        for (records[0..keys.len]) |record| {
+            @memcpy(out[at..][0..record.len], record);
+            at += record.len;
+        }
+        return out;
+    }
 };
 
 const Host = ts_core_host.TsCoreHost(mini_core);
@@ -1467,6 +1515,20 @@ test "Cmd.cancel leaves a live query to declarative subscription reconciliation"
 
     // The same bridge/engine slot is immediately reusable by a one-shot read.
     Host.dispatch(fx, .query_over_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+}
+
+test "live-query reconciliation retires stale slots before arming disjoint replacements" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .arm_full_db_live_set);
+    try std.testing.expectEqual(effects_mod.max_db_effects, fx.pendingDbCount());
+
+    // Every old key disappears at once. The final declaration contains one
+    // query and must fit without trying to hold its sixteen predecessors too.
+    Host.dispatch(fx, .replace_full_db_live_set);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
 }
 

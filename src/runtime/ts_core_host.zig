@@ -2909,6 +2909,19 @@ pub fn TsCoreHost(comptime core: type) type {
             const subs = core.subscriptions(model_root);
             var seen_timers = [_]bool{false} ** timers.len;
             var seen_db = [_]bool{false} ** dbs.len;
+
+            // Free live DB slots whose wire keys disappeared before the pass
+            // allocates replacements. Otherwise two independently valid sets
+            // can overflow the shared family at their transient union (for
+            // example, sixteen old keys replaced by one new key).
+            const retained_db = retainedDbSubscriptions(subs);
+            for (&dbs, 0..) |*entry, index| {
+                if (entry.used and entry.live and !retained_db[index]) {
+                    fx.dbUnsubscribe(db_key_base + index);
+                    entry.used = false;
+                }
+            }
+
             var at: usize = 0;
             while (at < subs.len) {
                 const record_start = at;
@@ -3015,12 +3028,41 @@ pub fn TsCoreHost(comptime core: type) type {
                     fx.cancelTimer(timer_key_base + index);
                 }
             }
-            for (&dbs, 0..) |*entry, index| {
-                if (entry.used and entry.live and !seen_db[index]) {
-                    fx.dbUnsubscribe(db_key_base + index);
-                    entry.used = false;
-                }
-            }
+        }
+
+        /// Parse the inert subscription stream without mutating it and mark
+        /// the currently-live DB entries whose public keys remain declared.
+        /// Reconciliation uses this pre-pass to retire genuinely stale slots
+        /// before it allocates any new ones.
+        fn retainedDbSubscriptions(subs: []const u8) [runtime_effects.max_db_effects]bool {
+            var retained = [_]bool{false} ** runtime_effects.max_db_effects;
+            var at: usize = 0;
+            while (at < subs.len) switch (takeByte(subs, &at)) {
+                0x01 => {
+                    _ = takeShortBytes(subs, &at);
+                    _ = takeBytes(subs, &at, 8);
+                    _ = takeByte(subs, &at);
+                },
+                0x02 => {
+                    const key = takeShortBytes(subs, &at);
+                    if (key.len == 0) @panic("ts core host: a live query requires a non-empty subscription key");
+                    _ = takeByte(subs, &at);
+                    _ = takeByte(subs, &at);
+                    _ = takeByte(subs, &at);
+                    _ = takeLongBytes(subs, &at);
+                    const param_count: usize = @intCast(takeU32(subs, &at));
+                    if (param_count > runtime_effects.max_effect_db_parameters) @panic("ts core host: a live query carries too many SQL parameters");
+                    for (0..param_count) |_| _ = takeDbValue(subs, &at);
+                    const table_count: usize = @intCast(takeU32(subs, &at));
+                    if (table_count == 0 or table_count > runtime_effects.max_effect_db_live_tables) @panic("ts core host: a live query carries an invalid dependency table set");
+                    for (0..table_count) |_| _ = takeShortBytes(subs, &at);
+                    if (findDb(key)) |index| {
+                        if (dbs[index].live) retained[index] = true;
+                    }
+                },
+                else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
+            };
+            return retained;
         }
 
         fn freeTimerIndex() ?usize {

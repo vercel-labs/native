@@ -1766,6 +1766,19 @@ function reconcileSubs(): void {
     }
   }
 
+  // Retire absent live queries before allocating their replacements. Both
+  // sets may fit the shared database family independently even when their
+  // transient union does not (for example, sixteen old keys replaced by one
+  // new key).
+  for (const [key, active] of [...liveDbByKey]) {
+    if (!declaredLive.has(key)) {
+      releaseDbOperation(active.operation, true);
+      liveDbByKey.delete(key);
+      dirtyLiveDbKeys.delete(key);
+      say(`sub cancel db_live ${key}`);
+    }
+  }
+
   for (const [key, sub] of declaredLive) {
     const tables = sub.tables;
     const params = sub.params;
@@ -1807,14 +1820,6 @@ function reconcileSubs(): void {
     say(`sub ${active ? "re-arm" : "arm"} db_live ${key}`);
     if (!capabilities.has("sqlite")) rejectDbOperation(sub, true, "rejected", operation);
     else runDbQuery(live.sql, live.params, operation);
-  }
-  for (const [key, active] of [...liveDbByKey]) {
-    if (!declaredLive.has(key)) {
-      releaseDbOperation(active.operation, true);
-      liveDbByKey.delete(key);
-      dirtyLiveDbKeys.delete(key);
-      say(`sub cancel db_live ${key}`);
-    }
   }
 }
 
