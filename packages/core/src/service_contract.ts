@@ -310,7 +310,10 @@ function typeSpelling(ref: ServiceTypeRef): string {
     case "i64": return "number";
     case "bytes": return "Uint8Array";
     case "optional": return `${typeSpelling(ref.inner)} | null`;
-    case "slice": return `readonly ${typeSpelling(ref.elem)}[]`;
+    case "slice": {
+      const elem = typeSpelling(ref.elem);
+      return `readonly ${ref.elem.kind === "optional" || ref.elem.kind === "slice" ? `(${elem})` : elem}[]`;
+    }
     case "record":
     case "enum":
     case "union": return ref.name;
@@ -490,6 +493,10 @@ export function emitServiceContract(
         }
         if (boundaryParameters.some((parameter) => isServiceCancellationType(tast, parameter.type))) {
           diagnostics.push(report(`\`${opName}\` places ServiceCancellation before another parameter; the generated cancellation capability must be last.`, stmt.name));
+          continue;
+        }
+        if (boundaryParameters.length > 2) {
+          diagnostics.push(report(`\`${opName}\` has more than one data parameter; service operations take at most one request followed by the generated emit capability.`, stmt.name));
           continue;
         }
         if (boundaryParameters.length > 0) {

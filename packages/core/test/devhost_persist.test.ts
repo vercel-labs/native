@@ -7,6 +7,46 @@ import fs from "node:fs";
 import os from "node:os";
 import { automationProtocolFingerprint, journalFormatFingerprint, readDevhostJournal } from "../src/devhost_journal.mjs";
 
+function runTemporaryDevhost(
+  files: Record<string, string>,
+  options: { script?: readonly string[]; serviceCwd?: boolean; env?: NodeJS.ProcessEnv; timeout?: number } = {},
+): { run: ReturnType<typeof spawnSync>; serviceCwd: string } {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-devhost-services-"));
+  const serviceCwd = path.join(root, "app-data");
+  try {
+    for (const [relative, source] of Object.entries(files)) {
+      const absolute = path.join(root, relative);
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, source);
+    }
+    const script = path.join(root, "scenario.ndjson");
+    fs.writeFileSync(script, `${(options.script ?? ['{"settle":true}']).join("\n")}\n`);
+    const argv = [
+      path.join(packageDir, "src", "devhost.ts"),
+      path.join(root, "src", "core.ts"),
+      "--script",
+      script,
+    ];
+    if (options.serviceCwd) argv.push("--service-cwd", serviceCwd);
+    const run = spawnSync(process.execPath, argv, {
+      cwd: root,
+      encoding: "utf8",
+      env: options.env ?? process.env,
+      timeout: options.timeout ?? 10_000,
+    });
+    return { run, serviceCwd };
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function lastModel(stdout: string): Record<string, unknown> {
+  const line = stdout.split("\n").filter((candidate) => candidate.startsWith("model ")).at(-1);
+  assert.ok(line, stdout);
+  return JSON.parse(line.slice("model ".length)) as Record<string, unknown>;
+}
+
 test("the devhost keeps Cmd.persist in memory and restores it through the boot route", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const repo = path.resolve(packageDir, "..", "..");
@@ -64,6 +104,144 @@ test("the devhost executes typed services, vendored npm, and stream events direc
   assert.match(run.stdout, /service feeds\.parse ok/);
   assert.match(run.stdout, /cmd channel_open key=77 event=stream_event/);
   assert.match(run.stdout, /"successes":3,"failures":0,"chunks":3/);
+});
+
+test("devhost services use the app-data cwd and the packaged environment allowlist", () => {
+  const { run, serviceCwd } = runTemporaryDevhost({
+    "src/core.ts": `
+import { Cmd } from "@native-sdk/core";
+import { authorityInspect } from "@native-sdk/services";
+export interface Model { readonly facts: Uint8Array; readonly failed: boolean; }
+export type Msg =
+  | { readonly kind: "inspected"; readonly facts: Uint8Array }
+  | { readonly kind: "failed"; readonly error: Uint8Array };
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [{ facts: new Uint8Array(0), failed: false }, authorityInspect({ key: "authority", ok: "inspected", err: "failed" })];
+}
+export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "inspected": return [{ facts: msg.facts, failed: false }, Cmd.none];
+    case "failed": return [{ facts: msg.error, failed: true }, Cmd.none];
+  }
+}`,
+    "src/services/authority.ts": `
+export function inspect(): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({
+    cwd: process.cwd(),
+    tz: process.env.TZ ?? "",
+    secret: process.env.DEVHOST_SECRET ?? "",
+    sdk: process.env.NATIVE_SDK_SECRET ?? "",
+  }));
+}`,
+  }, {
+    serviceCwd: true,
+    env: { ...process.env, TZ: "UTC", DEVHOST_SECRET: "must-not-cross", NATIVE_SDK_SECRET: "must-not-cross-sdk" },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, new RegExp(path.basename(serviceCwd)));
+  assert.match(run.stdout, /\\"tz\\":\\"UTC\\"/);
+  assert.doesNotMatch(run.stdout, /must-not-cross/);
+});
+
+test("a service module import failure fails its queued request instead of hanging before ready", () => {
+  const { run } = runTemporaryDevhost({
+    "src/core.ts": `
+import { Cmd } from "@native-sdk/core";
+import { brokenRun } from "@native-sdk/services";
+export interface Model { readonly failures: number; }
+export type Msg =
+  | { readonly kind: "done"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly error: Uint8Array };
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [{ failures: 0 }, brokenRun({ key: "broken", ok: "done", err: "failed" })];
+}
+export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "done": return [{ failures: -1 }, Cmd.none];
+    case "failed": return [{ failures: model.failures + 1 }, Cmd.none];
+  }
+}`,
+    "src/services/broken.ts": `
+const invalid = JSON.parse("{");
+void invalid;
+export function run(): Uint8Array { return new Uint8Array(0); }`,
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(lastModel(run.stdout).failures, 1);
+});
+
+test("a service terminal handler can immediately reuse the completed route key", () => {
+  const { run } = runTemporaryDevhost({
+    "src/core.ts": `
+import { Cmd } from "@native-sdk/core";
+import { workerRun } from "@native-sdk/services";
+export interface Model { readonly successes: number; readonly failures: number; }
+export type Msg =
+  | { readonly kind: "done"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly error: Uint8Array };
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [{ successes: 0, failures: 0 }, workerRun({ key: "same", ok: "done", err: "failed" })];
+}
+export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "done": {
+      const next = { successes: model.successes + 1, failures: model.failures };
+      if (next.successes === 1) return [next, workerRun({ key: "same", ok: "done", err: "failed" })];
+      return [next, Cmd.none];
+    }
+    case "failed": return [{ successes: model.successes, failures: model.failures + 1 }, Cmd.none];
+  }
+}`,
+    "src/services/worker.ts": `export function run(): Uint8Array { return new Uint8Array([1]); }`,
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(lastModel(run.stdout), { successes: 2, failures: 0 });
+});
+
+test("the devhost enforces @streamBuffer and reports dropped chunks", () => {
+  const { run } = runTemporaryDevhost({
+    "src/core.ts": `
+import { Cmd } from "@native-sdk/core";
+import { streamBurst } from "@native-sdk/services";
+export type StreamState = "data" | "closed" | "rejected";
+export interface Model { readonly chunks: number; readonly dropped: number; readonly closed: boolean; readonly failures: number; }
+export type Msg =
+  | { readonly kind: "done"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly error: Uint8Array }
+  | { readonly kind: "stream_event"; readonly key: number; readonly state: StreamState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [{ chunks: 0, dropped: 0, closed: false, failures: 0 }, streamBurst({ key: "burst", channelKey: 91, event: "stream_event", ok: "done", err: "failed" })];
+}
+export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "done": return [model, Cmd.none];
+    case "failed": return [{ ...model, failures: model.failures + 1 }, Cmd.none];
+    case "stream_event": return [{
+      ...model,
+      chunks: msg.state === "data" ? model.chunks + 1 : model.chunks,
+      dropped: msg.droppedTotal,
+      closed: msg.state === "closed" ? true : model.closed,
+    }, Cmd.none];
+  }
+}`,
+    "src/services/stream.ts": `
+/** @streamBuffer 1 */
+export function burst(emit: (chunk: Uint8Array) => void): Uint8Array {
+  const chunk = new Uint8Array([1]);
+  for (let index = 0; index < 50000; index++) emit(chunk);
+  return chunk;
+}`,
+  }, { timeout: 20_000 });
+
+  assert.equal(run.status, 0, run.stderr);
+  const model = lastModel(run.stdout);
+  assert.equal(model.failures, 0);
+  assert.equal(model.closed, true);
+  assert.ok((model.chunks as number) > 0 && (model.chunks as number) < 50_000, JSON.stringify(model));
+  assert.ok((model.dropped as number) > 0, JSON.stringify(model));
 });
 
 test("the devhost cooperatively cancels streams and enforces service deadlines", () => {

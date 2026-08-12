@@ -14,7 +14,9 @@
 //! imports are real files; the resolver hook maps only the SDK names).
 
 const std = @import("std");
+const app_dirs = @import("app_dirs");
 const buildgraph = @import("buildgraph.zig");
+const debug = @import("debug");
 const process_tree = @import("process_tree.zig");
 
 pub const Error = error{
@@ -524,6 +526,7 @@ pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env:
 
 pub const DevHostOptions = struct {
     base_env: *std.process.Environ.Map,
+    app_id: []const u8,
     app_name: []const u8 = "app",
     canvas_label: []const u8 = "canvas",
     window_width: f32 = 800,
@@ -549,6 +552,27 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     defer allocator.free(devhost_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
+    const app_root = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(app_root);
+    const core_path = try std.fs.path.join(allocator, &.{ app_root, "src/core.ts" });
+    defer allocator.free(core_path);
+    var script_path: ?[]u8 = null;
+    defer if (script_path) |value| allocator.free(value);
+    if (options.script) |script| {
+        script_path = if (std.fs.path.isAbsolute(script))
+            try allocator.dupe(u8, script)
+        else
+            try std.fs.path.join(allocator, &.{ app_root, script });
+    }
+    var app_data_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const app_data_dir = app_dirs.resolveOne(
+        .{ .name = options.app_id },
+        app_dirs.currentPlatform(),
+        debug.envFromMap(options.base_env),
+        .data,
+        &app_data_buffer,
+    ) catch "";
+    if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(io, app_data_dir) catch {};
     // The harness runs the frontend tier under node, so it needs the
     // TypeScript toolchain to resolve exactly like check/build do.
     try ensureResolvedTranspiler(allocator, io, framework_root);
@@ -565,7 +589,7 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     }
     try argv.append(allocator, runner_path);
     try argv.append(allocator, devhost_path);
-    try argv.append(allocator, "src/core.ts");
+    try argv.append(allocator, core_path);
     const window_width_arg = try std.fmt.allocPrint(allocator, "{d}", .{options.window_width});
     defer allocator.free(window_width_arg);
     const window_height_arg = try std.fmt.allocPrint(allocator, "{d}", .{options.window_height});
@@ -580,8 +604,11 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
         "--window-height",
         window_height_arg,
     });
-    if (options.script) |script| {
+    if (script_path) |script| {
         try argv.appendSlice(allocator, &.{ "--script", script });
+    }
+    if (app_data_dir.len > 0) {
+        try argv.appendSlice(allocator, &.{ "--service-cwd", app_data_dir });
     }
     if (options.persist_routes) |routes| {
         try argv.appendSlice(allocator, &.{

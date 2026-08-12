@@ -8,13 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-
-const appRoot = path.resolve(process.argv[2] ?? ".");
-const requested = process.argv.slice(3);
-if (requested.length === 0 || requested.some((spec) => !/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+@\d+\.\d+\.\d+$/i.test(spec))) {
-  console.error("usage: native vendor [dir] <package@exact-version> [more packages...]");
-  process.exit(2);
-}
+import { fileURLToPath } from "node:url";
 
 function packageContentHash(root) {
   const files = [];
@@ -56,21 +50,13 @@ function packageDirectories(nodeModules) {
   return out;
 }
 
-function replaceServicePackages(source, entries) {
-  const rendered = [
-    "    .service_packages = .{",
-    ...entries.map((entry) => `        .{ .name = ${JSON.stringify(entry.name)}, .version = ${JSON.stringify(entry.version)}, .content_hash = ${JSON.stringify(entry.content_hash)} },`),
-    "    },",
-  ].join("\n");
+function servicePackagesField(source) {
   const marker = /(^|\n)[ \t]*\.service_packages[ \t]*=[ \t]*\.\{/m;
   const match = marker.exec(source);
-  if (!match) {
-    const close = source.lastIndexOf("}");
-    if (close < 0) throw new Error("app.zon has no closing top-level brace");
-    return `${source.slice(0, close).trimEnd()}\n${rendered}\n${source.slice(close)}`;
-  }
+  if (!match) return null;
   const fieldStart = match.index + match[1].length;
-  let at = source.indexOf("{", fieldStart);
+  const open = source.indexOf("{", fieldStart);
+  let at = open;
   let depth = 0;
   let string = false;
   let escaped = false;
@@ -88,42 +74,116 @@ function replaceServicePackages(source, entries) {
       let end = at + 1;
       while (/[ \t]/.test(source[end] ?? "")) end++;
       if (source[end] === ",") end++;
-      return source.slice(0, fieldStart) + rendered + source.slice(end);
+      return { fieldStart, open, close: at, end };
     }
   }
   throw new Error("app.zon service_packages field is not balanced");
 }
 
-const manifestPath = path.join(appRoot, "app.zon");
-if (!fs.existsSync(manifestPath)) throw new Error(`${manifestPath} does not exist`);
-const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-vendor-"));
-try {
-  const install = spawnSync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--prefix", work, ...requested], { stdio: "inherit" });
-  if (install.status !== 0) process.exit(install.status ?? 1);
-  const nodeModules = path.join(work, "node_modules");
-  const packages = packageDirectories(nodeModules);
-  for (const packageDir of packages) {
-    if (fs.existsSync(path.join(packageDir, "node_modules"))) {
-      throw new Error("the resolved npm graph contains nested package versions; choose a dependency set npm can flatten before vendoring it for the static service tier");
-    }
-  }
-  const vendorRoot = path.join(appRoot, "src", "services", "vendor");
-  fs.mkdirSync(vendorRoot, { recursive: true });
+export function readServicePackages(source) {
+  const field = servicePackagesField(source);
+  if (!field) return [];
+  const body = source.slice(field.open + 1, field.close);
   const entries = [];
-  for (const packageDir of packages) {
-    const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
-    if (typeof manifest.name !== "string" || typeof manifest.version !== "string") throw new Error(`${packageDir} has no package identity`);
-    const destination = path.join(vendorRoot, ...manifest.name.split("/"));
-    fs.rmSync(destination, { recursive: true, force: true });
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.cpSync(packageDir, destination, { recursive: true });
-    entries.push({ name: manifest.name, version: manifest.version, content_hash: packageContentHash(destination) });
+  const pattern = /\.\{\s*\.name\s*=\s*("(?:\\.|[^"\\])*")\s*,\s*\.version\s*=\s*("(?:\\.|[^"\\])*")\s*,\s*\.content_hash\s*=\s*("(?:\\.|[^"\\])*")\s*,?\s*\}/g;
+  for (const match of body.matchAll(pattern)) {
+    const name = JSON.parse(match[1]);
+    const version = JSON.parse(match[2]);
+    const contentHash = JSON.parse(match[3]);
+    if (typeof name !== "string" || typeof version !== "string" || typeof contentHash !== "string") {
+      throw new Error("app.zon service_packages contains a non-string package fact");
+    }
+    entries.push({ name, version, content_hash: contentHash });
   }
-  entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const declaredCount = body.match(/\.name\s*=/g)?.length ?? 0;
+  if (entries.length !== declaredCount) throw new Error("app.zon service_packages is not in the package-fact shape written by native vendor");
+  return entries;
+}
+
+function packageNameFromSpec(spec) {
+  return spec.slice(0, spec.lastIndexOf("@"));
+}
+
+export function mergePackageSpecs(source, requested) {
+  const specs = new Map(readServicePackages(source).map((entry) => [entry.name, `${entry.name}@${entry.version}`]));
+  for (const spec of requested) specs.set(packageNameFromSpec(spec), spec);
+  return [...specs].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, spec]) => spec);
+}
+
+export function replaceServicePackages(source, entries) {
+  const rendered = [
+    "    .service_packages = .{",
+    ...entries.map((entry) => `        .{ .name = ${JSON.stringify(entry.name)}, .version = ${JSON.stringify(entry.version)}, .content_hash = ${JSON.stringify(entry.content_hash)} },`),
+    "    },",
+  ].join("\n");
+  const field = servicePackagesField(source);
+  if (!field) {
+    const close = source.lastIndexOf("}");
+    if (close < 0) throw new Error("app.zon has no closing top-level brace");
+    return `${source.slice(0, close).trimEnd()}\n${rendered}\n${source.slice(close)}`;
+  }
+  return source.slice(0, field.fieldStart) + rendered + source.slice(field.end);
+}
+
+export function replaceVendorTree(vendorRoot, stageRoot) {
+  fs.mkdirSync(path.dirname(vendorRoot), { recursive: true });
+  fs.rmSync(vendorRoot, { recursive: true, force: true });
+  fs.renameSync(stageRoot, vendorRoot);
+}
+
+function main(argv) {
+  const appRoot = path.resolve(argv[2] ?? ".");
+  const requested = argv.slice(3);
+  if (requested.length === 0 || requested.some((spec) => !/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+@\d+\.\d+\.\d+$/i.test(spec))) {
+    console.error("usage: native vendor [dir] <package@exact-version> [more packages...]");
+    return 2;
+  }
+
+  const manifestPath = path.join(appRoot, "app.zon");
+  if (!fs.existsSync(manifestPath)) throw new Error(`${manifestPath} does not exist`);
   const current = fs.readFileSync(manifestPath, "utf8");
-  fs.writeFileSync(manifestPath, replaceServicePackages(current, entries));
-  console.log(`vendored ${entries.length} package${entries.length === 1 ? "" : "s"} into src/services/vendor and updated app.zon`);
-  for (const entry of entries) console.log(`  ${entry.name}@${entry.version} ${entry.content_hash}`);
-} finally {
-  fs.rmSync(work, { recursive: true, force: true });
+  const installSpecs = mergePackageSpecs(current, requested);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-vendor-"));
+  const servicesRoot = path.join(appRoot, "src", "services");
+  const stageRoot = path.join(appRoot, ".native", `.service-vendor-stage-${process.pid}-${Date.now()}`);
+  try {
+    const install = spawnSync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--prefix", work, ...installSpecs], { stdio: "inherit" });
+    if (install.status !== 0) return install.status ?? 1;
+    const nodeModules = path.join(work, "node_modules");
+    const packages = packageDirectories(nodeModules);
+    for (const packageDir of packages) {
+      if (fs.existsSync(path.join(packageDir, "node_modules"))) {
+        throw new Error("the resolved npm graph contains nested package versions; choose a dependency set npm can flatten before vendoring it for the static service tier");
+      }
+    }
+    fs.mkdirSync(stageRoot, { recursive: true });
+    const entries = [];
+    for (const packageDir of packages) {
+      const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
+      if (typeof manifest.name !== "string" || typeof manifest.version !== "string") throw new Error(`${packageDir} has no package identity`);
+      const destination = path.join(stageRoot, ...manifest.name.split("/"));
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.cpSync(packageDir, destination, { recursive: true });
+      entries.push({ name: manifest.name, version: manifest.version, content_hash: packageContentHash(destination) });
+    }
+    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    const vendorRoot = path.join(servicesRoot, "vendor");
+    replaceVendorTree(vendorRoot, stageRoot);
+    fs.writeFileSync(manifestPath, replaceServicePackages(current, entries));
+    console.log(`vendored ${entries.length} package${entries.length === 1 ? "" : "s"} into src/services/vendor and updated app.zon`);
+    for (const entry of entries) console.log(`  ${entry.name}@${entry.version} ${entry.content_hash}`);
+    return 0;
+  } finally {
+    fs.rmSync(stageRoot, { recursive: true, force: true });
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    process.exitCode = main(process.argv);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

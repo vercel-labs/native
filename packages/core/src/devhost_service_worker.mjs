@@ -23,7 +23,20 @@ function errorFact(error) {
   return { kind: "service_error", message: "service operation threw" };
 }
 
-parentPort.on("message", ({ id, name, request, cancelBuffer }) => {
+function incrementDrops(view) {
+  const mask = 0xffffffffn;
+  for (;;) {
+    const current = Atomics.load(view, 0);
+    const pending = current & mask;
+    const total = current >> 32n;
+    const nextPending = pending === mask ? mask : pending + 1n;
+    const nextTotal = total === mask ? mask : total + 1n;
+    const next = (nextTotal << 32n) | nextPending;
+    if (Atomics.compareExchange(view, 0, current, next) === current) return;
+  }
+}
+
+parentPort.on("message", ({ id, name, request, cancelBuffer, streamStateBuffer }) => {
   const service = operations.get(name);
   if (!service) {
     parentPort.postMessage({ id, type: "error", error: { kind: "service_host", message: `unknown service operation ${name}` }, elapsed: 0 });
@@ -31,6 +44,8 @@ parentPort.on("message", ({ id, name, request, cancelBuffer }) => {
   }
   const started = performance.now();
   const flag = new Int32Array(cancelBuffer);
+  const streamInFlight = new Int32Array(streamStateBuffer, 0, 1);
+  const streamDrops = new BigUint64Array(streamStateBuffer, 8, 1);
   const cancellation = {
     cancelled: () => Atomics.load(flag, 0) !== 0,
     throwIfCancelled: () => {
@@ -43,7 +58,21 @@ parentPort.on("message", ({ id, name, request, cancelBuffer }) => {
   };
   const emit = (chunk) => {
     cancellation.throwIfCancelled();
-    parentPort.postMessage({ id, type: "chunk", chunk });
+    const limit = service.operation.stream?.in_flight ?? 0;
+    for (;;) {
+      const inFlight = Atomics.load(streamInFlight, 0);
+      if (inFlight >= limit) {
+        incrementDrops(streamDrops);
+        return;
+      }
+      if (Atomics.compareExchange(streamInFlight, 0, inFlight, inFlight + 1) === inFlight) break;
+    }
+    try {
+      parentPort.postMessage({ id, type: "chunk", chunk });
+    } catch (error) {
+      Atomics.sub(streamInFlight, 0, 1);
+      throw error;
+    }
   };
   try {
     const args = [];

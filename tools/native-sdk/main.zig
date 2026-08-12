@@ -305,6 +305,7 @@ pub fn main(init: std.process.Init) !void {
             }
             tooling.ts_core.runDevHost(allocator, init.io, framework_root, .{
                 .base_env = init.environ_map,
+                .app_id = dev_metadata.id,
                 .app_name = dev_metadata.name,
                 .canvas_label = dev_canvas_label,
                 .window_width = dev_window_width,

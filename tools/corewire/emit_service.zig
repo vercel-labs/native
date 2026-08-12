@@ -544,7 +544,10 @@ fn emitTsType(w: *std.Io.Writer, ref: service.TypeRef) !void {
         },
         .slice => {
             try w.writeAll("readonly ");
+            const parenthesize = ref.elem.?.kind == .optional or ref.elem.?.kind == .slice;
+            if (parenthesize) try w.writeByte('(');
             try emitTsType(w, ref.elem.?.*);
+            if (parenthesize) try w.writeByte(')');
             try w.writeAll("[]");
         },
         .record, .@"enum", .@"union" => try w.writeAll(ref.name.?),
@@ -641,6 +644,9 @@ pub fn emitClient(arena: std.mem.Allocator, contract: service.Contract) ![]const
 }
 
 test "service projection derives host dispatch and registry from one contract" {
+    const bytes_type: service.TypeRef = .{ .kind = .bytes };
+    const optional_bytes: service.TypeRef = .{ .kind = .optional, .inner = &bytes_type };
+    const slice_optional_bytes: service.TypeRef = .{ .kind = .slice, .elem = &optional_bytes };
     const operations = [_]service.Operation{
         .{
             .name = "feeds.parse",
@@ -663,6 +669,18 @@ test "service projection derives host dispatch and registry from one contract" {
             .result = .{ .kind = .bytes },
             .deadline_ms = null,
             .cancellable = true,
+            .stream = null,
+            .source_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+        .{
+            .name = "feeds.nested",
+            .client = "feedsNested",
+            .module = "src/services/feeds.ts",
+            .@"export" = "nested",
+            .request = slice_optional_bytes,
+            .result = slice_optional_bytes,
+            .deadline_ms = null,
+            .cancellable = false,
             .stream = null,
             .source_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
@@ -693,6 +711,11 @@ test "service projection derives host dispatch and registry from one contract" {
     try std.testing.expect(std.mem.indexOf(u8, registry, "copyServiceBytes(bytes)") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, "pub const compiler_version = \"0.0.22\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, "pub const contract_fingerprint = [_]u8{") != null);
+
+    const client = try emitClient(std.testing.allocator, contract);
+    defer std.testing.allocator.free(client);
+    try std.testing.expect(std.mem.indexOf(u8, client, "request: readonly (Uint8Array | null)[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client, "ServiceRoute<Msg, readonly (Uint8Array | null)[]>") != null);
 
     const original_fingerprint = contractFingerprint(contract);
     const reordered_operations = [_]service.Operation{ operations[1], operations[0] };

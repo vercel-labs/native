@@ -60,7 +60,7 @@ interface Cmdish {
 }
 
 function usage(): never {
-  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>]");
+  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>] [--service-cwd <app-data-dir>]");
   console.error("core-logic loop only (update/effects under a virtual host) - not a renderer;");
   console.error("run the real app with `native dev`.");
   process.exit(2);
@@ -74,6 +74,7 @@ let persistNone: string | null = null;
 let persistErr: string | null = null;
 let journalRecordArg: string | null = null;
 let journalReplayArg: string | null = null;
+let serviceCwd: string | null = null;
 let canvasLabel = "canvas";
 let windowWidth = 800;
 let windowHeight = 600;
@@ -86,6 +87,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === "--persist-err") persistErr = args[++i] ?? null;
   else if (args[i] === "--record-journal") journalRecordArg = args[++i] ?? null;
   else if (args[i] === "--replay-journal") journalReplayArg = args[++i] ?? null;
+  else if (args[i] === "--service-cwd") serviceCwd = args[++i] ?? null;
   else if (args[i] === "--canvas-label") canvasLabel = args[++i] ?? canvasLabel;
   else if (args[i] === "--window-width") windowWidth = Number(args[++i]);
   else if (args[i] === "--window-height") windowHeight = Number(args[++i]);
@@ -101,9 +103,19 @@ for (let i = 0; i < args.length; i++) {
 }
 if (!entry) usage();
 if (!Number.isFinite(windowWidth) || windowWidth <= 0 || !Number.isFinite(windowHeight) || windowHeight <= 0) usage();
-const journalRecordPath = process.env.NATIVE_SDK_SESSION_RECORD ?? journalRecordArg;
-const journalReplayPath = process.env.NATIVE_SDK_SESSION_REPLAY ?? journalReplayArg;
+const launchCwd = process.cwd();
+entry = path.resolve(launchCwd, entry);
+if (script !== null) script = path.resolve(launchCwd, script);
+if (serviceCwd !== null) serviceCwd = path.resolve(launchCwd, serviceCwd);
+const journalRecordValue = process.env.NATIVE_SDK_SESSION_RECORD ?? journalRecordArg;
+const journalReplayValue = process.env.NATIVE_SDK_SESSION_REPLAY ?? journalReplayArg;
+const journalRecordPath = journalRecordValue ? path.resolve(launchCwd, journalRecordValue) : null;
+const journalReplayPath = journalReplayValue ? path.resolve(launchCwd, journalReplayValue) : null;
 if (journalRecordPath && journalReplayPath) throw new Error("record and replay cannot be armed together");
+if (serviceCwd !== null) {
+  fs.mkdirSync(serviceCwd, { recursive: true });
+  process.chdir(serviceCwd);
+}
 const persistRouteCount = [persistOk, persistNone, persistErr].filter((route) => route !== null).length;
 if (persistRouteCount !== 0 && persistRouteCount !== 3) usage();
 let checked: ReturnType<typeof checkFile> | null = null;
@@ -399,8 +411,15 @@ function encodeServiceValue(type: ServiceTypeRef, value: unknown): Uint8Array {
   }
 }
 
-function channelMsg(kind: string, key: number, state: "data" | "closed", bytes = new Uint8Array(0)): unknown {
-  return { kind, key, state, bytes, droppedPending: 0, droppedTotal: 0 };
+function channelMsg(
+  kind: string,
+  key: number,
+  state: "data" | "closed" | "rejected",
+  bytes = new Uint8Array(0),
+  droppedPending = 0,
+  droppedTotal = 0,
+): unknown {
+  return { kind, key, state, bytes, droppedPending, droppedTotal };
 }
 
 interface ServiceTask {
@@ -411,6 +430,9 @@ interface ServiceTask {
   readonly channelKey: number | null;
   readonly channelEvent: string | null;
   readonly cancelFlag: Int32Array;
+  readonly streamStateBuffer: SharedArrayBuffer;
+  readonly streamInFlight: Int32Array;
+  readonly streamDrops: BigUint64Array;
   readonly engineIndex: number;
   deadlineTimer: ReturnType<typeof setTimeout> | null;
   hardTimer: ReturnType<typeof setTimeout> | null;
@@ -436,11 +458,23 @@ function releaseServiceSlot(task: ServiceTask): void {
   if (serviceRequestSlots[task.engineIndex] === task) serviceRequestSlots[task.engineIndex] = null;
 }
 
+function takeServiceStreamDrops(task: ServiceTask): { pending: number; total: number } {
+  const mask = 0xffffffffn;
+  for (;;) {
+    const current = Atomics.load(task.streamDrops, 0);
+    const total = current >> 32n;
+    if (Atomics.compareExchange(task.streamDrops, 0, current, total << 32n) === current) {
+      return { pending: Number(current & mask), total: Number(total) };
+    }
+  }
+}
+
 function closeServiceChannel(task: ServiceTask): void {
   if (task.channelKey === null || task.channelEvent === null) return;
   if (serviceChannels.has(task.channelKey)) {
-    if (journalWriter) { journalWriter.channel(task.channelKey, "closed"); journalWriter.wake(); }
-    dispatch(channelMsg(task.channelEvent, task.channelKey, "closed"));
+    const dropped = takeServiceStreamDrops(task);
+    if (journalWriter) { journalWriter.channel(task.channelKey, "closed", new Uint8Array(0), dropped.pending, dropped.total); journalWriter.wake(); }
+    dispatch(channelMsg(task.channelEvent, task.channelKey, "closed", new Uint8Array(0), dropped.pending, dropped.total));
   }
   serviceChannels.delete(task.channelKey);
 }
@@ -469,6 +503,7 @@ function serviceFailure(task: ServiceTask, bytes: Uint8Array): void {
   task.responseDelivered = true;
   if (journalWriter) { journalWriter.host(task.engineIndex, false, bytes); journalWriter.wake(); }
   releaseServiceSlot(task);
+  removeServiceKey(task);
   dispatch(bytesMsg(task.cmd.errKind as string, bytes));
 }
 
@@ -478,6 +513,7 @@ function serviceSuccess(task: ServiceTask, result: unknown): void {
   const wireResult = task.operation.result.kind === "bytes" ? result as Uint8Array : encodeServiceValue(task.operation.result, result);
   if (journalWriter) { journalWriter.host(task.engineIndex, true, wireResult); journalWriter.wake(); }
   releaseServiceSlot(task);
+  removeServiceKey(task);
   if (task.cmd.typedService === true) dispatch(valueMsg(task.cmd.okKind as string, result));
   else dispatch(bytesMsg(
     task.cmd.okKind as string,
@@ -529,6 +565,7 @@ function requestServiceStop(task: ServiceTask, timeout: boolean): void {
   else {
     task.cancelled = true;
     releaseServiceSlot(task);
+    removeServiceKey(task);
   }
   Atomics.store(task.cancelFlag, 0, 1);
   if (!timeout && task.operation.stream !== null && !task.responseDelivered) {
@@ -536,6 +573,24 @@ function requestServiceStop(task: ServiceTask, timeout: boolean): void {
     closeServiceChannel(task);
   }
   if (!task.hardTimer) task.hardTimer = setTimeout(() => stopWorkerFor(task), cooperativeCancelGraceMs);
+}
+
+const portableServiceEnvironment = new Set([
+  "PATH", "HOME", "USER", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+]);
+const windowsServiceEnvironment = new Set(["USERPROFILE", "USERNAME", "SYSTEMROOT", "COMSPEC", "PATHEXT"]);
+
+function serviceWorkerEnvironment(): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    const comparison = process.platform === "win32" ? name.toUpperCase() : name;
+    if (portableServiceEnvironment.has(comparison) || (process.platform === "win32" && windowsServiceEnvironment.has(comparison))) {
+      environment[name] = value;
+    }
+  }
+  return environment;
 }
 
 function makeServiceWorker(): Worker {
@@ -548,6 +603,7 @@ function makeServiceWorker(): Worker {
         absoluteModule: path.resolve(appRoot, operation.module),
       })),
     },
+    env: serviceWorkerEnvironment(),
   });
   worker.on("message", (message: { id?: number; type: string; chunk?: unknown; result?: unknown; error?: unknown; elapsed?: number }) => {
     if (message.type === "ready") {
@@ -558,11 +614,13 @@ function makeServiceWorker(): Worker {
     const task = activeService;
     if (!task || message.id !== task.id) return;
     if (message.type === "chunk") {
+      const dropped = takeServiceStreamDrops(task);
+      Atomics.sub(task.streamInFlight, 0, 1);
       if (!task.cancelled && !task.timedOut && task.channelKey !== null && task.channelEvent !== null && serviceChannels.has(task.channelKey)) {
         task.chunks += 1;
         const bytes = encodeServiceValue(task.operation.stream!.chunk, message.chunk);
-        if (journalWriter) { journalWriter.channel(task.channelKey, "data", bytes); journalWriter.wake(); }
-        dispatch(channelMsg(task.channelEvent, task.channelKey, "data", bytes));
+        if (journalWriter) { journalWriter.channel(task.channelKey, "data", bytes, dropped.pending, dropped.total); journalWriter.wake(); }
+        dispatch(channelMsg(task.channelEvent, task.channelKey, "data", bytes, dropped.pending, dropped.total));
       }
       return;
     }
@@ -571,10 +629,14 @@ function makeServiceWorker(): Worker {
     }
   });
   const failed = (): void => {
-    const task = activeService;
+    const task = activeService ?? serviceQueue.shift() ?? null;
+    if (task !== null && activeService === null) activeService = task;
     serviceWorker = null;
     serviceWorkerReady = false;
-    if (!task) return;
+    if (!task) {
+      settleServiceWaiters();
+      return;
+    }
     if (!task.cancelled && !task.timedOut) serviceFailure(task, encoder.encode(JSON.stringify({ kind: "service_host", message: "service worker exited" })));
     else if (task.timedOut) serviceFailure(task, encoder.encode(JSON.stringify({ kind: "timeout", message: "service request timed out" })));
     closeServiceChannel(task);
@@ -609,6 +671,7 @@ function startNextService(): void {
     name: task.operation.name,
     request: task.request,
     cancelBuffer: task.cancelFlag.buffer,
+    streamStateBuffer: task.streamStateBuffer,
   });
 }
 
@@ -623,9 +686,13 @@ function enqueueService(cmd: Cmdish, operation: ServiceOperationRuntime, request
     dispatch(bytesMsg(cmd.errKind as string, encoder.encode(JSON.stringify({ kind: "service_host", message: "more than 16 service requests are live" }))));
     return false;
   }
+  const streamStateBuffer = new SharedArrayBuffer(16);
   const task: ServiceTask = {
     id: nextServiceId++, cmd, operation, request, channelKey, channelEvent,
     cancelFlag: new Int32Array(new SharedArrayBuffer(4)),
+    streamStateBuffer,
+    streamInFlight: new Int32Array(streamStateBuffer, 0, 1),
+    streamDrops: new BigUint64Array(streamStateBuffer, 8, 1),
     engineIndex,
     deadlineTimer: null, hardTimer: null, cancelled: false, timedOut: false, responseDelivered: false, chunks: 0,
   };

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkFiles } from "./helpers.ts";
+import { mergePackageSpecs, readServicePackages, replaceServicePackages, replaceVendorTree } from "../scripts/vendor_service_packages.mjs";
 
 const serviceCore = `
 import { Cmd } from "@native-sdk/core";
@@ -242,6 +243,17 @@ export function roundTrip(request: BoundaryRecord): BoundaryRecord { return requ
   assert.match(result.servicesClient!, /serviceUnionBytes/);
 });
 
+test("generated clients parenthesize composite slice element types", () => {
+  const result = checkFiles({
+    "core.ts": serviceCore,
+    "services/feeds.ts": `
+export function parse(values: readonly (Uint8Array | null)[]): readonly (Uint8Array | null)[] { return values; }`,
+  });
+  assert.equal(result.ok, true, JSON.stringify([...result.diagnostics, ...result.typeErrors]));
+  assert.match(result.servicesClient!, /request: readonly \(Uint8Array \| null\)\[\]/);
+  assert.match(result.servicesClient!, /ServiceRoute<Msg, readonly \(Uint8Array \| null\)\[\]>/);
+});
+
 test("stream and deadline declarations are carried by the typed contract", () => {
   const result = checkFiles({
     "core.ts": serviceCore,
@@ -322,6 +334,15 @@ test("NS1067 validates operation signatures, throws, and core service call names
     "services/feeds.ts": `export async function parse(value: string): Promise<string> { return value; }`,
   });
   assert.ok(badSignature.diagnostics.some((d) => d.id === "NS1067"), JSON.stringify(badSignature.diagnostics));
+
+  const extraDataBeforeEmit = checkFiles({
+    "core.ts": serviceCore,
+    "services/feeds.ts": `export function parse(a: Uint8Array, b: Uint8Array, emit: (chunk: Uint8Array) => void): Uint8Array { emit(b); return a; }`,
+  });
+  assert.ok(
+    extraDataBeforeEmit.diagnostics.some((d) => d.id === "NS1067" && /more than one data parameter/.test(d.message)),
+    JSON.stringify(extraDataBeforeEmit.diagnostics),
+  );
 
   const badThrow = checkFiles({
     "core.ts": serviceCore,
@@ -434,6 +455,48 @@ export function parse(bytes: Bytes): Bytes { return bytes; }
     JSON.parse(result.servicesContract!).operations.map((op: { name: string }) => op.name),
     ["feeds.parse"],
   );
+});
+
+test("incremental vendoring preserves prior package facts and lets explicit updates win", () => {
+  const source = `.{
+    .name = "fixture",
+    .service_packages = .{
+        .{ .name = "alpha", .version = "1.2.3", .content_hash = "${"a".repeat(64)}" },
+        .{ .name = "@scope/beta", .version = "2.0.0", .content_hash = "${"b".repeat(64)}" },
+    },
+}`;
+  assert.deepEqual(readServicePackages(source).map((entry: { name: string; version: string }) => `${entry.name}@${entry.version}`), [
+    "alpha@1.2.3",
+    "@scope/beta@2.0.0",
+  ]);
+  assert.deepEqual(mergePackageSpecs(source, ["gamma@3.0.0", "alpha@1.3.0"]), [
+    "@scope/beta@2.0.0",
+    "alpha@1.3.0",
+    "gamma@3.0.0",
+  ]);
+  const replaced = replaceServicePackages(source, [
+    { name: "alpha", version: "1.3.0", content_hash: "c".repeat(64) },
+    { name: "gamma", version: "3.0.0", content_hash: "d".repeat(64) },
+  ]);
+  assert.deepEqual(readServicePackages(replaced).map((entry: { name: string; version: string }) => `${entry.name}@${entry.version}`), [
+    "alpha@1.3.0",
+    "gamma@3.0.0",
+  ]);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-vendor-replace-"));
+  try {
+    const vendor = path.join(root, "src", "services", "vendor");
+    const stage = path.join(root, ".native", "vendor-stage");
+    fs.mkdirSync(path.join(vendor, "stale"), { recursive: true });
+    fs.writeFileSync(path.join(vendor, "stale", "old.js"), "old");
+    fs.mkdirSync(path.join(stage, "fresh"), { recursive: true });
+    fs.writeFileSync(path.join(stage, "fresh", "new.js"), "new");
+    replaceVendorTree(vendor, stage);
+    assert.equal(fs.existsSync(path.join(vendor, "stale")), false);
+    assert.equal(fs.readFileSync(path.join(vendor, "fresh", "new.js"), "utf8"), "new");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("service staging lowers tagged throws across the service-host graph", () => {
