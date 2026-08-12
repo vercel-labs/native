@@ -328,6 +328,13 @@ if (Test-Path $logPath) {
         TexturesUploadedTotal = ($accepted | Measure-Object -Property ImagesN -Sum).Sum
     }
 
+    $rebuildSeqs = @{}
+    foreach ($row in $rebuilds) { $rebuildSeqs[[string]$row.Seq] = $true }
+    $rebuildPaints = @($paints | Where-Object { $rebuildSeqs.ContainsKey([string]$_.Seq) })
+    $rebuildBlitPerStep = if ($rebuilds.Count -gt 0) {
+        [Math]::Round((($rebuildPaints | Measure-Object -Property BlitUs -Sum).Sum) / $rebuilds.Count / 1000.0, 3)
+    } else { 0 }
+
     # The Phase 0 deliverable: cost of ONE resize step, split by stage.
     $result.ResizeStepMs = [pscustomobject]@{
         Samples     = $rebuilds.Count
@@ -337,6 +344,17 @@ if (Test-Path $logPath) {
         Decode      = Summarize $rebuilds "DecodeUs"
         PresentTotal= Summarize $rebuilds "TotalUs"
         Blit        = Summarize $paints "BlitUs"
+        # The number that actually holds still. WM_PAINT coalescing trades
+        # paint COUNT against paint SIZE run to run -- the same workload
+        # shows 0.8 or 2.4 paints per present depending on how Windows
+        # merged the update regions -- but total blit microseconds per
+        # resize step stays put. Quote this, never `Blit.P50 x ratio`.
+        #
+        # Attributed by seq to the RESIZE presents only: an app that also
+        # animates (gpu-dashboard) has steady-state presents in the
+        # accepted set, and dividing by those would understate the cost a
+        # resize step actually pays.
+        BlitPerStep = $rebuildBlitPerStep
         TexturesPerStep = if ($rebuilds.Count -gt 0) { [Math]::Round((($rebuilds | Measure-Object -Property ImagesN -Sum).Sum) / $rebuilds.Count, 2) } else { 0 }
         KibPerStep      = if ($rebuilds.Count -gt 0) { [Math]::Round((($rebuilds | Measure-Object -Property ImageKib -Sum).Sum) / $rebuilds.Count, 1) } else { 0 }
     }

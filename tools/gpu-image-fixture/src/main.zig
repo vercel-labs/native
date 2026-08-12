@@ -44,6 +44,22 @@ pub const image_count: u32 = 16;
 pub const image_extent: u32 = 512;
 pub const grid_columns: u32 = 4;
 
+/// Cells are a FIXED size rather than growing with the window, and that
+/// is deliberate. What this fixture isolates is texture re-upload, which
+/// tracks texture bytes and is independent of drawn size; letting the
+/// cells scale with the sweep would vary `DrawBitmap` cost step by step
+/// and put a second signal into the same column. Fixed cells keep the
+/// display list identical at every window size, so the only thing the
+/// sweep changes is the backing surface.
+///
+/// Sized in LOGICAL points to fit the harness's smallest window (900x700
+/// device pixels) on a 125%-scaled display, where that is only ~704x560
+/// points of client area. Overflow here is not cosmetic: a cell pushed
+/// past the surface edge drops out of the display list and stops being
+/// uploaded, so the fixture would quietly measure fewer than 16 textures.
+const cell_width: f32 = 150;
+const cell_height: f32 = 105;
+
 const app_permissions = [_][]const u8{native_sdk.security.permission_view};
 const shell_views = [_]native_sdk.ShellView{
     .{
@@ -208,22 +224,17 @@ pub fn view(ui: *Ui, model: *const Model) Ui.Node {
         var column: u32 = 0;
         while (column < count) : (column += 1) {
             const index = first + column;
-            // A small explicit basis, not the texture's intrinsic 512x512:
-            // `grow` only distributes SPARE space, so four intrinsic-width
-            // cells (2048pt) would overflow any ordinary window and the
-            // trailing column would clip out of the display list.
             var cell = ui.image(.{
                 .key = canvas.uiKey(index),
-                .width = 32,
-                .height = 32,
-                .grow = 1,
+                .width = cell_width,
+                .height = cell_height,
                 .image = imageId(index),
                 .semantics = .{ .label = "Fixture texture" },
             });
             cell.widget.image_fit = .cover;
             cells[column] = cell;
         }
-        row_nodes[row] = ui.row(.{ .height = 32, .grow = 1, .gap = 6 }, cells);
+        row_nodes[row] = ui.row(.{ .height = cell_height, .gap = 6 }, cells);
     }
     return ui.column(.{ .grow = 1, .gap = 6, .padding = 8 }, .{
         ui.row(.{ .cross = .center, .gap = 10 }, .{

@@ -1,7 +1,10 @@
 #include "gpu_surface_renderer.h"
 
 #include <d2d1.h>
+#include <d2d1_1.h>
+#include <d3d11.h>
 #include <dwrite_3.h>
+#include <dxgi1_2.h>
 
 #include <algorithm>
 #include <atomic>
@@ -9,6 +12,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -62,6 +66,16 @@ static void releaseCom(T *&value) {
 
 static float clamp01(float value) {
     return std::max(0.0f, std::min(1.0f, value));
+}
+
+/* True when `name` is set to anything other than "0" or the empty
+ * string. Diagnostic switches only -- nothing behavioral reads this. */
+static bool envFlagSet(const wchar_t *name) {
+    wchar_t value[8] = {};
+    const DWORD length = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
+    if (length == 0) return false;
+    if (length >= std::size(value)) return true; /* long value, definitely not "0" */
+    return !(value[0] == L'\0' || (value[0] == L'0' && value[1] == L'\0'));
 }
 
 static uint64_t gpuClockNs() {
@@ -969,12 +983,18 @@ public:
         releaseCom(memory_font_loader_);
         releaseCom(dwrite_factory5_);
         releaseCom(dwrite_factory_);
+        releaseDeviceStack();
         releaseCom(d2d_factory_);
     }
 
     bool initialize() {
         D2D1_FACTORY_OPTIONS options = {};
-        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, options, &d2d_factory_))) return false;
+        /* ID2D1Factory1, not ID2D1Factory: the derived interface is what
+         * owns `CreateDevice`, and it inherits every geometry and stroke
+         * entry point `d2dFactory()` already hands out, so the ~8 existing
+         * call sites are unchanged. */
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1),
+                &options, reinterpret_cast<void **>(&d2d_factory_))) || !d2d_factory_) return false;
         IUnknown *unknown = nullptr;
         if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), &unknown)) || !unknown) return false;
         dwrite_factory_ = static_cast<IDWriteFactory *>(unknown);
@@ -994,7 +1014,92 @@ public:
             fallback_result = fallback_builder->CreateFontFallback(&font_fallback_);
         }
         releaseCom(fallback_builder);
-        return SUCCEEDED(fallback_result) && font_fallback_;
+        if (FAILED(fallback_result) || !font_fallback_) return false;
+
+        /* The device stack is created eagerly here rather than lazily per
+         * surface: one D3D11 device backs every gpu_surface in the
+         * process, and a machine that cannot produce one at all should
+         * fail the renderer now, so the runtime takes its software pixel
+         * path from the first frame instead of discovering the problem
+         * mid-drag. */
+        return ensureDeviceStack();
+    }
+
+    /* Build D3D11 device -> IDXGIDevice -> ID2D1Device -> context.
+     *
+     * Idempotent, and safe to call again after `releaseDeviceStack()` --
+     * which is what device-removal recovery will need once presentation
+     * actually depends on this stack. */
+    bool ensureDeviceStack() {
+        if (d2d_context_) return true;
+        releaseDeviceStack();
+        if (!d2d_factory_) return false;
+
+        /* BGRA_SUPPORT is mandatory for D2D interop. SINGLETHREADED
+         * matches the D2D factory and the host's one-UI-thread model; it
+         * drops D3D's internal locking. */
+        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED;
+        static const D3D_FEATURE_LEVEL levels[] = {
+            D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_9_3, D3D_FEATURE_LEVEL_9_2, D3D_FEATURE_LEVEL_9_1,
+        };
+        /* An RDP session, a disabled adapter, or a machine with no D3D11
+         * driver has no hardware device; WARP still composites correctly,
+         * just on the CPU. `NATIVE_SDK_GPU_FORCE_WARP` exercises that path
+         * on a machine that would otherwise never take it. */
+        const bool force_warp = envFlagSet(L"NATIVE_SDK_GPU_FORCE_WARP");
+        HRESULT result = force_warp ? E_FAIL : createD3DDevice(D3D_DRIVER_TYPE_HARDWARE, flags, levels);
+        driver_type_ = D3D_DRIVER_TYPE_HARDWARE;
+        if (FAILED(result)) {
+            result = createD3DDevice(D3D_DRIVER_TYPE_WARP, flags, levels);
+            driver_type_ = D3D_DRIVER_TYPE_WARP;
+        }
+        if (FAILED(result) || !d3d_device_) {
+            releaseDeviceStack();
+            return false;
+        }
+
+        IDXGIDevice *dxgi_device = nullptr;
+        result = d3d_device_->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void **>(&dxgi_device));
+        if (SUCCEEDED(result) && dxgi_device) {
+            /* The factory this surface's swap chain must come from is the
+             * one that owns this device's adapter -- an independently
+             * created DXGI factory produces a swap chain the device
+             * cannot present through. Resolve it here, once. */
+            IDXGIAdapter *adapter = nullptr;
+            if (SUCCEEDED(dxgi_device->GetAdapter(&adapter)) && adapter) {
+                DXGI_ADAPTER_DESC adapter_desc = {};
+                if (SUCCEEDED(adapter->GetDesc(&adapter_desc))) {
+                    WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1,
+                        adapter_name_, static_cast<int>(sizeof(adapter_name_)), nullptr, nullptr);
+                }
+                adapter->GetParent(__uuidof(IDXGIFactory2), reinterpret_cast<void **>(&dxgi_factory_));
+            }
+            releaseCom(adapter);
+            result = d2d_factory_->CreateDevice(dxgi_device, &d2d_device_);
+        }
+        releaseCom(dxgi_device);
+        if (SUCCEEDED(result) && d2d_device_) {
+            result = d2d_device_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &d2d_context_);
+        }
+        if (FAILED(result) || !d2d_context_ || !dxgi_factory_) {
+            releaseDeviceStack();
+            return false;
+        }
+        if (gpuProfileActive()) {
+            GpuProfileLog::shared().line("device driver=%s level=0x%04x adapter=\"%s\"",
+                driver_type_ == D3D_DRIVER_TYPE_WARP ? "warp" : "hardware",
+                static_cast<unsigned>(feature_level_), adapter_name_);
+        }
+        return true;
+    }
+
+    void releaseDeviceStack() {
+        releaseCom(d2d_context_);
+        releaseCom(d2d_device_);
+        releaseCom(dxgi_factory_);
+        releaseCom(d3d_device_);
     }
 
     std::shared_ptr<WindowsGpuSurface> createSurface(HWND hwnd) override;
@@ -1077,7 +1182,16 @@ public:
         return true;
     }
 
-    ID2D1Factory *d2dFactory() const { return d2d_factory_; }
+    ID2D1Factory1 *d2dFactory() const { return d2d_factory_; }
+    ID3D11Device *d3dDevice() const { return d3d_device_; }
+    ID2D1Device *d2dDevice() const { return d2d_device_; }
+    /* One context shared by every surface. Direct2D device contexts are
+     * cheap to retarget (`SetTarget`) and expensive to multiply -- each
+     * one carries its own command buffer against the same device. */
+    ID2D1DeviceContext *d2dContext() const { return d2d_context_; }
+    /* The adapter's own factory (never an independently created one --
+     * a swap chain from a foreign factory cannot present this device). */
+    IDXGIFactory2 *dxgiFactory() const { return dxgi_factory_; }
     IDWriteFactory *dwriteFactory() const { return dwrite_factory_; }
     IDWriteFontFallback *fontFallback() const { return font_fallback_; }
 
@@ -1092,7 +1206,28 @@ public:
     }
 
 private:
-    ID2D1Factory *d2d_factory_ = nullptr;
+    HRESULT createD3DDevice(D3D_DRIVER_TYPE driver, UINT flags, const D3D_FEATURE_LEVEL (&levels)[7]) {
+        HRESULT result = D3D11CreateDevice(nullptr, driver, nullptr, flags, levels,
+            static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION, &d3d_device_, &feature_level_, nullptr);
+        /* A driver older than the 11_1 runtime rejects the whole list
+         * rather than negotiating down, so retry without that first
+         * entry. This is the documented shape of the call. */
+        if (result == E_INVALIDARG) {
+            result = D3D11CreateDevice(nullptr, driver, nullptr, flags, levels + 1,
+                static_cast<UINT>(std::size(levels)) - 1, D3D11_SDK_VERSION, &d3d_device_, &feature_level_, nullptr);
+        }
+        if (FAILED(result)) releaseCom(d3d_device_);
+        return result;
+    }
+
+    ID2D1Factory1 *d2d_factory_ = nullptr;
+    ID3D11Device *d3d_device_ = nullptr;
+    IDXGIFactory2 *dxgi_factory_ = nullptr;
+    ID2D1Device *d2d_device_ = nullptr;
+    ID2D1DeviceContext *d2d_context_ = nullptr;
+    D3D_DRIVER_TYPE driver_type_ = D3D_DRIVER_TYPE_UNKNOWN;
+    D3D_FEATURE_LEVEL feature_level_ = static_cast<D3D_FEATURE_LEVEL>(0);
+    char adapter_name_[128] = {};
     IDWriteFactory *dwrite_factory_ = nullptr;
     IDWriteFactory5 *dwrite_factory5_ = nullptr;
     IDWriteInMemoryFontFileLoader *memory_font_loader_ = nullptr;
