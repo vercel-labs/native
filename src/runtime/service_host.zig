@@ -16,8 +16,8 @@ const transport_error = "{\"kind\":\"service_host\",\"message\":\"service host e
 const timeout_error = "{\"kind\":\"timeout\",\"message\":\"service request timed out\"}";
 
 /// A service operation is synchronous inside the child. Bound the whole
-/// exchange (lazy spawn + hello + request + response), otherwise one hung
-/// operation would strand the service worker and every request behind it.
+/// request from admission through queueing, lazy spawn, hello, exchange, and
+/// response; otherwise one hung operation would strand every request behind it.
 pub const default_request_timeout_ms: u32 = 30_000;
 pub const cooperative_cancel_grace_ms: u32 = 100;
 
@@ -53,7 +53,7 @@ pub fn ServiceHost(comptime Registry: type) type {
             operation: u16,
             payload: []u8,
             answer: bool,
-            timeout_ms: u32,
+            deadline: std.Io.Clock.Timestamp,
             channel: ?effects.ChannelHandle,
         };
         const Result = struct { key: u64, ok: bool, bytes: []u8 };
@@ -267,6 +267,10 @@ pub fn ServiceHost(comptime Registry: type) type {
                 if (answer) self.stageStatic(key, false, transport_error);
                 return;
             };
+            const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .raw = std.Io.Duration.fromMilliseconds(timeout_ms),
+                .clock = .awake,
+            });
             self.mutex.lockUncancelable(self.io);
             if (self.shutting_down) {
                 self.mutex.unlock(self.io);
@@ -283,7 +287,7 @@ pub fn ServiceHost(comptime Registry: type) type {
                 .operation = operation,
                 .payload = copy,
                 .answer = answer,
-                .timeout_ms = timeout_ms,
+                .deadline = deadline,
                 .channel = channel,
             }) catch {
                 self.mutex.unlock(self.io);
@@ -346,9 +350,9 @@ pub fn ServiceHost(comptime Registry: type) type {
                 var completion: ?Result = null;
                 var preserve_child = false;
                 const response = self.exchange(&child, work) catch |err| response: {
-                    preserve_child = err == error.ServiceTimedOutCooperative;
+                    preserve_child = err == error.ServiceTimedOutCooperative or err == error.ServiceDeadlineExpired;
                     if (work.answer) {
-                        const bytes = if (err == error.ServiceTimedOut or err == error.ServiceTimedOutCooperative) timeout_error else transport_error;
+                        const bytes = if (err == error.ServiceTimedOut or err == error.ServiceTimedOutCooperative or err == error.ServiceDeadlineExpired) timeout_error else transport_error;
                         if (self.allocator.dupe(u8, bytes)) |copy| {
                             completion = .{ .key = work.key, .ok = false, .bytes = copy };
                         } else |_| {}
@@ -391,24 +395,19 @@ pub fn ServiceHost(comptime Registry: type) type {
             request_id: u32,
             done: *std.Io.Event,
             cancel_signal: *std.Io.Event,
-            timeout_ms: u32,
+            deadline: std.Io.Clock.Timestamp,
             timed_out: bool = false,
             hard_killed: bool = false,
 
             fn run(watch: *DeadlineWatch) void {
-                const duration: std.Io.Clock.Duration = .{
-                    .raw = std.Io.Duration.fromMilliseconds(watch.timeout_ms),
-                    .clock = .awake,
-                };
-                const deadline = std.Io.Clock.Timestamp.fromNow(watch.host.io, duration);
                 while (!watch.done.isSet()) {
-                    watch.cancel_signal.waitTimeout(watch.host.io, .{ .deadline = deadline }) catch |err| switch (err) {
+                    watch.cancel_signal.waitTimeout(watch.host.io, .{ .deadline = watch.deadline }) catch |err| switch (err) {
                         error.Canceled => return,
                         error.Timeout => {
                             // Futex waits may wake spuriously. Only the actual
                             // monotonic deadline is authority to kill a child.
                             const now = std.Io.Clock.Timestamp.now(watch.host.io, .awake);
-                            if (!std.Io.Clock.Timestamp.compare(now, .gte, deadline)) continue;
+                            if (!std.Io.Clock.Timestamp.compare(now, .gte, watch.deadline)) continue;
                             watch.host.mutex.lockUncancelable(watch.host.io);
                             if (watch.host.active_request_id == watch.request_id and !watch.done.isSet()) {
                                 watch.timed_out = true;
@@ -450,6 +449,8 @@ pub fn ServiceHost(comptime Registry: type) type {
         };
 
         fn exchange(self: *Self, child: *?std.process.Child, request_entry: Request) !ExchangeResult {
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            if (std.Io.Clock.Timestamp.compare(now, .gte, request_entry.deadline)) return error.ServiceDeadlineExpired;
             var done: std.Io.Event = .unset;
             var cancel_signal: std.Io.Event = .unset;
             const cancel_path = try self.cancellationPath(request_entry.request_id);
@@ -473,7 +474,7 @@ pub fn ServiceHost(comptime Registry: type) type {
                 .request_id = request_entry.request_id,
                 .done = &done,
                 .cancel_signal = &cancel_signal,
-                .timeout_ms = request_entry.timeout_ms,
+                .deadline = request_entry.deadline,
             };
             const watchdog = try std.Thread.spawn(.{}, DeadlineWatch.run, .{&watch});
             const result = self.exchangeUnbounded(child, request_entry, cancel_path) catch |err| {

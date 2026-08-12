@@ -51,6 +51,7 @@ fn command(name: []const u8) ?core.Msg {
     if (std.mem.eql(u8, name, "service.parse")) return .parse;
     if (std.mem.eql(u8, name, "service.fail")) return .fail;
     if (std.mem.eql(u8, name, "service.hang")) return .hang;
+    if (std.mem.eql(u8, name, "service.queued-deadline")) return .queued_deadline;
     if (std.mem.eql(u8, name, "service.replace-hang")) return .replace_hang;
     if (std.mem.eql(u8, name, "service.stream")) return .stream;
     if (std.mem.eql(u8, name, "service.stream-hang")) return .stream_hang;
@@ -74,6 +75,8 @@ fn appOptions() App.Options {
 const fixture_root = ".zig-cache/tmp/ts-services-e2e";
 const hang_marker = fixture_root ++ "/hang.started";
 const stream_hang_marker = fixture_root ++ "/stream-hang.started";
+const queued_blocker_marker = fixture_root ++ "/queued-blocker.started";
+const queued_probe_marker = fixture_root ++ "/queued-probe.started";
 
 fn resetFixtureDir() !void {
     const cwd = std.Io.Dir.cwd();
@@ -384,6 +387,18 @@ test "a cooperative deadline reports timeout and preserves the child" {
     try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 2), Bridge.model().successes);
     try std.testing.expectEqual(original_child, h.transport.processId().?);
+}
+
+test "service deadlines include time spent queued behind another operation" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.queued-deadline");
+    try h.settleCounts(1, 2);
+    try std.Io.Dir.cwd().access(std.testing.io, queued_blocker_marker, .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, queued_probe_marker, .{}));
+    try std.testing.expect(std.mem.indexOf(u8, Bridge.model().bytes, "\"kind\":\"timeout\"") != null);
 }
 
 const JournalBuffer = struct {

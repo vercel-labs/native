@@ -33,6 +33,18 @@ export function hang(cancel: ServiceCancellation): ParseResult {
   while (true) cancel.throwIfCancelled();
 }
 
+/** @deadlineMs 250 */
+export function queuedBlocker(cancel: ServiceCancellation): ParseResult {
+  fs.writeFileSync("queued-blocker.started", "ready");
+  while (true) cancel.throwIfCancelled();
+}
+
+/** @deadlineMs 100 */
+export function queuedProbe(): ParseResult {
+  fs.writeFileSync("queued-probe.started", "unexpected");
+  return parse({ source: new Uint8Array([102, 101, 101, 100]), caseSensitive: false });
+}
+
 /** @streamBuffer 4 */
 export function stream(request: ParseRequest, emit: (chunk: ParseChunk) => void): ParseResult {
   for (let index = 0; index < 3; index++) emit({ bytes: request.source, index });

@@ -1,5 +1,5 @@
 import { Cmd } from "@native-sdk/core";
-import { feedsExitClean, feedsFail, feedsHang, feedsParse, feedsStream, feedsStreamHang } from "@native-sdk/services";
+import { feedsExitClean, feedsFail, feedsHang, feedsParse, feedsQueuedBlocker, feedsQueuedProbe, feedsStream, feedsStreamHang } from "@native-sdk/services";
 import type { ParseResult } from "./shared.ts";
 
 export type StreamState = "data" | "closed" | "rejected";
@@ -16,6 +16,7 @@ export type Msg =
   | { readonly kind: "parse" }
   | { readonly kind: "fail" }
   | { readonly kind: "hang" }
+  | { readonly kind: "queued_deadline" }
   | { readonly kind: "replace_hang" }
   | { readonly kind: "stream" }
   | { readonly kind: "stream_hang" }
@@ -43,6 +44,11 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, feedsFail({ key: "fail", ok: "parsed", err: "parse_failed" })];
     case "hang":
       return [model, feedsHang({ key: "hang", ok: "parsed", err: "parse_failed" })];
+    case "queued_deadline":
+      return [model, Cmd.batch([
+        feedsQueuedBlocker({ key: "queued-blocker", ok: "parsed", err: "parse_failed" }),
+        feedsQueuedProbe({ key: "queued-probe", ok: "parsed", err: "parse_failed" }),
+      ])];
     case "replace_hang":
       return [model, Cmd.batch([
         Cmd.cancel("hang"),
@@ -89,6 +95,7 @@ export function commandMsg(name: string): Msg | null {
     case "service.parse": return { kind: "parse" };
     case "service.fail": return { kind: "fail" };
     case "service.hang": return { kind: "hang" };
+    case "service.queued-deadline": return { kind: "queued_deadline" };
     case "service.replace-hang": return { kind: "replace_hang" };
     case "service.stream": return { kind: "stream" };
     case "service.stream-hang": return { kind: "stream_hang" };
@@ -101,4 +108,4 @@ export function commandMsg(name: string): Msg | null {
   }
 }
 
-export const viewUnbound = ["boot_parsed", "hang", "replace_hang", "stream", "stream_hang", "cancel_stream", "duplicate_parse", "unkeyed_parse", "duplicate_stream", "exit_clean", "stream_event", "successes", "failures", "chunks"] as const;
+export const viewUnbound = ["boot_parsed", "hang", "queued_deadline", "replace_hang", "stream", "stream_hang", "cancel_stream", "duplicate_parse", "unkeyed_parse", "duplicate_stream", "exit_clean", "stream_event", "successes", "failures", "chunks"] as const;

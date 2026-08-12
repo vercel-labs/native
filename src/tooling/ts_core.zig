@@ -17,6 +17,7 @@ const std = @import("std");
 const app_dirs = @import("app_dirs");
 const buildgraph = @import("buildgraph.zig");
 const debug = @import("debug");
+const package_tool = @import("package.zig");
 const process_tree = @import("process_tree.zig");
 
 pub const Error = error{
@@ -453,7 +454,7 @@ pub fn checkCore(
         try service_package_args.append(allocator, spelling);
         try argv.appendSlice(allocator, &.{ "--service-package", spelling });
     }
-    if (dirExists(io, "src/services")) {
+    if (try package_tool.projectHasTypeScriptServices(allocator, io, ".")) {
         try argv.appendSlice(allocator, &.{ "--services-editor-client", "node_modules/@native-sdk/services/index.ts" });
     } else {
         std.Io.Dir.cwd().deleteTree(io, "node_modules/@native-sdk/services") catch {};

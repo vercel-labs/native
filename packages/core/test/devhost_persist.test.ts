@@ -267,6 +267,33 @@ test("the devhost cooperatively cancels streams and enforces service deadlines",
   assert.match(run.stdout, /"successes":1,"failures":2,"chunks":1/);
 });
 
+test("service deadlines include time spent in the devhost queue", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = path.resolve(packageDir, "..", "..");
+  const blockerMarker = path.join(repo, "queued-blocker.started");
+  const probeMarker = path.join(repo, "queued-probe.started");
+  fs.rmSync(blockerMarker, { force: true });
+  fs.rmSync(probeMarker, { force: true });
+  const run = spawnSync(process.execPath, [
+    path.join(packageDir, "src", "devhost.ts"),
+    path.join(repo, "tests", "ts-services", "ok", "src", "core.ts"),
+    "--script",
+    path.join(repo, "tests", "ts-services", "ok", "devhost_queued_deadline.ndjson"),
+    "--service-package",
+    "escape-string-regexp|5.0.0|705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d",
+  ], { cwd: repo, encoding: "utf8" });
+  const blockerStarted = fs.existsSync(blockerMarker);
+  const probeStarted = fs.existsSync(probeMarker);
+  fs.rmSync(blockerMarker, { force: true });
+  fs.rmSync(probeMarker, { force: true });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(blockerStarted, true);
+  assert.equal(probeStarted, false);
+  assert.match(run.stdout, /"successes":1,"failures":2/);
+  assert.match(run.stdout, /\\"kind\\":\\"timeout\\"/);
+});
+
 test("the devhost keeps duplicate, unkeyed, and streaming service admission aligned with native", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const repo = path.resolve(packageDir, "..", "..");

@@ -481,6 +481,7 @@ interface ServiceTask {
   readonly streamInFlight: Int32Array;
   readonly streamDrops: BigUint64Array;
   readonly engineIndex: number;
+  readonly deadlineAt: number | null;
   deadlineTimer: ReturnType<typeof setTimeout> | null;
   hardTimer: ReturnType<typeof setTimeout> | null;
   cancelled: boolean;
@@ -710,8 +711,17 @@ function startNextService(): void {
   if (!serviceWorkerReady) return;
   const task = serviceQueue.shift()!;
   activeService = task;
-  if (task.operation.deadline_ms !== null) {
-    task.deadlineTimer = setTimeout(() => requestServiceStop(task, true), task.operation.deadline_ms);
+  if (task.deadlineAt !== null) {
+    const remaining = task.deadlineAt - performance.now();
+    if (remaining <= 0) {
+      task.timedOut = true;
+      serviceFailure(task, encoder.encode(JSON.stringify({ kind: "timeout", message: "service request timed out" })));
+      closeServiceChannel(task);
+      activeService = null;
+      startNextService();
+      return;
+    }
+    task.deadlineTimer = setTimeout(() => requestServiceStop(task, true), remaining);
   }
   serviceWorker.postMessage({
     id: task.id,
@@ -741,6 +751,7 @@ function enqueueService(cmd: Cmdish, operation: ServiceOperationRuntime, request
     streamInFlight: new Int32Array(streamStateBuffer, 0, 1),
     streamDrops: new BigUint64Array(streamStateBuffer, 8, 1),
     engineIndex,
+    deadlineAt: operation.deadline_ms === null ? null : performance.now() + operation.deadline_ms,
     deadlineTimer: null, hardTimer: null, cancelled: false, timedOut: false, responseDelivered: false, chunks: 0,
   };
   serviceRequestSlots[engineIndex] = task;
