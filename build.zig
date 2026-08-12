@@ -507,7 +507,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(corewire_service_contract_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_service_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
-    const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run the real out-of-process TypeScript service carrier, crash recovery, timeout, and replay suites");
+    const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run both TypeScript service carriers end to end: the out-of-process child (crash recovery, timeout, replay) and the in-process pool (parallel keys, FIFO, trap isolation, replay)");
     if (ts_core_e2e_tests) |ts_core_artifacts| {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
@@ -523,17 +523,27 @@ pub fn build(b: *std.Build) void {
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
         ts_services_e2e_step.dependOn(&services_e2e_run.step);
-        // Service-host carrier benchmark: cold start (lazy spawn + hello),
-        // warm round-trip latency for small and large payloads, and queued
-        // throughput, all through the production carrier binding against a
-        // bytes-echo service (see tools/bench_service_host.zig).
+        // The same fixture through the in-process carrier (ServicePool over
+        // the linked service archive): parallel keys, per-key FIFO,
+        // cooperative cancellation/deadlines, trap isolation, streaming,
+        // and replay without initializing the archive.
+        const services_pool_e2e_run: ?*std.Build.Step.Run = if (ts_core_artifacts.services_pool) |pool_tests| pool: {
+            const run = b.addRunArtifact(pool_tests);
+            ts_services_e2e_step.dependOn(&run.step);
+            break :pool run;
+        } else null;
+        // Service carrier benchmark: cold start, warm round-trip latency
+        // for small and large payloads, and queued throughput, through the
+        // production carrier bindings of BOTH carriers — the out-of-process
+        // child and the in-process pool — against one bytes-echo service
+        // (see tools/bench_service_host.zig).
         const bench_service_host_run = b.addRunArtifact(ts_core_artifacts.service_host_bench);
         bench_service_host_run.has_side_effects = true;
         // Repo root as cwd so the generated service executable path and the
         // benchmark's scratch directory resolve regardless of where
         // `zig build` ran from.
         bench_service_host_run.setCwd(b.path("."));
-        const bench_service_host_step = b.step("bench-service-host", "Run the service-host carrier benchmark (cold start, round-trip latency, queued throughput; requires node and `npm ci` in packages/core; pass -Doptimize=ReleaseFast for baselines)");
+        const bench_service_host_step = b.step("bench-service-host", "Run the service carrier benchmark over both carriers (cold start, round-trip latency, queued throughput; requires node and `npm ci` in packages/core; pass -Doptimize=ReleaseFast for baselines)");
         bench_service_host_step.dependOn(&bench_service_host_run.step);
         const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
         const sidecar_conformance_step = b.step("sidecar-conformance", "Validate corewire-generated mirrors over every fixture's frontend-emitted contract (requires node)");
@@ -565,6 +575,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&scaffold_ide_e2e_run.step);
         ts_core_e2e_step.dependOn(&ai_chat_e2e_run.step);
         ts_core_e2e_step.dependOn(&services_e2e_run.step);
+        if (services_pool_e2e_run) |run| ts_core_e2e_step.dependOn(&run.step);
         test_step.dependOn(&host_e2e_run.step);
         test_step.dependOn(&persist_e2e_run.step);
         test_step.dependOn(&markup_e2e_run.step);
@@ -574,6 +585,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&scaffold_ide_e2e_run.step);
         test_step.dependOn(&ai_chat_e2e_run.step);
         test_step.dependOn(&services_e2e_run.step);
+        if (services_pool_e2e_run) |run| test_step.dependOn(&run.step);
         test_step.dependOn(&sidecar_conformance_run.step);
     }
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
@@ -2865,9 +2877,16 @@ const TsCoreE2eArtifacts = struct {
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
     services: *std.Build.Step.Compile,
+    /// The in-process service carrier: the same fixture compiled as a
+    /// thread-instanced library archive, linked into this battery and driven
+    /// through ServicePool (parallel keys, per-key FIFO, cooperative
+    /// cancellation/deadlines, trap isolation, streaming, replay). Null when
+    /// the target cannot carry the archive (cross or non-desktop builds).
+    services_pool: ?*std.Build.Step.Compile,
     /// The service-host carrier benchmark: a bytes-echo service compiled
     /// through the same lane, driven directly through the production
-    /// carrier binding (cold start, round-trip latency, queued throughput).
+    /// carrier bindings of BOTH carriers (cold start, round-trip latency,
+    /// queued throughput).
     service_host_bench: *std.Build.Step.Compile,
     /// Sidecar-shim conformance (tests/sidecar): every fixture's
     /// generated mirror validated over its frontend-emitted contract
@@ -3102,6 +3121,20 @@ fn tsCoreE2eArtifact(
     service_test_options.addOption([]const u8, "node_executable", node);
     services_e2e_mod.addOptions("ts_services_options", service_test_options);
 
+    // The same fixture against the in-process carrier: the service archive
+    // links into the battery beside the fixture core's archive (distinct
+    // symbol prefixes), and ServicePool drives it through the identical
+    // TsUiApp/Effects seam.
+    const services_pool_mod: ?*std.Build.Module = if (service_host_fixture.archive) |service_archive| pool: {
+        const pool_mod = module(b, target, optimize, "tests/ts-services/service_pool_e2e_tests.zig");
+        pool_mod.addImport("native_sdk", desktop_mod);
+        pool_mod.addImport("ts_services_core", services_fixture.module);
+        pool_mod.addImport("ts_services_registry", service_host_fixture.registry);
+        pool_mod.link_libc = true;
+        pool_mod.addObjectFile(service_archive);
+        break :pool pool_mod;
+    } else null;
+
     // Service-host carrier benchmark: the same production service lane
     // (frontend contract -> corewire host/registry -> exact-pinned
     // plain-scriptc executable) over a bytes-echo operation that returns
@@ -3129,7 +3162,14 @@ fn tsCoreE2eArtifact(
     service_bench_mod.addImport("service_registry", service_bench_fixture.registry);
     const service_bench_options = b.addOptions();
     service_bench_options.addOptionPath("service_executable", service_bench_fixture.executable);
+    service_bench_options.addOption(bool, "has_archive", service_bench_fixture.archive != null);
     service_bench_mod.addOptions("bench_options", service_bench_options);
+    if (service_bench_fixture.archive) |bench_archive| {
+        // The in-process carrier's half of the benchmark: the same echo
+        // service as a linked archive, driven through ServicePool.
+        service_bench_mod.link_libc = true;
+        service_bench_mod.addObjectFile(bench_archive);
+    }
     const service_bench_exe = b.addExecutable(.{
         .name = "bench-service-host",
         .root_module = service_bench_mod,
@@ -3215,6 +3255,7 @@ fn tsCoreE2eArtifact(
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
+        .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
         .service_host_bench = service_bench_exe,
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
@@ -3224,14 +3265,20 @@ fn tsCoreE2eArtifact(
 
 const ExternalServiceFixture = struct {
     executable: std.Build.LazyPath,
+    /// The in-process carrier's library archive (thread-instanced,
+    /// runtime-localized), compiled from the same staged tree. Host-native
+    /// darwin/linux builds only; null elsewhere (runtime localization
+    /// refuses cross targets, and the pool is a desktop host-native carrier).
+    archive: ?std.Build.LazyPath,
     registry: *std.Build.Module,
 };
 
 /// Compile one fixture's service class through the production phase-1 lane:
 /// service sidecar -> corewire host/registry -> ordinary source stage (plus
 /// the pinned compiler's tagged-throw compatibility lowering) -> exact pinned
-/// plain-scriptc executable. No author source is re-read for dispatch facts
-/// after the sidecar emission.
+/// scriptc outputs (the child executable, plus the in-process library archive
+/// on host-native darwin/linux). No author source is re-read for dispatch
+/// facts after the sidecar emission.
 fn externalServiceFixture(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -3242,6 +3289,9 @@ fn externalServiceFixture(
     contract: std.Build.LazyPath,
     name: []const u8,
 ) ExternalServiceFixture {
+    const emit_archive = target.result.os.tag == b.graph.host.result.os.tag and
+        target.result.cpu.arch == b.graph.host.result.cpu.arch and
+        (target.result.os.tag == .macos or target.result.os.tag == .linux);
     const project = b.addRunArtifact(corewire_exe);
     project.addArg("--services-sidecar");
     project.addFileArg(contract);
@@ -3249,6 +3299,10 @@ fn externalServiceFixture(
     const host_main = project.addOutputFileArg("service_host_main.ts");
     project.addArg("--service-registry");
     const registry_source = project.addOutputFileArg("services.zig");
+    project.addArg("--service-inproc-main");
+    const inproc_main = project.addOutputFileArg("service_inproc_main.ts");
+    project.addArg("--service-inproc-profile");
+    const inproc_profile = project.addOutputFileArg("service_profile.json");
 
     const stage = b.addSystemCommand(&.{node});
     stage.addFileArg(b.path("packages/core/scripts/stage_external_services.mjs"));
@@ -3256,6 +3310,10 @@ fn externalServiceFixture(
     stage.addDirectoryArg(src_dir);
     stage.addArg("--host-main");
     stage.addFileArg(host_main);
+    stage.addArg("--inproc-main");
+    stage.addFileArg(inproc_main);
+    stage.addArg("--inproc-profile");
+    stage.addFileArg(inproc_profile);
     stage.addArg("--contract");
     stage.addFileArg(contract);
     stage.addArg("--out");
@@ -3278,6 +3336,10 @@ fn externalServiceFixture(
     compile.addArg("--out-exe");
     const suffix = if (b.graph.host.result.os.tag == .windows) ".exe" else "";
     const executable = compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
+    const archive: ?std.Build.LazyPath = if (emit_archive) archive: {
+        compile.addArg("--out-archive");
+        break :archive compile.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
+    } else null;
     const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
     compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", host_platform });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
@@ -3289,6 +3351,7 @@ fn externalServiceFixture(
 
     return .{
         .executable = executable,
+        .archive = archive,
         .registry = b.createModule(.{
             .root_source_file = registry_source,
             .target = target,

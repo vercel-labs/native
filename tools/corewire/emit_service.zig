@@ -1,8 +1,17 @@
-//! Fourth corewire projection: the plain-scriptc service host entry and the
-//! Zig name/index registry consumed by the runner transport.
+//! Fourth corewire projection: the service entries and the Zig name/index
+//! registry consumed by the runner transports. Two entry projections share
+//! one contract: the plain-scriptc child-process host main (framed stdio)
+//! and the in-process library facade (a library-mode archive linked into
+//! the app binary, one instance per pool thread).
 
 const std = @import("std");
 const service = @import("service_contract.zig");
+
+/// The in-process service archive's C symbol family. Distinct from the
+/// compiled core's prefix (the frontend's abi.prefix, canonically
+/// "nsc_core_") so both archives link into one binary; fixed because one
+/// app binary carries at most one service archive.
+pub const inproc_symbol_prefix = "nsc_svc_";
 
 const fingerprint_len = std.crypto.hash.sha2.Sha256.digest_length;
 
@@ -385,44 +394,7 @@ pub fn emitHost(arena: std.mem.Allocator, contract: service.Contract) ![]const u
         \\  switch (index) {
         \\
     );
-    for (contract.operations, 0..) |op, index| {
-        try w.print("    case {d}: {{\n", .{index});
-        if (op.request.kind == .none) {
-            try w.writeAll("      if (payload.length !== 0) throw new Error(\"unexpected service request payload\");\n");
-            try w.print("      return ", .{});
-            const call = if (op.stream != null and op.cancellable)
-                try std.fmt.allocPrint(arena, "serviceOp{d}((chunk) => __nativeSdkEmit{d}(requestId, chunk), cancellation(cancelPath))", .{ index, index })
-            else if (op.stream != null)
-                try std.fmt.allocPrint(arena, "serviceOp{d}((chunk) => __nativeSdkEmit{d}(requestId, chunk))", .{ index, index })
-            else if (op.cancellable)
-                try std.fmt.allocPrint(arena, "serviceOp{d}(cancellation(cancelPath))", .{index})
-            else
-                try std.fmt.allocPrint(arena, "serviceOp{d}()", .{index});
-            defer arena.free(call);
-            if (op.result.kind == .bytes) try w.writeAll(call) else try emitEncodeExpr(w, op.result, call);
-            try w.writeAll(";\n");
-        } else {
-            if (op.request.kind == .bytes) {
-                try w.writeAll("      const request = payload;\n      return ");
-            } else {
-                try w.writeAll("      const reader = new __NativeSdkReader(payload);\n      const request = ");
-                try emitDecodeExpr(w, op.request, "reader");
-                try w.writeAll(";\n      reader.finish();\n      return ");
-            }
-            const call = if (op.stream != null and op.cancellable)
-                try std.fmt.allocPrint(arena, "serviceOp{d}(request, (chunk) => __nativeSdkEmit{d}(requestId, chunk), cancellation(cancelPath))", .{ index, index })
-            else if (op.stream != null)
-                try std.fmt.allocPrint(arena, "serviceOp{d}(request, (chunk) => __nativeSdkEmit{d}(requestId, chunk))", .{ index, index })
-            else if (op.cancellable)
-                try std.fmt.allocPrint(arena, "serviceOp{d}(request, cancellation(cancelPath))", .{index})
-            else
-                try std.fmt.allocPrint(arena, "serviceOp{d}(request)", .{index});
-            defer arena.free(call);
-            if (op.result.kind == .bytes) try w.writeAll(call) else try emitEncodeExpr(w, op.result, call);
-            try w.writeAll(";\n");
-        }
-        try w.writeAll("    }\n");
-    }
+    try emitDispatchCases(w, arena, contract, .child_process);
     try w.writeAll(
         \\    default: throw new Error("service operation index is not in the contract");
         \\  }
@@ -458,6 +430,205 @@ pub fn emitHost(arena: std.mem.Allocator, contract: service.Contract) ![]const u
     return out.toOwnedSlice();
 }
 
+/// The dispatch switch shared by both entry projections. The child host
+/// main's streaming emits carry the frame's request id; the in-process
+/// facade's emits write to the request's chunk-relay file instead, so its
+/// emit helpers take the chunk alone.
+const DispatchLane = enum { child_process, in_process };
+
+fn emitDispatchCases(w: *std.Io.Writer, arena: std.mem.Allocator, contract: service.Contract, lane: DispatchLane) !void {
+    for (contract.operations, 0..) |op, index| {
+        try w.print("    case {d}: {{\n", .{index});
+        const emit_callback = switch (lane) {
+            .child_process => try std.fmt.allocPrint(arena, "(chunk) => __nativeSdkEmit{d}(requestId, chunk)", .{index}),
+            .in_process => try std.fmt.allocPrint(arena, "(chunk) => __nativeSdkEmit{d}(chunk)", .{index}),
+        };
+        defer arena.free(emit_callback);
+        if (op.request.kind == .none) {
+            try w.writeAll("      if (payload.length !== 0) throw new Error(\"unexpected service request payload\");\n");
+            try w.print("      return ", .{});
+            const call = if (op.stream != null and op.cancellable)
+                try std.fmt.allocPrint(arena, "serviceOp{d}({s}, cancellation(cancelPath))", .{ index, emit_callback })
+            else if (op.stream != null)
+                try std.fmt.allocPrint(arena, "serviceOp{d}({s})", .{ index, emit_callback })
+            else if (op.cancellable)
+                try std.fmt.allocPrint(arena, "serviceOp{d}(cancellation(cancelPath))", .{index})
+            else
+                try std.fmt.allocPrint(arena, "serviceOp{d}()", .{index});
+            defer arena.free(call);
+            if (op.result.kind == .bytes) try w.writeAll(call) else try emitEncodeExpr(w, op.result, call);
+            try w.writeAll(";\n");
+        } else {
+            if (op.request.kind == .bytes) {
+                try w.writeAll("      const request = payload;\n      return ");
+            } else {
+                try w.writeAll("      const reader = new __NativeSdkReader(payload);\n      const request = ");
+                try emitDecodeExpr(w, op.request, "reader");
+                try w.writeAll(";\n      reader.finish();\n      return ");
+            }
+            const call = if (op.stream != null and op.cancellable)
+                try std.fmt.allocPrint(arena, "serviceOp{d}(request, {s}, cancellation(cancelPath))", .{ index, emit_callback })
+            else if (op.stream != null)
+                try std.fmt.allocPrint(arena, "serviceOp{d}(request, {s})", .{ index, emit_callback })
+            else if (op.cancellable)
+                try std.fmt.allocPrint(arena, "serviceOp{d}(request, cancellation(cancelPath))", .{index})
+            else
+                try std.fmt.allocPrint(arena, "serviceOp{d}(request)", .{index});
+            defer arena.free(call);
+            if (op.result.kind == .bytes) try w.writeAll(call) else try emitEncodeExpr(w, op.result, call);
+            try w.writeAll(";\n");
+        }
+        try w.writeAll("    }\n");
+    }
+}
+
+/// The in-process facade: the library-mode entry the service archive
+/// compiles from. One exported dispatch covers every operation — the pool
+/// passes the contract's operation index, the encoded request, the
+/// cooperative-cancellation marker path, and (streaming operations only)
+/// the chunk-relay file path. The return is a status byte (0 ok, 1 err)
+/// followed by the encoded result or the error JSON. Interim stream
+/// chunks ride the relay file as [len u32 LE][bytes] frames while the
+/// operation runs — the same liveness the child's stdout frames give.
+pub fn emitInprocMain(arena: std.mem.Allocator, contract: service.Contract) ![]const u8 {
+    var out = std.Io.Writer.Allocating.init(arena);
+    const w = &out.writer;
+    try w.writeAll(
+        \\// Generated by corewire from services.contract.json. Do not edit.
+        \\import * as fs from "node:fs";
+        \\
+    );
+    for (contract.operations, 0..) |op, index| {
+        const staged_module = op.module["src/".len..];
+        try w.print("import {{ {s} as serviceOp{d} }} from \"./{s}\";\n", .{ op.@"export", index, staged_module });
+    }
+    for (contract.types.records) |record| try w.print("import type {{ {s} }} from \"./{s}\";\n", .{ record.name, record.origin });
+    for (contract.types.enums) |enum_type| try w.print("import type {{ {s} }} from \"./{s}\";\n", .{ enum_type.name, enum_type.origin });
+    for (contract.types.unions) |union_type| try w.print("import type {{ {s} }} from \"./{s}\";\n", .{ union_type.name, union_type.origin });
+    const fingerprint = contractFingerprint(contract);
+    try w.writeAll("\nconst CONTRACT_FINGERPRINT = new Uint8Array([");
+    for (fingerprint, 0..) |byte, index| {
+        if (index > 0) try w.writeAll(", ");
+        try w.print("{d}", .{byte});
+    }
+    try w.writeAll("]);\n");
+    try w.writeAll(
+        \\export function contractFingerprint(): Uint8Array {
+        \\  return CONTRACT_FINGERPRINT;
+        \\}
+        \\class __NativeSdkCancelled extends Error {
+        \\  constructor() { super("service operation was cancelled"); this.name = "cancelled"; }
+        \\}
+        \\function cancellation(path: string) {
+        \\  const cancelled = (): boolean => path.length > 0 && fs.existsSync(path);
+        \\  return {
+        \\    cancelled,
+        \\    throwIfCancelled: (): void => { if (cancelled()) throw new __NativeSdkCancelled(); },
+        \\  };
+        \\}
+        \\let __nativeSdkStreamFd = -1;
+        \\function __nativeSdkEmitFrame(bytes: Uint8Array): void {
+        \\  if (__nativeSdkStreamFd < 0) return;
+        \\  const frame = new Uint8Array(4 + bytes.length);
+        \\  frame[0] = bytes.length & 255;
+        \\  frame[1] = (bytes.length >>> 8) & 255;
+        \\  frame[2] = (bytes.length >>> 16) & 255;
+        \\  frame[3] = (bytes.length >>> 24) & 255;
+        \\  frame.set(bytes, 4);
+        \\  fs.writeSync(__nativeSdkStreamFd, frame, 0, frame.length);
+        \\}
+        \\
+    );
+    try emitHostCodecs(w, contract);
+    for (contract.operations, 0..) |op, index| if (op.stream) |stream| {
+        try w.print("\nfunction __nativeSdkEmit{d}(chunk: ", .{index});
+        try emitTsType(w, stream.chunk);
+        try w.writeAll("): void { __nativeSdkEmitFrame(");
+        if (stream.chunk.kind == .bytes) try w.writeAll("chunk") else try emitEncodeExpr(w, stream.chunk, "chunk");
+        try w.writeAll("); }\n");
+    };
+    try w.writeAll(
+        \\function dispatchOperation(index: number, payload: Uint8Array, cancelPath: string): Uint8Array {
+        \\  switch (index) {
+        \\
+    );
+    try emitDispatchCases(w, arena, contract, .in_process);
+    try w.writeAll(
+        \\    default: throw new Error("service operation index is not in the contract");
+        \\  }
+        \\}
+        \\
+        \\export function dispatch(operation: number, payload: Uint8Array, cancelPathBytes: Uint8Array, streamPathBytes: Uint8Array): Uint8Array {
+        \\  const cancelPath = new TextDecoder().decode(cancelPathBytes);
+        \\  const streamPath = new TextDecoder().decode(streamPathBytes);
+        \\  __nativeSdkStreamFd = streamPath.length > 0 ? fs.openSync(streamPath, "a") : -1;
+        \\  try {
+        \\    const result = dispatchOperation(operation, payload, cancelPath);
+        \\    cancellation(cancelPath).throwIfCancelled();
+        \\    const out = new Uint8Array(1 + result.length);
+        \\    out[0] = 0;
+        \\    out.set(result, 1);
+        \\    return out;
+        \\  } catch (error) {
+        \\    let kind = "service_error";
+        \\    let message = "service operation threw";
+        \\    if (error instanceof Error) {
+        \\      kind = error.name;
+        \\      message = error.message;
+        \\    }
+        \\    const body = new TextEncoder().encode(JSON.stringify({ kind, message }));
+        \\    const out = new Uint8Array(1 + body.length);
+        \\    out[0] = 1;
+        \\    out.set(body, 1);
+        \\    return out;
+        \\  } finally {
+        \\    if (__nativeSdkStreamFd >= 0) {
+        \\      fs.closeSync(__nativeSdkStreamFd);
+        \\      __nativeSdkStreamFd = -1;
+        \\    }
+        \\  }
+        \\}
+        \\
+    );
+    return out.toOwnedSlice();
+}
+
+/// The library-mode compiler profile for the in-process service archive.
+/// Contract-independent by design: one fixed entry, the fixed service
+/// symbol family, runtime localization (so the archive links beside the
+/// compiled core's archive), and thread-instanced state (one independent
+/// instance per pool thread). No sidecar section — the archive is built
+/// and linked by one build graph, and the facade's fingerprint export is
+/// the pairing check. No determinism fences — services run with ambient
+/// authority by contract.
+pub fn emitInprocProfile(arena: std.mem.Allocator) ![]const u8 {
+    var out = std.Io.Writer.Allocating.init(arena);
+    const w = &out.writer;
+    try w.print(
+        \\{{
+        \\  "profile_format": 1,
+        \\  "name": "native-sdk-services",
+        \\  "entry": "service_inproc_main.ts",
+        \\  "emission": "llvm",
+        \\  "abi": {{
+        \\    "prefix": "{s}",
+        \\    "init_symbol": "{s}init",
+        \\    "sink_register_symbol": "{s}set_panic_sink",
+        \\    "collect_symbol": "{s}collect",
+        \\    "result_reset_symbol": null,
+        \\    "localize_runtime": true,
+        \\    "instance_per_thread": true
+        \\  }},
+        \\  "exports": [
+        \\    {{ "export": "dispatch", "symbol": "{s}dispatch", "params": ["u32", "bytes", "bytes", "bytes"], "returns": "bytes" }},
+        \\    {{ "export": "contractFingerprint", "symbol": "{s}contract_fingerprint", "params": [], "returns": "bytes" }}
+        \\  ]
+        \\}}
+        \\
+    , .{ inproc_symbol_prefix, inproc_symbol_prefix, inproc_symbol_prefix, inproc_symbol_prefix, inproc_symbol_prefix, inproc_symbol_prefix });
+    return out.toOwnedSlice();
+}
+
 pub fn emitRegistry(arena: std.mem.Allocator, contract: service.Contract) ![]const u8 {
     var out = std.Io.Writer.Allocating.init(arena);
     const w = &out.writer;
@@ -467,8 +638,9 @@ pub fn emitRegistry(arena: std.mem.Allocator, contract: service.Contract) ![]con
         \\pub const enabled = true;
         \\pub const protocol_version: u8 = {d};
         \\pub const compiler_version = "{s}";
+        \\pub const inproc_symbol_prefix = "{s}";
         \\
-    , .{ contract.protocol_version, contract.compiler_version });
+    , .{ contract.protocol_version, contract.compiler_version, inproc_symbol_prefix });
     try w.writeAll("pub const contract_fingerprint = [_]u8{");
     for (fingerprint, 0..) |byte, index| {
         if (index > 0) try w.writeAll(", ");
@@ -704,8 +876,28 @@ test "service projection derives host dispatch and registry from one contract" {
     try std.testing.expect(std.mem.indexOf(u8, host, "PROTOCOL_VERSION = 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, host, "CONTRACT_FINGERPRINT = new Uint8Array([") != null);
 
+    const inproc = try emitInprocMain(std.testing.allocator, contract);
+    defer std.testing.allocator.free(inproc);
+    try std.testing.expect(std.mem.indexOf(u8, inproc, "export function dispatch(operation: number, payload: Uint8Array, cancelPathBytes: Uint8Array, streamPathBytes: Uint8Array): Uint8Array") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inproc, "export function contractFingerprint(): Uint8Array") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inproc, "serviceOp0(request)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inproc, "serviceOp1(cancellation(cancelPath))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inproc, "import { $refresh as serviceOp1 }") != null);
+    // The facade returns its status byte in-band; no stdio protocol rides it.
+    try std.testing.expect(std.mem.indexOf(u8, inproc, "writeHello") == null);
+    try std.testing.expect(std.mem.indexOf(u8, inproc, "requestId") == null);
+
+    const profile = try emitInprocProfile(std.testing.allocator);
+    defer std.testing.allocator.free(profile);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "\"prefix\": \"nsc_svc_\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "\"localize_runtime\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "\"instance_per_thread\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "\"entry\": \"service_inproc_main.ts\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "\"symbol\": \"nsc_svc_dispatch\"") != null);
+
     const registry = try emitRegistry(std.testing.allocator, contract);
     defer std.testing.allocator.free(registry);
+    try std.testing.expect(std.mem.indexOf(u8, registry, "pub const inproc_symbol_prefix = \"nsc_svc_\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, ".name = \"feeds.parse\", .index = 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, "0 => true") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, "copyServiceBytes(bytes)") != null);

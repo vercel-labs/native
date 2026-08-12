@@ -1,7 +1,11 @@
 #!/usr/bin/env node
-// Exact-pinned plain-scriptc executable compile for the service host. The
-// version is verified against the one packages/core pin and the echo in
-// services.contract.json before any compiler work starts.
+// Exact-pinned scriptc compile for the service class. Two output lanes over
+// one staged tree: --out-exe builds the plain-scriptc child executable
+// (service_host_main.ts, framed stdio), --out-archive builds the library-mode
+// archive the in-process carrier links (service_inproc_main.ts under the
+// staged service_profile.json). One invocation may produce either or both.
+// The compiler version is verified against the one packages/core pin and the
+// echo in services.contract.json before any compiler work starts.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -14,16 +18,20 @@ function parseArgs(argv) {
     const key = argv[i];
     const value = argv[i + 1];
     if (!key?.startsWith("--") || value === undefined) {
-      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> --out-exe <file> --host-platform <arch-os-abi> --target-platform <arch-os-abi> (--compiler <cmd> | --compiler-js <main.js>)");
+      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> (--out-exe <file> | --out-archive <file>) --host-platform <arch-os-abi> --target-platform <arch-os-abi> (--compiler <cmd> | --compiler-js <main.js>)");
       process.exit(2);
     }
     args[key.slice(2)] = value;
   }
-  for (const required of ["stage", "manifest", "contract", "out-exe", "host-platform", "target-platform"]) {
+  for (const required of ["stage", "manifest", "contract", "host-platform", "target-platform"]) {
     if (!args[required]) {
       console.error(`run_external_service_compiler.mjs: missing --${required}`);
       process.exit(2);
     }
+  }
+  if (!args["out-exe"] && !args["out-archive"]) {
+    console.error("run_external_service_compiler.mjs: supply --out-exe, --out-archive, or both");
+    process.exit(2);
   }
   if (!args.compiler && !args["compiler-js"]) {
     console.error("run_external_service_compiler.mjs: supply --compiler or --compiler-js");
@@ -40,7 +48,7 @@ if (args["target-platform"] !== args["host-platform"]) {
   );
   process.exit(2);
 }
-for (const key of ["stage", "manifest", "contract", "out-exe", "compiler-js"]) {
+for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "compiler-js"]) {
   if (args[key]) args[key] = path.resolve(args[key]);
 }
 const argv0 = args.compiler
@@ -82,10 +90,7 @@ if (probe.status !== 0 || reported !== pin) {
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-external-services-"));
 try {
   fs.cpSync(args.stage, work, { recursive: true });
-  const built = path.join(work, process.platform === "win32" ? "service-host.exe" : "service-host");
   const staticPackages = Array.isArray(contract.packages) ? contract.packages.map((entry) => entry.name) : [];
-  const compileArgs = [...argv0.slice(1), "build", "service_host_main.ts", "-o", built];
-  if (staticPackages.length > 0) compileArgs.push("--npm-static", staticPackages.join(","));
   if (staticPackages.length > 0) {
     const coverage = spawnSync(argv0[0], [
       ...argv0.slice(1),
@@ -102,23 +107,63 @@ try {
       process.exit(coverage.status && coverage.status !== 0 ? coverage.status : 1);
     }
   }
-  const result = spawnSync(argv0[0], compileArgs, {
-    cwd: work,
-    encoding: "utf8",
-  });
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-  if (result.status !== 0) {
-    if (isNpmStaticRefusal(`${result.stdout ?? ""}${result.stderr ?? ""}`)) printNpmStaticTeaching();
-    process.exit(result.status ?? 1);
+  if (args["out-exe"]) {
+    const built = path.join(work, process.platform === "win32" ? "service-host.exe" : "service-host");
+    const compileArgs = [...argv0.slice(1), "build", "service_host_main.ts", "-o", built];
+    if (staticPackages.length > 0) compileArgs.push("--npm-static", staticPackages.join(","));
+    const result = spawnSync(argv0[0], compileArgs, {
+      cwd: work,
+      encoding: "utf8",
+    });
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    if (result.status !== 0) {
+      if (isNpmStaticRefusal(`${result.stdout ?? ""}${result.stderr ?? ""}`)) printNpmStaticTeaching();
+      process.exit(result.status ?? 1);
+    }
+    if (!fs.existsSync(built)) {
+      console.error("the external service compile produced no executable");
+      process.exit(1);
+    }
+    fs.mkdirSync(path.dirname(args["out-exe"]), { recursive: true });
+    fs.copyFileSync(built, args["out-exe"]);
+    fs.chmodSync(args["out-exe"], 0o755);
   }
-  if (!fs.existsSync(built)) {
-    console.error("the external service compile produced no executable");
-    process.exit(1);
+  if (args["out-archive"]) {
+    // The in-process carrier's library archive: the staged profile pins
+    // the entry (service_inproc_main.ts), the fixed symbol family, runtime
+    // localization, and thread-instanced state. Library mode takes no
+    // --npm-static: bare npm specifiers are static-or-refuse there, and
+    // the vendored packages already staged under node_modules resolve
+    // automatically.
+    if (!fs.existsSync(path.join(work, "service_profile.json")) || !fs.existsSync(path.join(work, "service_inproc_main.ts"))) {
+      console.error("the service stage carries no in-process entry/profile (stage with --inproc-main and --inproc-profile)");
+      process.exit(2);
+    }
+    const builtArchive = path.join(work, "native_sdk_services");
+    const result = spawnSync(argv0[0], [
+      ...argv0.slice(1),
+      "build",
+      "--lib",
+      "--profile",
+      "service_profile.json",
+      "-o",
+      builtArchive,
+    ], { cwd: work, encoding: "utf8" });
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    if (result.status !== 0) {
+      if (isNpmStaticRefusal(`${result.stdout ?? ""}${result.stderr ?? ""}`)) printNpmStaticTeaching();
+      process.exit(result.status ?? 1);
+    }
+    const producedArchive = [`${builtArchive}.lib.a`, builtArchive].find((name) => fs.existsSync(name));
+    if (!producedArchive) {
+      console.error("the external service compile produced no archive (expected native_sdk_services.lib.a)");
+      process.exit(1);
+    }
+    fs.mkdirSync(path.dirname(args["out-archive"]), { recursive: true });
+    fs.copyFileSync(producedArchive, args["out-archive"]);
   }
-  fs.mkdirSync(path.dirname(args["out-exe"]), { recursive: true });
-  fs.copyFileSync(built, args["out-exe"]);
-  fs.chmodSync(args["out-exe"], 0o755);
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
 }

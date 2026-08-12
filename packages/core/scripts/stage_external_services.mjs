@@ -165,3 +165,8 @@ export interface ServiceCancellation {
 `);
 stagePackages(args.src, args.out, args.contract);
 fs.copyFileSync(args["host-main"], path.join(args.out, "service_host_main.ts"));
+// The in-process carrier's library entry and its compiler profile stage
+// beside the child host main; the archive compile resolves the profile's
+// entry relative to the profile file, so both land at the stage root.
+if (args["inproc-main"]) fs.copyFileSync(args["inproc-main"], path.join(args.out, "service_inproc_main.ts"));
+if (args["inproc-profile"]) fs.copyFileSync(args["inproc-profile"], path.join(args.out, "service_profile.json"));

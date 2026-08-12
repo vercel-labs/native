@@ -63,6 +63,7 @@ const native_sdk = @import("native_sdk");
 const manifest = @import("app_manifest_zon");
 pub const core = @import("core.zig");
 const services = @import("services.zig");
+const service_carrier = @import("service_carrier.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -135,28 +136,49 @@ pub fn main(init: std.process.Init) !void {
     ) catch "";
     if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, app_data_dir) catch {};
 
-    // Phase-1 TypeScript services: a lazily-spawned sibling executable,
-    // generated and compiled from services.contract.json. Replay never calls
-    // the binding, so the child never starts. Its ambient environment is an
-    // explicit allowlist and its cwd is the app data directory.
+    // TypeScript services, on the build-selected carrier (service_carrier.zig).
+    // In-process (the default where supported): the service archive is linked
+    // into this binary and ServicePool runs one instance per worker thread.
+    // Child: a lazily-spawned sibling executable with an explicit environment
+    // allowlist and the app data directory as its cwd. Either way, replay
+    // never calls the binding, so nothing starts under replay.
+    const use_pool = comptime (services.enabled and service_carrier.kind == .in_process);
+    const use_child = comptime (services.enabled and !use_pool);
     var service_env = std.process.Environ.Map.init(std.heap.page_allocator);
     defer service_env.deinit();
-    const env_keys = init.environ_map.keys();
-    const env_values = init.environ_map.values();
-    for (env_keys, env_values) |key, value| {
-        if (native_sdk.serviceEnvironmentVariableAllowed(key)) service_env.put(key, value) catch {};
-    }
     var service_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const service_path = siblingServiceHostPath(init.io, &service_path_buffer);
-    const ServiceTransport = native_sdk.ServiceHost(services);
-    var service_transport = ServiceTransport.init(
-        std.heap.page_allocator,
-        init.io,
-        service_path,
-        app_data_dir,
-        &service_env,
-    );
-    defer service_transport.deinit();
+    const ChildTransport = native_sdk.ServiceHost(services);
+    const PoolTransport = native_sdk.ServicePool(services);
+    var child_transport: if (use_child) ChildTransport else void = undefined;
+    var pool_transport: if (use_pool) PoolTransport else void = undefined;
+    if (comptime use_child) {
+        const env_keys = init.environ_map.keys();
+        const env_values = init.environ_map.values();
+        for (env_keys, env_values) |key, value| {
+            if (native_sdk.serviceEnvironmentVariableAllowed(key)) service_env.put(key, value) catch {};
+        }
+        const service_path = siblingServiceHostPath(init.io, &service_path_buffer);
+        child_transport = ChildTransport.init(
+            std.heap.page_allocator,
+            init.io,
+            service_path,
+            app_data_dir,
+            &service_env,
+        );
+    }
+    if (comptime use_pool) {
+        // The pool's cwd holds the cooperative-cancellation markers and
+        // stream-relay files; the service operations themselves run with the
+        // app process's own working directory.
+        pool_transport = PoolTransport.init(
+            std.heap.page_allocator,
+            init.io,
+            app_data_dir,
+            .{ .max_workers = service_carrier.pool_workers },
+        );
+    }
+    defer if (comptime use_child) child_transport.deinit();
+    defer if (comptime use_pool) pool_transport.deinit();
     // app.zon-declared images, read once at launch (bounded; a missing or
     // over-bound file skips its entry and the views keep their fallback)
     // and registered by the adapter on the installing frame.
@@ -259,7 +281,12 @@ pub fn main(init: std.process.Init) !void {
         .image_cache_dir = audio_cache_dir,
         .boot_images = boot_images_buffer[0..boot_image_count],
         .env_values = env_values_buffer[0..env_value_count],
-        .host_calls = if (comptime services.enabled) service_transport.binding() else null,
+        .host_calls = if (comptime use_pool)
+            pool_transport.binding()
+        else if (comptime use_child)
+            child_transport.binding()
+        else
+            null,
         .service_results = if (comptime services.enabled) .{
             .index_fn = services.indexOf,
             .streaming_fn = services.isStreaming,

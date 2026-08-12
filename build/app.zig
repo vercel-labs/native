@@ -100,9 +100,54 @@ const TsCoreStage = struct {
     /// for the toolchain's runtime) beside the staged mirror.
     archive: std.Build.LazyPath,
     /// Plain-scriptc service host compiled from src/services/, when that
-    /// class exists. It is installed/packaged beside the app executable.
+    /// class exists and the child carrier is selected. It is installed/
+    /// packaged beside the app executable.
     service_exe: ?std.Build.LazyPath = null,
+    /// The in-process carrier's service archive (thread-instanced,
+    /// runtime-localized), when that class exists and the in-process
+    /// carrier is selected. The app module links it beside the core's
+    /// archive.
+    service_archive: ?std.Build.LazyPath = null,
 };
+
+/// Which carrier runs src/services/ operations. In-process is the default
+/// where it is supported: host-native desktop builds on macOS and Linux
+/// (runtime localization is host-native there; Windows and cross builds
+/// keep the child process). `.service_carrier` in app.zon and the
+/// `-Dservice-carrier` flag state the choice explicitly.
+const ServiceCarrierOption = enum { auto, in_process, child };
+
+const ServiceCarrier = enum { none, child, in_process };
+
+fn resolveServiceCarrier(
+    choice: ServiceCarrierOption,
+    has_services: bool,
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+) ServiceCarrier {
+    if (!has_services) return .none;
+    const host = b.graph.host.result;
+    const supported = target.result.os.tag == host.os.tag and
+        target.result.cpu.arch == host.cpu.arch and
+        (target.result.os.tag == .macos or target.result.os.tag == .linux);
+    return switch (choice) {
+        .auto => if (supported) .in_process else .child,
+        .in_process => if (supported) .in_process else @panic(
+            "\nservice_carrier = \"in_process\" requires a host-native macOS or Linux build:" ++
+                " the service archive compiles with runtime localization, which is host-native" ++
+                " on those platforms only.\nUse \"child\" (or drop the setting — the default" ++
+                " picks the supported carrier) for this target.\n",
+        ),
+        .child => .child,
+    };
+}
+
+fn parseServiceCarrierOption(raw: []const u8) ServiceCarrierOption {
+    if (std.mem.eql(u8, raw, "auto")) return .auto;
+    if (std.mem.eql(u8, raw, "in_process")) return .in_process;
+    if (std.mem.eql(u8, raw, "child")) return .child;
+    @panic("\n.service_carrier must be \"auto\", \"in_process\", or \"child\"\n");
+}
 
 /// The frontend's own sources — the staleness set of every build step
 /// that runs it (a frontend edit re-checks every core).
@@ -370,9 +415,12 @@ fn tsCoreStage(
     store_capability: bool,
     persist_version: ?u64,
     service_packages: []const ServicePackageConfig,
+    service_carrier_choice: ServiceCarrierOption,
+    service_pool_workers: ?u8,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
+    const service_carrier = resolveServiceCarrier(service_carrier_choice, has_services, b, target);
 
     // The frontend, in check-only mode: the subset checker and the
     // contract sidecar, no emission. Every check-time teaching gates the
@@ -440,6 +488,7 @@ fn tsCoreStage(
     // name/index registry never rediscover facts from author source.
     var service_registry: std.Build.LazyPath = dep.path("src/app_runner/no_services.zig");
     var service_exe: ?std.Build.LazyPath = null;
+    var service_archive: ?std.Build.LazyPath = null;
     var service_client: ?std.Build.LazyPath = null;
     if (services_contract) |service_contract| {
         const service_project = b.addRunArtifact(corewire_exe);
@@ -451,6 +500,14 @@ fn tsCoreStage(
         service_registry = service_project.addOutputFileArg("services.zig");
         service_project.addArg("--service-client");
         service_client = service_project.addOutputFileArg("services.gen.ts");
+        const service_inproc_main: ?std.Build.LazyPath = if (service_carrier == .in_process) inproc: {
+            service_project.addArg("--service-inproc-main");
+            break :inproc service_project.addOutputFileArg("service_inproc_main.ts");
+        } else null;
+        const service_inproc_profile: ?std.Build.LazyPath = if (service_carrier == .in_process) inproc: {
+            service_project.addArg("--service-inproc-profile");
+            break :inproc service_project.addOutputFileArg("service_profile.json");
+        } else null;
 
         // Ordinary service TypeScript is staged without core-subset rewrites.
         // The one service-boundary lowering turns NS1067's `{ kind, message }`
@@ -462,6 +519,14 @@ fn tsCoreStage(
         service_stage_run.addDirectoryArg(b.path(appPath(b, app_root, "src")));
         service_stage_run.addArg("--host-main");
         service_stage_run.addFileArg(service_host_main);
+        if (service_inproc_main) |inproc_main| {
+            service_stage_run.addArg("--inproc-main");
+            service_stage_run.addFileArg(inproc_main);
+        }
+        if (service_inproc_profile) |inproc_profile| {
+            service_stage_run.addArg("--inproc-profile");
+            service_stage_run.addFileArg(inproc_profile);
+        }
         service_stage_run.addArg("--contract");
         service_stage_run.addFileArg(service_contract);
         service_stage_run.addArg("--out");
@@ -478,9 +543,16 @@ fn tsCoreStage(
         service_compile.addFileArg(dep.path("packages/core/package.json"));
         service_compile.addArg("--contract");
         service_compile.addFileArg(service_contract);
-        service_compile.addArg("--out-exe");
-        const service_suffix = if (target.result.os.tag == .windows) ".exe" else "";
-        service_exe = service_compile.addOutputFileArg(b.fmt("{s}_services{s}", .{ app_name, service_suffix }));
+        if (service_carrier == .in_process) {
+            // The in-process carrier links the service class into the app
+            // binary; no sibling executable is built or packaged.
+            service_compile.addArg("--out-archive");
+            service_archive = service_compile.addOutputFileArg(b.fmt("lib{s}_services.a", .{externalCoreSymbolName(b, app_name)}));
+        } else {
+            service_compile.addArg("--out-exe");
+            const service_suffix = if (target.result.os.tag == .windows) ".exe" else "";
+            service_exe = service_compile.addOutputFileArg(b.fmt("{s}_services{s}", .{ app_name, service_suffix }));
+        }
         service_compile.addArgs(&.{
             "--host-platform",
             b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
@@ -557,9 +629,20 @@ fn tsCoreStage(
     _ = staged.addCopyFile(dep.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/core_abi.zig"), "core_abi.zig");
     _ = staged.addCopyFile(service_registry, "services.zig");
+    // The carrier selection, as one staged constant module: the generated
+    // wiring comptime-switches its service transport on it.
+    _ = staged.add("service_carrier.zig", b.fmt(
+        \\//! Generated by the app build: the resolved service-carrier selection.
+        \\pub const Kind = enum {{ none, child, in_process }};
+        \\pub const kind: Kind = .{t};
+        \\/// Pool width for the in-process carrier; null resolves the
+        \\/// runtime default (min(4, cores)).
+        \\pub const pool_workers: ?usize = {?d};
+        \\
+    , .{ service_carrier, service_pool_workers }));
     _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
-    return .{ .main_root = main_root, .archive = archive, .service_exe = service_exe };
+    return .{ .main_root = main_root, .archive = archive, .service_exe = service_exe, .service_archive = service_archive };
 }
 
 /// corewire (the contract-sidecar shim generator), compiled from the SDK
@@ -828,6 +911,22 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " target mobile yet.\nBuild for a desktop target, or port the core to a Zig" ++
             " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
     }
+    // The service-carrier selection: `-Dservice-carrier` overrides app.zon's
+    // `.service_carrier`; both default to auto (in-process where supported).
+    const service_carrier_choice: ServiceCarrierOption = choice: {
+        if (b.option([]const u8, "service-carrier", "How src/services operations run: auto (default), in_process, child")) |flag| {
+            break :choice parseServiceCarrierOption(flag);
+        }
+        break :choice parseServiceCarrierOption(app_config.service_carrier);
+    };
+    const service_pool_workers: ?u8 = workers: {
+        const configured = b.option(u8, "service-pool-size", "In-process service carrier worker threads (1-16; default min(4, cores))") orelse
+            app_config.service_pool_size;
+        if (configured) |count| {
+            if (count < 1 or count > 16) @panic("\nservice pool size must be between 1 and 16\n");
+        }
+        break :workers configured;
+    };
     const ts_stage: ?TsCoreStage = if (core_tree == .ts)
         tsCoreStage(
             b,
@@ -839,6 +938,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_config.store_capability,
             app_config.persist_version,
             app_config.service_packages,
+            service_carrier_choice,
+            service_pool_workers,
         )
     else
         null;
@@ -1163,6 +1264,9 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         // toolchain's runtime needs libc.
         app_mod.link_libc = true;
         app_mod.addObjectFile(stage.archive);
+        // The in-process service archive links beside it (distinct symbol
+        // prefix; its runtime internals are localized).
+        if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);
     }
     if (app_config.sqlite_capability) {
         // `store` and the relational `sqlite` tier share this exact object.
@@ -1770,6 +1874,8 @@ const AppManifestBuildConfig = struct {
     persist_capability: bool = false,
     persist_version: ?u64 = null,
     service_packages: []const ServicePackageConfig = &.{},
+    service_carrier: []const u8 = "auto",
+    service_pool_size: ?u8 = null,
     store_capability: bool = false,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
@@ -1803,6 +1909,8 @@ const InferenceManifest = struct {
         version: u64,
     } = null,
     service_packages: []const ServicePackageConfig = &.{},
+    service_carrier: []const u8 = "auto",
+    service_pool_size: u8 = 0,
     shell: struct {
         windows: []const struct {
             views: []const struct {
@@ -1854,6 +1962,8 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .persist_capability = hasManifestCapability(raw.capabilities, "persist"),
         .persist_version = if (raw.persist) |persist| persist.version else null,
         .service_packages = raw.service_packages,
+        .service_carrier = raw.service_carrier,
+        .service_pool_size = if (raw.service_pool_size == 0) null else raw.service_pool_size,
         .store_capability = hasManifestCapability(raw.capabilities, "store"),
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),

@@ -24,6 +24,11 @@ pub const Metadata = struct {
     capabilities: []const []const u8 = &.{},
     persist: ?PersistMetadata = null,
     service_packages: []const ServicePackageMetadata = &.{},
+    /// Which carrier runs src/services operations: "auto", "in_process",
+    /// or "child". Validated so a typo teaches at check time.
+    service_carrier: []const u8 = "auto",
+    /// In-process service pool width; null keeps the runtime default.
+    service_pool_size: ?u8 = null,
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
     /// Whether the app ships the embedded web layer: "auto" (default,
@@ -72,6 +77,7 @@ pub const Metadata = struct {
         allocator.free(self.web_engine);
         allocator.free(self.webview_layer);
         allocator.free(self.core_compiler);
+        allocator.free(self.service_carrier);
         allocator.free(self.cef.dir);
         for (self.icons) |value| allocator.free(value);
         if (self.icons.len > 0) allocator.free(self.icons);
@@ -493,6 +499,16 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .ok = false,
         .message = "app.zon service_packages must use safe npm names, exact X.Y.Z versions, unique names, and lowercase SHA-256 content hashes",
     };
+    if (!validServiceCarrier(metadata.service_carrier)) return .{
+        .ok = false,
+        .message = "app.zon service_carrier must be \"auto\", \"in_process\", or \"child\"",
+    };
+    if (metadata.service_pool_size) |pool_size| {
+        if (pool_size < 1 or pool_size > 16) return .{
+            .ok = false,
+            .message = "app.zon service_pool_size must be between 1 and 16",
+        };
+    }
     const bridge_commands = parseBridgeCommands(allocator, metadata.bridge_commands) catch return .{ .ok = false, .message = "app.zon bridge commands are invalid" };
     defer {
         for (bridge_commands) |command| allocator.free(command.permissions);
@@ -614,6 +630,8 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
         .persist = try duplicateRawPersist(allocator, raw.persist),
         .service_packages = try duplicateRawServicePackages(allocator, raw.service_packages),
+        .service_carrier = try allocator.dupe(u8, raw.service_carrier),
+        .service_pool_size = if (raw.service_pool_size == 0) null else raw.service_pool_size,
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
         .webview_layer = try allocator.dupe(u8, raw.webview_layer),
@@ -653,6 +671,10 @@ fn validServicePackages(packages: []const ServicePackageMetadata) bool {
         for (packages[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, package_entry.name)) return false;
     }
     return true;
+}
+
+fn validServiceCarrier(value: []const u8) bool {
+    return std.mem.eql(u8, value, "auto") or std.mem.eql(u8, value, "in_process") or std.mem.eql(u8, value, "child");
 }
 
 fn validNpmPackageName(name: []const u8) bool {

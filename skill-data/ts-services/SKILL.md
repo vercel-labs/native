@@ -1,6 +1,6 @@
 ---
 name: ts-services
-description: Authoring guide for Native SDK TypeScript services under src/services: ordinary scriptc static-tier TypeScript reached through generated typed Cmd clients, shared record shapes, hermetic vendored npm, streaming, deadlines, cancellation, devhost simulation, authority, replay, and the desktop subprocess transport. Use when adding or modifying src/services modules, moving Node/JSON/regex/Map/Date/class work out of a core, or fixing NS1065-NS1067.
+description: Authoring guide for Native SDK TypeScript services under src/services: ordinary scriptc static-tier TypeScript reached through generated typed Cmd clients, shared record shapes, hermetic vendored npm, streaming, deadlines, cancellation, devhost simulation, authority, replay, and the two desktop carriers (in-process thread pool, child subprocess). Use when adding or modifying src/services modules, moving Node/JSON/regex/Map/Date/class work out of a core, or fixing NS1065-NS1067.
 ---
 
 # Author TypeScript services behind the effect boundary
@@ -67,7 +67,7 @@ case "parse":
 
 The generated route type proves that `ok` names the one Msg arm carrying exactly the declared result and `err` names a one-bytes-field arm. Raw `Cmd.request(name, bytes, route)` remains available as the low-level byte seam.
 
-Keys share the engine effect-key space. Duplicate live service keys reject loudly. Terminal results and stream events are journaled; replay feeds the recorded events without starting the service host.
+Keys share the engine effect-key space. A duplicate live service key rejects with `rejected` through `err`. Same-key requests run strictly FIFO on both carriers; the in-process carrier runs different keys in parallel across its pool instances. Terminal results and stream events are journaled; replay feeds the recorded events without starting a child process or a pool thread.
 
 ## Hermetic npm
 
@@ -107,17 +107,19 @@ export function parseLarge(
 }
 ```
 
-Import `ServiceCancellation` as a type from `@native-sdk/core`; it is legal only as the final capability parameter. The generated client route additionally requires `channelKey` and a channel-event Msg arm. `@streamBuffer` is a 1–64 in-flight contract cap (default 8); `@deadlineMs` is a 1–86400000 operation deadline. A terminal result closes the channel after its interim frames. `Cmd.cancel(key)` flips the token, closes a streaming channel, sends `cancelled` through `err`, and drops every later chunk. Deadline expiry flips the same token and sends JSON with `kind: "timeout"`. Poll `cancelled()` or call `throwIfCancelled()` at bounded intervals; the subprocess receives a short cooperative grace period and remains alive after a clean unwind. Ignoring the token causes a hard kill, after which the next request lazily starts a clean host.
+Import `ServiceCancellation` as a type from `@native-sdk/core`; it is legal only as the final capability parameter. The generated client route additionally requires `channelKey` and a channel-event Msg arm. `@streamBuffer` is a 1–64 in-flight contract cap (default 8); `@deadlineMs` is a 1–86400000 operation deadline. A terminal result closes the channel after its interim frames. `Cmd.cancel(key)` flips the token, closes a streaming channel, sends `cancelled` through `err`, and drops every later chunk. Deadline expiry flips the same token and sends JSON with `kind: "timeout"`. Poll `cancelled()` or call `throwIfCancelled()` at bounded intervals; a short cooperative grace period follows the token, and an operation that unwinds inside it keeps its instance (child process or pool instance) warm. Ignoring the token has a per-carrier hard edge: the child is killed and the next request starts a clean host; the in-process carrier abandons that instance's thread, routes the failure, and adds a fresh instance to the pool. A detected runtime trap routes `kind: "service_trap"` and poisons only the instance it fired in.
 
 ## Dev loop, authority, and current limits
 
 `native dev --core` imports service modules in an isolated Node worker, verifies the same package hashes, decodes the same request contract, cooperatively interrupts cancellation/deadline work, maps errors through the same arms, and emits stream chunks through the same channel-event shape. Use `--script scenario.ndjson --watch` for repeatable logic iterations. The devhost reads `NATIVE_SDK_SESSION_RECORD`/`NATIVE_SDK_SESSION_REPLAY`, writes the native journal format, and starts no service worker during replay. Service-only recordings cross between it and the packaged runtime; packaged recordings containing other effect families must be replayed with `native automate replay`, and devhost rejects those records explicitly. `native dev` runs the compiled service executable beside the real app.
 
-The service process runs with the app's privileges and app-data cwd. It receives an explicit environment allowlist (path, user/home/temp, locale/time zone, certificate, and proxy variables; platform equivalents on Windows); `NATIVE_SDK_*` internals are stripped. Stdout belongs to framed transport, so diagnostics go to stderr. This authority is why service work never runs synchronously inside `update`.
+Carrier selection is a build fact: `.service_carrier = "in_process" | "child"` in app.zon (or `-Dservice-carrier`), default in-process on host-native macOS/Linux builds and child elsewhere. `.service_pool_size` (or `-Dservice-pool-size`, 1–16) sets the in-process pool width; the default is min(4, cores).
+
+Authority differs by carrier. The child process runs with the app's privileges and app-data cwd, receives an explicit environment allowlist (path, user/home/temp, locale/time zone, certificate, and proxy variables; platform equivalents on Windows) with `NATIVE_SDK_*` internals stripped, and its stdout belongs to framed transport (diagnostics go to stderr). In-process services share the app process outright: the app's full environment and working directory, no transport-owned stdout — and a hardware fault (stack overflow) or `process.exit()` in service code takes the app with it, so the child carrier remains the fully isolated option. Either way this authority is why service work never runs synchronously inside `update`.
 
 Current limits:
 
-- desktop and build-host target only; the carrier is a lazily spawned sibling executable;
+- desktop and build-host target only; the in-process carrier additionally requires a host-native macOS/Linux build (the child carrier covers Windows and every other supported shape);
 - synchronous static-tier operations only—async services wait for the next compiler/runtime phase;
 - no JavaScript engine or dynamic npm fallback;
 - storage remains engine-owned effects, not a service-layer database shortcut;

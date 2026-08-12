@@ -1,5 +1,5 @@
 import { Cmd } from "@native-sdk/core";
-import { feedsExitClean, feedsFail, feedsHang, feedsParse, feedsQueuedBlocker, feedsQueuedProbe, feedsStream, feedsStreamHang } from "@native-sdk/services";
+import { feedsExitClean, feedsFail, feedsHang, feedsParse, feedsQueuedBlocker, feedsQueuedProbe, feedsStream, feedsStreamHang, feedsStreamPark } from "@native-sdk/services";
 import type { ParseResult } from "./shared.ts";
 
 export type StreamState = "data" | "closed" | "rejected";
@@ -20,6 +20,8 @@ export type Msg =
   | { readonly kind: "replace_hang" }
   | { readonly kind: "stream" }
   | { readonly kind: "stream_hang" }
+  | { readonly kind: "stream_park" }
+  | { readonly kind: "cancel_stream_park" }
   | { readonly kind: "cancel_stream" }
   | { readonly kind: "duplicate_parse" }
   | { readonly kind: "unkeyed_parse" }
@@ -58,6 +60,10 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, feedsStream({ source: model.bytes, caseSensitive: false }, { key: "stream", channelKey: 77, event: "stream_event", ok: "parsed", err: "parse_failed" })];
     case "stream_hang":
       return [model, feedsStreamHang({ source: model.bytes, caseSensitive: false }, { key: "stream-hang", channelKey: 78, event: "stream_event", ok: "parsed", err: "parse_failed" })];
+    case "stream_park":
+      return [model, feedsStreamPark({ source: model.bytes, caseSensitive: false }, { key: "stream-park", channelKey: 80, event: "stream_event", ok: "parsed", err: "parse_failed" })];
+    case "cancel_stream_park":
+      return [model, Cmd.cancel("stream-park")];
     case "cancel_stream":
       return [model, Cmd.cancel("stream-hang")];
     case "duplicate_parse":
@@ -99,6 +105,8 @@ export function commandMsg(name: string): Msg | null {
     case "service.replace-hang": return { kind: "replace_hang" };
     case "service.stream": return { kind: "stream" };
     case "service.stream-hang": return { kind: "stream_hang" };
+    case "service.stream-park": return { kind: "stream_park" };
+    case "service.cancel-stream-park": return { kind: "cancel_stream_park" };
     case "service.cancel-stream": return { kind: "cancel_stream" };
     case "service.duplicate-parse": return { kind: "duplicate_parse" };
     case "service.unkeyed-parse": return { kind: "unkeyed_parse" };
@@ -108,4 +116,4 @@ export function commandMsg(name: string): Msg | null {
   }
 }
 
-export const viewUnbound = ["boot_parsed", "hang", "queued_deadline", "replace_hang", "stream", "stream_hang", "cancel_stream", "duplicate_parse", "unkeyed_parse", "duplicate_stream", "exit_clean", "stream_event", "successes", "failures", "chunks"] as const;
+export const viewUnbound = ["boot_parsed", "hang", "queued_deadline", "replace_hang", "stream", "stream_hang", "stream_park", "cancel_stream_park", "cancel_stream", "duplicate_parse", "unkeyed_parse", "duplicate_stream", "exit_clean", "stream_event", "successes", "failures", "chunks"] as const;

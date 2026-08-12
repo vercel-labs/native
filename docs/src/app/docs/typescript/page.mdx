@@ -554,7 +554,7 @@ case "parse":
   ];
 ```
 
-The core never receives a synchronous handle. Its update returns a command, the typed result crosses back as the named Msg arm, and the runtime journals that result like every other effect. Replay parks the request and feeds the recorded result without launching the service executable. The service itself is ordinary static-tier TypeScript — Node built-ins, `fetch`, regexes, JSON, `Map`/`Set`, `Date`, classes — running with the app's privileges in a supervised, lazily started sibling process with a sanitized environment. Writing operations, kind-tagged error throws, streaming and cancellation, exact vendored npm, and the boundary rules NS1065–NS1067 have their own chapter: [TypeScript Services](/docs/typescript/services).
+The core never receives a synchronous handle. Its update returns a command, the typed result crosses back as the named Msg arm, and the runtime journals that result like every other effect. Replay parks the request and feeds the recorded result without starting the carrier. The service itself is ordinary static-tier TypeScript — Node built-ins, `fetch`, regexes, JSON, `Map`/`Set`, `Date`, classes — running with the app's privileges on a supervised, lazily started carrier: an in-process worker-thread pool by default, or a sibling child process with a sanitized environment. Writing operations, kind-tagged error throws, streaming and cancellation, exact vendored npm, and the boundary rules NS1065–NS1067 have their own chapter: [TypeScript Services](/docs/typescript/services).
 
 ## The dev loop
 
