@@ -32,13 +32,12 @@
 #                                                 in-dir `zig build test`)
 #   docs/**                                     -> docs `pnpm check`
 #   docs/**, skills/**, skill-data/**,
-#   packages/core/**                            -> service-surface claim check:
-#                                                 the generated compile-surface
-#                                                 table matches the pinned
-#                                                 compiler manifest, and no
-#                                                 hand-written SC-code or stale
-#                                                 compiler-version claims exist
-#                                                 in prose (requires
+#   packages/core/**                            -> service-surface tooling tests:
+#                                                 manifest diff categorization,
+#                                                 generated compile-surface
+#                                                 freshness, and hand-written
+#                                                 SC-code/stale compiler-version
+#                                                 claim checks (requires
 #                                                 `npm ci --include=dev` in
 #                                                 packages/core, like the
 #                                                 service suites)
@@ -49,8 +48,9 @@
 #                                                 frontend/contract tests
 #   anything else (README, .github, packages,
 #   scripts, skills, release docs, ...)         -> root suites only
-# A docs-ONLY diff runs only the docs check. The docs check is path-gated
-# in both tiers: it never runs unless docs/ changed (or --all in full).
+# A docs-ONLY diff runs the docs and service-surface checks. The docs check
+# is path-gated in both tiers: it never runs unless docs/ changed (or --all
+# in full).
 #
 # full — root test + validate, the service-surface claim check, every
 # example suite (frontends, native incl.
@@ -309,7 +309,7 @@ if [ "$tier" = "fast" ]; then
   fi
 
   if $surface_claims_changed; then
-    run_step "surface-claims" node packages/core/scripts/gen_service_surface.mjs --check
+    run_step "surface-claims" node --test packages/core/test/surface_tools.test.ts
   else
     skip_step "surface-claims" "docs/skills/skill-data/packages-core unchanged vs $base_ref"
   fi
@@ -330,7 +330,7 @@ else # full
   run_step "zig-validate" zig build validate
   run_step "ts-services-frontend" node --test packages/core/test/services.test.ts
   run_step "ts-services-e2e" zig build test-ts-services-e2e
-  run_step "surface-claims" node packages/core/scripts/gen_service_surface.mjs --check
+  run_step "surface-claims" node --test packages/core/test/surface_tools.test.ts
   run_step "examples-frontends" zig build test-examples-frontends
   run_step "examples-native" zig build test-examples-native
   run_step "examples-mobile" zig build test-examples-mobile

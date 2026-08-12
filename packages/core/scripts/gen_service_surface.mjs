@@ -85,8 +85,9 @@ for (const e of manifest.entries) {
 const counts = { static: 0, "dynamic-only": 0, unsupported: 0 };
 for (const e of manifest.entries) counts[e.status] = (counts[e.status] ?? 0) + 1;
 
-const builtinModules = kinds["node-builtin"].filter((e) => e.id.split(".").length === 2);
-const builtinMembers = kinds["node-builtin"].filter((e) => e.id.split(".").length > 2);
+const isBuiltinModule = (entry) => !entry.name.includes(".");
+const builtinModules = kinds["node-builtin"].filter(isBuiltinModule);
+const builtinMembers = kinds["node-builtin"].filter((entry) => !isBuiltinModule(entry));
 
 const sections = [];
 sections.push(`<!-- GENERATED FILE — do not edit by hand.
@@ -146,9 +147,16 @@ sections.push(`## Standard library
 ${table(kinds.stdlib)}`);
 
 if (unknownKinds.size > 0) {
+  const otherTables = [...unknownKinds].sort().map((kind) => `### \`${kind}\`
+
+${table(kinds[kind])}`).join("\n\n");
   sections.push(`## Other entries
 
-Entry kinds this generator does not know yet (update it): ${[...unknownKinds].map((k) => `\`${k}\``).join(", ")} — listed above by id in their own arrays.`);
+Entry kinds this generator does not know yet. Their manifest rows are
+preserved here; update the generator when a dedicated section would make
+the reference clearer.
+
+${otherTables}`);
 }
 
 sections.push(`## Compiler coverage statement
@@ -207,13 +215,17 @@ function proseFiles() {
     const full = path.join(repoRoot, root);
     if (fs.existsSync(full)) walk(full);
   }
-  return files.filter((f) => path.relative(repoRoot, f) !== outputRel);
+  return files.filter((f) => path.resolve(f) !== outputPath);
 }
 
-// A version literal counts as a scriptc claim only in the 0.0.x family
-// the compiler publishes in; the lookaround keeps dotted quads
-// (127.0.0.1) and larger versions out.
-const versionClaim = /(?<![\d.])0\.0\.\d+(?![\d.])/g;
+// Only semver literals in explicit compiler context are scriptc claims.
+// Package examples such as `some-package@0.0.1` are unrelated and must
+// remain legal in authoring docs.
+const semver = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`;
+const versionClaim = new RegExp(
+  String.raw`\b(?:scriptc(?:\s+compiler)?(?:'s)?(?:\s+version)?|compiler(?:\s+version)?)\s+(?<before>${semver})\b|\b(?<after>${semver})\s+(?:calibration|spike)\b`,
+  "gi",
+);
 const scClaim = /\bSC\d{4}\b/g;
 
 for (const file of proseFiles()) {
@@ -224,8 +236,9 @@ for (const file of proseFiles()) {
       problems.push(`${rel}:${index + 1}: hand-written compiler capability claim \`${match[0]}\` — SC codes live only in the generated ${outputRel}; state the fact there (regenerate) and link or describe it here without the code`);
     }
     for (const match of text.matchAll(versionClaim)) {
-      if (match[0] !== pin) {
-        problems.push(`${rel}:${index + 1}: names compiler version ${match[0]} but the pin is ${pin} — refresh the sentence (calibration/spike claims move with the pin)`);
+      const claimedVersion = match.groups.before ?? match.groups.after;
+      if (claimedVersion !== pin) {
+        problems.push(`${rel}:${index + 1}: names compiler version ${claimedVersion} but the pin is ${pin} — refresh the sentence (calibration/spike claims move with the pin)`);
       }
     }
   });

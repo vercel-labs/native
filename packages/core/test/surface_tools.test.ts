@@ -15,13 +15,37 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const repo = path.resolve(pkg, "..", "..");
 const diffScript = path.join(pkg, "scripts", "surface_manifest_diff.mjs");
 const genScript = path.join(pkg, "scripts", "gen_service_surface.mjs");
+const surfaceReference = path.join(repo, "skill-data", "ts-services", "references", "service-surface.md");
 
 function writeManifest(dir: string, name: string, version: string, entries: unknown[]): string {
   const file = path.join(dir, name);
   fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, compilerVersion: version, coverage: [], entries }));
   return file;
+}
+
+function generatorFixture(entries: unknown[]) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "surface-generator-"));
+  const core = path.join(root, "packages", "core");
+  const scriptDir = path.join(core, "scripts");
+  const manifestDir = path.join(core, "node_modules", "@scriptc", "compiler");
+  fs.mkdirSync(scriptDir, { recursive: true });
+  fs.mkdirSync(manifestDir, { recursive: true });
+  fs.copyFileSync(genScript, path.join(scriptDir, "gen_service_surface.mjs"));
+  fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.26" } }));
+  fs.writeFileSync(path.join(manifestDir, "surface-manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    compilerVersion: "0.0.26",
+    coverage: [],
+    entries,
+  }));
+  return {
+    root,
+    script: path.join(scriptDir, "gen_service_surface.mjs"),
+    output: path.join(root, "skill-data", "ts-services", "references", "service-surface.md"),
+  };
 }
 
 test("surface_manifest_diff categorizes every change class by stable id", () => {
@@ -95,4 +119,58 @@ test("the committed service-surface reference passes the claim check", () => {
     0,
     `the gate's surface-claims step would fail:\n${run.stdout}${run.stderr}`,
   );
+});
+
+test("the generated reference keeps subpath modules and unknown kinds visible", () => {
+  const fixture = generatorFixture([
+    { id: "node-builtin.fs", kind: "node-builtin", name: "fs", status: "static", note: "recognized module (bare and node:-prefixed specifiers)" },
+    { id: "node-builtin.fs.promises", kind: "node-builtin", name: "fs/promises", status: "static", note: "recognized module (bare and node:-prefixed specifiers)" },
+    { id: "node-builtin.fs.promises.readFile", kind: "node-builtin", name: "fs/promises.readFile", status: "static" },
+    { id: "host-capability.clipboard", kind: "host-capability", name: "clipboard", status: "unsupported", code: "SC2999" },
+  ]);
+  const run = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+
+  const rendered = fs.readFileSync(fixture.output, "utf8");
+  const moduleEnd = rendered.indexOf("### Module member surface");
+  const moduleSection = rendered.slice(rendered.indexOf("## Node built-in modules"), moduleEnd);
+  const memberSection = rendered.slice(moduleEnd, rendered.indexOf("## Standard library"));
+  assert.ok(moduleSection.includes("`node-builtin.fs.promises`"));
+  assert.ok(!moduleSection.includes("`node-builtin.fs.promises.readFile`"));
+  assert.ok(memberSection.includes("`node-builtin.fs.promises.readFile`"));
+  assert.match(rendered, /### `host-capability`[\s\S]*`host-capability\.clipboard`/);
+});
+
+test("the claim scan ignores unrelated package versions but rejects stale scriptc versions", () => {
+  const fixture = generatorFixture([]);
+  const write = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
+  assert.equal(write.status, 0, write.stderr);
+
+  const skillDir = path.join(fixture.root, "skills", "example");
+  fs.mkdirSync(skillDir, { recursive: true });
+  const skill = path.join(skillDir, "SKILL.md");
+  fs.writeFileSync(skill, "Install `some-package@0.0.1` for this example.\n");
+  const unrelated = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(unrelated.status, 0, unrelated.stderr);
+
+  fs.writeFileSync(skill, "The pinned scriptc 0.0.25 compiler was used for this calibration.\n");
+  const stale = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(stale.status, 1);
+  assert.match(stale.stderr, /compiler version 0\.0\.25 but the pin is 0\.0\.26/);
+});
+
+test("every recognized built-in module is in the committed module table", () => {
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(pkg, "node_modules", "@scriptc", "compiler", "surface-manifest.json"),
+    "utf8",
+  ));
+  const rendered = fs.readFileSync(surfaceReference, "utf8");
+  const moduleSection = rendered.slice(
+    rendered.indexOf("## Node built-in modules"),
+    rendered.indexOf("### Module member surface"),
+  );
+  for (const entry of manifest.entries.filter((candidate: { kind: string; note?: string }) =>
+    candidate.kind === "node-builtin" && candidate.note?.startsWith("recognized module"))) {
+    assert.ok(moduleSection.includes(`| \`${entry.id}\` |`), `${entry.id} is missing from the recognized-module table`);
+  }
 });

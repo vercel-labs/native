@@ -29,6 +29,8 @@ jobs:
       # per-run compiler cache dies with the VM and runs stay hermetic
       # across commits by machine lifecycle.
       - run: npm ci --prefix packages/core
+      - name: Service surface tooling and claims
+        run: node --test packages/core/test/surface_tools.test.ts
       - run: zig build test
       - run: zig build validate
 

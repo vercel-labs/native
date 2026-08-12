@@ -109,6 +109,7 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | Entry id | Surface | Status | Notes |
 |---|---|---|---|
 | `node-builtin.assert` | assert | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.assert.strict` | assert/strict | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.async_hooks` | async_hooks | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.buffer` | buffer | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.child_process` | child_process | static | recognized module (bare and node:-prefixed specifiers) |
@@ -119,6 +120,7 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.dns` | dns | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.events` | events | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.fs` | fs | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.fs.promises` | fs/promises | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.http` | http | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.http2` | http2 | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.https` | https | static | recognized module (bare and node:-prefixed specifiers) |
@@ -126,17 +128,23 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.net` | net | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.os` | os | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.path` | path | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.path.posix` | path/posix | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.path.win32` | path/win32 | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.perf_hooks` | perf_hooks | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.querystring` | querystring | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.readline` | readline | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.stream` | stream | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.stream.consumers` | stream/consumers | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.stream.promises` | stream/promises | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.string_decoder` | string_decoder | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.test` | node:test | static | recognized module (node:-prefixed specifier only, matching Node) |
 | `node-builtin.timers` | timers | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.timers.promises` | timers/promises | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.tls` | tls | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.tty` | tty | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.url` | url | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.util` | util | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.util.types` | util/types | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.worker_threads` | worker_threads | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.zlib` | zlib | static | recognized module (bare and node:-prefixed specifiers) |
 
@@ -153,7 +161,6 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.assert.notDeepEqual` | assert.notDeepEqual | unsupported | `SC2020` | loose == equality has no lowering — the strict forms compare with Object.is/structural equality like Node's assert/strict module, where equal IS strictEqual |
 | `node-builtin.assert.notEqual` | assert.notEqual | unsupported | `SC2020` | loose == equality has no lowering — the strict forms compare with Object.is/structural equality like Node's assert/strict module, where equal IS strictEqual |
 | `node-builtin.assert.rejects` | assert.rejects | unsupported | `SC2020` | await the promise inside assert.throws's callback story instead: try { await p; assert.fail("expected rejection") } catch { ... } |
-| `node-builtin.assert.strict` | assert/strict | static |  | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.assert.strict.AssertionError` | assert/strict.AssertionError | unsupported | `SC2020` | the class itself has no lowering — catch and test err.name === "AssertionError" or err.code === "ERR_ASSERTION" |
 | `node-builtin.assert.strict.doesNotReject` | assert/strict.doesNotReject | unsupported | `SC2020` | await the promise directly — an unexpected rejection already fails the test |
 | `node-builtin.assert.strict.doesNotThrow` | assert/strict.doesNotThrow | unsupported | `SC2020` | call the function directly — an unexpected throw already fails the test |
@@ -219,7 +226,6 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.fs.mkdirSync` | fs.mkdirSync | static |  |  |
 | `node-builtin.fs.mkdtempSync` | fs.mkdtempSync | static |  |  |
 | `node-builtin.fs.openSync` | fs.openSync | static |  |  |
-| `node-builtin.fs.promises` | fs/promises | static |  | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.fs.promises.chmod` | fs/promises.chmod | static |  |  |
 | `node-builtin.fs.promises.mkdir` | fs/promises.mkdir | static |  |  |
 | `node-builtin.fs.promises.open` | fs/promises.open | static |  |  |
@@ -266,7 +272,6 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.path.isAbsolute` | path.isAbsolute | static |  |  |
 | `node-builtin.path.join` | path.join | static |  |  |
 | `node-builtin.path.normalize` | path.normalize | static |  |  |
-| `node-builtin.path.posix` | path/posix | static |  | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.path.posix.basename` | path/posix.basename | static |  |  |
 | `node-builtin.path.posix.delimiter` | path/posix.delimiter | static |  | constant value read |
 | `node-builtin.path.posix.dirname` | path/posix.dirname | static |  |  |
@@ -282,7 +287,6 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.path.resolve` | path.resolve | static |  |  |
 | `node-builtin.path.sep` | path.sep | static |  | constant value read |
 | `node-builtin.path.toNamespacedPath` | path.toNamespacedPath | static |  |  |
-| `node-builtin.path.win32` | path/win32 | static |  | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.path.win32.basename` | path/win32.basename | static |  |  |
 | `node-builtin.path.win32.delimiter` | path/win32.delimiter | static |  | constant value read |
 | `node-builtin.path.win32.dirname` | path/win32.dirname | static |  |  |
@@ -321,11 +325,8 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.querystring.stringify` | querystring.stringify | static |  |  |
 | `node-builtin.querystring.unescape` | querystring.unescape | static |  |  |
 | `node-builtin.readline.createInterface` | readline.createInterface | static |  |  |
-| `node-builtin.stream.consumers` | stream/consumers | static |  | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.stream.consumers.arrayBuffer` | stream/consumers.arrayBuffer | unsupported | `SC2020` | no free-standing ArrayBuffer value exists here (typed arrays own their storage) — buffer(stream) collects the same bytes as a Buffer |
 | `node-builtin.stream.consumers.blob` | stream/consumers.blob | unsupported | `SC2020` | Blob values have no representation in a compiled binary — buffer(stream) collects the same bytes as a Buffer, text(stream) the decoded text |
-| `node-builtin.stream.promises` | stream/promises | static |  | recognized module (bare and node:-prefixed specifiers) |
-| `node-builtin.timers.promises` | timers/promises | static |  | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.timers.promises.setImmediate` | timers/promises.setImmediate | static |  |  |
 | `node-builtin.timers.promises.setTimeout` | timers/promises.setTimeout | static |  |  |
 | `node-builtin.tls.connect` | tls.connect | unsupported | `SC2020` | the lowered TLS client is https.request({ hostname, port, path, method, ca?, rejectUnauthorized? }); raw tls.connect sockets have no lowering yet |
@@ -337,7 +338,6 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `node-builtin.url.pathToFileURL` | url.pathToFileURL | static |  |  |
 | `node-builtin.util.parseArgs` | util.parseArgs | static |  |  |
 | `node-builtin.util.promisify` | util.promisify | unsupported | `SC2020` | the one lowered shape is a const binding over child_process.execFile: const execFileAsync = promisify(execFile), then call execFileAsync directly |
-| `node-builtin.util.types` | util/types | static |  | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.worker_threads.isMainThread` | worker_threads.isMainThread | static |  | constant value read |
 | `node-builtin.worker_threads.threadId` | worker_threads.threadId | static |  | constant value read |
 | `node-builtin.zlib.brotliCompressSync` | zlib.brotliCompressSync | unsupported | `SC2020` | deflateSync and inflateSync are the lowered zlib surface |
