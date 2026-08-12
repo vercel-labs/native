@@ -222,26 +222,30 @@ function proseFiles() {
 // Package examples such as `some-package@0.0.1` are unrelated and must
 // remain legal in authoring docs.
 const semver = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`;
+const markdownTicks = "`*";
 const versionClaim = new RegExp(
-  String.raw`\b(?:scriptc(?:\s+compiler)?(?:'s)?(?:\s+version)?|compiler(?:\s+version)?)\s+(?<before>${semver})\b|\b(?<after>${semver})\s+(?:calibration|spike)\b`,
+  String.raw`\b(?:scriptc(?:\s+compiler)?(?:'s)?(?:\s+version)?|compiler(?:\s+version)?)\s+${markdownTicks}\b(?<before>${semver})\b${markdownTicks}|${markdownTicks}\b(?<after>${semver})\b${markdownTicks}\s+(?:calibration|spike)\b`,
   "gi",
 );
 const scClaim = /\bSC\d{4}\b/g;
+const lineNumberAt = (text, offset) =>
+  1 + (text.slice(0, offset).match(/\n/g)?.length ?? 0);
 
 for (const file of proseFiles()) {
   const rel = path.relative(repoRoot, file);
-  const lines = fs.readFileSync(file, "utf8").split("\n");
-  lines.forEach((text, index) => {
-    for (const match of text.matchAll(scClaim)) {
-      problems.push(`${rel}:${index + 1}: hand-written compiler capability claim \`${match[0]}\` — SC codes live only in the generated ${outputRel}; state the fact there (regenerate) and link or describe it here without the code`);
+  const text = fs.readFileSync(file, "utf8");
+  for (const match of text.matchAll(scClaim)) {
+    const line = lineNumberAt(text, match.index);
+    problems.push(`${rel}:${line}: hand-written compiler capability claim \`${match[0]}\` — SC codes live only in the generated ${outputRel}; state the fact there (regenerate) and link or describe it here without the code`);
+  }
+  for (const match of text.matchAll(versionClaim)) {
+    const claimedVersion = match.groups.before ?? match.groups.after;
+    if (claimedVersion !== pin) {
+      const versionOffset = match.index + match[0].indexOf(claimedVersion);
+      const line = lineNumberAt(text, versionOffset);
+      problems.push(`${rel}:${line}: names compiler version ${claimedVersion} but the pin is ${pin} — refresh the sentence (calibration/spike claims move with the pin)`);
     }
-    for (const match of text.matchAll(versionClaim)) {
-      const claimedVersion = match.groups.before ?? match.groups.after;
-      if (claimedVersion !== pin) {
-        problems.push(`${rel}:${index + 1}: names compiler version ${claimedVersion} but the pin is ${pin} — refresh the sentence (calibration/spike claims move with the pin)`);
-      }
-    }
-  });
+  }
 }
 
 if (problems.length > 0) {

@@ -144,8 +144,8 @@ const diff = {
   otherTierMoves: [],    // unsupported -> dynamic-only (eased, but still unusable without --dynamic)
   added: [],
   removed: [],
-  codeChanges: [],       // same tier, SC code moved
-  noteChanges: [],       // same tier, semantic note changed
+  codeChanges: [],       // SC code moved, including alongside a tier move
+  noteChanges: [],       // semantic note changed, including alongside a tier move
   nameChanges: [],       // same id, display name changed
   retirementsDue: [],    // watched entries among flippedToStatic
 };
@@ -163,7 +163,6 @@ for (const [id, oldEntry] of oldById) {
     } else {
       diff.otherTierMoves.push(move);
     }
-    continue;
   }
   if (oldEntry.code !== newEntry.code) {
     diff.codeChanges.push({ id, kind: newEntry.kind, name: newEntry.name, status: newEntry.status, oldCode: oldEntry.code, newCode: newEntry.code });
