@@ -28,6 +28,15 @@ param(
     # Fixture knobs (ignored by any other -AppDir): texture count and edge.
     [int]$Images = 0,
     [int]$Extent = 0,
+    # After the sweep, hold the window still and jiggle the pointer inside
+    # it for this long. Resize steps are all full-surface repaints, so they
+    # say nothing about partial-update cost; this phase is what exercises
+    # the damage-accumulated copy and dirty-rect Present1. Needs the
+    # console desktop, like -Drag.
+    [int]$HoldMs = 0,
+    # Pin every paint to the full-surface copy + plain Present, so the
+    # partial path can be A/B'd against itself on one build.
+    [switch]$FullPresent,
     [switch]$Drag,
     [switch]$KeepRunning
 )
@@ -198,6 +207,12 @@ function Parse-Profile([string]$path) {
                 Rects = [int]$fields["rects"]; BlitUs = [double]$fields["blit_us"]
                 # Present's share of blit_us (flip model only; 0 before it).
                 PresentUs = if ($fields.ContainsKey("present_us")) { [double]$fields["present_us"] } else { 0 }
+                # 1 = whole surface copied and plain Present; 0 = damage
+                # rects copied and Present1. Absent before the flip model.
+                Full = if ($fields.ContainsKey("full")) { [int]$fields["full"] } else { 1 }
+                Dirty = if ($fields.ContainsKey("dirty")) { [int]$fields["dirty"] } else { 0 }
+                DamagePx = if ($fields.ContainsKey("dmg_px")) { [double]$fields["dmg_px"] } else { 0 }
+                SurfacePx = if ($fields.ContainsKey("sw")) { [double]$fields["sw"] * [double]$fields["sh"] } else { 0 }
                 # Absent in logs captured before the field existed; treat
                 # those as real blits rather than silently dropping them.
                 Content = if ($fields.ContainsKey("content")) { [int]$fields["content"] } else { 1 }
@@ -220,15 +235,17 @@ Stop-App $ProcessName | Out-Null
 $env:NATIVE_SDK_GPU_PROFILE = $logPath
 if ($Images -gt 0) { $env:NATIVE_SDK_FIXTURE_IMAGES = "$Images" }
 if ($Extent -gt 0) { $env:NATIVE_SDK_FIXTURE_EXTENT = "$Extent" }
+if ($FullPresent) { $env:NATIVE_SDK_GPU_FULL_PRESENT = "1" }
 $launched = Start-Process -FilePath (Resolve-Path $exePath) -WorkingDirectory (Resolve-Path $AppDir) -PassThru
 Remove-Item Env:\NATIVE_SDK_GPU_PROFILE
 Remove-Item Env:\NATIVE_SDK_FIXTURE_IMAGES -ErrorAction SilentlyContinue
 Remove-Item Env:\NATIVE_SDK_FIXTURE_EXTENT -ErrorAction SilentlyContinue
+Remove-Item Env:\NATIVE_SDK_GPU_FULL_PRESENT -ErrorAction SilentlyContinue
 
 $result = [ordered]@{
     Label = $Label; App = $AppDir; Error = $null
     DisplayRefreshHz = 0; Steps = $Steps; StepIntervalMs = $StepIntervalMs
-    Sweep = $null; Drag = $null; Log = $logPath
+    Sweep = $null; Hold = $null; Drag = $null; Log = $logPath
 }
 
 try {
@@ -257,6 +274,31 @@ try {
         [Threading.Thread]::Sleep($StepIntervalMs)
     }
     [Threading.Thread]::Sleep(400)
+
+    if ($HoldMs -gt 0) {
+        $seen = @(Parse-Profile $logPath).Present
+        $holdFrom = if ($seen.Count -gt 0) { ($seen | Select-Object -Last 1).Seq + 1 } else { 1 }
+        $result.Hold = [pscustomobject]@{ Ran = $false; FirstSeq = $holdFrom; Ms = $HoldMs }
+        $rect = New-Object NativeSdkResizeProfile+RECT
+        [NativeSdkResizeProfile]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+        $cx = [int](($rect.Left + $rect.Right) / 2)
+        $cy = [int](($rect.Top + $rect.Bottom) / 2)
+        $radius = [Math]::Min(120, [int](($rect.Right - $rect.Left) / 4))
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $step = 0
+        while ($watch.ElapsedMilliseconds -lt $HoldMs) {
+            # A small circular sweep: hover state changes repaint a widget
+            # at a time, which is the localized-damage case.
+            $angle = $step * 0.35
+            [NativeSdkResizeProfile]::MouseTo(
+                $cx + [int]($radius * [Math]::Cos($angle)),
+                $cy + [int]($radius * [Math]::Sin($angle))) | Out-Null
+            [Threading.Thread]::Sleep(16)
+            $step++
+        }
+        [Threading.Thread]::Sleep(300)
+        $result.Hold.Ran = $true
+    }
 
     if ($Drag) {
         # A real modal resize drag: grab the right border and walk it. This
@@ -365,6 +407,35 @@ if (Test-Path $logPath) {
         TexturesPerStep = if ($rebuilds.Count -gt 0) { [Math]::Round((($rebuilds | Measure-Object -Property ImagesN -Sum).Sum) / $rebuilds.Count, 2) } else { 0 }
         KibPerStep      = if ($rebuilds.Count -gt 0) { [Math]::Round((($rebuilds | Measure-Object -Property ImageKib -Sum).Sum) / $rebuilds.Count, 1) } else { 0 }
     }
+    # The partial-update population: paints while the window sat still.
+    # This is where the damage-accumulated copy and dirty-rect Present1
+    # show up at all -- a resize step is always a full-surface repaint.
+    if ($result.Hold -and $result.Hold.Ran) {
+        $holdFrom = [uint64]$result.Hold.FirstSeq
+        $holdPaints = @($parsed.Paint | Where-Object { $_.Ok -eq 1 -and $_.Content -eq 1 -and $_.Rects -gt 0 -and $_.Seq -ge $holdFrom })
+        $holdFull = @($holdPaints | Where-Object { $_.Full -eq 1 })
+        $holdPartial = @($holdPaints | Where-Object { $_.Full -eq 0 })
+        $result.PartialUpdateMs = [pscustomobject]@{
+            Paints = $holdPaints.Count
+            FullCopies = $holdFull.Count
+            PartialCopies = $holdPartial.Count
+            # Copy = blit minus Present, i.e. the surface work this phase
+            # is trying to remove, as opposed to the flip itself.
+            FullCopyMs = if ($holdFull.Count -gt 0) { [Math]::Round((($holdFull | ForEach-Object { $_.BlitUs - $_.PresentUs } | Measure-Object -Average).Average) / 1000.0, 3) } else { 0 }
+            PartialCopyMs = if ($holdPartial.Count -gt 0) { [Math]::Round((($holdPartial | ForEach-Object { $_.BlitUs - $_.PresentUs } | Measure-Object -Average).Average) / 1000.0, 3) } else { 0 }
+            FullPresentMs = if ($holdFull.Count -gt 0) { [Math]::Round((($holdFull | Measure-Object -Property PresentUs -Average).Average) / 1000.0, 3) } else { 0 }
+            PartialPresentMs = if ($holdPartial.Count -gt 0) { [Math]::Round((($holdPartial | Measure-Object -Property PresentUs -Average).Average) / 1000.0, 3) } else { 0 }
+            # The number that predicts whether this app can benefit at
+            # all. Copied pixels as a percentage of the surface: at 100%
+            # the app invalidates everything every frame and dirty rects
+            # have nothing to save, however correct the mechanism is.
+            DamageCoveragePct = if ($holdPartial.Count -gt 0) {
+                $cov = @($holdPartial | Where-Object { $_.SurfacePx -gt 0 } | ForEach-Object { 100.0 * $_.DamagePx / $_.SurfacePx })
+                if ($cov.Count -gt 0) { [Math]::Round(($cov | Measure-Object -Average).Average, 1) } else { 0 }
+            } else { 0 }
+        }
+    }
+
     # The same split for the real WM_ENTERSIZEMOVE drag, which is the check
     # that the SetWindowPos sweep is an honest proxy for it.
     if ($dragRows.Count -gt 0) {

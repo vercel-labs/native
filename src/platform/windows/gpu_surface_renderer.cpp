@@ -32,6 +32,10 @@ constexpr uint8_t kPacketVersion = 5;
 constexpr size_t kRetainedCommandCap = 2048;
 constexpr size_t kDirtyRectCap = kWindowsGpuDirtyRectCap;
 constexpr uint32_t kMaxSurfacePixels = 8192;
+/* Beyond this many combined damage rectangles (this paint's plus the
+ * previous paint's), the per-rect clipped copies stop being cheaper than
+ * one full-surface pass and the paint falls back to copying everything. */
+constexpr size_t kSwapDirtyRectCap = 12;
 constexpr float kBezierCircle = 0.5522847498307936f;
 
 constexpr uint64_t canvasFontResourceId(uint64_t font_id) {
@@ -1460,6 +1464,8 @@ private:
         releaseCom(swap_chain_);
         swap_width_ = 0;
         swap_height_ = 0;
+        swap_last_damage_.clear();
+        swap_history_valid_ = false;
     }
 
     /* FLIP_SEQUENTIAL, not FLIP_DISCARD: the renderer's incremental path
@@ -1506,6 +1512,10 @@ private:
         }
         swap_width_ = width;
         swap_height_ = height;
+        /* Resized buffers hold undefined pixels, so the next paint owes a
+         * full copy before any partial one can be correct. */
+        swap_last_damage_.clear();
+        swap_history_valid_ = false;
         return ensureSwapBitmap();
     }
 
@@ -2336,6 +2346,17 @@ private:
     ID2D1Bitmap1 *swap_bitmap_ = nullptr;
     UINT swap_width_ = 0;
     UINT swap_height_ = 0;
+    /* Damage bookkeeping for the partial copy. `swap_last_damage_` is the
+     * previous paint's damage; `swap_history_valid_` says the buffers hold
+     * a known frame history at all (false right after create/resize/loss,
+     * when their contents are undefined). See `paintRects`. */
+    std::vector<RECT> swap_last_damage_;
+    bool swap_history_valid_ = false;
+    /* `NATIVE_SDK_GPU_FULL_PRESENT=1` pins every paint to the
+     * full-surface copy and plain Present. It exists to A/B the partial
+     * path against itself on one build and one workload, and to bisect a
+     * suspected damage-tracking artifact without a rebuild. */
+    const bool force_full_present_ = envFlagSet(L"NATIVE_SDK_GPU_FULL_PRESENT");
     /* 1x1 CPU-readable staging bitmap for `readColorAt`. Replaces the
      * GDI-interop read, which required the backing surface to be
      * GDI_COMPATIBLE -- a constraint a device-context target cannot
@@ -2373,6 +2394,11 @@ private:
      * interval 0 and a two-deep flip queue this is where the UI thread
      * waits for a free back buffer, and that wait is not copy work. */
     uint64_t profile_swap_present_ns_ = 0;
+    size_t profile_swap_dirty_rects_ = 0;
+    bool profile_swap_full_copy_ = false;
+    uint64_t profile_swap_damage_px_ = 0;
+    bool profile_swap_exact_ = false;
+    bool profile_swap_history_ = false;
     bool profile_target_rebuild_ = false;
 };
 
@@ -2585,11 +2611,15 @@ bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
      * these a reducer averages them in and understates the copy. */
     const bool had_content = content_valid_ && backing_bitmap_ != nullptr;
     profile_swap_present_ns_ = 0;
+    profile_swap_dirty_rects_ = 0;
+    profile_swap_damage_px_ = 0;
+    profile_swap_full_copy_ = false;
     const uint64_t begin_ns = gpuClockNs();
     const bool ok = paintRects(paint_rects, paint_rect_count);
     const uint64_t blit_ns = gpuClockNs() - begin_ns;
     GpuProfileLog::shared().line(
-        "paint seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu present_us=%llu",
+        "paint seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu present_us=%llu "
+        "full=%d dirty=%llu dmg_px=%llu exact=%d hist=%d sw=%u sh=%u",
         static_cast<unsigned long long>(profile_sequence_),
         ok ? 1 : 0,
         had_content ? 1 : 0,
@@ -2597,7 +2627,14 @@ bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
         pixel_height_,
         static_cast<unsigned long long>(paint_rect_count),
         static_cast<unsigned long long>(gpuProfileMicros(blit_ns)),
-        static_cast<unsigned long long>(gpuProfileMicros(profile_swap_present_ns_)));
+        static_cast<unsigned long long>(gpuProfileMicros(profile_swap_present_ns_)),
+        profile_swap_full_copy_ ? 1 : 0,
+        static_cast<unsigned long long>(profile_swap_dirty_rects_),
+        static_cast<unsigned long long>(profile_swap_damage_px_),
+        profile_swap_exact_ ? 1 : 0,
+        profile_swap_history_ ? 1 : 0,
+        swap_width_,
+        swap_height_);
     return ok;
 }
 
@@ -2613,43 +2650,100 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
         return false;
     }
 
-    /* Phase 2 keeps `WM_PAINT` as the presentation trigger (the plan's
-     * option (a)): the host still invalidates and Windows still decides
-     * when to paint, and this call now ends in Present instead of a blt
-     * through the DWM redirection surface. Moving presentation into
-     * `present()` -- option (b) -- is a separate, deliberate change.
+    /* `WM_PAINT` remains the presentation trigger (the plan's option (a)):
+     * the host still invalidates and Windows still decides when to paint;
+     * this call ends in Present instead of a blt through the DWM
+     * redirection surface. Moving presentation into `present()` --
+     * option (b) -- is a separate, deliberate change.
      *
-     * The copy is FULL SURFACE, and the paint rects deliberately do not
-     * clip it. Under the blt model they could: the redirection surface
-     * persisted, so untouched pixels were last frame's. A flip-model back
-     * buffer does not persist -- with two buffers, the one being drawn
-     * holds the frame from TWO presents ago -- so a clipped copy leaves a
-     * stale alternating image outside the damage. Copying the whole
-     * retained surface is what makes the undamaged region correct, which
-     * is also the precondition `Present1` states for dirty rects.
+     * How much gets copied is the interesting part.
      *
-     * `CopyFromBitmap` would be the cheaper primitive but is not
-     * available here: it requires identical D2D pixel formats, and the
-     * backing surface is PREMULTIPLIED while a flip-model HWND swap
-     * chain's D2D view must be ALPHA_MODE_IGNORE. It returns E_INVALIDARG
-     * on that pair. Aligning the backing surface to IGNORE would fix the
-     * copy but changes the blend semantics every layer and opacity group
-     * in the display list renders under, which is not a trade to make for
-     * a presentation change. So: DrawBitmap, at 1:1 with nearest
-     * sampling, which costs one filtered-free full-surface pass. */
+     * Under the blt model `paint()` clipped the copy to the update
+     * region, because the redirection surface persisted and untouched
+     * pixels were already last frame's. A flip-model back buffer does not
+     * persist: with `BufferCount = 2` the buffer about to be drawn is the
+     * one presented TWO frames ago. So the region that must be refreshed
+     * is not this paint's damage alone, it is
+     *
+     *     damage(this paint) UNION damage(previous paint)
+     *
+     * -- everything that has changed since the pixels currently sitting
+     * in this buffer were correct. Copy that and the whole buffer equals
+     * the current frame again, which is exactly the precondition
+     * `Present1` states before it will honour dirty rects. The dirty
+     * rects themselves are this paint's damage alone, because they
+     * describe the delta against the PREVIOUSLY PRESENTED frame.
+     *
+     * `swap_history_valid_` is the guard: right after a create, a
+     * `ResizeBuffers`, or a device loss the buffers hold undefined
+     * pixels, no history exists, and the copy has to be full.
+     *
+     * (`CopyFromBitmap` would be the cheaper primitive for the full case
+     * but is unavailable: it requires identical D2D pixel formats, and
+     * the backing surface is PREMULTIPLIED while a flip-model HWND swap
+     * chain's D2D view must be ALPHA_MODE_IGNORE -- E_INVALIDARG on that
+     * pair. Aligning the backing surface to IGNORE would change the blend
+     * semantics every layer and opacity group renders under, which is not
+     * a trade worth making for a presentation change.) */
     const D2D1_SIZE_U backing_pixels = backing_bitmap_->GetPixelSize();
     const D2D1_SIZE_U swap_pixels = swap_bitmap_->GetPixelSize();
     const bool exact = backing_pixels.width == swap_pixels.width && backing_pixels.height == swap_pixels.height;
+
+    std::vector<RECT> damage;
+    damage.reserve(paint_rect_count);
+    for (size_t index = 0; index < paint_rect_count; ++index) {
+        RECT clamped = paint_rects[index];
+        clamped.left = std::max<LONG>(0, clamped.left);
+        clamped.top = std::max<LONG>(0, clamped.top);
+        clamped.right = std::min<LONG>(static_cast<LONG>(swap_pixels.width), clamped.right);
+        clamped.bottom = std::min<LONG>(static_cast<LONG>(swap_pixels.height), clamped.bottom);
+        if (clamped.right > clamped.left && clamped.bottom > clamped.top) damage.push_back(clamped);
+    }
+    /* An empty update region is nothing to show. Presenting anyway would
+     * flip a buffer holding a two-frames-old image to the front. */
+    if (damage.empty()) return true;
+
+    /* Deliberately NOT gated on `exact`. The backing surface is sized
+     * from the packet (`ceil(logical * scale)`) and the swap chain from
+     * `GetClientRect`, and at fractional DPI those disagree by a pixel
+     * more often than not -- 1349x895 against 1348x894 at 125%. Treating
+     * that as a reason to copy everything meant the partial path
+     * essentially never ran. A partial copy is just as correct when the
+     * blit scales: it draws the same scaled image the full copy would,
+     * clipped to the damage. Only the sampling mode cares. */
+    const bool full_copy = force_full_present_ || !swap_history_valid_ ||
+        damage.size() + swap_last_damage_.size() > kSwapDirtyRectCap;
+
     const float logical_client_width = static_cast<float>(client_width / scale_);
     const float logical_client_height = static_cast<float>(client_height / scale_);
+    const D2D1_RECT_F whole = D2D1::RectF(0, 0, logical_client_width, logical_client_height);
+    /* Sizes disagree only in the window between a resize step and the
+     * packet that re-renders at the new size; scale rather than refuse,
+     * so a drag never shows a hole. */
+    const D2D1_INTERPOLATION_MODE sampling = exact
+        ? D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+        : D2D1_INTERPOLATION_MODE_LINEAR;
+
     beginOn(swap_bitmap_);
-    ctx()->DrawBitmap(backing_bitmap_,
-        D2D1::RectF(0, 0, logical_client_width, logical_client_height), 1.0f,
-        /* Sizes disagree only in the window between a resize step and the
-         * packet that re-renders at the new size; scale rather than
-         * refuse, so a drag never shows a hole. */
-        exact ? D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR : D2D1_INTERPOLATION_MODE_LINEAR,
-        nullptr, nullptr);
+    if (full_copy) {
+        ctx()->DrawBitmap(backing_bitmap_, whole, 1.0f, sampling, nullptr, nullptr);
+    } else {
+        auto copy_region = [&](const RECT &pixels) {
+            /* Device pixels to logical, outset by one pixel each way so
+             * the fractional-scale rounding can never leave a seam of
+             * two-frames-old content along a damage edge. */
+            const D2D1_RECT_F clip = D2D1::RectF(
+                static_cast<float>((pixels.left - 1) / scale_),
+                static_cast<float>((pixels.top - 1) / scale_),
+                static_cast<float>((pixels.right + 1) / scale_),
+                static_cast<float>((pixels.bottom + 1) / scale_));
+            ctx()->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            ctx()->DrawBitmap(backing_bitmap_, whole, 1.0f, sampling, nullptr, nullptr);
+            ctx()->PopAxisAlignedClip();
+        };
+        for (const RECT &region : damage) copy_region(region);
+        for (const RECT &region : swap_last_damage_) copy_region(region);
+    }
     const HRESULT drawn = endOn();
     if (drawn == D2DERR_RECREATE_TARGET || FAILED(drawn)) {
         if (gpuProfileActive()) {
@@ -2665,19 +2759,55 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
      * monitor's refresh, and blocking the UI thread inside Present would
      * put that pacing behind DXGI's. */
     const uint64_t present_begin_ns = gpuProfileActive() ? gpuClockNs() : 0;
-    const HRESULT presented = swap_chain_->Present(0, 0);
-    if (gpuProfileActive()) profile_swap_present_ns_ = gpuClockNs() - present_begin_ns;
+    HRESULT presented = S_OK;
+    if (full_copy) {
+        presented = swap_chain_->Present(0, 0);
+    } else {
+        DXGI_PRESENT_PARAMETERS parameters = {};
+        parameters.DirtyRectsCount = static_cast<UINT>(damage.size());
+        parameters.pDirtyRects = damage.data();
+        presented = swap_chain_->Present1(0, 0, &parameters);
+    }
+    if (gpuProfileActive()) {
+        profile_swap_present_ns_ = gpuClockNs() - present_begin_ns;
+        profile_swap_full_copy_ = full_copy;
+        profile_swap_dirty_rects_ = full_copy ? 0 : damage.size();
+        profile_swap_exact_ = exact;
+        profile_swap_history_ = swap_history_valid_;
+        /* Damage coverage is what decides whether the partial path can
+         * ever help this app: a workload that invalidates its whole
+         * surface every frame has nothing for dirty rects to save, and
+         * without this field that looks identical to a broken
+         * optimization. Counted over the copied union, not just this
+         * paint's rects, because that is the work actually done. */
+        profile_swap_damage_px_ = 0;
+        for (const RECT &region : damage) {
+            profile_swap_damage_px_ += static_cast<uint64_t>(region.right - region.left) *
+                static_cast<uint64_t>(region.bottom - region.top);
+        }
+        if (!full_copy) {
+            for (const RECT &region : swap_last_damage_) {
+                profile_swap_damage_px_ += static_cast<uint64_t>(region.right - region.left) *
+                    static_cast<uint64_t>(region.bottom - region.top);
+            }
+        }
+    }
     if (presented == DXGI_STATUS_OCCLUDED) {
         /* Ground truth that the window is hidden. Not a failure, and
          * deliberately not wired into the existing occluded-pacing
          * heuristics -- that interacts with frame scheduling and is a
-         * separate change. */
+         * separate change.
+         *
+         * The buffers did not rotate, so the damage history did not
+         * advance either; leave it alone. */
         return true;
     }
     if (FAILED(presented)) {
         releaseDeviceResources(true);
         return false;
     }
+    swap_last_damage_ = std::move(damage);
+    swap_history_valid_ = true;
     return true;
 }
 
