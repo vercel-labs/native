@@ -82,6 +82,19 @@ static bool envFlagSet(const wchar_t *name) {
     return !(value[0] == L'\0' || (value[0] == L'0' && value[1] == L'\0'));
 }
 
+/* Small unsigned diagnostic knob; 0 when unset or unparseable. */
+static unsigned envCount(const wchar_t *name) {
+    wchar_t value[16] = {};
+    const DWORD length = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
+    if (length == 0 || length >= std::size(value)) return 0;
+    unsigned parsed = 0;
+    for (const wchar_t *cursor = value; *cursor; ++cursor) {
+        if (*cursor < L'0' || *cursor > L'9') return 0;
+        parsed = parsed * 10 + static_cast<unsigned>(*cursor - L'0');
+    }
+    return parsed;
+}
+
 static uint64_t gpuClockNs() {
     static LARGE_INTEGER frequency = [] {
         LARGE_INTEGER value = {};
@@ -1091,10 +1104,12 @@ public:
             releaseDeviceStack();
             return false;
         }
+        device_generation_ += 1;
         if (gpuProfileActive()) {
-            GpuProfileLog::shared().line("device driver=%s level=0x%04x adapter=\"%s\"",
+            GpuProfileLog::shared().line("device driver=%s level=0x%04x generation=%llu adapter=\"%s\"",
                 driver_type_ == D3D_DRIVER_TYPE_WARP ? "warp" : "hardware",
-                static_cast<unsigned>(feature_level_), adapter_name_);
+                static_cast<unsigned>(feature_level_),
+                static_cast<unsigned long long>(device_generation_), adapter_name_);
         }
         return true;
     }
@@ -1186,6 +1201,40 @@ public:
         return true;
     }
 
+    /* Bumped every time the device stack is (re)built. Surfaces stamp
+     * the generation they built against and compare, which is how a
+     * device loss reaches them without the renderer having to keep a
+     * registry of live surfaces. */
+    uint64_t deviceGeneration() const { return device_generation_; }
+
+    /* HRESULTs that mean "this device is gone, rebuild everything", as
+     * opposed to D2DERR_RECREATE_TARGET, which means only the target
+     * went and the device is still good. */
+    static bool deviceLost(HRESULT result) {
+        return result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET ||
+            result == DXGI_ERROR_DEVICE_HUNG || result == DXGI_ERROR_DRIVER_INTERNAL_ERROR ||
+            result == D2DERR_RECREATE_TARGET;
+    }
+
+    /* Tear the whole stack down and build a new one. Surfaces discover
+     * this through the generation counter and drop their own resources
+     * -- every backing bitmap, swap chain, and cached texture belongs to
+     * the device that just died. Returns false if the machine cannot
+     * produce a device at all now, in which case surfaces stay dark and
+     * the runtime keeps taking its software path. */
+    bool recoverDeviceStack() {
+        HRESULT reason = S_OK;
+        if (d3d_device_) reason = d3d_device_->GetDeviceRemovedReason();
+        releaseDeviceStack();
+        const bool recovered = ensureDeviceStack();
+        if (gpuProfileActive()) {
+            GpuProfileLog::shared().line("device-lost reason=0x%08x recovered=%d generation=%llu",
+                static_cast<unsigned>(reason), recovered ? 1 : 0,
+                static_cast<unsigned long long>(device_generation_));
+        }
+        return recovered;
+    }
+
     ID2D1Factory1 *d2dFactory() const { return d2d_factory_; }
     ID3D11Device *d3dDevice() const { return d3d_device_; }
     ID2D1Device *d2dDevice() const { return d2d_device_; }
@@ -1229,6 +1278,7 @@ private:
     IDXGIFactory2 *dxgi_factory_ = nullptr;
     ID2D1Device *d2d_device_ = nullptr;
     ID2D1DeviceContext *d2d_context_ = nullptr;
+    uint64_t device_generation_ = 0;
     D3D_DRIVER_TYPE driver_type_ = D3D_DRIVER_TYPE_UNKNOWN;
     D3D_FEATURE_LEVEL feature_level_ = static_cast<D3D_FEATURE_LEVEL>(0);
     char adapter_name_[128] = {};
@@ -1440,6 +1490,36 @@ private:
         const HRESULT result = ctx()->EndDraw();
         ctx()->SetTarget(nullptr);
         return result;
+    }
+
+    /* Adopt the renderer's current device generation, dropping every
+     * resource built against the previous one. Called before any frame
+     * work: a surface whose device was removed holds a backing bitmap, a
+     * swap chain, and a texture cache that all belong to a dead device,
+     * and none of them can be reused or repaired -- only released.
+     *
+     * Returns false when there is no usable device at all, which leaves
+     * the surface contentless and the runtime on its software path. */
+    bool syncDevice() {
+        const uint64_t generation = renderer_->deviceGeneration();
+        if (generation != device_generation_) {
+            releaseDeviceResources(true);
+            device_generation_ = generation;
+        }
+        return renderer_->d2dContext() != nullptr;
+    }
+
+    /* One exit for every lost-device HRESULT. Rebuilds the shared stack
+     * (which bumps the generation, so sibling surfaces drop theirs on
+     * their next frame) and clears this surface. The caller returns
+     * false, which makes the host set `gpu_force_full_repaint_pending`
+     * and ask the runtime for a full packet. */
+    void handleDeviceLoss(HRESULT result) {
+        if (GpuRendererImpl::deviceLost(result) && result != D2DERR_RECREATE_TARGET) {
+            renderer_->recoverDeviceStack();
+            device_generation_ = renderer_->deviceGeneration();
+        }
+        releaseDeviceResources(true);
     }
 
     void releaseDeviceResources(bool drop_retained) {
@@ -2324,7 +2404,7 @@ private:
         const HRESULT end = endOn();
         if (!ok) return false;
         if (FAILED(end)) {
-            releaseDeviceResources(true);
+            handleDeviceLoss(end);
             return false;
         }
         /* No GetBitmap round trip any more: `backing_bitmap_` is the
@@ -2357,12 +2437,16 @@ private:
      * path against itself on one build and one workload, and to bisect a
      * suspected damage-tracking artifact without a rebuild. */
     const bool force_full_present_ = envFlagSet(L"NATIVE_SDK_GPU_FULL_PRESENT");
+    const unsigned simulate_loss_after_ = envCount(L"NATIVE_SDK_GPU_SIMULATE_DEVICE_LOSS");
+    unsigned paints_since_start_ = 0;
     /* 1x1 CPU-readable staging bitmap for `readColorAt`. Replaces the
      * GDI-interop read, which required the backing surface to be
      * GDI_COMPATIBLE -- a constraint a device-context target cannot
      * carry. See the comment there. */
     ID2D1Bitmap1 *readback_bitmap_ = nullptr;
     ID2D1Bitmap *blur_snapshot_ = nullptr;
+    /* Renderer device generation these resources were built against. */
+    uint64_t device_generation_ = 0;
     ID2D1StrokeStyle *rect_stroke_ = nullptr;
     ID2D1StrokeStyle *butt_stroke_ = nullptr;
     ID2D1StrokeStyle *round_stroke_ = nullptr;
@@ -2507,6 +2591,13 @@ int GpuSurfaceImpl::presentPacket(const WindowsGpuPacketPresent &present, Window
         if (patch) retained_valid_ = false;
         return 0;
     }
+    /* Before touching any GPU resource: a device removed since the last
+     * frame leaves this surface holding a backing bitmap, a swap chain,
+     * and a texture cache that all belong to it. `syncDevice` drops them
+     * and adopts the rebuilt stack; a refused present here makes the
+     * runtime resend a full packet, which is exactly the resync a fresh
+     * device needs. */
+    if (!syncDevice()) return 0;
     if (!ensureTargets(present.surface_width, present.surface_height, scale, pixel_width, pixel_height)) {
         releaseDeviceResources(true);
         return 0;
@@ -2639,6 +2730,7 @@ bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
 }
 
 bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count) {
+    if (!syncDevice()) return false;
     if (!content_valid_ || !backing_bitmap_) return true;
     if (paint_rect_count > 0 && paint_rects == nullptr) return false;
     RECT client = {};
@@ -2647,6 +2739,15 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
     const UINT client_height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
     if (!ensureSwapChain(client_width, client_height)) {
         releaseDeviceResources(true);
+        return false;
+    }
+    if (simulate_loss_after_ > 0 && ++paints_since_start_ == simulate_loss_after_) {
+        /* NATIVE_SDK_GPU_SIMULATE_DEVICE_LOSS=<n>: take the recovery path
+         * on the nth paint. Disabling an adapter mid-drag is the honest
+         * test but not a repeatable one, and this exercises the same
+         * code -- rebuild the stack, drop every surface's resources,
+         * force a full resync -- on demand. */
+        handleDeviceLoss(DXGI_ERROR_DEVICE_REMOVED);
         return false;
     }
 
@@ -2751,7 +2852,7 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
                 static_cast<unsigned>(drawn), backing_pixels.width, backing_pixels.height,
                 swap_pixels.width, swap_pixels.height);
         }
-        releaseDeviceResources(true);
+        handleDeviceLoss(drawn);
         return false;
     }
 
@@ -2803,7 +2904,10 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
         return true;
     }
     if (FAILED(presented)) {
-        releaseDeviceResources(true);
+        if (gpuProfileActive()) {
+            GpuProfileLog::shared().line("paint-fail stage=present hr=0x%08x", static_cast<unsigned>(presented));
+        }
+        handleDeviceLoss(presented);
         return false;
     }
     swap_last_damage_ = std::move(damage);
