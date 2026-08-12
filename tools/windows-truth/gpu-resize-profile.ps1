@@ -34,6 +34,12 @@ param(
     # the damage-accumulated copy and dirty-rect Present1. Needs the
     # console desktop, like -Drag.
     [int]$HoldMs = 0,
+    # How long to let the app settle before the sweep. The default covers
+    # boot plus a first present. A real app that restores a project on
+    # launch needs much longer -- sweep too early and you measure an empty
+    # window, with no registered textures and nothing to flush, which is
+    # indistinguishable in the log from an app that has none.
+    [int]$SettleMs = 1500,
     # Pin every paint to the full-surface copy + plain Present, so the
     # partial path can be A/B'd against itself on one build.
     [switch]$FullPresent,
@@ -191,6 +197,7 @@ function Parse-Profile([string]$path) {
         }
         if ($line.StartsWith("present ")) {
             $present += [pscustomobject]@{
+                Surface = if ($fields.ContainsKey("surface")) { [int]$fields["surface"] } else { 0 }
                 Seq = [uint64]$fields["seq"]; Outcome = [int]$fields["outcome"]
                 Pw = [int]$fields["pw"]; Ph = [int]$fields["ph"]
                 Rebuild = [int]$fields["rebuild"]; Flushed = [int]$fields["flushed"]
@@ -202,6 +209,7 @@ function Parse-Profile([string]$path) {
             }
         } elseif ($line.StartsWith("paint ")) {
             $paint += [pscustomobject]@{
+                Surface = if ($fields.ContainsKey("surface")) { [int]$fields["surface"] } else { 0 }
                 Seq = [uint64]$fields["seq"]; Ok = [int]$fields["ok"]
                 Pw = [int]$fields["pw"]; Ph = [int]$fields["ph"]
                 Rects = [int]$fields["rects"]; BlitUs = [double]$fields["blit_us"]
@@ -256,7 +264,7 @@ try {
     [NativeSdkResizeProfile]::timeBeginPeriod(1) | Out-Null
     # Let boot-time registration, the first present, and the first paint
     # settle so device creation never lands in the measured population.
-    [Threading.Thread]::Sleep(1500)
+    [Threading.Thread]::Sleep($SettleMs)
 
     # SWPs: NOZORDER | NOACTIVATE | NOCOPYBITS. NOCOPYBITS keeps Windows
     # from blitting stale client pixels forward, so every step invalidates
@@ -372,9 +380,12 @@ if (Test-Path $logPath) {
         TexturesUploadedTotal = ($accepted | Measure-Object -Property ImagesN -Sum).Sum
     }
 
+    # Keyed by SURFACE and seq: `seq` counts presents per surface, so a
+    # multi-surface app (the video editor has a dozen gpu_surfaces) collides
+    # sequence numbers across them and seq alone cross-attributes paints.
     $rebuildSeqs = @{}
-    foreach ($row in $rebuilds) { $rebuildSeqs[[string]$row.Seq] = $true }
-    $rebuildPaints = @($paints | Where-Object { $rebuildSeqs.ContainsKey([string]$_.Seq) })
+    foreach ($row in $rebuilds) { $rebuildSeqs["$($row.Surface):$($row.Seq)"] = $true }
+    $rebuildPaints = @($paints | Where-Object { $rebuildSeqs.ContainsKey("$($_.Surface):$($_.Seq)") })
     $rebuildBlitPerStep = if ($rebuilds.Count -gt 0) {
         [Math]::Round((($rebuildPaints | Measure-Object -Property BlitUs -Sum).Sum) / $rebuilds.Count / 1000.0, 3)
     } else { 0 }
@@ -465,8 +476,8 @@ if (Test-Path $logPath) {
         $inBucket = @($rebuilds | Where-Object { $_.Megapixels -gt $low -and $_.Megapixels -le $edge })
         if ($inBucket.Count -eq 0) { continue }
         $paintSeqs = @{}
-        foreach ($row in $inBucket) { $paintSeqs[[string]$row.Seq] = $true }
-        $bucketPaints = @($paints | Where-Object { $paintSeqs.ContainsKey([string]$_.Seq) })
+        foreach ($row in $inBucket) { $paintSeqs["$($row.Surface):$($row.Seq)"] = $true }
+        $bucketPaints = @($paints | Where-Object { $paintSeqs.ContainsKey("$($_.Surface):$($_.Seq)") })
         $buckets += [pscustomobject]@{
             MegapixelRange = "$low-$edge"
             Samples = $inBucket.Count

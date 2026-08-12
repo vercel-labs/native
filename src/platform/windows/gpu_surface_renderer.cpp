@@ -1413,6 +1413,8 @@ static bool makePathGeometry(ID2D1Factory *factory, const Shape &shape, bool fil
 class GpuSurfaceImpl final : public WindowsGpuSurface {
 public:
     GpuSurfaceImpl(std::shared_ptr<GpuRendererImpl> renderer, HWND hwnd) : renderer_(std::move(renderer)), hwnd_(hwnd) {
+        static unsigned next_surface_id = 0;
+        surface_id_ = ++next_surface_id;
         D2D1_STROKE_STYLE_PROPERTIES style = D2D1::StrokeStyleProperties();
         style.startCap = D2D1_CAP_STYLE_FLAT;
         style.endCap = D2D1_CAP_STYLE_FLAT;
@@ -2415,6 +2417,11 @@ private:
 
     std::shared_ptr<GpuRendererImpl> renderer_;
     HWND hwnd_ = nullptr;
+    /* Stable per-surface identity for the profile log. `seq` counts
+     * presents PER SURFACE, so in an app with several gpu_surfaces (a
+     * video editor has a dozen) sequence numbers collide across surfaces
+     * and any reducer that groups by seq alone silently mixes them. */
+    unsigned surface_id_ = 0;
     /* The retained content surface. Device-owned (not target-owned as the
      * old CreateCompatibleRenderTarget bitmap was), which is what lets the
      * image cache outlive a resize in the next phase. */
@@ -2500,8 +2507,9 @@ int GpuSurfaceImpl::present(const WindowsGpuPacketPresent &present, WindowsGpuPr
     const int outcome = presentPacket(present, info);
     const uint64_t total_ns = gpuClockNs() - begin_ns;
     GpuProfileLog::shared().line(
-        "present seq=%llu outcome=%d pw=%u ph=%u rebuild=%d flushed=%llu targets_us=%llu "
+        "present surface=%u seq=%llu outcome=%d pw=%u ph=%u rebuild=%d flushed=%llu targets_us=%llu "
         "images_us=%llu images_n=%u image_kib=%llu render_us=%llu decode_us=%llu total_us=%llu",
+        surface_id_,
         static_cast<unsigned long long>(profile_sequence_),
         outcome,
         pixel_width_,
@@ -2709,8 +2717,9 @@ bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
     const bool ok = paintRects(paint_rects, paint_rect_count);
     const uint64_t blit_ns = gpuClockNs() - begin_ns;
     GpuProfileLog::shared().line(
-        "paint seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu present_us=%llu "
+        "paint surface=%u seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu present_us=%llu "
         "full=%d dirty=%llu dmg_px=%llu exact=%d hist=%d sw=%u sh=%u",
+        surface_id_,
         static_cast<unsigned long long>(profile_sequence_),
         ok ? 1 : 0,
         had_content ? 1 : 0,
