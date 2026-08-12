@@ -9,6 +9,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "quick-start": "Quick Start",
   "app-model": "App Model",
   typescript: "TypeScript Cores",
+  "typescript/services": "TypeScript Services",
   "typescript/packages": "Where Packages Go",
   "native-ui": "Native UI",
   "dynamic-images": "Dynamic Images",

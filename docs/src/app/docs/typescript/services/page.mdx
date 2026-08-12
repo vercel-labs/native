@@ -1,0 +1,350 @@
+# TypeScript Services
+
+Modules under `src/services/` are ordinary TypeScript compiled to native code on the compiler's full static tier: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, `JSON`, `Map`/`Set`, `Date`, and classes, when the pinned compiler supports them. The same pinned compiler builds the deterministic core ([TypeScript Cores](/docs/typescript)) and the service tier; no JavaScript engine ships in either.
+
+The core calls a service by returning a command from `update`. The typed result returns as an ordinary `Msg`:
+
+```ts:src/core.ts
+import { feedsParse } from "@native-sdk/services";
+
+case "parse":
+  return [model, feedsParse({ source: model.source, caseSensitive: false }, {
+    key: "parse",
+    ok: "parsed",        // the one Msg arm carrying ParseResult
+    err: "parse_failed", // a one-Uint8Array-field arm
+  })];
+```
+
+Services run in a separate supervised process and are desktop-only today (see [Runtime behavior](#runtime-behavior)).
+
+## The two tiers
+
+Record→replay, headless testing, and [automation](/docs/automation) depend on `update` being a pure function of its inputs. A service reads the real filesystem, clock, and network, so the checker refuses a core import of a service file (NS1065) and the core-to-service edge is always a command. Service results are journaled like every other effect result.
+
+<table>
+  <thead>
+    <tr>
+      <th>Tier</th>
+      <th>Owns</th>
+      <th>Language rules</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Core (<code>src/core.ts</code> + imports outside <code>src/services/</code>)</td>
+      <td>App state and decisions: <code>Model</code>, <code>Msg</code>, <code>update</code>, pure helpers</td>
+      <td>The deterministic subset (NS1001–NS1064)</td>
+    </tr>
+    <tr>
+      <td>Service (<code>src/services/**/*.ts</code>)</td>
+      <td>Imperative work: parsing, filesystem transforms, environment inspection, subprocesses</td>
+      <td>Ordinary static-tier TypeScript; only the boundary rules NS1065–NS1067 apply</td>
+    </tr>
+  </tbody>
+</table>
+
+Services are not a storage engine or a general FFI surface. Durable data uses the engine-owned [persistence](/docs/persistence) and [record store](/docs/record-store) effects; custom widgets, render passes, and new engine capabilities are Zig ([Building Components](/docs/building-components)).
+
+## Service authority
+
+A service runs with the app's privileges. Its working directory is the app data directory. It may use:
+
+- **Filesystem** — Node built-ins over the real disk.
+- **Environment** — `process` and the allowlisted variables below.
+- **Network** — `fetch` and sockets, directly.
+- **Ambient time and randomness** — `Date.now()`, `Math.random()`, and friends. Their results reach the core only as journaled message payloads.
+
+The child process receives an explicit environment allowlist; everything else, including every `NATIVE_SDK_*` internal, is stripped.
+
+<table>
+  <thead>
+    <tr>
+      <th>Group</th>
+      <th>Variables</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Path</td>
+      <td><code>PATH</code></td>
+    </tr>
+    <tr>
+      <td>Home / user / temp</td>
+      <td><code>HOME</code>, <code>USER</code>, <code>TMPDIR</code>, <code>TMP</code>, <code>TEMP</code></td>
+    </tr>
+    <tr>
+      <td>Locale / time zone</td>
+      <td><code>LANG</code>, <code>LC_ALL</code>, <code>LC_CTYPE</code>, <code>TZ</code></td>
+    </tr>
+    <tr>
+      <td>Certificates</td>
+      <td><code>SSL_CERT_FILE</code>, <code>SSL_CERT_DIR</code></td>
+    </tr>
+    <tr>
+      <td>Proxies</td>
+      <td><code>HTTP_PROXY</code>, <code>HTTPS_PROXY</code>, <code>NO_PROXY</code></td>
+    </tr>
+    <tr>
+      <td>Windows additions</td>
+      <td><code>USERPROFILE</code>, <code>USERNAME</code>, <code>SystemRoot</code>, <code>COMSPEC</code>, <code>PATHEXT</code>; all names match case-insensitively</td>
+    </tr>
+  </tbody>
+</table>
+
+Standard output carries the framed transport between app and service, so service diagnostics go to standard error.
+
+## Writing a service
+
+A service module is any `.ts` file under `src/services/`. Every directly exported, non-default named function is an operation:
+
+- It is synchronous and has a body.
+- It takes zero or one explicitly annotated request parameter.
+- It declares a contract-encodable result type.
+- Its name is `<module-basename>.<export>` — `export function parse` in `src/services/feeds.ts` is `feeds.parse`.
+
+Boundary shapes live in a shared, subset-legal module outside `src/services/`, imported by both tiers:
+
+```ts:src/shared.ts
+export type ParseRequest = {
+  readonly source: Uint8Array;
+  readonly caseSensitive: boolean;
+};
+
+export type ParseResult = {
+  readonly bytes: Uint8Array;
+  readonly matches: boolean;
+};
+```
+
+```ts:src/services/feeds.ts
+import * as fs from "node:fs";
+import type { ParseRequest, ParseResult } from "../shared.ts";
+
+export function parse(request: ParseRequest): ParseResult {
+  if (!fs.existsSync(".")) {
+    throw { kind: "data_directory_missing", message: "the app data directory is unavailable" };
+  }
+  const source = new TextDecoder().decode(request.source);
+  const matches = request.caseSensitive ? /feed/.test(source) : /feed/i.test(source);
+  return { bytes: new TextEncoder().encode(JSON.stringify({ matches })), matches };
+}
+```
+
+`native check` projects the complete type table into a contract sidecar (`services.contract.json`), checks both tiers, and generates the typed client the core imports. An operation shaped any other way — `async`, a default export, an unannotated request, a non-encodable result — is a teaching error (NS1067) naming the rewrite.
+
+### Boundary types
+
+<table>
+  <thead>
+    <tr>
+      <th>Crosses</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Booleans, numbers</td>
+      <td>Integer-class fields are proven and carried as integers</td>
+    </tr>
+    <tr>
+      <td><code>Uint8Array</code></td>
+      <td>The bytes form both tiers already share</td>
+    </tr>
+    <tr>
+      <td>Optionals, readonly slices</td>
+      <td><code>T | null</code> and <code>readonly T[]</code> of encodable elements</td>
+    </tr>
+    <tr>
+      <td>Named records, enums, kind-tagged unions</td>
+      <td>Declared in the shared module; both sides import the one declaration</td>
+    </tr>
+    <tr>
+      <td>Functions, behavior-bearing classes, Promises</td>
+      <td>Do not cross — the boundary is encoded data, not object references</td>
+    </tr>
+  </tbody>
+</table>
+
+Inside the service, classes, `Map`s, and the rest of the static tier are unrestricted; they just cannot be a request or result shape.
+
+### Errors
+
+An explicit throw crossing the operation boundary must be exactly an inline `{ kind: "...", message: "..." }` shape with a string-valued message, and it must escape the operation rather than be caught locally:
+
+```ts
+throw { kind: "parse", message: "bad feed" };
+```
+
+The encoded kind and message arrive on the core's error arm as UTF-8 JSON bytes. Do not throw `new Error(...)` from the exported surface. The build mechanically lowers the escaping tagged value into the form the pinned compiler carries across the boundary; your checked-in source — and its behavior under Node — does not change.
+
+## Calling a service
+
+`native check` derives the virtual module `@native-sdk/services` from the contract: one constructor per operation, named `<module><Export>` (`feeds.parse` → `feedsParse`), taking the typed request plus a route.
+
+```ts:src/core.ts
+import { feedsParse } from "@native-sdk/services";
+import type { ParseRequest, ParseResult } from "./shared.ts";
+
+export type Msg =
+  | { readonly kind: "parse"; readonly request: ParseRequest }
+  | { readonly kind: "parsed"; readonly result: ParseResult }
+  | { readonly kind: "parse_failed"; readonly error: Uint8Array };
+
+case "parse":
+  return [model, feedsParse(msg.request, {
+    key: "feed-parse",
+    ok: "parsed",
+    err: "parse_failed",
+  })];
+```
+
+The route is typechecked: the constructor's type proves that `ok` names the one Msg arm carrying exactly the declared result record and that `err` names a one-bytes-field arm. A stale field or wrong route is a `native check` type error at the call site. The generated source lives only in build scratch space and the ignored editor package under `node_modules/@native-sdk/services`, never in authored `src/`.
+
+Raw `Cmd.request("feeds.parse", bytes, { key?, ok, err })` remains the low-level byte seam beneath the client — same transport, same routing, request and result as raw bytes you encode yourself.
+
+### Keys
+
+Keys share the engine effect-key space. A second live request on the same key — buffered or streaming — is rejected (`err` receives `rejected`) rather than replacing the first, so two calls can never splice into one result. Cancel the first if you mean to supersede it.
+
+### Timeouts
+
+Every request carries a deadline: 30 seconds by default, or the operation's declared `@deadlineMs` (a JSDoc tag, 1 to 86400000 ms). Expiry routes JSON with `kind: "timeout"` to `err`.
+
+### Cancellation
+
+`Cmd.cancel(key)` on a buffered request drops it — no message is dispatched — and cooperatively interrupts the service child. Cancelling a stream routes `cancelled` to `err` (see [Streaming](#streaming)).
+
+## Streaming
+
+To return incremental results, declare a final typed `emit` capability. Each chunk arrives through a channel-event Msg arm; the function's return stays the one typed terminal result.
+
+```ts:src/services/feeds.ts
+import type { ServiceCancellation } from "@native-sdk/core";
+import type { ParseChunk, ParseRequest, ParseResult } from "../shared.ts";
+
+/**
+ * @deadlineMs 5000
+ * @streamBuffer 8
+ */
+export function parseLarge(
+  request: ParseRequest,
+  emit: (chunk: ParseChunk) => void,
+  cancellation: ServiceCancellation,
+): ParseResult {
+  for (let index = 0; index < request.source.length; index += 4096) {
+    cancellation.throwIfCancelled();
+    emit({ bytes: request.source.slice(index, index + 4096), index });
+  }
+  return parse(request);
+}
+```
+
+The generated route gains two fields beside `key`, `ok`, and `err`: `channelKey` (an app-chosen numeric channel key) and `event` (the channel-event Msg arm each chunk dispatches). The terminal result closes the channel after all accepted chunks. `@streamBuffer` caps in-flight chunks at 1–64 (default 8).
+
+### Cooperative cancellation
+
+An optional final `ServiceCancellation` parameter opts an operation into cooperative cancellation — legal only as the last parameter. Poll `cancelled()` or call `throwIfCancelled()` at bounded intervals.
+
+- `Cmd.cancel(key)` on a stream flips the token, closes the channel, routes `cancelled` to `err`, and drops every later chunk.
+- A deadline expiry flips the same token and routes `kind: "timeout"` to `err`.
+- The child gets a short grace period to unwind and stays alive when it cooperates. An operation that ignores its token is hard-killed, and the next request starts a clean host.
+
+## npm packages
+
+Service modules may import local service files, shared core-class declarations, and exact vendored npm packages — never a bare install:
+
+```bash
+native vendor . escape-string-regexp@5.0.0
+```
+
+The command resolves the exact version once (lifecycle scripts disabled), copies the flattened package graph and license files into `src/services/vendor/`, and writes the exact name/version/tree-hash facts into `app.zon`. Check both in. Builds are hermetic: no npm, no network — every vendored byte is re-hashed, and the compiler receives only the explicit declared package allowlist. Importing a package that was never vendored is NS1066:
+
+> Run `native vendor . package@X.Y.Z`, check in `src/services/vendor/` and the generated app.zon `service_packages` facts, then import that exact package name; or vendor a local source module and import it relatively.
+
+npm support is selective. A vendored package compiles only if the pinned compiler reaches 100% static coverage of its bytes; anything less fails `native check` with the compiler's coverage note preserved verbatim and a remediation. The shipped compiler's calibration run over five deliberately small candidates passed three and refused two:
+
+<table>
+  <thead>
+    <tr>
+      <th>Package</th>
+      <th>Verdict</th>
+      <th>Static coverage</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>escape-string-regexp@5.0.0</code></td>
+      <td>compiled</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td><code>comma-separated-tokens@2.0.3</code></td>
+      <td>compiled</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td><code>space-separated-tokens@2.0.2</code></td>
+      <td>compiled</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td><code>nanoid@3.3.15</code></td>
+      <td>refused</td>
+      <td>76%</td>
+    </tr>
+    <tr>
+      <td><code>micromark@4.0.2</code></td>
+      <td>refused</td>
+      <td>92%</td>
+    </tr>
+  </tbody>
+</table>
+
+Small, source-shipping, dependency-light utilities are the realistic fit. There is no `auto` mode or dynamic fallback; `native check` is the verdict for the exact bytes you vendored, and a refusal names the options: choose another exact package, port or vendor a suitable implementation, or wait for broader compiler support. Source you control — your own modules under `src/services/` — compiles on the same tier with no coverage question. For npm-heavy work that does not compile statically (an editor component, a charting stack), use a different edge: see [Where Packages Go](/docs/typescript/packages).
+
+## Runtime behavior
+
+The carrier is a second native executable — `<app>_services` — built beside the app binary and packaged with it ([Packaging](/docs/packaging) discovers it automatically).
+
+- **Lazy start.** The child spawns on the first real request, not at app launch. A session that never calls a service never starts the process.
+- **Verified handshake.** Startup checks the protocol version and a fingerprint of the generated operation/type/package registry; a stale or mismatched sibling executable is rejected before any operation dispatches.
+- **Supervision.** Requests queue and run in order. After a crash — or after a cancellation or deadline the operation did not honor cooperatively — the child is killed and the next request starts a clean host. A cooperative unwind keeps the warm process alive. Every failure produces a routed result: a dead transport routes a `kind: "service_host"` error, an expired deadline `kind: "timeout"`.
+- **Replay.** Terminal results and stream events are journaled like every other effect. Replaying a recorded session parks each request and feeds the recorded result; the service executable is not launched.
+- **Scope.** Services are desktop-only today, and the service executable builds for the build host: a cross-target build of a service-bearing app fails with a teaching rather than packaging an executable for the wrong OS or architecture. Operations are synchronous.
+
+## Development
+
+`native dev --core` runs service operations in an isolated Node worker through the same generated contract: the same vendored-package hash verification, request/result codecs, error arms, cooperative cancellation and deadlines, and channel-event chunk shape. Pair `--script scenario.ndjson` with `--watch` for repeatable iteration.
+
+The devhost honors session record/replay the same way the packaged runtime does — replay starts no service worker — and service-only recordings cross between the devhost and the packaged app. `native dev` runs the compiled service executable beside the native app.
+
+## Boundary diagnostics
+
+Three checker rules enforce the boundary. Each teaches the fix and the reason at the site.
+
+<table>
+  <thead>
+    <tr>
+      <th>Rule</th>
+      <th>Teaching</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>NS1065</strong> — the core does not import services</td>
+      <td>A direct import would run ambient, non-deterministic service authority inside update and erase the command/result boundary that journaling and replay depend on. The core-to-service edge is always an effect.</td>
+    </tr>
+    <tr>
+      <td><strong>NS1066</strong> — service package imports are exact vendored facts</td>
+      <td>Service builds have no package-manager or network input: the compiler sees only manifest-declared, hash-verified checked-in sources through an explicit static-package allowlist.</td>
+    </tr>
+    <tr>
+      <td><strong>NS1067</strong> — service calls match the generated typed contract</td>
+      <td>The host codecs, runner registry, and typed client are projections of <code>services.contract.json</code>; every crossing data shape, stream declaration, deadline, and operation name must be stated there once.</td>
+    </tr>
+  </tbody>
+</table>
+
+## Reference
+
+`examples/service-feed-reader` is the minimal two-tier app: a deterministic core, a service using `node:fs`, regex, `Map`, `Date`, and JSON, and a kind-tagged error path. The machine-precise authoring guide ships as `native skills get ts-services`.
