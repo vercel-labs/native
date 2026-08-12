@@ -21,6 +21,8 @@
 //                                       treat removals as suspect)
 //   - semantic note / SC-code moves  -> teaching text and fence codes
 //                                       that docs or checks may echo
+//   - coverage-statement changes     -> the projection's scope or profile
+//                                       changed even when its rows did not
 //
 //   node surface_manifest_diff.mjs <old> <new> [--json]
 //
@@ -125,6 +127,8 @@ const newSide = resolveSpec(specs[1]);
 const byId = (m) => new Map(m.entries.map((e) => [e.id, e]));
 const oldById = byId(oldSide.manifest);
 const newById = byId(newSide.manifest);
+const oldCoverage = new Set(oldSide.manifest.coverage ?? []);
+const newCoverage = new Set(newSide.manifest.coverage ?? []);
 
 // Tier order for regression detection: losing ground means moving DOWN.
 const TIER_RANK = { static: 2, "dynamic-only": 1, unsupported: 0 };
@@ -148,6 +152,10 @@ const diff = {
   noteChanges: [],       // semantic note changed, including alongside a tier move
   nameChanges: [],       // same id, display name changed
   retirementsDue: [],    // watched entries among flippedToStatic
+  coverageChanges: {
+    added: [...newCoverage].filter((statement) => !oldCoverage.has(statement)),
+    removed: [...oldCoverage].filter((statement) => !newCoverage.has(statement)),
+  },
 };
 
 for (const [id, oldEntry] of oldById) {
@@ -212,8 +220,12 @@ section("SC-code changes", diff.codeChanges,
 section("semantic note changes", diff.noteChanges, (c) =>
   `  ${c.id}  ${c.name}\n    old: ${clip(c.oldNote)}\n    new: ${clip(c.newNote)}`);
 section("name changes", diff.nameChanges, (c) => `  ${c.id}  "${c.oldName}" -> "${c.newName}"`);
+section("coverage statements added (candidate scope)", diff.coverageChanges.added,
+  (statement) => `  + ${statement}`);
+section("coverage statements removed (old scope)", diff.coverageChanges.removed,
+  (statement) => `  - ${statement}`);
 
 const total = diff.flippedToStatic.length + diff.tierRegressions.length + diff.otherTierMoves.length
   + diff.added.length + diff.removed.length + diff.codeChanges.length + diff.noteChanges.length
-  + diff.nameChanges.length;
+  + diff.nameChanges.length + diff.coverageChanges.added.length + diff.coverageChanges.removed.length;
 if (total === 0) console.log("\nno differences.");

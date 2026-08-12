@@ -34,7 +34,7 @@ How to read the tables:
 |---|---|---|---|---|
 | `syntax.class-declarations-inside-functions` | class declarations inside functions | unsupported | `SC1090` |  |
 | `syntax.class-expressions` | class expressions | unsupported | `SC1020` |  |
-| `syntax.compound-assignment.bitwise-and` | compound assignment operator '&=' | static |  | compiles over the operand types the '&' operator supports |
+| `syntax.compound-assignment.bitwise-and` | compound assignment operator '&amp;=' | static |  | compiles over the operand types the '&amp;' operator supports |
 | `syntax.compound-assignment.bitwise-or` | compound assignment operator '\|=' | static |  | compiles over the operand types the '\|' operator supports |
 | `syntax.compound-assignment.bitwise-xor` | compound assignment operator '^=' | static |  | compiles over the operand types the '^' operator supports |
 | `syntax.compound-assignment.divide` | compound assignment operator '/=' | static |  | compiles over the operand types the '/' operator supports |
@@ -42,9 +42,9 @@ How to read the tables:
 | `syntax.compound-assignment.minus` | compound assignment operator '-=' | static |  | compiles over the operand types the '-' operator supports |
 | `syntax.compound-assignment.plus` | compound assignment operator '+=' | static |  | compiles over the operand types the '+' operator supports |
 | `syntax.compound-assignment.remainder` | compound assignment operator '%=' | static |  | compiles over the operand types the '%' operator supports |
-| `syntax.compound-assignment.shift-left` | compound assignment operator '<<=' | static |  | compiles over the operand types the '<<' operator supports |
-| `syntax.compound-assignment.shift-right` | compound assignment operator '>>=' | static |  | compiles over the operand types the '>>' operator supports |
-| `syntax.compound-assignment.shift-right-unsigned` | compound assignment operator '>>>=' | static |  | compiles over the operand types the '>>>' operator supports |
+| `syntax.compound-assignment.shift-left` | compound assignment operator '&lt;&lt;=' | static |  | compiles over the operand types the '&lt;&lt;' operator supports |
+| `syntax.compound-assignment.shift-right` | compound assignment operator '&gt;&gt;=' | static |  | compiles over the operand types the '&gt;&gt;' operator supports |
+| `syntax.compound-assignment.shift-right-unsigned` | compound assignment operator '&gt;&gt;&gt;=' | static |  | compiles over the operand types the '&gt;&gt;&gt;' operator supports |
 | `syntax.compound-assignment.times` | compound assignment operator '*=' | static |  | compiles over the operand types the '*' operator supports |
 | `syntax.debugger-statements` | debugger statements | unsupported | `SC1090` |  |
 | `syntax.delete-expressions` | delete expressions | unsupported | `SC1090` |  |
@@ -81,9 +81,9 @@ each one refuses.
 | `diagnostic.sc1071` | generators | unsupported | `SC1071` |  |
 | `diagnostic.sc1080` | 'this' outside a class method | unsupported | `SC1080` |  |
 | `diagnostic.sc1090` | this syntax | unsupported | `SC1090` |  |
-| `diagnostic.sc1100` | operations on 'unknown' values | unsupported | `SC1100` | validate with 'as <type>' first — the cast checks the dynamic value at runtime and throws on mismatch |
+| `diagnostic.sc1100` | operations on 'unknown' values | unsupported | `SC1100` | validate with 'as &lt;type&gt;' first — the cast checks the dynamic value at runtime and throws on mismatch |
 | `diagnostic.sc1101` | converting typed values to 'unknown' | unsupported | `SC1101` | numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet |
-| `diagnostic.sc1120` | this regex feature | unsupported | `SC1120` | supported: literal regexes with the g/i/m/s/u/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $<name> templates, \k<name>), .source/.flags, and string replace/replaceAll/split with string replacement templates |
+| `diagnostic.sc1120` | this regex feature | unsupported | `SC1120` | supported: literal regexes with the g/i/m/s/u/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $&lt;name&gt; templates, \k&lt;name&gt;), .source/.flags, and string replace/replaceAll/split with string replacement templates |
 | `diagnostic.sc1121` | '.test()' on a regex with the 'g' or 'y' flag | unsupported | `SC1121` | g/y regexes carry mutable lastIndex state between calls, which is not modeled; drop the flag for a plain match test, or use replace/replaceAll/split (their iteration is internal) |
 | `diagnostic.sc2001` | values of types outside the compilable set (bigint and symbol primitives, constructor objects, and library-derived or unresolved generic shapes) | unsupported | `SC2001` |  |
 | `diagnostic.sc2002` | record shape flows outside the width-copy rules (shapes must match exactly or width-coerce) | unsupported | `SC2002` |  |
@@ -535,7 +535,7 @@ Recognized modules (importable bare or `node:`-prefixed, except
 | `stdlib.response.bodyUsed` | Response.bodyUsed | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static |
 | `stdlib.response.bytes` | Response.bytes | static |  | Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static, fixture:static-stream |
 | `stdlib.response.clone` | Response.clone | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation |
-| `stdlib.response.constructor` | Response constructor | static |  | Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, body-consumption, state-machine, error-shape; supported scope: BodyInit is string, Uint8Array/Buffer, ReadableStream<Uint8Array>, null/undefined, or a checked-dynamic value that follows the supported WebIDL string conversion; ResponseInit is headers/status/statusText; differential evidence: fixture:static |
+| `stdlib.response.constructor` | Response constructor | static |  | Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, body-consumption, state-machine, error-shape; supported scope: BodyInit is string, Uint8Array/Buffer, ReadableStream&lt;Uint8Array&gt;, null/undefined, or a checked-dynamic value that follows the supported WebIDL string conversion; ResponseInit is headers/status/statusText; differential evidence: fixture:static |
 | `stdlib.response.formData` | Response.formData | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation |
 | `stdlib.response.headers` | Response.headers | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static |
 | `stdlib.response.json` | Response.json | static |  | Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static, fixture:static-stream |

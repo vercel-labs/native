@@ -20,9 +20,15 @@ const diffScript = path.join(pkg, "scripts", "surface_manifest_diff.mjs");
 const genScript = path.join(pkg, "scripts", "gen_service_surface.mjs");
 const surfaceReference = path.join(repo, "skill-data", "ts-services", "references", "service-surface.md");
 
-function writeManifest(dir: string, name: string, version: string, entries: unknown[]): string {
+function writeManifest(
+  dir: string,
+  name: string,
+  version: string,
+  entries: unknown[],
+  coverage: string[] = [],
+): string {
   const file = path.join(dir, name);
-  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, compilerVersion: version, coverage: [], entries }));
+  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, compilerVersion: version, coverage, entries }));
   return file;
 }
 
@@ -119,6 +125,27 @@ test("identical manifests diff to no differences", () => {
   assert.match(run.stdout, /no differences\./);
 });
 
+test("surface_manifest_diff reports coverage-only scope changes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "surface-diff-"));
+  const entries = [{ id: "stdlib.math.abs", kind: "stdlib", name: "Math.abs", status: "static" }];
+  const oldManifest = writeManifest(dir, "old.json", "0.0.1", entries, ["timers are not projected"]);
+  const newManifest = writeManifest(dir, "new.json", "0.0.2", entries, ["timers are projected"]);
+
+  const jsonRun = spawnSync(process.execPath, [diffScript, oldManifest, newManifest, "--json"], { encoding: "utf8" });
+  assert.equal(jsonRun.status, 0, jsonRun.stderr);
+  const diff = JSON.parse(jsonRun.stdout);
+  assert.deepEqual(diff.coverageChanges, {
+    added: ["timers are projected"],
+    removed: ["timers are not projected"],
+  });
+
+  const human = spawnSync(process.execPath, [diffScript, oldManifest, newManifest], { encoding: "utf8" });
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /coverage statements added[\s\S]*\+ timers are projected/);
+  assert.match(human.stdout, /coverage statements removed[\s\S]*- timers are not projected/);
+  assert.doesNotMatch(human.stdout, /no differences\./);
+});
+
 test("the committed service-surface reference passes the claim check", () => {
   const run = spawnSync(process.execPath, [genScript, "--check"], { encoding: "utf8" });
   assert.equal(
@@ -148,7 +175,26 @@ test("the generated reference keeps subpath modules and unknown kinds visible", 
   assert.match(rendered, /### `host-capability`[\s\S]*`host-capability\.clipboard`/);
 });
 
-test("the claim scan ignores package versions but catches formatted and wrapped stale compiler versions", () => {
+test("the generated reference escapes manifest text for Markdown tables", () => {
+  const fixture = generatorFixture([
+    {
+      id: "syntax.generic-value",
+      kind: "syntax",
+      name: "generic <T> & value",
+      status: "static",
+      note: "Use ReadableStream<Uint8Array> & bytes",
+    },
+  ]);
+  const run = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+
+  const rendered = fs.readFileSync(fixture.output, "utf8");
+  assert.match(rendered, /generic &lt;T&gt; &amp; value/);
+  assert.match(rendered, /ReadableStream&lt;Uint8Array&gt; &amp; bytes/);
+  assert.doesNotMatch(rendered, /generic <T>|ReadableStream<Uint8Array>/);
+});
+
+test("the claim scan ignores package versions but catches formatted, wrapped, and punctuated stale compiler versions", () => {
   const fixture = generatorFixture([]);
   const write = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
   assert.equal(write.status, 0, write.stderr);
@@ -169,6 +215,18 @@ test("the claim scan ignores package versions but catches formatted and wrapped 
   assert.equal(stale.status, 1);
   assert.match(stale.stderr, /skills\/example\/SKILL\.md:2:/);
   assert.match(stale.stderr, /compiler version 0\.0\.25 but the pin is 0\.0\.26/);
+
+  fs.writeFileSync(skill, "Compiler support was measured with scriptc version: `0.0.24`.\n");
+  const punctuated = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(punctuated.status, 1);
+  assert.match(punctuated.stderr, /skills\/example\/SKILL\.md:1:/);
+  assert.match(punctuated.stderr, /compiler version 0\.0\.24 but the pin is 0\.0\.26/);
+
+  fs.writeFileSync(skill, "The compiler pin is 0.0.23.\n");
+  const pinClaim = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(pinClaim.status, 1);
+  assert.match(pinClaim.stderr, /skills\/example\/SKILL\.md:1:/);
+  assert.match(pinClaim.stderr, /compiler version 0\.0\.23 but the pin is 0\.0\.26/);
 });
 
 test("every recognized built-in module is in the committed module table", () => {

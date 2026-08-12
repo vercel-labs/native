@@ -61,7 +61,12 @@ if (manifest.schemaVersion !== KNOWN_SCHEMA_VERSION) {
 // ---- render ---------------------------------------------------------------
 
 const cell = (text) =>
-  text === undefined ? "" : String(text).replaceAll("|", "\\|").replaceAll(/\r?\n/g, " ");
+  text === undefined ? "" : String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("|", "\\|")
+    .replaceAll(/\r?\n/g, " ");
 const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 function table(entries, { withCode = true } = {}) {
@@ -223,8 +228,10 @@ function proseFiles() {
 // remain legal in authoring docs.
 const semver = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`;
 const markdownTicks = "`*";
+const compilerContext = String.raw`(?:scriptc(?:\s+compiler)?|compiler)(?:'s)?(?:\s+(?:version|pin))?`;
+const versionJoin = String.raw`\s*(?:(?:is|at)\s*)?[:=]?\s*`;
 const versionClaim = new RegExp(
-  String.raw`\b(?:scriptc(?:\s+compiler)?(?:'s)?(?:\s+version)?|compiler(?:\s+version)?)\s+${markdownTicks}\b(?<before>${semver})\b${markdownTicks}|${markdownTicks}\b(?<after>${semver})\b${markdownTicks}\s+(?:calibration|spike)\b`,
+  String.raw`\b${compilerContext}${versionJoin}${markdownTicks}\b(?<before>${semver})\b${markdownTicks}|${markdownTicks}\b(?<after>${semver})\b${markdownTicks}\s+(?:calibration|spike)\b`,
   "gi",
 );
 const scClaim = /\bSC\d{4}\b/g;
