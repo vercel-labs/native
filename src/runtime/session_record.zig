@@ -27,6 +27,11 @@ const runtime_effects = @import("effects.zig");
 const journal = @import("session_journal.zig");
 const session_blobs = @import("session_blobs.zig");
 
+/// Keep ordinary query pages self-contained while spilling pages large
+/// enough to dominate the journal. The relational page's own hard ceiling
+/// remains `max_effect_db_page_bytes`.
+pub const max_inline_db_page_bytes: usize = 64 * 1024;
+
 pub const Header = journal.Header;
 
 /// Where journal bytes go. The app runner backs this with a file opened
@@ -241,6 +246,18 @@ pub const SessionRecorder = struct {
             journaled.persist_blob_len = record.payload.len;
             journaled.payload = "";
         }
+        if (record.kind == .db and record.payload.len > max_inline_db_page_bytes) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a large relational page needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.db_blob_hash = hash;
+            journaled.db_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
         const payload = journal.encodeEffect(journaled, &self.effect_buffer) catch {
             return self.fail("an effect result exceeded max_session_record_bytes");
         };
@@ -404,6 +421,39 @@ test "recorder moves model restore snapshots into the session blob store" {
     var scratch: [64]u8 = undefined;
     const restored = try blobs.read(effect.persist_blob_hash, &scratch);
     try testing.expectEqualStrings("canonical model", restored);
+}
+
+test "recorder spills large relational pages into the session blob store" {
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+
+    const page = try testing.allocator.alloc(u8, max_inline_db_page_bytes + 1);
+    defer testing.allocator.free(page);
+    @memset(page, 0x5a);
+    recorder.begin(.{ .platform_name = "test", .app_name = "relational" });
+    recorder.recordEffect(.{
+        .kind = .db,
+        .key = 73,
+        .payload = page,
+        .code = runtime_effects.dbJournalCode(.page, .ok),
+    });
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expectEqual(@as(u64, page.len), effect.db_blob_len);
+    const scratch = try testing.allocator.alloc(u8, page.len);
+    defer testing.allocator.free(scratch);
+    const restored = try blobs.read(effect.db_blob_hash, scratch);
+    try testing.expectEqualSlices(u8, page, restored);
 }
 
 test "recorder commits nested events innermost-first" {

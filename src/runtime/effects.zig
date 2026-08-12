@@ -76,6 +76,7 @@ const validation = @import("validation.zig");
 const runtime_clock = @import("clock.zig");
 const persist_store = @import("persist_store.zig");
 const record_store = @import("record_store.zig");
+const relational_store = @import("relational_store.zig");
 const pty_transport = @import("pty.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
@@ -84,6 +85,9 @@ pub const max_effects: usize = 16;
 /// database cannot consume the spawn/fetch/file family's sixteen slots.
 pub const max_store_effects: usize = 16;
 const total_effect_slots: usize = max_effects + max_store_effects;
+/// Relational queries and transactions have their own loop-side capacity;
+/// they never consume file/fetch workers or record-store request slots.
+pub const max_db_effects: usize = 16;
 /// Maximum argv entries per spawn.
 pub const max_effect_argv: usize = 16;
 /// Maximum total bytes across all argv entries of one spawn.
@@ -185,6 +189,46 @@ pub const max_effect_store_scan_limit: u32 = record_store.max_scan_limit;
 pub const EffectStoreOutcome = record_store.Outcome;
 pub const EffectStoreOp = record_store.Operation;
 pub const RecordStoreBinding = record_store.Binding;
+pub const max_effect_db_sql_bytes: usize = relational_store.max_sql_bytes;
+pub const max_effect_db_parameters: usize = relational_store.max_parameters;
+pub const max_effect_db_exec_statements: usize = relational_store.max_exec_statements;
+pub const max_effect_db_parameter_bytes: usize = relational_store.max_parameter_bytes;
+pub const max_effect_db_exec_parameter_bytes: usize = relational_store.max_exec_parameter_bytes;
+pub const default_effect_db_page_rows: usize = relational_store.default_page_rows;
+pub const max_effect_db_page_bytes: usize = relational_store.max_page_bytes;
+pub const max_effect_db_result_rows: usize = relational_store.max_result_rows;
+pub const max_effect_db_result_bytes: usize = relational_store.max_result_bytes;
+pub const max_effect_db_live_tables: usize = relational_store.max_changed_tables;
+pub const EffectDbValue = relational_store.Value;
+pub const EffectDbStatement = relational_store.Statement;
+pub const EffectDbOutcome = relational_store.Outcome;
+pub const RelationalStoreBinding = relational_store.Binding;
+
+/// One relational delivery. Queries produce one or more `.page` events and
+/// exactly one `.done`; an exec transaction produces exactly one `.exec`.
+/// A non-ok outcome is terminal regardless of kind and carries no bytes.
+pub const EffectDbResultKind = enum(u8) { page, done, exec };
+
+pub const EffectDbResult = struct {
+    key: u64,
+    kind: EffectDbResultKind,
+    outcome: EffectDbOutcome = .ok,
+    /// Encoded row page for `.page`; drain scratch, valid through the update
+    /// that receives it. Empty for terminal events.
+    bytes: []const u8 = "",
+};
+
+pub fn dbJournalCode(kind: EffectDbResultKind, outcome: EffectDbOutcome) i32 {
+    return @as(i32, @intFromEnum(kind)) | (@as(i32, @intFromEnum(outcome)) << 8);
+}
+
+pub fn dbKindFromJournalCode(code: i32) ?EffectDbResultKind {
+    return std.enums.fromInt(EffectDbResultKind, @as(u8, @intCast(code & 0xff)));
+}
+
+pub fn dbOutcomeFromJournalCode(code: i32) ?EffectDbOutcome {
+    return std.enums.fromInt(EffectDbOutcome, @as(u8, @intCast((code >> 8) & 0xff)));
+}
 /// The one boot-time model-restore result delivered to a persistence-enabled
 /// Zig core. Successful bytes contain the generated snapshot body; every
 /// other outcome carries an empty slice. The bytes are instance-lived, so an
@@ -1915,6 +1959,12 @@ pub const EffectResultKind = enum(u8) {
     /// `payload` at the live boundary and move to the session blob store;
     /// replay feeds those exact bytes before the installing app-start event.
     persist = 16,
+    /// One relational page or terminal. Small page bytes ride `payload`; the
+    /// session recorder spills large pages to `db_blob_hash`/`db_blob_len`.
+    /// Result kind and closed outcome are packed into `code` by
+    /// `dbJournalCode`. Admission rejections mark
+    /// `exit_reason == .rejected` and regenerate.
+    db = 17,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -2070,6 +2120,10 @@ pub const EffectResultRecord = struct {
     persist_outcome: EffectPersistOutcome = .none,
     persist_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
     persist_blob_len: u64 = 0,
+    /// `.db` page records may move a large encoded page out of line. Small
+    /// pages stay inline in `payload`; terminals use neither representation.
+    db_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
+    db_blob_len: u64 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -2589,6 +2643,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
         pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
+        pub const DbMsgFn = *const fn (result: EffectDbResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
         pub const ChannelMsgFn = *const fn (event: EffectChannelEvent) Msg;
         pub const PtyMsgFn = *const fn (event: EffectPtyEvent) Msg;
@@ -2706,6 +2761,15 @@ pub fn Effects(comptime Msg: type) type {
         pub fn hostMsg(comptime tag: std.meta.Tag(Msg)) HostMsgFn {
             return struct {
                 fn make(result: EffectHostResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for relational pages and terminals.
+        pub fn dbMsg(comptime tag: std.meta.Tag(Msg)) DbMsgFn {
+            return struct {
+                fn make(result: EffectDbResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
@@ -2965,6 +3029,27 @@ pub fn Effects(comptime Msg: type) type {
             key: u64,
             entries: []const StoreEntry,
             on_result: ?HostMsgFn = null,
+        };
+
+        pub const DbQueryOptions = struct {
+            key: u64,
+            sql: []const u8,
+            params: []const EffectDbValue = &.{},
+            on_result: ?DbMsgFn = null,
+        };
+
+        pub const DbExecOptions = struct {
+            key: u64,
+            statements: []const EffectDbStatement,
+            on_result: ?DbMsgFn = null,
+        };
+
+        pub const DbSubscribeOptions = struct {
+            key: u64,
+            sql: []const u8,
+            params: []const EffectDbValue = &.{},
+            tables: []const []const u8,
+            on_result: ?DbMsgFn = null,
         };
 
         /// A recorded host request, exposed by the fake executor for
@@ -3576,6 +3661,25 @@ pub fn Effects(comptime Msg: type) type {
 
         const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host, store, image };
 
+        const DbSlotKind = enum(u8) { query, exec, live };
+
+        const DbLiveContext = struct {
+            sql: []u8,
+            params: []EffectDbValue,
+            tables: [][]u8,
+        };
+
+        const DbSlot = struct {
+            active: bool = false,
+            fake: bool = false,
+            dirty: bool = false,
+            key: u64 = 0,
+            generation: u64 = 0,
+            kind: DbSlotKind = .query,
+            on_result: ?DbMsgFn = null,
+            live: ?*DbLiveContext = null,
+        };
+
         const EntryKind = enum(u8) { line, exit, response, file, clipboard, host, image, channel, pty };
 
         const Entry = struct {
@@ -3735,6 +3839,7 @@ pub fn Effects(comptime Msg: type) type {
             /// `.rejected` names the parked channel-table slot it
             /// retires at delivery (see `PendingChannel`).
             channel: struct { event: EffectChannelEvent, channel_fn: ?ChannelMsgFn, regenerates: bool, retire_slot: ?usize = null, retire_generation: u64 = 0 },
+            db: PendingDb,
             /// A fully formed Msg staged on the loop thread by a
             /// caller-side validator (`stageLoopMsg` — the TS bridge's
             /// synchronous refusals). Always regenerating by contract:
@@ -3780,6 +3885,7 @@ pub fn Effects(comptime Msg: type) type {
                     // `pending_channels` for the same reason —
                     // exactly one `.rejected` per refused open.
                     .channel => unreachable,
+                    .db => unreachable,
                     // Staged Msgs live in the non-lossy
                     // `pending_staged` — one per caller-side refusal,
                     // and no counter to fold a loss into.
@@ -3801,6 +3907,7 @@ pub fn Effects(comptime Msg: type) type {
                     .video => unreachable,
                     .image => unreachable,
                     .channel => unreachable,
+                    .db => unreachable,
                     .staged => unreachable,
                 };
             }
@@ -3954,6 +4061,22 @@ pub fn Effects(comptime Msg: type) type {
         const PendingStaged = struct {
             seq: u64,
             msg: Msg,
+        };
+
+        /// One copied relational page or terminal awaiting the next drain.
+        /// Pages are non-lossy and independently journaled; the owned buffer
+        /// survives until the Msg has run through update.
+        const PendingDb = struct {
+            seq: u64,
+            key: u64,
+            generation: u64,
+            kind: EffectDbResultKind,
+            outcome: EffectDbOutcome,
+            bytes: ?[]u8 = null,
+            db_fn: ?DbMsgFn,
+            regenerates: bool,
+            /// Rejections that never acquired a DB slot do not retire one.
+            transient: bool = false,
         };
 
         /// Everything a real spawn worker's BLOCKING phase may touch,
@@ -4454,6 +4577,9 @@ pub fn Effects(comptime Msg: type) type {
         /// SDK-reserved routed requests, so their results reuse the request
         /// journal/replay path while the database handle stays host-owned.
         record_store_binding: ?RecordStoreBinding = null,
+        /// Capability-installed Tier-3 relational database. Queries execute
+        /// synchronously on the loop thread and stage bounded page results.
+        relational_store_binding: ?RelationalStoreBinding = null,
         /// Window-action mirror: counts and the last requested label,
         /// observable in tests (`windowActionState`).
         window_action_state: WindowActionState = .{},
@@ -4548,6 +4674,9 @@ pub fn Effects(comptime Msg: type) type {
         /// the non-wrapping guarantee without 2^32 opens.
         channel_generation: u64 = 0,
         slots: [total_effect_slots]Slot = [_]Slot{.{}} ** total_effect_slots,
+        db_slots: [max_db_effects]DbSlot = [_]DbSlot{.{}} ** max_db_effects,
+        next_db_generation: u64 = 1,
+        db_revision: u64 = 0,
         /// Fixed fx timer table (see `max_effect_timers`): timers live
         /// beside the effect slots, never in them. Loop-thread only.
         timer_slots: [max_effect_timers]TimerSlot = [_]TimerSlot{.{}} ** max_effect_timers,
@@ -4692,6 +4821,10 @@ pub fn Effects(comptime Msg: type) type {
         pending_staged_spill: []PendingStaged = &.{},
         pending_staged_head: usize = 0,
         pending_staged_len: usize = 0,
+        pending_dbs: [max_effect_pending_images_inline]PendingDb = undefined,
+        pending_db_spill: []PendingDb = &.{},
+        pending_db_head: usize = 0,
+        pending_db_len: usize = 0,
         /// INTERNED backing for the KEY bytes a staged Msg carries (a TS
         /// bridge spawn-rejection names the app's requested key). A
         /// staged Msg outlives the caller's frame arena, the caller has
@@ -4721,6 +4854,8 @@ pub fn Effects(comptime Msg: type) type {
         /// when the next response or file result drains, or at
         /// `deinit`).
         drain_fetch_body: ?[]u8 = null,
+        /// Owned page bytes for the most recently delivered relational Msg.
+        drain_db_bytes: ?[]u8 = null,
         /// The collect buffer of the most recently delivered collect
         /// exit, keeping `EffectExit.output` valid while `update` runs
         /// (freed when the next collect exit drains, or at `deinit`).
@@ -5237,6 +5372,10 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(buffer);
                 self.drain_fetch_body = null;
             }
+            if (self.drain_db_bytes) |buffer| {
+                self.allocator.free(buffer);
+                self.drain_db_bytes = null;
+            }
             if (self.drain_collect_output) |buffer| {
                 self.allocator.free(buffer);
                 self.drain_collect_output = null;
@@ -5292,6 +5431,21 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.pending_staged_head = 0;
             self.pending_staged_len = 0;
+            const pending_db_storage = self.pendingDbStorage();
+            for (0..self.pending_db_len) |offset| {
+                if (pending_db_storage[(self.pending_db_head + offset) % pending_db_storage.len].bytes) |bytes| {
+                    self.allocator.free(bytes);
+                }
+            }
+            if (self.pending_db_spill.len > 0) {
+                self.allocator.free(self.pending_db_spill);
+                self.pending_db_spill = &.{};
+            }
+            self.pending_db_head = 0;
+            self.pending_db_len = 0;
+            for (&self.db_slots) |*slot| self.freeDbLive(slot);
+            self.db_slots = [_]DbSlot{.{}} ** max_db_effects;
+            self.db_revision = 0;
             // The durable key buffers those staged Msgs referenced.
             self.releaseStagedKeys();
             if (self.staged_keys.len > 0) {
@@ -5351,6 +5505,8 @@ pub fn Effects(comptime Msg: type) type {
             // Sever the host-call binding for the same reason: its
             // context belongs to the embedding host.
             self.host_calls = null;
+            self.record_store_binding = null;
+            self.relational_store_binding = null;
             self.system_services = null;
         }
 
@@ -5719,6 +5875,13 @@ pub fn Effects(comptime Msg: type) type {
         /// receive a closed `rejected` outcome if a command is smuggled in.
         pub fn bindRecordStore(self: *Self, binding: RecordStoreBinding) void {
             if (self.record_store_binding == null) self.record_store_binding = binding;
+        }
+
+        /// Bind the engine-owned Tier-3 relational database. Loop-thread
+        /// only; first bind sticks. An app without the `sqlite` capability
+        /// never installs this binding and every smuggled command rejects.
+        pub fn bindRelationalStore(self: *Self, binding: RelationalStoreBinding) void {
+            if (self.relational_store_binding == null) self.relational_store_binding = binding;
         }
 
         /// Switch this channel into session-replay mode: the fake
@@ -8057,6 +8220,346 @@ pub fn Effects(comptime Msg: type) type {
             self.deliverLoopHost(.{ .key = key, .ok = false, .bytes = record_store.outcomeName(outcome) }, on_result, true);
         }
 
+        /// Run one read-only SQL statement and stage bounded row pages followed
+        /// by one terminal. Same-key queries replace silently; the already
+        /// staged pages of the older generation are discarded at drain.
+        pub fn dbQuery(self: *Self, options: DbQueryOptions) void {
+            if (!validDbSql(options.sql) or !validDbParams(options.params, relational_store.max_parameter_bytes)) {
+                return self.rejectDb(options.key, .done, options.on_result);
+            }
+            const slot_index = self.claimDbSlot(options.key, .query, options.on_result) orelse {
+                return self.rejectDb(options.key, .done, options.on_result);
+            };
+            const slot = &self.db_slots[slot_index];
+            slot.fake = self.executor == .fake;
+            if (slot.fake) return;
+            self.runDbRead(slot_index, options.sql, options.params);
+        }
+
+        /// Register a long-lived read query. Its initial pages arrive
+        /// immediately; after each successful transaction the engine reruns
+        /// it only when SQLite's update hook named one of `tables`. The slot
+        /// remains parked across `.done` deliveries so replay can feed every
+        /// recorded re-delivery without opening a database.
+        pub fn dbSubscribe(self: *Self, options: DbSubscribeOptions) void {
+            if (!validDbSql(options.sql) or !validDbParams(options.params, relational_store.max_parameter_bytes) or
+                options.tables.len == 0 or options.tables.len > max_effect_db_live_tables)
+            {
+                return self.rejectDb(options.key, .done, options.on_result);
+            }
+            for (options.tables) |table| {
+                if (table.len == 0 or table.len > relational_store.max_table_name_bytes or !std.unicode.utf8ValidateSlice(table))
+                    return self.rejectDb(options.key, .done, options.on_result);
+            }
+            if (self.findDbSlot(options.key) != null) return self.rejectDb(options.key, .done, options.on_result);
+            const slot_index = self.claimDbSlot(options.key, .live, options.on_result) orelse
+                return self.rejectDb(options.key, .done, options.on_result);
+            const slot = &self.db_slots[slot_index];
+            slot.live = self.copyDbLive(options) orelse {
+                slot.active = false;
+                return self.rejectDb(options.key, .done, options.on_result);
+            };
+            slot.fake = self.executor == .fake;
+            if (slot.fake) return;
+            self.runDbRead(slot_index, slot.live.?.sql, slot.live.?.params);
+        }
+
+        /// Execute every statement as one atomic transaction. Exec joins the
+        /// spawn discipline: a duplicate live key rejects loudly and never
+        /// replaces a write whose commit is already represented by the Cmd.
+        pub fn dbExec(self: *Self, options: DbExecOptions) void {
+            if (!validDbStatements(options.statements)) return self.rejectDb(options.key, .exec, options.on_result);
+            const slot_index = self.claimDbSlot(options.key, .exec, options.on_result) orelse {
+                return self.rejectDb(options.key, .exec, options.on_result);
+            };
+            const slot = &self.db_slots[slot_index];
+            slot.fake = self.executor == .fake;
+            if (slot.fake) return;
+            const binding = self.relational_store_binding orelse {
+                slot.active = false;
+                return self.rejectDb(options.key, .exec, options.on_result);
+            };
+            const outcome = binding.exec_fn(binding.context, options.statements);
+            self.stageDb(.{
+                .seq = self.nextPendingSeq(),
+                .key = options.key,
+                .generation = slot.generation,
+                .kind = .exec,
+                .outcome = outcome,
+                .db_fn = options.on_result,
+                .regenerates = false,
+            });
+            if (outcome == .ok) self.markDbSubscriptions(binding);
+        }
+
+        /// Silently cancel a read query. Transactions are deliberately not
+        /// cancellable through this API: once issued they either commit whole
+        /// or report a terminal outcome.
+        pub fn cancelDbQuery(self: *Self, key: u64) void {
+            const index = self.findDbSlot(key) orelse return;
+            const slot = &self.db_slots[index];
+            if (slot.kind != .query) return;
+            self.discardPendingDbGeneration(slot.key, slot.generation);
+            slot.active = false;
+            slot.generation = self.takeDbGeneration();
+        }
+
+        pub fn dbUnsubscribe(self: *Self, key: u64) void {
+            const index = self.findDbSlot(key) orelse return;
+            const slot = &self.db_slots[index];
+            if (slot.kind != .live) return;
+            self.discardPendingDbGeneration(slot.key, slot.generation);
+            self.freeDbLive(slot);
+            slot.active = false;
+            slot.generation = self.takeDbGeneration();
+        }
+
+        fn runDbRead(self: *Self, slot_index: usize, sql: []const u8, params: []const EffectDbValue) void {
+            const slot = &self.db_slots[slot_index];
+            const binding = self.relational_store_binding orelse {
+                if (slot.kind != .live) slot.active = false;
+                return self.rejectDb(slot.key, .done, slot.on_result);
+            };
+            var page_context: DbPageContext = .{ .effects = self, .slot_index = slot_index, .generation = slot.generation };
+            const pending_start = self.pending_db_len;
+            const outcome = binding.query_fn(binding.context, sql, params, &page_context, dbPageBound);
+            if (outcome != .ok) self.discardPendingDbTail(pending_start);
+            self.stageDb(.{
+                .seq = self.nextPendingSeq(),
+                .key = slot.key,
+                .generation = slot.generation,
+                .kind = .done,
+                .outcome = outcome,
+                .db_fn = slot.on_result,
+                .regenerates = false,
+            });
+        }
+
+        /// Re-run every live query dirtied by transactions since the previous
+        /// flush. Hosts call this once after walking a whole Cmd batch, so a
+        /// hot table touched by several transactions still produces one
+        /// subscribed result set in the frame.
+        pub fn flushDbSubscriptions(self: *Self) void {
+            for (&self.db_slots, 0..) |*slot, index| {
+                if (!slot.active or slot.kind != .live or slot.fake or !slot.dirty) continue;
+                slot.dirty = false;
+                const live = slot.live orelse continue;
+                self.runDbRead(index, live.sql, live.params);
+            }
+        }
+
+        fn markDbSubscriptions(self: *Self, binding: RelationalStoreBinding) void {
+            const changes = binding.changes_fn(binding.context, self.db_revision);
+            self.db_revision = changes.revision;
+            if (changes.tables.len == 0 and !changes.all_tables) return;
+            for (&self.db_slots) |*slot| {
+                if (!slot.active or slot.kind != .live or slot.fake) continue;
+                if (changes.all_tables) {
+                    slot.dirty = true;
+                    continue;
+                }
+                const live = slot.live orelse continue;
+                for (live.tables) |dependency| {
+                    for (changes.tables) |changed| {
+                        if (std.mem.eql(u8, dependency, changed.name())) {
+                            slot.dirty = true;
+                            break;
+                        }
+                    }
+                    if (slot.dirty) break;
+                }
+            }
+        }
+
+        fn copyDbLive(self: *Self, options: DbSubscribeOptions) ?*DbLiveContext {
+            const context = self.allocator.create(DbLiveContext) catch return null;
+            context.* = .{
+                .sql = self.allocator.dupe(u8, options.sql) catch {
+                    self.allocator.destroy(context);
+                    return null;
+                },
+                .params = &.{},
+                .tables = &.{},
+            };
+            context.params = self.allocator.alloc(EffectDbValue, options.params.len) catch {
+                self.allocator.free(context.sql);
+                self.allocator.destroy(context);
+                return null;
+            };
+            var copied_params: usize = 0;
+            for (options.params, 0..) |value, index| {
+                context.params[index] = switch (value) {
+                    .text => |bytes| .{ .text = self.allocator.dupe(u8, bytes) catch {
+                        freeCopiedDbParams(self, context.params[0..copied_params]);
+                        self.allocator.free(context.params);
+                        self.allocator.free(context.sql);
+                        self.allocator.destroy(context);
+                        return null;
+                    } },
+                    .blob => |bytes| .{ .blob = self.allocator.dupe(u8, bytes) catch {
+                        freeCopiedDbParams(self, context.params[0..copied_params]);
+                        self.allocator.free(context.params);
+                        self.allocator.free(context.sql);
+                        self.allocator.destroy(context);
+                        return null;
+                    } },
+                    else => value,
+                };
+                copied_params += 1;
+            }
+            context.tables = self.allocator.alloc([]u8, options.tables.len) catch {
+                freeCopiedDbParams(self, context.params);
+                self.allocator.free(context.params);
+                self.allocator.free(context.sql);
+                self.allocator.destroy(context);
+                return null;
+            };
+            var copied_tables: usize = 0;
+            for (options.tables, 0..) |table, index| {
+                context.tables[index] = self.allocator.dupe(u8, table) catch {
+                    for (context.tables[0..copied_tables]) |owned| self.allocator.free(owned);
+                    self.allocator.free(context.tables);
+                    freeCopiedDbParams(self, context.params);
+                    self.allocator.free(context.params);
+                    self.allocator.free(context.sql);
+                    self.allocator.destroy(context);
+                    return null;
+                };
+                copied_tables += 1;
+            }
+            return context;
+        }
+
+        fn freeCopiedDbParams(self: *Self, params: []EffectDbValue) void {
+            for (params) |value| switch (value) {
+                .text => |bytes| self.allocator.free(bytes),
+                .blob => |bytes| self.allocator.free(bytes),
+                else => {},
+            };
+        }
+
+        fn freeDbLive(self: *Self, slot: *DbSlot) void {
+            const context = slot.live orelse return;
+            for (context.tables) |table| self.allocator.free(table);
+            if (context.tables.len > 0) self.allocator.free(context.tables);
+            freeCopiedDbParams(self, context.params);
+            if (context.params.len > 0) self.allocator.free(context.params);
+            self.allocator.free(context.sql);
+            self.allocator.destroy(context);
+            slot.live = null;
+        }
+
+        fn claimDbSlot(self: *Self, key: u64, kind: DbSlotKind, on_result: ?DbMsgFn) ?usize {
+            if (self.findDbSlot(key)) |index| {
+                const existing = &self.db_slots[index];
+                if (kind != .query or existing.kind != .query) return null;
+                self.discardPendingDbGeneration(existing.key, existing.generation);
+                existing.generation = self.takeDbGeneration();
+                existing.on_result = on_result;
+                existing.fake = false;
+                return index;
+            }
+            for (&self.db_slots, 0..) |*slot, index| {
+                if (slot.active) continue;
+                slot.* = .{
+                    .active = true,
+                    .key = key,
+                    .generation = self.takeDbGeneration(),
+                    .kind = kind,
+                    .on_result = on_result,
+                };
+                return index;
+            }
+            return null;
+        }
+
+        fn findDbSlot(self: *Self, key: u64) ?usize {
+            for (&self.db_slots, 0..) |*slot, index| {
+                if (slot.active and slot.key == key) return index;
+            }
+            return null;
+        }
+
+        fn takeDbGeneration(self: *Self) u64 {
+            const generation = self.next_db_generation;
+            self.next_db_generation +%= 1;
+            if (self.next_db_generation == 0) self.next_db_generation = 1;
+            return generation;
+        }
+
+        const DbPageContext = struct {
+            effects: *Self,
+            slot_index: usize,
+            generation: u64,
+        };
+
+        fn dbPageBound(context: *anyopaque, bytes: []const u8) void {
+            const page: *DbPageContext = @ptrCast(@alignCast(context));
+            const slot = &page.effects.db_slots[page.slot_index];
+            page.effects.stageDb(.{
+                .seq = page.effects.nextPendingSeq(),
+                .key = slot.key,
+                .generation = page.generation,
+                .kind = .page,
+                .outcome = .ok,
+                .bytes = if (bytes.len == 0) null else page.effects.allocator.dupe(u8, bytes) catch
+                    @panic("effects: out of memory staging a relational row page - a query page is an effect result and must never be dropped"),
+                .db_fn = slot.on_result,
+                .regenerates = false,
+            });
+        }
+
+        fn rejectDb(self: *Self, key: u64, kind: EffectDbResultKind, on_result: ?DbMsgFn) void {
+            self.stageDb(.{
+                .seq = self.nextPendingSeq(),
+                .key = key,
+                .generation = 0,
+                .kind = kind,
+                .outcome = .rejected,
+                .db_fn = on_result,
+                .regenerates = true,
+                .transient = true,
+            });
+        }
+
+        fn validDbSql(sql: []const u8) bool {
+            return sql.len > 0 and sql.len <= max_effect_db_sql_bytes and std.mem.indexOfScalar(u8, sql, 0) == null;
+        }
+
+        fn validDbParams(params: []const EffectDbValue, byte_limit: usize) bool {
+            if (params.len > max_effect_db_parameters) return false;
+            var total: usize = 0;
+            for (params) |value| switch (value) {
+                .text => |bytes| {
+                    if (!std.unicode.utf8ValidateSlice(bytes)) return false;
+                    total = std.math.add(usize, total, bytes.len) catch return false;
+                },
+                .blob => |bytes| total = std.math.add(usize, total, bytes.len) catch return false,
+                .real => |number| if (!std.math.isFinite(number)) return false,
+                else => {},
+            };
+            return total <= byte_limit;
+        }
+
+        fn validDbStatements(statements: []const EffectDbStatement) bool {
+            if (statements.len == 0 or statements.len > max_effect_db_exec_statements) return false;
+            var total: usize = 0;
+            for (statements) |statement| {
+                if (!validDbSql(statement.sql) or statement.params.len > max_effect_db_parameters) return false;
+                for (statement.params) |value| switch (value) {
+                    .text => |bytes| {
+                        if (!std.unicode.utf8ValidateSlice(bytes)) return false;
+                        total = std.math.add(usize, total, bytes.len) catch return false;
+                    },
+                    .blob => |bytes| total = std.math.add(usize, total, bytes.len) catch return false,
+                    .real => |number| if (!std.math.isFinite(number)) return false,
+                    else => {},
+                };
+                if (total > relational_store.max_exec_parameter_bytes) return false;
+            }
+            return true;
+        }
+
         /// A keyed, routed host command — the generic named host call
         /// behind a transpiled core's `request` wire records: the host
         /// performs `name` with `payload` and answers with exactly one
@@ -9884,6 +10387,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.pending_video_len > 0 or
                 self.pending_pty_len > 0 or
                 self.pending_staged_len > 0 or
+                self.pending_db_len > 0 or
                 self.channel_pending_count.load(.seq_cst) > 0 or
                 self.pty_pending_count.load(.seq_cst) > 0 or
                 self.queue_count.load(.seq_cst) > 0 or
@@ -10012,6 +10516,10 @@ pub fn Effects(comptime Msg: type) type {
         /// `boundary` deliver; anything produced after the snapshot
         /// waits for the wake its producer already nudged.
         pub fn takeMsgWithin(self: *Self, boundary: *DrainBoundary) ?Msg {
+            if (self.drain_db_bytes) |bytes| {
+                self.allocator.free(bytes);
+                self.drain_db_bytes = null;
+            }
             self.reclaimSlots();
             while (true) {
                 if (self.takePendingMsg(boundary.pending_before)) |pending| {
@@ -10091,6 +10599,41 @@ pub fn Effects(comptime Msg: type) type {
                                 .exit_reason = if (entry.rejected) .rejected else .exited,
                             });
                             return host_fn(entry.result);
+                        },
+                        .db => |entry| {
+                            if (!entry.transient) {
+                                const slot_index = self.findDbSlot(entry.key) orelse {
+                                    if (entry.bytes) |bytes| self.allocator.free(bytes);
+                                    continue;
+                                };
+                                const slot = &self.db_slots[slot_index];
+                                if (slot.generation != entry.generation) {
+                                    if (entry.bytes) |bytes| self.allocator.free(bytes);
+                                    continue;
+                                }
+                                if ((entry.kind != .page or entry.outcome != .ok) and slot.kind != .live) slot.active = false;
+                            }
+                            self.drain_db_bytes = entry.bytes;
+                            const bytes: []const u8 = if (self.drain_db_bytes) |owned| owned else "";
+                            const result: EffectDbResult = .{
+                                .key = entry.key,
+                                .kind = entry.kind,
+                                .outcome = entry.outcome,
+                                .bytes = bytes,
+                            };
+                            self.journalNote(.{
+                                .kind = .db,
+                                .key = entry.key,
+                                .payload = bytes,
+                                .code = dbJournalCode(entry.kind, entry.outcome),
+                                .exit_reason = if (entry.regenerates) .rejected else .exited,
+                            });
+                            const db_fn = entry.db_fn orelse {
+                                if (self.drain_db_bytes) |owned| self.allocator.free(owned);
+                                self.drain_db_bytes = null;
+                                continue;
+                            };
+                            return db_fn(result);
                         },
                         .audio => |entry| {
                             var event = entry.event;
@@ -11649,6 +12192,46 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Feed one recorded/test relational delivery into the parked fake
+        /// request. Replay never opens SQLite: row pages and terminal outcomes
+        /// come exclusively through this seam.
+        pub fn feedDbResult(
+            self: *Self,
+            key: u64,
+            kind: EffectDbResultKind,
+            outcome: EffectDbOutcome,
+            bytes: []const u8,
+        ) error{ EffectNotFound, ReplayDamagedRecord }!void {
+            const slot_index = self.findDbSlot(key) orelse return error.EffectNotFound;
+            const slot = &self.db_slots[slot_index];
+            if (!slot.fake) return error.EffectNotFound;
+            if (kind == .page) {
+                if ((slot.kind != .query and slot.kind != .live) or outcome != .ok or !relational_store.validEncodedPage(bytes)) return error.ReplayDamagedRecord;
+            } else {
+                if (bytes.len != 0) return error.ReplayDamagedRecord;
+                if ((kind == .done) != (slot.kind == .query or slot.kind == .live)) return error.ReplayDamagedRecord;
+            }
+            self.stageDb(.{
+                .seq = self.nextPendingSeq(),
+                .key = key,
+                .generation = slot.generation,
+                .kind = kind,
+                .outcome = outcome,
+                .bytes = if (bytes.len == 0) null else self.allocator.dupe(u8, bytes) catch
+                    @panic("effects: out of memory feeding a replayed relational page - every journaled result must be delivered"),
+                .db_fn = slot.on_result,
+                .regenerates = false,
+            });
+        }
+
+        pub fn pendingDbCount(self: *Self) usize {
+            var count: usize = 0;
+            for (&self.db_slots) |*slot| if (slot.active and slot.fake) {
+                count += 1;
+            };
+            return count;
+        }
+
         /// Number of parked (still-active) fake host requests.
         pub fn pendingHostCount(self: *Self) usize {
             var count: usize = 0;
@@ -13062,6 +13645,84 @@ pub fn Effects(comptime Msg: type) type {
             self.staged_keys_len = 0;
         }
 
+        fn pendingDbStorage(self: *Self) []PendingDb {
+            if (self.pending_db_spill.len > 0) return self.pending_db_spill;
+            return &self.pending_dbs;
+        }
+
+        fn stageDb(self: *Self, entry: PendingDb) void {
+            const storage = self.pendingDbStorage();
+            if (self.pending_db_len == storage.len) {
+                const grown = self.allocator.alloc(PendingDb, storage.len * 2) catch
+                    @panic("effects: out of memory staging a relational result - every query page and terminal must be delivered");
+                for (grown[0..self.pending_db_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.pending_db_head + index) % storage.len];
+                }
+                if (self.pending_db_spill.len > 0) self.allocator.free(self.pending_db_spill);
+                self.pending_db_spill = grown;
+                self.pending_db_head = 0;
+            }
+            const active = self.pendingDbStorage();
+            active[(self.pending_db_head + self.pending_db_len) % active.len] = entry;
+            self.pending_db_len += 1;
+            self.wakeHost();
+        }
+
+        fn discardPendingDbTail(self: *Self, retained_len: usize) void {
+            std.debug.assert(retained_len <= self.pending_db_len);
+            const storage = self.pendingDbStorage();
+            while (self.pending_db_len > retained_len) {
+                const index = (self.pending_db_head + self.pending_db_len - 1) % storage.len;
+                if (storage[index].bytes) |bytes| self.allocator.free(bytes);
+                self.pending_db_len -= 1;
+            }
+            if (self.pending_db_len == 0) {
+                self.pending_db_head = 0;
+                if (self.pending_db_spill.len > 0) {
+                    self.allocator.free(self.pending_db_spill);
+                    self.pending_db_spill = &.{};
+                }
+            }
+        }
+
+        fn discardPendingDbGeneration(self: *Self, key: u64, generation: u64) void {
+            const storage = self.pendingDbStorage();
+            const original_len = self.pending_db_len;
+            var kept: usize = 0;
+            for (0..original_len) |offset| {
+                const entry = storage[(self.pending_db_head + offset) % storage.len];
+                if (entry.key == key and entry.generation == generation) {
+                    if (entry.bytes) |bytes| self.allocator.free(bytes);
+                    continue;
+                }
+                storage[(self.pending_db_head + kept) % storage.len] = entry;
+                kept += 1;
+            }
+            self.pending_db_len = kept;
+            if (kept == 0) {
+                self.pending_db_head = 0;
+                if (self.pending_db_spill.len > 0) {
+                    self.allocator.free(self.pending_db_spill);
+                    self.pending_db_spill = &.{};
+                }
+            }
+        }
+
+        fn takePendingDb(self: *Self) PendingDb {
+            const storage = self.pendingDbStorage();
+            const entry = storage[self.pending_db_head];
+            self.pending_db_head = (self.pending_db_head + 1) % storage.len;
+            self.pending_db_len -= 1;
+            if (self.pending_db_len == 0) {
+                self.pending_db_head = 0;
+                if (self.pending_db_spill.len > 0) {
+                    self.allocator.free(self.pending_db_spill);
+                    self.pending_db_spill = &.{};
+                }
+            }
+            return entry;
+        }
+
         /// The caller-staged Msg stage's current backing storage —
         /// `pendingImageStorage`'s twin.
         fn pendingStagedStorage(self: *Self) []PendingStaged {
@@ -13213,7 +13874,11 @@ pub fn Effects(comptime Msg: type) type {
                 self.pendingPtyStorage()[self.pending_pty_head].seq
             else
                 no_seq;
-            const min_seq = @min(@min(@min(ring_seq, staged_seq), video_seq), @min(@min(image_seq, channel_seq_head), pty_seq_head));
+            const db_seq: u64 = if (self.pending_db_len > 0)
+                self.pendingDbStorage()[self.pending_db_head].seq
+            else
+                no_seq;
+            const min_seq = @min(@min(@min(ring_seq, staged_seq), @min(video_seq, db_seq)), @min(@min(image_seq, channel_seq_head), pty_seq_head));
             if (min_seq == no_seq or min_seq >= before) return null;
             if (min_seq == staged_seq) {
                 return .{ .staged = self.takePendingStaged().msg };
@@ -13255,6 +13920,7 @@ pub fn Effects(comptime Msg: type) type {
                     .retire_generation = staged.retire_generation,
                 } };
             }
+            if (min_seq == db_seq) return .{ .db = self.takePendingDb() };
             const pending = self.pending_exits[self.pending_exit_head];
             self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
             self.pending_exit_len -= 1;

@@ -15,6 +15,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "dynamic-images": "Dynamic Images",
   persistence: "Model Persistence",
   "record-store": "Record Store",
+  sqlite: "Relational SQLite",
   terminal: "Terminal",
   state: "State & Data Flow",
   theming: "Theming",

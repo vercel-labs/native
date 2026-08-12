@@ -9,5 +9,6 @@ pub fn build(b: *std.Build) void {
         // gate a real mobile artifact that exercises capability-selected
         // SQLite linkage and the data-root host lifecycle.
         .store_capability = b.option(bool, "store", "Link the Tier-2 record store") orelse false,
+        .relational_capability = b.option(bool, "sqlite", "Link the Tier-3 relational database") orelse false,
     });
 }

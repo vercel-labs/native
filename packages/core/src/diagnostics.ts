@@ -436,6 +436,18 @@ export const rules = {
     fix: "Add `\"store\"` to app.zon's `capabilities`, or remove the unused capability/command.",
     why: "The store capability controls whether SQLite and the engine-owned record-store binding are linked into the app. Keeping the declaration and command in lockstep prevents a rejected effect and sheds the storage engine from apps that do not use it.",
   },
+  NS1070: {
+    id: "NS1070",
+    title: "Cmd.db and its capability must agree",
+    fix: "Add `\"sqlite\"` to app.zon's `capabilities`, or remove the unused capability/command.",
+    why: "The sqlite capability controls whether the relational database and its effect binding are linked into the app. Keeping the declaration and command in lockstep prevents a rejected effect and sheds SQLite from apps that do not use either storage tier.",
+  },
+  NS1420: {
+    id: "NS1420",
+    title: "declare stable SQL in src/queries.sql",
+    fix: "Move the string literal into a named `-- name: ...` block in src/queries.sql and call its generated `Cmd.q<Name>` constructor; keep Cmd.db only for genuinely dynamic escape-hatch SQL.",
+    why: "Declared SQL is prepared against the complete migration schema during native check, so table, column, result, and parameter mistakes never reach an installed app.",
+  },
 } as const satisfies Record<string, RuleCopy>;
 
 export type RuleId = keyof typeof rules;

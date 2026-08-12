@@ -22,6 +22,10 @@ if (!entry) {
   console.error("usage: compiler_typecheck.mjs <entry.ts>");
   process.exit(2);
 }
+let generatedCore = null;
+for (let i = 3; i < process.argv.length; i++) {
+  if (process.argv[i] === "--sdk-core") generatedCore = process.argv[++i] ?? null;
+}
 const here = path.dirname(fileURLToPath(import.meta.url));
 const coreRoot = path.resolve(here, "..");
 let compilerJs;
@@ -40,7 +44,9 @@ for (const [specifier, file] of [
   ["@native-sdk/core/text", "sdk/text.d.ts"],
   ["@native-sdk/core/events", "sdk/events.d.ts"],
 ]) {
-  const p = path.join(coreRoot, file);
+  const p = specifier === "@native-sdk/core" && generatedCore !== null
+    ? path.resolve(generatedCore)
+    : path.join(coreRoot, file);
   if (fs.existsSync(p)) maps.push("--external-types", `${specifier}=${p}`);
 }
 const servicesClient = path.resolve(path.dirname(entry), "..", "node_modules", "@native-sdk", "services", "index.d.ts");

@@ -55,6 +55,26 @@ export function parse(payload: Uint8Array): Uint8Array {
   assert.match(contract.operations[0].source_hash, /^[0-9a-f]{64}$/);
 });
 
+test("a generated SQLite SDK surface and typed services share one checked program", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const generatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "native-generated-sdk-services-"));
+  try {
+    fs.cpSync(path.join(packageDir, "sdk"), generatedDir, { recursive: true });
+    const result = checkFiles({
+      "core.ts": serviceCore,
+      "services/feeds.ts": `export function parse(bytes: Uint8Array): Uint8Array { return bytes; }`,
+    }, {
+      contractEntry: "src/core.ts",
+      servicesContract: true,
+      sdkCorePath: path.join(generatedDir, "core.ts"),
+    });
+    assert.equal(result.ok, true, JSON.stringify([...result.diagnostics, ...result.typeErrors]));
+    assert.match(result.servicesClient!, /feedsParse/);
+  } finally {
+    fs.rmSync(generatedDir, { recursive: true, force: true });
+  }
+});
+
 test("service source hashes cover transitive shared modules", () => {
   const check = (body: string) => checkFiles({
     "core.ts": serviceCore,

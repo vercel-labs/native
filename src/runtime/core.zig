@@ -41,6 +41,7 @@ const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 const runtime_effects = @import("effects.zig");
 const runtime_record_store = @import("record_store.zig");
+const runtime_relational_store = @import("relational_store.zig");
 const security = @import("../security/root.zig");
 
 const max_async_bridge_responses = runtime_async_bridge.max_async_bridge_responses;
@@ -1057,6 +1058,13 @@ pub fn TestHarness() type {
             return RecordStoreTestHarness().create(gpa, surface);
         }
 
+        /// Relational-capability counterpart of `create`. `native test`
+        /// receives a private in-memory SQLite database and never touches an
+        /// app-data path.
+        pub fn createWithRelationalStore(gpa: std.mem.Allocator, surface: platform.Surface) !*RelationalStoreTestHarness() {
+            return RelationalStoreTestHarness().create(gpa, surface);
+        }
+
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
             // The harness embeds the runtime's platform: deinit both
             // returns the runtime's heap-owned storage (registered font
@@ -1145,6 +1153,54 @@ pub fn RecordStoreTestHarness() type {
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
             self.runtime.deinit();
             if (self.record_store) |*store| store.deinit();
+            gpa.destroy(self);
+        }
+
+        pub fn start(self: *Self, app: App) anyerror!void {
+            try self.runtime.dispatchPlatformEvent(app, .app_start);
+            try self.runtime.dispatchPlatformEvent(app, .{ .surface_resized = self.null_platform.surface_value });
+            try self.runtime.dispatchPlatformEvent(app, .frame_requested);
+        }
+
+        pub fn stop(self: *Self, app: App) anyerror!void {
+            try self.runtime.dispatchPlatformEvent(app, .app_shutdown);
+        }
+    };
+}
+
+/// Capability-opted harness returned by
+/// `TestHarness().createWithRelationalStore`.
+pub fn RelationalStoreTestHarness() type {
+    return struct {
+        const Self = @This();
+
+        null_platform: platform.NullPlatform = platform.NullPlatform.init(.{}),
+        trace_records: [64]trace.Record = undefined,
+        trace_sink: trace.BufferSink = undefined,
+        runtime: Runtime = undefined,
+        relational_store: ?runtime_relational_store.Database = null,
+
+        pub fn create(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
+            const self = try gpa.create(Self);
+            errdefer gpa.destroy(self);
+            self.relational_store = try runtime_relational_store.Database.openMemory(gpa);
+            errdefer if (self.relational_store) |*database| database.deinit();
+            self.null_platform = platform.NullPlatform.init(surface);
+            self.trace_sink = trace.BufferSink.init(&self.trace_records);
+            Runtime.initAt(&self.runtime, .{
+                .platform = self.null_platform.platform(),
+                .trace_sink = self.trace_sink.sink(),
+                .relational_store = self.relational_store.?.binding(),
+                .allocator = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator,
+                .environ = if (builtin.is_test) std.testing.environ else null,
+            });
+            self.runtime.dispatch_error_policy = .propagate;
+            return self;
+        }
+
+        pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            self.runtime.deinit();
+            if (self.relational_store) |*database| database.deinit();
             gpa.destroy(self);
         }
 

@@ -858,6 +858,54 @@ export interface StoreScanOptions {
   readonly after?: string | Uint8Array;
 }
 
+/// Dynamic UTF-8 SQLite TEXT. App-core text is byte-honest, so generated
+/// TEXT parameters wrap model bytes with this marker; literal strings remain
+/// accepted by the raw escape hatch.
+export interface DbText {
+  readonly __dbText: true;
+  readonly bytes: ReadonlyArray<number>;
+}
+
+export function dbText(bytes: Uint8Array): DbText {
+  const out: number[] = [];
+  for (let i = 0; i < bytes.length; i++) out.push(bytes[i]!);
+  return { __dbText: true, bytes: out };
+}
+
+/// Runtime SQL parameter values. Numbers preserve integer storage when they
+/// are finite integral values; booleans bind as SQLite INTEGER 0/1.
+export type DbValue = null | number | string | Uint8Array | boolean | DbText;
+export type DbStatement = readonly [sql: string, params: ReadonlyArray<DbValue>];
+
+/// A query dispatches every encoded row page through `page`, then exactly one
+/// payload-less `done`. Any closed DbOutcome instead dispatches `err` as its
+/// UTF-8 name (`constraint`, `busy`, `io_failed`, `corrupt`, `misuse`,
+/// `rejected`, or `cancelled`).
+export interface DbRowsRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly page: BytesKind<M>;
+  readonly done: EmptyKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// A generated declared-query route. The row parameter is intentionally
+/// phantom on the wire: generated `decode<Name>Page` turns each bounded page
+/// into this exact row shape without reflection.
+export interface TypedRowsRoute<Row, M extends Msgish> extends DbRowsRoute<M> {
+  readonly __row?: Row;
+}
+
+/// One generated, already-validated write statement. Only generated query
+/// constructors create the brand; `Cmd.qTx` therefore cannot receive a
+/// raw SQL string by accident.
+export interface TypedDbStatement {
+  readonly sql: string;
+  readonly params: ReadonlyArray<DbValue>;
+  readonly __typedDbStatement: true;
+}
+
+// @native-sqlite-generated-types
+
 /// `Cmd.fetch` routing: the ok arm carries `{ status, body }` (one number
 /// field, one bytes field — matched by type); the err arm the reason bytes.
 export interface FetchRoute<M extends Msgish> {
@@ -1081,6 +1129,22 @@ export type Cmd<M extends Msgish> =
       readonly okKind: string;
       readonly errKind: string;
       readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
+    }
+  | {
+      readonly op: "db_query";
+      readonly key: string;
+      readonly pageKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly sql: string;
+      readonly params: ReadonlyArray<DbValue>;
+    }
+  | {
+      readonly op: "db_exec";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly statements: ReadonlyArray<DbStatement>;
     }
   | {
       readonly op: "fetch";
@@ -1505,6 +1569,29 @@ export const Cmd = {
       return { op: "store_set_many", key: route.key ?? "", okKind: route.ok, errKind: route.err, entries };
     },
   },
+
+  /// Capability-gated relational SQLite. Reads remain effects: pages and the
+  /// terminal arrive as Msg values after the issuing model has committed.
+  /// Every exec statement in one command commits atomically or all roll back.
+  db: {
+    query<M extends Msgish>(sql: string, params: ReadonlyArray<DbValue>, route: DbRowsRoute<M>): Cmd<M> {
+      return {
+        op: "db_query",
+        key: route.key ?? "",
+        pageKind: route.page,
+        doneKind: route.done,
+        errKind: route.err,
+        sql,
+        params,
+      };
+    },
+
+    exec<M extends Msgish>(statements: ReadonlyArray<DbStatement>, route: WriteRoute<M>): Cmd<M> {
+      return { op: "db_exec", key: route.key ?? "", okKind: route.ok, errKind: route.err, statements };
+    },
+  },
+
+  // @native-sqlite-generated-cmds
 
   fetch: fetchCmd,
 
@@ -1965,6 +2052,16 @@ export const Cmd = {
 export type Sub<M extends Msgish> =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | {
+      readonly op: "db_live";
+      readonly key: string;
+      readonly pageKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly sql: string;
+      readonly params: ReadonlyArray<DbValue>;
+      readonly tables: readonly string[];
+    }
   | { readonly op: "batch"; readonly subs: readonly Sub<M>[] };
 
 export const Sub = {
@@ -1977,6 +2074,8 @@ export const Sub = {
   timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
     return { op: "timer", key, everyMs, msgKind };
   },
+
+  // @native-sqlite-generated-subs
 
   /// Several subscriptions at once.
   batch<M extends Msgish>(subs: readonly Sub<M>[]): Sub<M> {

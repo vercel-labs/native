@@ -70,7 +70,10 @@ export type Declaration = tsImpl.Declaration;
 /// except `useUnknownInCatchVariables` (see below), where the subset checker
 /// itself is the stricter authority — so the 6-to-7 provider swap changes no
 /// acceptance decision.
-export function subsetCompilerOptions(generatedServicesPath?: string): tsImpl.CompilerOptions {
+export function subsetCompilerOptions(
+  coreModulePath: string = sdkCoreModulePath,
+  generatedServicesPath?: string,
+): tsImpl.CompilerOptions {
   return {
     strict: true,
     // The one strict-family knob turned OFF: the subset's own checker types
@@ -88,7 +91,7 @@ export function subsetCompilerOptions(generatedServicesPath?: string): tsImpl.Co
     // their published names. Absolute mappings so entry files anywhere
     // (tmp dirs, workspaces) resolve the same modules.
     paths: {
-      "@native-sdk/core": [sdkCoreModulePath.replace(/\.ts$/, "")],
+      "@native-sdk/core": [coreModulePath.replace(/\.ts$/, "")],
       ...(generatedServicesPath
         ? { "@native-sdk/services": [generatedServicesPath.replace(/\.ts$/, "")] }
         : {}),
@@ -597,9 +600,10 @@ export function createSubsetProgram(
   entry: string,
   roots: readonly string[] = [entry],
   virtualFiles: ReadonlyMap<string, string> = new Map(),
+  coreModulePath: string = sdkCoreModulePath,
 ): tsImpl.Program {
   const generatedServicesPath = [...virtualFiles.keys()].find((file) => path.basename(file) === "services.gen.ts");
-  const options = subsetCompilerOptions(generatedServicesPath);
+  const options = subsetCompilerOptions(coreModulePath, generatedServicesPath);
   if (virtualFiles.size === 0) return tsImpl.createProgram([...new Set([entry, ...roots, bytesTextMethodsDts])], options);
   const host = tsImpl.createCompilerHost(options);
   const virtual = new Map([...virtualFiles].map(([file, source]) => [path.resolve(file), source]));

@@ -1,0 +1,123 @@
+# Relational SQLite
+
+The relational tier gives a model core an engine-owned SQLite database while keeping `update` pure. Add the capability in `app.zon`:
+
+```zig:app.zon
+.capabilities = .{ "sqlite" },
+```
+
+The runner opens `app.db` in the app-data directory, enables WAL and foreign keys, applies pending migrations, and keeps the path private. Apps that declare neither `"sqlite"` nor `"store"` do not link SQLite. The record store uses a separate `store.db`.
+
+## Make the schema append-only
+
+Migration files under `src/schema/` are the source of truth. Names are contiguous and monotonic:
+
+```text
+src/schema/0001_init.sql
+src/schema/0002_add_tags.sql
+```
+
+Create the next file with:
+
+```sh
+native db new-migration add-tags
+```
+
+Use `STRICT` for ordinary generated-query tables so SQLite's storage classes agree with generated TypeScript types:
+
+```sql:src/schema/0001_init.sql
+CREATE TABLE folder (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+) STRICT;
+
+CREATE TABLE note (
+  id INTEGER PRIMARY KEY,
+  folder_id INTEGER NOT NULL REFERENCES folder(id),
+  title TEXT NOT NULL
+) STRICT;
+```
+
+`native check` applies the complete chain to a real in-memory SQLite database. It rejects gaps, edited published migrations, invalid SQLite, non-STRICT tables, and a schema change that is not represented by a new version. The accepted hashes are written to `src/schema/migrations.lock.json`; commit that file with the migrations so append-only validation has the same authority in every checkout and in CI. At launch the runtime compares the chain with `PRAGMA user_version` and applies all pending files in one transaction. A migration failure refuses the database open; a database newer than the binary is `version_unknown` and is never repaired or downgraded automatically.
+
+`native db status` compares source and installed versions. `native db reset --yes` deletes the development `app.db`, WAL, and shared-memory files; the next launch reapplies the chain. Reset never accepts an arbitrary path.
+
+## Declare checked queries
+
+Put named statements in `src/queries.sql`:
+
+```sql:src/queries.sql
+-- name: notesInFolder :live
+SELECT n.id, n.title
+FROM note AS n
+WHERE n.folder_id = :folder
+ORDER BY n.id DESC;
+
+-- name: moveNote :exec
+UPDATE note SET folder_id = :to WHERE id = :id;
+```
+
+`native check` asks real SQLite to prepare every statement against the migrated schema. Missing tables or columns, invalid SQL, wrong read/write declarations, parameter mistakes, and invalid result shapes are reported at the `.sql` source with NS14xx diagnostics.
+
+The accepted schema generates a flat API in `@native-sdk/core`:
+
+- `Cmd.qNotesInFolder(params, route)` returns typed row pages.
+- `Cmd.qMoveNote(params)` returns a typed transaction member.
+- `Cmd.qTx([statement, ...], route)` commits all generated `:exec` members atomically.
+- `Sub.qNotesInFolder(key, params, route)` exists because the query is marked `:live`.
+- `NotesInFolderRow`, `NotesInFolderParams`, and `decodeNotesInFolderPage(bytes)` describe and decode its result.
+
+The `q<Name>` spelling is intentionally flat: it stays inside the ahead-of-time core subset while retaining one-to-one names from `queries.sql`.
+
+```ts:src/core.ts
+import {
+  Cmd,
+  Sub,
+  decodeNotesInFolderPage,
+  utf8Bytes,
+} from "@native-sdk/core";
+
+export type Msg =
+  | { readonly kind: "move" }
+  | { readonly kind: "rows"; readonly page: Uint8Array }
+  | { readonly kind: "rows_done" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "db_failed"; readonly reason: Uint8Array };
+
+// In update:
+return [model, Cmd.qTx([
+  Cmd.qMoveNote({ id: 7, to: 2 }),
+], { key: "move-note", ok: "wrote", err: "db_failed" })];
+
+// In the rows arm:
+const rows = decodeNotesInFolderPage(msg.page);
+
+// In subscriptions(model):
+return Sub.qNotesInFolder("folder-notes", { folder: model.folderId }, {
+  page: "rows",
+  done: "rows_done",
+  err: "db_failed",
+});
+```
+
+SQLite `INTEGER` and `REAL` map to `number`; generated decoders reject an `INTEGER` outside JavaScript's exact ±(2^53−1) range. `TEXT` and `BLOB` map to `Uint8Array`, matching byte-honest Model storage. Generated parameters inferred from a TEXT column wrap bytes automatically. Use `dbText(bytes)` when a raw query—or a parameter whose storage class cannot be inferred, such as an FTS `MATCH` term—must bind bytes as SQLite TEXT rather than BLOB. Nullability comes from the schema.
+
+## Live queries
+
+A `:live` query runs when subscribed and runs again after a committed transaction touches one of its generated table dependencies. The runtime combines SQLite authorizer write targets with row-update notifications until commit, so `WITHOUT ROWID` tables and truncate-optimized deletes invalidate reliably; it coalesces invalidations once per command frame and never reruns an unrelated subscription. FTS5 shadow tables are included automatically. A `:live` declaration with no table dependency is rejected because it could never refresh.
+
+Each delivery uses the same bounded page route as a one-shot query: zero or more `page` messages followed by `done`. Keep temporary pages in the Model and replace the visible result set on `done`. Changing a subscription's key, parameters, routes, SQL, or dependencies re-arms it; omitting the key cancels it. Dependencies are table-level in this release.
+
+Every page and terminal crosses the session journal. Pages over 64 KiB spill into the journal's content-addressed blob store. Replay never opens SQLite: recorded one-shot and live results are fed back as ordinary Msg values, including repeated live deliveries.
+
+## Raw escape hatch and bounds
+
+`Cmd.db.query(sql, params, route)` and `Cmd.db.exec(statements, route)` remain available. A raw query is read-only and returns pages; one raw exec commits its entire 1–64 statement array as one transaction. `native check` warns when a raw query literal could instead be declared and checked.
+
+Parameters accept `null`, finite `number`, literal `string`, `Uint8Array`, `dbText(bytes)`, and `boolean` (integer 0/1). A query accepts at most 64 parameters and 1 MiB of parameter bytes. A transaction accepts at most 8 MiB. SQL is capped at 64 KiB per statement. Results page at 256 rows or 256 KiB and never truncate a row; one result is capped at 8,192 rows or 8 MiB and rejects whole when it crosses either bound. Add `LIMIT` and keyset pagination for larger collections.
+
+The binary page header is `column_count u32`, `row_count u32`, then length-prefixed UTF-8 column names. Row-major values use tags `0` NULL, `1` + signed little-endian i64, `2` + little-endian f64, `3` + length-prefixed TEXT, and `4` + length-prefixed BLOB.
+
+The database boundary stays pathless. SQLite's authorizer denies `ATTACH`, `DETACH`, `VACUUM INTO`, and writes to engine-owned lifecycle PRAGMAs. Outcomes are closed: `constraint`, `busy`, `io_failed`, `corrupt`, `misuse`, `rejected`, and `cancelled`. Query keys replace; duplicate transaction keys reject loudly so a write is never silently lost.
+
+Zig cores have first-class `Effects(Msg).dbQuery`, `dbExec`, `dbSubscribe`, and `dbUnsubscribe` operations over the same runtime. `native test` and `TestHarness().createWithRelationalStore` use real in-memory SQLite. See [`examples/relational-notes`](https://github.com/vercel-labs/native/tree/main/examples/relational-notes) for migrations, typed atomic writes, FTS5, page decoding, and two live queries together.

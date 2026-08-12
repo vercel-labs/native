@@ -148,6 +148,39 @@ export interface StoreScanOptions {
   readonly after?: string | Uint8Array;
 }
 
+export interface DbText {
+  readonly __dbText: true;
+  readonly bytes: ReadonlyArray<number>;
+}
+
+export function dbText(bytes: Uint8Array): DbText {
+  const out: number[] = [];
+  for (let i = 0; i < bytes.length; i++) out.push(bytes[i]!);
+  return { __dbText: true, bytes: out };
+}
+
+export type DbValue = null | number | string | Uint8Array | boolean | DbText;
+export type DbStatement = readonly [sql: string, params: ReadonlyArray<DbValue>];
+
+export interface DbRowsRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly page: M["kind"];
+  readonly done: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface TypedRowsRoute<Row, M extends Msgish> extends DbRowsRoute<M> {
+  readonly __row?: Row;
+}
+
+export interface TypedDbStatement {
+  readonly sql: string;
+  readonly params: ReadonlyArray<DbValue>;
+  readonly __typedDbStatement: true;
+}
+
+// @native-sqlite-generated-types
+
 export interface FetchRoute<M extends Msgish> {
   readonly key?: string;
   readonly ok: M["kind"];
@@ -352,6 +385,22 @@ export type CmdData =
       readonly okKind: string;
       readonly errKind: string;
       readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
+    }
+  | {
+      readonly op: "db_query";
+      readonly key: string;
+      readonly pageKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly sql: string;
+      readonly params: ReadonlyArray<DbValue>;
+    }
+  | {
+      readonly op: "db_exec";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly statements: ReadonlyArray<DbStatement>;
     }
   | {
       readonly op: "fetch";
@@ -670,6 +719,17 @@ export const Cmd = {
     },
   },
 
+  db: {
+    query(sql: string, params: ReadonlyArray<DbValue>, route: { readonly key?: string; readonly page: string; readonly done: string; readonly err: string }): CmdData {
+      return { op: "db_query", key: route.key ?? "", pageKind: route.page, doneKind: route.done, errKind: route.err, sql, params };
+    },
+    exec(statements: ReadonlyArray<DbStatement>, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "db_exec", key: route.key ?? "", okKind: route.ok, errKind: route.err, statements };
+    },
+  },
+
+  // @native-sqlite-generated-cmds
+
   fetch(
     spec: FetchStreamSpec,
     route: { readonly key?: string; readonly line?: string; readonly ok: string; readonly err: string },
@@ -960,6 +1020,7 @@ export const Cmd = {
 export type SubData =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "db_live"; readonly key: string; readonly pageKind: string; readonly doneKind: string; readonly errKind: string; readonly sql: string; readonly params: ReadonlyArray<DbValue>; readonly tables: readonly string[] }
   | { readonly op: "batch"; readonly subs: readonly SubData[] };
 
 export type Sub<M extends Msgish> = SubData;
@@ -970,6 +1031,8 @@ export const Sub = {
   timer(key: string, everyMs: number, msgKind: string): SubData {
     return { op: "timer", key, everyMs, msgKind };
   },
+
+  // @native-sqlite-generated-subs
 
   batch(subs: readonly SubData[]): SubData {
     return { op: "batch", subs };

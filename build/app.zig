@@ -108,6 +108,7 @@ const TsCoreStage = struct {
     /// carrier is selected. The app module links it beside the core's
     /// archive.
     service_archive: ?std.Build.LazyPath = null,
+    migrations: std.Build.LazyPath,
 };
 
 /// Which carrier runs src/services/ operations. Auto preserves the isolated,
@@ -151,7 +152,7 @@ fn parseServiceCarrierOption(raw: []const u8) ServiceCarrierOption {
 /// The frontend's own sources — the staleness set of every build step
 /// that runs it (a frontend edit re-checks every core).
 const frontend_sources = [_][]const u8{
-    "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "ownership.ts", "service_contract.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+    "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "ownership.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "sqlite_runtime_policy.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
 };
 
 /// Whether the frontend's TypeScript compiler (@typescript/old, the
@@ -335,19 +336,19 @@ fn tsSdkRoot(allocator: std.mem.Allocator, io: std.Io, dep: *std.Build.Dependenc
     return std.Io.Dir.cwd().realPathFileAlloc(io, raw_root, allocator) catch raw_root;
 }
 
-/// The TS-core preflight — the markup view, node, and the frontend
-/// toolchain gate — returning the resolved node program. The frontend
-/// (the subset checker and the contract-sidecar emitter) runs under
-/// node; the compile itself is the external toolchain's.
-fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) []const u8 {
-    if (!appFileExists(b, app_root, "src/app.native")) {
-        @panic("\nthis app has a TypeScript core (src/core.ts) but no view: TS apps render markup," ++
-            " so add src/app.native (the whole view tier binds the core's model)\n");
-    }
-    const node = b.findProgram(&.{"node"}, &.{}) catch {
-        @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core frontend checks the" ++
+const TsToolingConsumer = enum { app_core, sqlite_schema };
+
+/// Resolve the node + pinned TypeScript loader shared by the app-core
+/// frontend and relational schema generator. Keep app-shape assertions out
+/// of this helper: a Zig core may use SQLite without carrying a markup view.
+fn tsToolingPreflight(b: *std.Build, dep: *std.Build.Dependency, consumer: TsToolingConsumer) []const u8 {
+    const node = b.findProgram(&.{"node"}, &.{}) catch switch (consumer) {
+        .app_core => @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core frontend checks the" ++
             " core at build time; the binary you ship carries no JS runtime).\nInstall Node.js 22.15+ (on the 23" ++
-            " line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n");
+            " line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n"),
+        .sqlite_schema => @panic("\nbuilding relational SQLite migrations needs node on PATH (the schema checker and" ++
+            " migration generator run at build time; the binary you ship carries no JS runtime).\nInstall Node.js" ++
+            " 22.15+ (on the 23 line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n"),
     };
     switch (tsToolchainResolution(b, dep)) {
         .resolved => {},
@@ -359,16 +360,28 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
             // fail the configure phase cleanly — a teaching message, never
             // a panic stack trace.
             const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
-            std.debug.print(
-                \\
-                \\error: the @native-sdk/core frontend cannot resolve its TypeScript toolchain
-                \\(its compiler, @typescript/old). On a repo checkout, install it once with:
-                \\  cd {s}/packages/core && npm ci --include=dev
-                \\(An npm-installed @native-sdk/cli carries the toolchain automatically; if it
-                \\is missing there, the install is broken - reinstall @native-sdk/cli.)
-                \\
-                \\
-            , .{sdk_root});
+            switch (consumer) {
+                .app_core => std.debug.print(
+                    \\
+                    \\error: the @native-sdk/core frontend cannot resolve its TypeScript toolchain
+                    \\(its compiler, @typescript/old). On a repo checkout, install it once with:
+                    \\  cd {s}/packages/core && npm ci --include=dev
+                    \\(An npm-installed @native-sdk/cli carries the toolchain automatically; if it
+                    \\is missing there, the install is broken - reinstall @native-sdk/cli.)
+                    \\
+                    \\
+                , .{sdk_root}),
+                .sqlite_schema => std.debug.print(
+                    \\
+                    \\error: the relational SQLite schema generator cannot resolve its TypeScript toolchain
+                    \\(its compiler, @typescript/old). On a repo checkout, install it once with:
+                    \\  cd {s}/packages/core && npm ci --include=dev
+                    \\(An npm-installed @native-sdk/cli carries the toolchain automatically; if it
+                    \\is missing there, the install is broken - reinstall @native-sdk/cli.)
+                    \\
+                    \\
+                , .{sdk_root}),
+            }
             std.process.exit(1);
         },
         .version_mismatch => |mismatch| {
@@ -377,20 +390,43 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
             // @typescript/old shadows the SDK's exact pin, and no install
             // command fixes what is already installed — the conflict has
             // to move.
-            std.debug.print(
-                \\
-                \\error: the @native-sdk/core frontend's TypeScript compiler resolves at the
-                \\wrong version: @typescript/old resolves to typescript {s}, but the SDK pins
-                \\npm:typescript@{s}. Another package in this tree pins a conflicting
-                \\@typescript/old - align it with the SDK's pin (or remove it) and reinstall,
-                \\so the SDK's exact pin is the copy that resolves.
-                \\
-                \\
-            , .{ mismatch.resolved, mismatch.pinned });
+            switch (consumer) {
+                .app_core => std.debug.print(
+                    \\
+                    \\error: the @native-sdk/core frontend's TypeScript compiler resolves at the
+                    \\wrong version: @typescript/old resolves to typescript {s}, but the SDK pins
+                    \\npm:typescript@{s}. Another package in this tree pins a conflicting
+                    \\@typescript/old - align it with the SDK's pin (or remove it) and reinstall,
+                    \\so the SDK's exact pin is the copy that resolves.
+                    \\
+                    \\
+                , .{ mismatch.resolved, mismatch.pinned }),
+                .sqlite_schema => std.debug.print(
+                    \\
+                    \\error: the relational SQLite schema generator's TypeScript compiler resolves at the
+                    \\wrong version: @typescript/old resolves to typescript {s}, but the SDK pins
+                    \\npm:typescript@{s}. Another package in this tree pins a conflicting
+                    \\@typescript/old - align it with the SDK's pin (or remove it) and reinstall,
+                    \\so the SDK's exact pin is the copy that resolves.
+                    \\
+                    \\
+                , .{ mismatch.resolved, mismatch.pinned }),
+            }
             std.process.exit(1);
         },
     }
     return node;
+}
+
+/// The TS-core-only shape gate plus the shared tooling preflight. The
+/// frontend (the subset checker and contract-sidecar emitter) runs under
+/// node; the compile itself is the external toolchain's.
+fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) []const u8 {
+    if (!appFileExists(b, app_root, "src/app.native")) {
+        @panic("\nthis app has a TypeScript core (src/core.ts) but no view: TS apps render markup," ++
+            " so add src/app.native (the whole view tier binds the core's model)\n");
+    }
+    return tsToolingPreflight(b, dep, .app_core);
 }
 
 /// The TypeScript-core compile lane: the frontend checks the core and
@@ -412,6 +448,7 @@ fn tsCoreStage(
     app_name: []const u8,
     persist_capability: bool,
     store_capability: bool,
+    relational_capability: bool,
     persist_version: ?u64,
     service_packages: []const ServicePackageConfig,
     service_carrier_choice: ServiceCarrierOption,
@@ -420,6 +457,40 @@ fn tsCoreStage(
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
     const service_carrier = resolveServiceCarrier(service_carrier_choice, has_services, b, target);
+
+    // Relational schema analysis runs the real SQLite parser in memory before
+    // the ordinary core checker. Its generated SDK/static surfaces carry the
+    // named Cmd.q/Sub.q members, while the Zig projection embeds the exact
+    // append-only migration chain the checker accepted.
+    var checked_sdk_core: std.Build.LazyPath = dep.path("packages/core/sdk/core.ts");
+    var checked_static_core: std.Build.LazyPath = dep.path("packages/core/compile-surface/core.ts");
+    var migrations_zig: std.Build.LazyPath = dep.path("src/app_runner/no_migrations.zig");
+    if (relational_capability) {
+        const sqlite_check = b.addSystemCommand(&.{node});
+        sqlite_check.addFileArg(dep.path("build/ts_run.mjs"));
+        sqlite_check.addFileArg(dep.path("packages/core/src/sqlite_cli.ts"));
+        sqlite_check.addArg("--src");
+        sqlite_check.addDirectoryArg(b.path(appPath(b, app_root, "src")));
+        sqlite_check.addArg("--sdk-in");
+        sqlite_check.addFileArg(dep.path("packages/core/sdk/core.ts"));
+        sqlite_check.addArg("--static-in");
+        sqlite_check.addFileArg(dep.path("packages/core/compile-surface/core.ts"));
+        sqlite_check.addArg("--sdk-out");
+        checked_sdk_core = sqlite_check.addOutputFileArg("core.ts");
+        sqlite_check.addArg("--static-out");
+        checked_static_core = sqlite_check.addOutputFileArg("core_static.ts");
+        sqlite_check.addArg("--zig-out");
+        migrations_zig = sqlite_check.addOutputFileArg("migrations.zig");
+        sqlite_check.addArg("--metadata-out");
+        _ = sqlite_check.addOutputFileArg("sqlite.meta.json");
+        sqlite_check.addArgs(&.{ "--state", b.pathFromRoot(appPath(b, app_root, "src/schema/migrations.lock.json")) });
+        if (appFileExists(b, app_root, "src/schema/migrations.lock.json")) {
+            sqlite_check.addFileInput(b.path(appPath(b, app_root, "src/schema/migrations.lock.json")));
+        }
+        sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
+        sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
+        addAppSqlDirInputs(b, sqlite_check, appPath(b, app_root, "src"));
+    }
 
     // The frontend, in check-only mode: the subset checker and the
     // contract sidecar, no emission. Every check-time teaching gates the
@@ -456,6 +527,11 @@ fn tsCoreStage(
         });
     }
     if (store_capability) check.addArgs(&.{ "--capability", "store" });
+    if (relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
+    if (relational_capability) {
+        check.addArg("--sdk-core");
+        check.addFileArg(checked_sdk_core);
+    }
     if (persist_version) |version| {
         check.addArgs(&.{ "--persist-version", b.fmt("{d}", .{version}) });
         check.addArgs(&.{ "--persist-state", appPath(b, app_root, ".native/cache/persist-schema.json") });
@@ -576,7 +652,7 @@ fn tsCoreStage(
     stage_run.addArg("--sdk");
     stage_run.addDirectoryArg(dep.path("packages/core/sdk"));
     stage_run.addArg("--static");
-    stage_run.addFileArg(dep.path("packages/core/compile-surface/core.ts"));
+    stage_run.addFileArg(checked_static_core);
     stage_run.addArg("--facade");
     stage_run.addFileArg(facade);
     stage_run.addArg("--profile");
@@ -639,9 +715,46 @@ fn tsCoreStage(
         \\pub const pool_workers: ?usize = {?d};
         \\
     , .{ service_carrier, service_pool_workers }));
+    _ = staged.addCopyFile(migrations_zig, "migrations.zig");
     _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
-    return .{ .main_root = main_root, .archive = archive, .service_exe = service_exe, .service_archive = service_archive };
+    return .{
+        .main_root = main_root,
+        .archive = archive,
+        .service_exe = service_exe,
+        .service_archive = service_archive,
+        .migrations = migrations_zig,
+    };
+}
+
+fn sqliteMigrationsStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) std.Build.LazyPath {
+    const node = tsToolingPreflight(b, dep, .sqlite_schema);
+    const generate = b.addSystemCommand(&.{node});
+    generate.addFileArg(dep.path("build/ts_run.mjs"));
+    generate.addFileArg(dep.path("packages/core/src/sqlite_cli.ts"));
+    generate.addArg("--src");
+    generate.addDirectoryArg(b.path(appPath(b, app_root, "src")));
+    generate.addArg("--zig-out");
+    const migrations = generate.addOutputFileArg("migrations.zig");
+    generate.addArgs(&.{ "--state", b.pathFromRoot(appPath(b, app_root, "src/schema/migrations.lock.json")) });
+    if (appFileExists(b, app_root, "src/schema/migrations.lock.json")) {
+        generate.addFileInput(b.path(appPath(b, app_root, "src/schema/migrations.lock.json")));
+    }
+    generate.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
+    generate.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
+    addAppSqlDirInputs(b, generate, appPath(b, app_root, "src"));
+    return migrations;
+}
+
+fn addAppSqlDirInputs(b: *std.Build, run: *std.Build.Step.Run, src_path: []const u8) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
+        run.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
+    }
 }
 
 /// corewire (the contract-sidecar shim generator), compiled from the SDK
@@ -782,6 +895,11 @@ pub const MobileLibOptions = struct {
     /// `addApp` builds infer this from app.zon; direct `addMobileLib`
     /// callers state it here because that lower-level API has no manifest.
     store_capability: bool = false,
+    /// Link and install the engine-owned Tier-3 relational database.
+    relational_capability: bool = false,
+    /// Generated append-only migration module. Direct low-level callers may
+    /// omit it and open an empty version-0 database.
+    relational_migrations: ?std.Build.LazyPath = null,
 };
 
 /// Mobile counterpart of `addApp`: produce the embed static library
@@ -821,12 +939,17 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
     if (options.scene == .canvas) {
         const mobile_options = b.addOptions();
         mobile_options.addOption(bool, "store_capability", options.store_capability);
+        mobile_options.addOption(bool, "relational_capability", options.relational_capability);
         exports_mod.addImport("mobile_build_options", mobile_options.createModule());
+        const migration_path = options.relational_migrations orelse dep.path("src/app_runner/no_migrations.zig");
+        const migration_mod = b.createModule(.{ .root_source_file = migration_path, .target = target, .optimize = optimize });
+        migration_mod.addImport("native_sdk", native_sdk_mod);
+        exports_mod.addImport("relational_migrations", migration_mod);
         const app_mod = localModule(b, target, optimize, options.main);
         app_mod.addImport("native_sdk", native_sdk_mod);
         exports_mod.addImport("app", app_mod);
     }
-    if (options.store_capability) {
+    if (options.store_capability or options.relational_capability) {
         exports_mod.addIncludePath(dep.path("third_party/sqlite"));
         exports_mod.addCSourceFile(.{
             .file = dep.path("third_party/sqlite/sqlite3.c"),
@@ -935,6 +1058,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_options.name,
             app_config.persist_capability,
             app_config.store_capability,
+            app_config.relational_capability,
             app_config.persist_version,
             app_config.service_packages,
             service_carrier_choice,
@@ -942,6 +1066,12 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         )
     else
         null;
+    const relational_migrations = if (ts_stage) |stage|
+        stage.migrations
+    else if (app_config.relational_capability)
+        sqliteMigrationsStage(b, dep, app_options.app_root)
+    else
+        dep.path("src/app_runner/no_migrations.zig");
 
     // Mobile targets get the embed static library as a `lib` step: the
     // artifact the toolkit-owned iOS host (and any hand-written shim)
@@ -953,6 +1083,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .name = app_options.name,
             .main = appPath(b, app_options.app_root, app_options.main),
             .store_capability = app_config.store_capability,
+            .relational_capability = app_config.relational_capability,
+            .relational_migrations = relational_migrations,
         });
     }
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
@@ -1001,7 +1133,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
-    const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod, ts_stage, app_config);
+    const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod, ts_stage, relational_migrations, app_config);
     const exe = b.addExecutable(.{
         .name = app_options.name,
         .root_module = app_mod,
@@ -1056,7 +1188,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run.step);
 
-    const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, dep, target, optimize, app_options, options_mod, ts_stage, app_config);
+    const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, dep, target, optimize, app_options, options_mod, ts_stage, relational_migrations, app_config);
     const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -1229,7 +1361,7 @@ fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, defa
     };
 }
 
-fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, app_config: AppManifestBuildConfig) *std.Build.Module {
+fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, relational_migrations: std.Build.LazyPath, app_config: AppManifestBuildConfig) *std.Build.Module {
     const native_sdk_mod = nativeSdkModuleWithTerminal(b, dep, target, optimize, app_options.terminal_sessions);
     const runner_mod = b.createModule(.{
         .root_source_file = dep.path("src/app_runner/root.zig"),
@@ -1240,6 +1372,9 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
     runner_mod.addImport("native_sdk", native_sdk_mod);
     runner_mod.addImport("build_options", options_mod);
     runner_mod.addImport("app_manifest_zon", manifest_mod);
+    const migration_mod = b.createModule(.{ .root_source_file = relational_migrations, .target = target, .optimize = optimize });
+    migration_mod.addImport("native_sdk", native_sdk_mod);
+    runner_mod.addImport("relational_migrations", migration_mod);
 
     const app_mod = if (ts_stage) |stage|
         // TypeScript core: the app module roots at the staged generated
@@ -1275,12 +1410,7 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         app_mod.addIncludePath(dep.path("third_party/sqlite"));
         app_mod.addCSourceFile(.{
             .file = dep.path("third_party/sqlite/sqlite3.c"),
-            .flags = &.{
-                "-DSQLITE_THREADSAFE=1",
-                "-DSQLITE_OMIT_LOAD_EXTENSION",
-                "-DSQLITE_DQS=0",
-                "-DSQLITE_DEFAULT_MEMSTATUS=0",
-            },
+            .flags = &sqlite_c_defines,
         });
         app_mod.link_libc = true;
     }
@@ -1331,9 +1461,13 @@ fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
 }
 
 const sqlite_c_defines = [_][]const u8{
-    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_THREADSAFE=2",
     "-DSQLITE_OMIT_LOAD_EXTENSION",
     "-DSQLITE_DQS=0",
+    "-DSQLITE_ENABLE_FTS5",
+    "-DSQLITE_ENABLE_JSON1",
+    "-DSQLITE_ENABLE_UPDATE_HOOK",
+    "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
     "-DSQLITE_DEFAULT_MEMSTATUS=0",
 };
 
@@ -1350,6 +1484,10 @@ fn sqliteCFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const
             sqlite_c_defines[1],
             sqlite_c_defines[2],
             sqlite_c_defines[3],
+            sqlite_c_defines[4],
+            sqlite_c_defines[5],
+            sqlite_c_defines[6],
+            sqlite_c_defines[7],
             "-isysroot",
             sysroot,
             b.fmt("-isystem{s}/usr/include", .{sysroot}),
@@ -1364,6 +1502,10 @@ fn sqliteCFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const
             sqlite_c_defines[1],
             sqlite_c_defines[2],
             sqlite_c_defines[3],
+            sqlite_c_defines[4],
+            sqlite_c_defines[5],
+            sqlite_c_defines[6],
+            sqlite_c_defines[7],
             b.fmt("-isystem{s}/usr/include/{s}", .{ sysroot, triple }),
             b.fmt("-isystem{s}/usr/include", .{sysroot}),
         });
@@ -1876,6 +2018,7 @@ const AppManifestBuildConfig = struct {
     service_carrier: []const u8 = "auto",
     service_pool_size: ?u8 = null,
     store_capability: bool = false,
+    relational_capability: bool = false,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
@@ -1964,6 +2107,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .service_carrier = raw.service_carrier,
         .service_pool_size = if (raw.service_pool_size == 0) null else raw.service_pool_size,
         .store_capability = hasManifestCapability(raw.capabilities, "store"),
+        .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };

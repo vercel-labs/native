@@ -1,0 +1,22 @@
+{
+  // Mirrors the compiler options the @native-sdk/core checker enforces,
+  // so editor diagnostics match `native check` reality. @native-sdk/core
+  // resolves from node_modules: the native CLI materializes the SDK's
+  // copy there (and keeps it fresh) until the package is on npm.
+  "compilerOptions": {
+    "strict": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext"],
+    "types": [],
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}

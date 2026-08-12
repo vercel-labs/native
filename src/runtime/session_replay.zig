@@ -325,6 +325,13 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .db and dbRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: relational record for key {d} has a kind, outcome, payload, blob, or provenance shape the recorder never writes - the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -363,6 +370,16 @@ pub fn replaySession(
                         std.debug.print(
                             "replay refused after event {d}: model restore references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
                             .{ report.events_replayed, session_blobs.hexName(effect.persist_blob_hash), effect.persist_blob_len, @errorName(err) },
+                        );
+                        return error.ReplayMissingBlob;
+                    };
+                    effect.payload = bytes;
+                }
+                if (effect.kind == .db and effect.db_blob_len > 0) {
+                    const bytes = resolveBlob(effect.db_blob_hash, effect.db_blob_len, runtime_effects.max_effect_db_page_bytes, options.blobs, &blob_scratch) catch |err| {
+                        std.debug.print(
+                            "replay refused after event {d}: relational page for key {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
+                            .{ report.events_replayed, effect.key, session_blobs.hexName(effect.db_blob_hash), effect.db_blob_len, @errorName(err) },
                         );
                         return error.ReplayMissingBlob;
                     };
@@ -549,6 +566,25 @@ fn persistRecordDamaged(record: journal.EffectResultRecord) bool {
     return record.persist_outcome != .ok and record.persist_blob_len > 0;
 }
 
+fn dbRecordDamaged(record: journal.EffectResultRecord) bool {
+    const kind = runtime_effects.dbKindFromJournalCode(record.code) orelse return true;
+    const outcome = runtime_effects.dbOutcomeFromJournalCode(record.code) orelse return true;
+    if (record.code != runtime_effects.dbJournalCode(kind, outcome)) return true;
+    // `.rejected` provenance identifies an admission refusal that replay
+    // regenerates. An executor may also return the closed `.rejected`
+    // outcome (for example when a result crosses its total bound); that
+    // terminal is external truth and correctly keeps `.exited` provenance.
+    if (record.exit_reason != .exited and record.exit_reason != .rejected) return true;
+    if (record.exit_reason == .rejected and outcome != .rejected) return true;
+    if (record.db_blob_len > runtime_effects.max_effect_db_page_bytes) return true;
+    return switch (kind) {
+        .page => outcome != .ok or
+            (record.payload.len == 0) == (record.db_blob_len == 0) or
+            record.payload.len > runtime_effects.max_effect_db_page_bytes,
+        .done, .exec => record.payload.len > 0 or record.db_blob_len > 0,
+    };
+}
+
 /// Recorder truth for pty provenance: output records always carry
 /// `.exited` (the live drain never touches the exit reason on an
 /// output); every reason is legal on an `.exit` record (`.rejected` =
@@ -705,6 +741,7 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // Host-request rejections mark themselves with the exit reason
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,
+        .db => record.exit_reason == .rejected,
         // Image `.rejected` terminals journal from BOTH sides of the
         // executor seam, so the outcome alone is not provenance: only
         // loop-side validation refusals — which the replayed
@@ -823,6 +860,31 @@ test "audio records outside the exact-integer scalar window are damaged" {
     record.audio_position_ms = 0;
     record.audio_duration_ms = std.math.maxInt(u64);
     try std.testing.expect(audioScalarsDamaged(record));
+}
+
+test "relational rejection provenance distinguishes admission from executor truth" {
+    var record: journal.EffectResultRecord = .{
+        .kind = .db,
+        .key = 1,
+        .code = runtime_effects.dbJournalCode(.done, .rejected),
+        .exit_reason = .exited,
+    };
+
+    // A bounded executor result is a real terminal which replay must feed.
+    try std.testing.expect(!dbRecordDamaged(record));
+
+    // A deterministic admission refusal regenerates instead and uses the
+    // same outcome with explicit rejected provenance.
+    record.exit_reason = .rejected;
+    try std.testing.expect(!dbRecordDamaged(record));
+
+    // Rejected provenance cannot decorate a successful result, and DB
+    // records never carry process-only exit reasons.
+    record.code = runtime_effects.dbJournalCode(.done, .ok);
+    try std.testing.expect(dbRecordDamaged(record));
+    record.code = runtime_effects.dbJournalCode(.done, .rejected);
+    record.exit_reason = .cancelled;
+    try std.testing.expect(dbRecordDamaged(record));
 }
 
 /// Debug aid: `NATIVE_SDK_SESSION_REPLAY_DUMP=<dir>` writes each

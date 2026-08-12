@@ -57,6 +57,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
     const core_tree = ts_core.detect(io);
     if (core_tree == .both) return ts_core.failBothCores();
     if (core_tree == .ts) {
+        const sqlite_enabled = for (metadata.capabilities) |capability| {
+            if (std.mem.eql(u8, capability, "sqlite")) break true;
+        } else false;
         // Keep the app's editor surface fresh (node_modules/@native-sdk/core,
         // the pre-publish copy stock tsc resolves): best-effort by design —
         // build truth never depends on it, so an unresolvable framework here
@@ -69,6 +72,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
             // for graphs the CLI itself generates (see the preflight's own
             // doc for why ejected apps must flow past it).
             try tsToolchainPreflight(allocator, io, ".", framework_root);
+            if (sqlite_enabled) {
+                const sqlite_declarations = try ts_core.generateSqliteSurface(allocator, io, options.base_env, framework_root, true);
+                allocator.free(sqlite_declarations);
+            }
         }
     }
 

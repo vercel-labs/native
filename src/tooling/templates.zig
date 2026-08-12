@@ -1444,6 +1444,10 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const web_layer = resolveWebLayer(app_config, web_engine, web_layer_override);
         \\
         \\    const native_sdk_mod = nativeSdkModule(b, target, optimize, native_sdk_path);
+        \\    const relational_migrations_source = if (app_config.relational_capability)
+        \\        sqliteMigrationsSource(b, native_sdk_path)
+        \\    else
+        \\        nativeSdkPath(b, native_sdk_path, "src/app_runner/no_migrations.zig");
         \\    const options = b.addOptions();
         \\    options.addOption([]const u8, "platform", switch (selected_platform) {
         \\        .auto => unreachable,
@@ -1464,6 +1468,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    runner_mod.addImport("native_sdk", native_sdk_mod);
         \\    runner_mod.addImport("build_options", options_mod);
         \\    runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+        \\    const migrations_mod = b.createModule(.{ .root_source_file = relational_migrations_source, .target = target, .optimize = optimize });
+        \\    migrations_mod.addImport("native_sdk", native_sdk_mod);
+        \\    runner_mod.addImport("relational_migrations", migrations_mod);
         \\
         \\    const app_mod = localModule(b, target, optimize, "src/main.zig");
         \\    app_mod.addImport("native_sdk", native_sdk_mod);
@@ -1528,6 +1535,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        package_runner_mod.addImport("native_sdk", package_sdk_mod);
         \\        package_runner_mod.addImport("build_options", options_mod);
         \\        package_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+        \\        const package_migrations_mod = b.createModule(.{ .root_source_file = relational_migrations_source, .target = target, .optimize = package_optimize });
+        \\        package_migrations_mod.addImport("native_sdk", package_sdk_mod);
+        \\        package_runner_mod.addImport("relational_migrations", package_migrations_mod);
         \\        const package_app_mod = localModule(b, target, package_optimize, "src/main.zig");
         \\        package_app_mod.addImport("native_sdk", package_sdk_mod);
         \\        package_app_mod.addImport("runner", package_runner_mod);
@@ -1720,11 +1730,40 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    return native_sdk_mod;
         \\}
         \\
+        \\fn sqliteMigrationsSource(b: *std.Build, native_sdk_path: []const u8) std.Build.LazyPath {
+        \\    const generate = b.addSystemCommand(&.{ "node" });
+        \\    generate.addFileArg(nativeSdkPath(b, native_sdk_path, "build/ts_run.mjs"));
+        \\    generate.addFileArg(nativeSdkPath(b, native_sdk_path, "packages/core/src/sqlite_cli.ts"));
+        \\    generate.addArg("--src");
+        \\    generate.addDirectoryArg(b.path("src"));
+        \\    generate.addArg("--zig-out");
+        \\    const migrations = generate.addOutputFileArg("migrations.zig");
+        \\    generate.addArgs(&.{ "--state", "src/schema/migrations.lock.json" });
+        \\    if (b.build_root.handle.access(b.graph.io, "src/schema/migrations.lock.json", .{})) |_| {
+        \\        generate.addFileInput(b.path("src/schema/migrations.lock.json"));
+        \\    } else |_| {}
+        \\    generate.addFileInput(nativeSdkPath(b, native_sdk_path, "packages/core/src/sqlite_codegen.ts"));
+        \\    generate.addFileInput(nativeSdkPath(b, native_sdk_path, "packages/core/src/sqlite_runtime_policy.ts"));
+        \\    addAppSqlDirInputs(b, generate, "src");
+        \\    return migrations;
+        \\}
+        \\
+        \\fn addAppSqlDirInputs(b: *std.Build, run: *std.Build.Step.Run, src_path: []const u8) void {
+        \\    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch return;
+        \\    defer dir.close(b.graph.io);
+        \\    var walker = dir.walk(b.allocator) catch return;
+        \\    defer walker.deinit();
+        \\    while (walker.next(b.graph.io) catch null) |entry| {
+        \\        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
+        \\        run.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
+        \\    }
+        \\}
+        \\
         \\fn addSqliteEngine(b: *std.Build, app_mod: *std.Build.Module, native_sdk_path: []const u8) void {
         \\    app_mod.addIncludePath(nativeSdkPath(b, native_sdk_path, "third_party/sqlite"));
         \\    app_mod.addCSourceFile(.{
         \\        .file = nativeSdkPath(b, native_sdk_path, "third_party/sqlite/sqlite3.c"),
-        \\        .flags = &.{ "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0", "-DSQLITE_DEFAULT_MEMSTATUS=0" },
+        \\        .flags = &.{ "-DSQLITE_THREADSAFE=2", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0", "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_JSON1", "-DSQLITE_ENABLE_UPDATE_HOOK", "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1", "-DSQLITE_DEFAULT_MEMSTATUS=0" },
         \\    });
         \\    app_mod.link_libc = true;
         \\}
@@ -2005,6 +2044,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    microphone_permission: bool = false,
         \\    system_audio_permission: bool = false,
         \\    sqlite_capability: bool = false,
+        \\    relational_capability: bool = false,
         \\    /// The first web declaration found (for teaching messages), or
         \\    /// null when app.zon declares no web use. `web_engine = "system"`
         \\    /// alone is NOT web intent — it is the default in many canvas
@@ -2059,6 +2099,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        .microphone_permission = hasManifestPermission(raw.permissions, "microphone"),
         \\        .system_audio_permission = hasManifestPermission(raw.permissions, "system_audio"),
         \\        .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
+        \\        .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         \\    };
         \\    config.web_declaration = blk: {
         \\        if (raw.frontend != null) break :blk "a .frontend block";
@@ -2261,6 +2302,7 @@ fn runnerZig() []const u8 {
     \\const build_options = @import("build_options");
     \\const native_sdk = @import("native_sdk");
     \\const app_manifest = @import("app_manifest_zon");
+    \\const built_relational_migrations = @import("relational_migrations");
     \\const manifest_commands = if (@hasField(@TypeOf(app_manifest), "commands")) app_manifest.commands else .{};
     \\const manifest_shortcuts = if (@hasField(@TypeOf(app_manifest), "shortcuts")) app_manifest.shortcuts else .{};
     \\const manifest_menus = if (@hasField(@TypeOf(app_manifest), "menus")) app_manifest.menus else .{};
@@ -2294,6 +2336,8 @@ fn runnerZig() []const u8 {
     \\    menus: ?[]const native_sdk.Menu = null,
     \\    shortcuts: ?[]const native_sdk.Shortcut = null,
     \\    record_store: ?native_sdk.RecordStoreBinding = null,
+    \\    relational_store: ?native_sdk.RelationalStoreBinding = null,
+    \\    relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
     \\        var info: native_sdk.AppInfo = .{
@@ -2637,6 +2681,15 @@ fn runnerZig() []const u8 {
     \\    return false;
     \\}
     \\
+    \\fn manifestDeclaresSqlite() bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    \\    inline for (app_manifest.capabilities) |capability| {
+    \\        const name: []const u8 = capability;
+    \\        if (comptime std.mem.eql(u8, name, "sqlite")) return true;
+    \\    }
+    \\    return false;
+    \\}
+    \\
     \\fn menuItem(comptime item: anytype) native_sdk.MenuItem {
     \\    return .{
     \\        .label = if (@hasField(@TypeOf(item), "label")) item.label else "",
@@ -2695,6 +2748,31 @@ fn runnerZig() []const u8 {
     \\    }
     \\    defer if (comptime manifestDeclaresStore()) {
     \\        if (record_store_open) record_store_value.deinit();
+    \\    };
+    \\    const RelationalStoreType = if (comptime manifestDeclaresSqlite()) native_sdk.RelationalStore else void;
+    \\    var relational_store_value: RelationalStoreType = undefined;
+    \\    var relational_store_open = false;
+    \\    if (comptime manifestDeclaresSqlite()) {
+    \\        var data_dir_buffer: [512]u8 = undefined;
+    \\        const app_data_dir = native_sdk.app_dirs.resolveOne(
+    \\            .{ .name = options.bundle_id },
+    \\            native_sdk.app_dirs.currentPlatform(),
+    \\            native_sdk.debug.envFromMap(init.environ_map),
+    \\            .data,
+    \\            &data_dir_buffer,
+    \\        ) catch return error.SqliteDataDirUnavailable;
+    \\        try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
+    \\        const open_result = try native_sdk.RelationalStore.openMigrated(std.heap.page_allocator, app_data_dir, options.relational_migrations);
+    \\        relational_store_value = switch (open_result.outcome) {
+    \\            .ok => open_result.database.?,
+    \\            .migrate_failed => return error.SqliteMigrationFailed,
+    \\            .version_unknown => return error.SqliteVersionUnknown,
+    \\        };
+    \\        relational_store_open = true;
+    \\        resolved_options.relational_store = relational_store_value.binding();
+    \\    }
+    \\    defer if (comptime manifestDeclaresSqlite()) {
+    \\        if (relational_store_open) relational_store_value.deinit();
     \\    };
     \\    if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
     \\        try runMacos(app, resolved_options, init);
@@ -2756,6 +2834,7 @@ fn runnerZig() []const u8 {
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
+    \\        .relational_store = options.relational_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2811,6 +2890,7 @@ fn runnerZig() []const u8 {
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
+    \\        .relational_store = options.relational_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2866,6 +2946,7 @@ fn runnerZig() []const u8 {
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
+    \\        .relational_store = options.relational_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2921,6 +3002,7 @@ fn runnerZig() []const u8 {
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
+    \\        .relational_store = options.relational_store,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -3934,6 +4016,11 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "hasManifestPermission(raw.permissions, \"microphone\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "hasManifestCapability(raw.capabilities, \"store\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "addSqliteEngine(b, app_mod, native_sdk_path)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "sqliteMigrationsSource(b, native_sdk_path)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "sqlite_runtime_policy.ts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "addAppSqlDirInputs(b, generate, \"src\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "run.addFileInput(b.path(b.fmt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "runner_mod.addImport(\"relational_migrations\", migrations_mod)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSMicrophoneUsageDescription") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSAudioCaptureUsageDescription") != null);
     try std.testing.expect(std.mem.count(u8, build_zig_text, "addMacosPrivacyInfoPlist(b, ") == 2);
@@ -3982,6 +4069,8 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "frontend/dist") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "127.0.0.1:5173") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "@import(\"app_manifest_zon\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "@import(\"relational_migrations\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "RelationalStore.openMigrated") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "commands: ?[]const native_sdk.Command = null") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "resolvedCommands") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "menus: ?[]const native_sdk.Menu = null") != null);
@@ -3990,6 +4079,9 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "record_store: ?native_sdk.RecordStoreBinding = null") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDeclaresStore()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".record_store = options.record_store") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "relational_store: ?native_sdk.RelationalStoreBinding = null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDeclaresSqlite()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".relational_store = options.relational_store") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "resolvedShortcuts") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "const manifest_windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn appInfo(self: RunOptions, buffers: *StateBuffers)") != null);

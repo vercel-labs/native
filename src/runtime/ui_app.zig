@@ -1407,6 +1407,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (runtime.options.record_store) |binding| {
                 self.effects.bindRecordStore(binding);
             }
+            if (runtime.options.relational_store) |binding| {
+                self.effects.bindRelationalStore(binding);
+            }
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
             self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
@@ -1492,6 +1495,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // `.rejected` and regenerate from the same
                     // deterministic validation, like `.timer` records.
                     .host => try self.effects.feedHostResult(record.key, record.code == 0, record.payload),
+                    .db => try self.effects.feedDbResult(
+                        record.key,
+                        runtime_effects.dbKindFromJournalCode(record.code) orelse return error.ReplayDamagedRecord,
+                        runtime_effects.dbOutcomeFromJournalCode(record.code) orelse return error.ReplayDamagedRecord,
+                        record.payload,
+                    ),
                     .clock => try self.effects.pushReplayClock(record.clock_wall_ms),
                     // `.env` records carry the arm name in `stderr_tail`
                     // and the value in `payload`; the TS adapter's
@@ -1655,6 +1664,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             } else {
                 self.options.update.?(&self.model, msg);
             }
+            // One update call is one complete command batch. Re-run live
+            // relational reads only after the batch has walked so several
+            // writes touching the same table still coalesce into one result.
+            self.effects.flushDbSubscriptions();
         }
 
         /// Drain the effect completion queue on the loop thread: every
@@ -4249,6 +4262,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         self.init_fx_ran = true;
                         self.bindEffectsChannel(runtime);
                         init_fx(&self.model, &self.effects);
+                        // init_fx has the same batch contract as update_fx;
+                        // subscriptions dirtied by boot transactions must be
+                        // current before their staged results are drained.
+                        self.effects.flushDbSubscriptions();
                         self.publishAudioState(runtime);
                         // Launch lap (env-gated): boot-effect cost (asset
                         // decode/registration) splits out of the

@@ -43,6 +43,9 @@ export interface FrontendOptions {
   /// app.zon's persistence restore routes, projected without manifest syntax
   /// so the frontend can validate them against the core's Msg union.
   readonly persistRoutes?: PersistRoutes;
+  /// Generated @native-sdk/core surface carrying declared SQLite query
+  /// constructors. Omitted for non-relational apps and direct checker tests.
+  readonly sdkCorePath?: string;
 }
 
 export interface FrontendResult {
@@ -70,7 +73,11 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   // Module-boundary mistakes (NS1034-NS1037) teach BEFORE the type-checked
   // program is built: a missing file or an escaped src/ boundary would
   // otherwise surface as a raw resolution error.
-  const graph = resolveModuleGraph(entry, (options.servicePackages ?? []).map((packageEntry) => packageEntry.name));
+  const graph = resolveModuleGraph(
+    entry,
+    (options.servicePackages ?? []).map((packageEntry) => packageEntry.name),
+    options.sdkCorePath,
+  );
   if (graph.diagnostics.length > 0) {
     return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
@@ -93,7 +100,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     };
   };
 
-  let program = createSubsetProgram(entry, graph.files);
+  let program = createSubsetProgram(entry, graph.files, new Map(), options.sdkCorePath);
   let loaded = loadProgramFiles(program);
   if (loaded === null || loaded.files.length === 0) {
     return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${entry}`], inputs: [...graph.files] };
@@ -124,7 +131,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   // but excluded from the authored core's NS walk.
   if (serviceSurface.client !== null) {
     const generatedPath = path.join(path.dirname(path.resolve(entry)), "services.gen.ts");
-    program = createSubsetProgram(entry, graph.files, new Map([[generatedPath, serviceSurface.client]]));
+    program = createSubsetProgram(entry, graph.files, new Map([[generatedPath, serviceSurface.client]]), options.sdkCorePath);
     loaded = loadProgramFiles(program);
     if (loaded === null) {
       return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [], warnings: [], typeErrors: ["cannot materialize the generated service client"], inputs: [...graph.files] };
@@ -192,6 +199,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     serviceOps,
     options.capabilities ?? [],
     options.persistRoutes,
+    options.sdkCorePath,
   );
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {
