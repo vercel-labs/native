@@ -3622,8 +3622,32 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_SIZE: {
             double width = 0;
             double height = 0;
-            if (gpuSurfaceLogicalSize(*view, hwnd, scale, &width, &height)) {
-                (void)syncGpuSurfaceGeometry(host, *view, width, height, scale);
+            if (gpuSurfaceLogicalSize(*view, hwnd, scale, &width, &height) &&
+                syncGpuSurfaceGeometry(host, *view, width, height, scale)) {
+                /* A geometry change is a reason to draw, and nothing else
+                 * in this host treats it as one. Emissions are scheduled by
+                 * input, by animation, and by explicit frame requests; the
+                 * top-level WM_SIZE handler further down only RE-ARMS
+                 * surfaces that already had one pending. So a panel that
+                 * happened to be idle when the window (or a dock divider)
+                 * moved never heard about its new bounds: it kept
+                 * presenting the packet it rendered for the old ones and
+                 * only repaired itself once the pointer wandered in and
+                 * woke it for unrelated reasons. That is the "some panels
+                 * resize live, others wait for the mouse" split.
+                 *
+                 * The repaint has to be FORCED. The runtime plans an idle
+                 * frame for an unchanged scene, and a resize does not
+                 * change the scene -- only the viewport it is laid out
+                 * against. AppKit already forces one across its view-frame
+                 * and backing-scale transitions; this is the Win32 half of
+                 * the same contract.
+                 *
+                 * Cost is bounded by the frame grid rather than the message
+                 * rate: a drag delivers WM_SIZE per mouse step and every
+                 * one of them folds into the single in-flight emission. */
+                view->gpu_force_full_repaint_pending = true;
+                gpuSurfaceScheduleFrameEmission(host, *view);
             }
             return 0;
         }

@@ -2366,6 +2366,32 @@ test "windows packet renderer preserves text baselines and disjoint dirty region
     ) != null);
 }
 
+test "a resized windows gpu surface asks for its own repaint" {
+    const host_source = @embedFile("webview2_host.cpp");
+
+    // The host's only other resize-driven wake re-arms surfaces that
+    // ALREADY have an emission pending, so an idle panel would never hear
+    // that its bounds moved. Both halves matter: the schedule delivers a
+    // frame event carrying the new size, and the forced full repaint stops
+    // the runtime from planning an idle frame for a scene that did not
+    // change — only the viewport did.
+    const forced_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "view->gpu_force_full_repaint_pending = true;\n                gpuSurfaceScheduleFrameEmission(host, *view);",
+    );
+    try std.testing.expect(forced_at != null);
+
+    // ...and it is gated on the geometry actually changing. Waking on
+    // every WM_SIZE regardless would hold a full-rate frame loop open for
+    // as long as the message keeps arriving.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "syncGpuSurfaceGeometry(host, *view, width, height, scale)) {",
+    ) != null);
+}
+
 test "windows packet renderer keeps square rectangle stroke joins" {
     const renderer_source = @embedFile("gpu_surface_renderer.cpp");
     try std.testing.expect(std.mem.indexOf(
