@@ -222,15 +222,20 @@ fn DirectPool(comptime Carrier: type) type {
             }
         }
 
-        /// Poll until `count` completions accumulated (30 s budget).
-        fn awaitCompletions(self: *Self, count: usize) !void {
+        /// Poll until `count` completions accumulate within the stated budget.
+        fn awaitCompletionsWithin(self: *Self, count: usize, budget_ms: usize) !void {
             var waited_ms: usize = 0;
-            while (waited_ms < 30_000) : (waited_ms += 2) {
+            while (waited_ms < budget_ms) : (waited_ms += 2) {
                 try self.drain();
                 if (self.completions.items.len >= count) return;
                 try sleepMs(2);
             }
             return error.TestTimedOut;
+        }
+
+        /// Poll until `count` completions accumulated (30 s budget).
+        fn awaitCompletions(self: *Self, count: usize) !void {
+            return self.awaitCompletionsWithin(count, 30_000);
         }
 
         fn takeCompletions(self: *Self) []Completion {
@@ -373,6 +378,35 @@ test "in-process deadlines include time spent queued behind another operation" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, "queued-probe.started", .{}));
 }
 
+test "a newly queued short deadline wakes the supervisor" {
+    const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 1 });
+    defer d.destroy();
+    const marker = try absoluteFixturePath(std.testing.allocator, "queued-wake.started");
+    defer std.testing.allocator.free(marker);
+
+    var payload_buffer: [256]u8 = undefined;
+    d.request("feeds.parkAt", 1, encodeParseRequest(&payload_buffer, marker));
+    var waited_ms: usize = 0;
+    while (waited_ms < 30_000) : (waited_ms += 5) {
+        std.Io.Dir.cwd().access(std.testing.io, marker, .{}) catch {
+            try sleepMs(5);
+            continue;
+        };
+        break;
+    }
+    try std.testing.expect(waited_ms < 30_000);
+
+    // The only worker stays occupied until cancellation, but queuedProbe's
+    // 100 ms budget still expires independently of parkAt's 10-second one.
+    d.request("feeds.queuedProbe", 2, "");
+    try d.awaitCompletionsWithin(1, 2_000);
+    const timed = d.takeCompletions();
+    defer DirectPool(ServiceCarrier).freeCompletions(timed);
+    try std.testing.expectEqual(@as(u64, 2), timed[0].key);
+    try std.testing.expect(!timed[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, timed[0].bytes, "\"kind\":\"timeout\"") != null);
+}
+
 test "independent keys run in parallel across pool instances and same-key requests serialize" {
     const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 4 });
     defer d.destroy();
@@ -410,6 +444,37 @@ test "independent keys run in parallel across pool instances and same-key reques
     try std.testing.expect(serial_ms >= 1100);
     try std.testing.expect(parallel_ms * 10 < serial_ms * 6);
     try std.testing.expectEqual(@as(u64, 0), d.pool.poisonedCount());
+}
+
+test "a large send burst cannot hide a runnable independent key" {
+    const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 2 });
+    defer d.destroy();
+    const marker = try absoluteFixturePath(std.testing.allocator, "send-burst.started");
+    defer std.testing.allocator.free(marker);
+
+    // Fire-and-forget work shares key zero. Keep one such operation active,
+    // then queue more entries than the old fixed skip buffer could cross.
+    var park_buffer: [256]u8 = undefined;
+    d.binding.send_fn(d.binding.context, "feeds.parkAt", encodeParseRequest(&park_buffer, marker));
+    var waited_ms: usize = 0;
+    while (waited_ms < 30_000) : (waited_ms += 5) {
+        std.Io.Dir.cwd().access(std.testing.io, marker, .{}) catch {
+            try sleepMs(5);
+            continue;
+        };
+        break;
+    }
+    try std.testing.expect(waited_ms < 30_000);
+
+    var parse_buffer: [64]u8 = undefined;
+    const payload = encodeParseRequest(&parse_buffer, "feed");
+    for (0..65) |_| d.binding.send_fn(d.binding.context, "feeds.parse", payload);
+    d.request("feeds.parse", 2, payload);
+    try d.awaitCompletionsWithin(1, 2_000);
+    const completion = d.takeCompletions();
+    defer DirectPool(ServiceCarrier).freeCompletions(completion);
+    try std.testing.expectEqual(@as(u64, 2), completion[0].key);
+    try std.testing.expect(completion[0].ok);
 }
 
 test "same-key requests run FIFO with no interleaving" {

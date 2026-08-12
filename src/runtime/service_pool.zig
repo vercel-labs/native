@@ -538,7 +538,12 @@ pub fn ServicePool(comptime Registry: type) type {
                 if (answer) self.stageStatic(key, false, transport_error);
                 return;
             }
+            // A newly admitted deadline may be earlier than every deadline
+            // the supervisor observed before parking. Wake both schedulers:
+            // a worker may be able to run it now, while the supervisor owns
+            // expiry if every eligible worker remains occupied.
             self.condition.signal(self.io);
+            self.supervisor_event.set(self.io);
             self.mutex.unlock(self.io);
         }
 
@@ -596,25 +601,14 @@ pub fn ServicePool(comptime Registry: type) type {
             return false;
         }
 
-        /// The oldest queue entry whose key is not blocked by an earlier
-        /// same-key entry or an active/abandoned twin — FIFO per key,
-        /// parallel across keys.
+        /// The oldest queue entry whose key has no active/abandoned twin —
+        /// FIFO per key follows directly from the queue-order scan, while a
+        /// busy key never hides later independent work from an idle worker.
         fn pickRequestLocked(self: *Self) ?Request {
-            var skipped: [64]u64 = undefined;
-            var skipped_len: usize = 0;
             var index: usize = 0;
             while (index < self.queue.items.len) : (index += 1) {
                 const key = self.queue.items[index].key;
-                var blocked = false;
-                for (skipped[0..skipped_len]) |seen| {
-                    if (seen == key) blocked = true;
-                }
-                if (!blocked and self.keyBusyLocked(key)) blocked = true;
-                if (!blocked) return self.queue.orderedRemove(index);
-                if (skipped_len < skipped.len) {
-                    skipped[skipped_len] = key;
-                    skipped_len += 1;
-                } else return null; // conservative under pathological fan-out
+                if (!self.keyBusyLocked(key)) return self.queue.orderedRemove(index);
             }
             return null;
         }
