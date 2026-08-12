@@ -404,7 +404,7 @@ pub const AppIdMode = enum {
 };
 
 pub fn validateAppId(id: []const u8, mode: AppIdMode) ValidationError!void {
-    if (id.len == 0) return error.InvalidId;
+    if (id.len == 0 or id.len > types.max_app_id_bytes) return error.InvalidId;
     if (id[0] == '.' or id[id.len - 1] == '.') return error.InvalidId;
 
     var segments: usize = 0;

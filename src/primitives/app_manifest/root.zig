@@ -9,6 +9,7 @@ pub const web_layer = @import("web_layer.zig");
 pub const ValidationError = types.ValidationError;
 pub const max_shortcuts = types.max_shortcuts;
 pub const max_shortcut_id_bytes = types.max_shortcut_id_bytes;
+pub const max_app_id_bytes = types.max_app_id_bytes;
 pub const max_shortcut_key_bytes = types.max_shortcut_key_bytes;
 pub const max_shell_windows = types.max_shell_windows;
 pub const max_shell_views_per_window = types.max_shell_views_per_window;

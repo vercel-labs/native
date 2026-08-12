@@ -6,6 +6,7 @@
 const std = @import("std");
 const effects_mod = @import("effects.zig");
 const core = @import("core.zig");
+const clock_mod = @import("clock.zig");
 const platform = @import("../platform/root.zig");
 
 const Msg = union(enum) { result: effects_mod.EffectCredentialsResult };
@@ -25,6 +26,56 @@ fn takeResult(fx: *Fx) !effects_mod.EffectCredentialsResult {
     }
     return error.TestExpectedMsg;
 }
+
+const BlockingCredentialStore = struct {
+    first_entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    release_first: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    first_exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    abandon_noted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    call_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    mutex: std.atomic.Mutex = .unlocked,
+    first_secret: [32]u8 = undefined,
+    first_secret_len: usize = 0,
+    stored_secret: [32]u8 = undefined,
+    stored_secret_len: usize = 0,
+
+    fn lock(self: *BlockingCredentialStore) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn set(context: ?*anyopaque, credential: platform.Credential) anyerror!void {
+        const self: *BlockingCredentialStore = @ptrCast(@alignCast(context));
+        const call = self.call_count.fetchAdd(1, .acq_rel);
+        if (call == 0) {
+            self.lock();
+            const first_len = @min(credential.secret.len, self.first_secret.len);
+            @memcpy(self.first_secret[0..first_len], credential.secret[0..first_len]);
+            self.first_secret_len = first_len;
+            self.mutex.unlock();
+            self.first_entered.store(true, .release);
+            while (!self.release_first.load(.acquire)) std.atomic.spinLoopHint();
+        }
+        self.lock();
+        const stored_len = @min(credential.secret.len, self.stored_secret.len);
+        @memcpy(self.stored_secret[0..stored_len], credential.secret[0..stored_len]);
+        self.stored_secret_len = stored_len;
+        self.mutex.unlock();
+        if (call == 0) self.first_exited.store(true, .release);
+    }
+
+    fn noteAbandoned(context: ?*anyopaque) void {
+        const self: *BlockingCredentialStore = @ptrCast(@alignCast(context));
+        self.abandon_noted.store(true, .release);
+    }
+
+    fn waitFor(value: *std.atomic.Value(bool)) !void {
+        for (0..1_000_000) |_| {
+            if (value.load(.acquire)) return;
+            std.Thread.yield() catch {};
+        }
+        return error.TestExpectedSignal;
+    }
+};
 
 test "credential effects round-trip through the hermetic platform backing" {
     var null_platform = platform.NullPlatform.init(.{});
@@ -129,6 +180,72 @@ test "credential permission and bounds failures are staged closed outcomes" {
     fx.credentialsGet(.{ .key = 13, .credential_key = &oversized_key, .on_result = Fx.credentialsMsg(.result) });
     const bounded = try takeResult(&fx);
     try std.testing.expectEqual(effects_mod.EffectCredentialsOutcome.over_bound, bounded.outcome);
+
+    fx.credentialsGet(.{ .key = 14, .credential_key = "prefix\x00suffix", .on_result = Fx.credentialsMsg(.result) });
+    const nul = try takeResult(&fx);
+    try std.testing.expectEqual(effects_mod.EffectCredentialsOutcome.over_bound, nul.outcome);
+}
+
+test "real credential replacements coalesce and execute in issue order" {
+    var backing: BlockingCredentialStore = .{};
+    var services: platform.PlatformServices = .{
+        .context = &backing,
+        .set_credential_fn = BlockingCredentialStore.set,
+        .note_blocking_call_abandoned_fn = BlockingCredentialStore.noteAbandoned,
+    };
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindCredentialsStore(.{
+        .services = &services,
+        .service = "dev.native-sdk.credentials-test",
+        .permitted = true,
+    });
+
+    fx.credentialsSet(.{ .key = 40, .credential_key = "token", .secret = "old", .on_result = Fx.credentialsMsg(.result) });
+    try BlockingCredentialStore.waitFor(&backing.first_entered);
+    fx.credentialsSet(.{ .key = 40, .credential_key = "token", .secret = "new-1", .on_result = Fx.credentialsMsg(.result) });
+    fx.credentialsSet(.{ .key = 40, .credential_key = "token", .secret = "new-2", .on_result = Fx.credentialsMsg(.result) });
+    fx.credentialsSet(.{ .key = 40, .credential_key = "token", .secret = "new-3", .on_result = Fx.credentialsMsg(.result) });
+    fx.credentialsSet(.{ .key = 40, .credential_key = "token", .secret = "new-4", .on_result = Fx.credentialsMsg(.result) });
+    fx.credentialsSet(.{ .key = 40, .credential_key = "token", .secret = "new-5", .on_result = Fx.credentialsMsg(.result) });
+    try std.testing.expectEqual(@as(usize, 1), backing.call_count.load(.acquire));
+
+    backing.release_first.store(true, .release);
+    const result = try takeResult(&fx);
+    try std.testing.expectEqual(effects_mod.EffectCredentialsOutcome.ok, result.outcome);
+    try std.testing.expectEqual(@as(usize, 2), backing.call_count.load(.acquire));
+    backing.lock();
+    defer backing.mutex.unlock();
+    try std.testing.expectEqualStrings("old", backing.first_secret[0..backing.first_secret_len]);
+    try std.testing.expectEqualStrings("new-5", backing.stored_secret[0..backing.stored_secret_len]);
+}
+
+test "credential teardown abandons a blocked platform call at its deadline" {
+    var backing: BlockingCredentialStore = .{};
+    var services: platform.PlatformServices = .{
+        .context = &backing,
+        .set_credential_fn = BlockingCredentialStore.set,
+        .note_blocking_call_abandoned_fn = BlockingCredentialStore.noteAbandoned,
+    };
+    var fx = Fx.init(std.testing.allocator);
+    fx.credentials_join_deadline_ms = 10;
+    fx.bindCredentialsStore(.{
+        .services = &services,
+        .service = "dev.native-sdk.credentials-test",
+        .permitted = true,
+    });
+    fx.credentialsSet(.{ .key = 41, .credential_key = "token", .secret = "blocked", .on_result = Fx.credentialsMsg(.result) });
+    try BlockingCredentialStore.waitFor(&backing.first_entered);
+
+    const start_ns = clock_mod.monotonicNanoseconds();
+    fx.deinit();
+    const elapsed_ms = (clock_mod.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+    try std.testing.expect(elapsed_ms < 2_000);
+    try std.testing.expectEqual(@as(u32, 1), fx.abandoned_credentials_workers);
+    try std.testing.expect(backing.abandon_noted.load(.acquire));
+
+    backing.release_first.store(true, .release);
+    try BlockingCredentialStore.waitFor(&backing.first_exited);
 }
 
 test "credential effects replace by key and own four slots" {

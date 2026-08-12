@@ -288,7 +288,7 @@ Credentials are app-scoped effects, not Model data. Declare both gates; `native 
 .permissions = .{ "credentials" },
 ```
 
-The manifest app id is the OS keychain service namespace, so authored code supplies only a key. Keys are UTF-8 through 256 bytes and secrets are bounded at 64 KiB. A get miss routes the error arm with `miss`; the other closed outcomes are `denied`, `locked`, `io_failed`, `over_bound`, and `rejected`. Set and delete route empty bytes on success, and delete is idempotent.
+The manifest app id is the OS keychain service namespace and is bounded at 128 bytes, so authored code supplies only a key. Keys are NUL-free UTF-8 through 256 bytes and secrets are bounded at 64 KiB. A get miss routes the error arm with `miss`; the other closed outcomes are `denied`, `locked`, `io_failed`, `over_bound`, and `rejected`. Set and delete route empty bytes on success, and delete is idempotent.
 
 ```ts
 case "save_token":

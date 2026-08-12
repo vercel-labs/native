@@ -309,9 +309,8 @@ pub const WindowsPlatform = struct {
     /// later runtime-created alpha window can fail with the precise
     /// transparency error before crossing the C ABI.
     menus_active: bool = false,
-    /// Latched when the runtime's effects teardown abandons an
-    /// in-flight channel `wake_fn` call (see
-    /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale
+    /// Latched when effects teardown abandons an in-flight platform call
+    /// (a channel wake or blocking credential operation): the stale
     /// call still holds this platform as its context and may execute
     /// into it at any later time, so `deinit` must skip destruction
     /// and leak the host, process-lived — and the wrapper struct the
@@ -402,13 +401,13 @@ pub const WindowsPlatform = struct {
     }
 
     pub fn deinit(self: *WindowsPlatform) void {
-        // An abandoned channel wake call may still enter this host at
+        // An abandoned platform call may still enter this host at
         // any later time (see `channel_wake_abandoned`): destroying it
         // would turn that stale call into a use-after-free, so the
         // host is deliberately leaked, process-lived — the
         // abandoned-worker idiom, applied to the platform itself.
         if (self.channel_wake_abandoned.load(.seq_cst)) {
-            std.debug.print("windows platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
+            std.debug.print("windows platform teardown: an abandoned platform call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
             return;
         }
         native_sdk_windows_destroy(self.host);
@@ -477,6 +476,7 @@ pub const WindowsPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .note_blocking_call_abandoned_fn = noteChannelWakeAbandoned,
                 .format_local_time_fn = formatLocalTime,
                 .audio_load_fn = audioLoad,
                 .audio_load_url_fn = audioLoadUrl,

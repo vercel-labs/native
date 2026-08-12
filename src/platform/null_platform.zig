@@ -697,9 +697,8 @@ pub const NullPlatform = struct {
     /// embed host drain it on their own thread via `takeWake` and then
     /// dispatch the `.wake` platform event themselves.
     wake_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    /// Latched when the runtime's effects teardown abandons an in-flight
-    /// channel `wake_fn` call (see
-    /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale call
+    /// Latched when effects teardown abandons an in-flight platform call
+    /// (a channel wake or blocking credential operation): the stale call
     /// still holds this platform as its context, so `deinit` must skip
     /// destruction and leak the host, process-lived — the reference model
     /// of the real hosts' destroy gate, and the seam channel teardown
@@ -814,7 +813,7 @@ pub const NullPlatform = struct {
     /// which is exactly what makes the gate observable in tests.
     pub fn deinit(self: *NullPlatform) void {
         if (self.channel_wake_abandoned.load(.seq_cst)) {
-            std.debug.print("null platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it, process-lived, so the stale call stays safe\n", .{});
+            std.debug.print("null platform teardown: an abandoned platform call may still enter this host; skipping destruction and leaking it, process-lived, so the stale call stays safe\n", .{});
             return;
         }
         if (self.destroyed) return;
@@ -883,6 +882,7 @@ pub const NullPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .note_blocking_call_abandoned_fn = noteChannelWakeAbandoned,
                 .format_local_time_fn = formatLocalTime,
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,

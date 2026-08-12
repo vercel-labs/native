@@ -27,7 +27,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "go": return [model, Cmd.credentials.set("api-token", asciiBytes("super-secret"), { key: "write", ok: "wrote", err: "failed" })];
     case "wrote": return [{ ...model, writes: model.writes + 1 }, Cmd.credentials.get("api-token", { key: "read", ok: "loaded", err: "failed" })];
     case "loaded": return [{ ...model, loadedLength: msg.bytes.length }, Cmd.credentials.delete("api-token", { key: "delete", ok: "deleted", err: "failed" })];
-    case "deleted": return { ...model, deletes: model.deletes + 1 };
+    case "deleted": return [{ ...model, deletes: model.deletes + 1 }, Cmd.credentials.set("bad\\0key", asciiBytes("must-not-store"), { key: "invalid", ok: "wrote", err: "failed" })];
     case "failed": return { ...model, failures: model.failures + 1 };
   }
 }
@@ -42,8 +42,10 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     assert.match(run.stdout, /core\.credentials\.set write api-token \(<redacted, 12 bytes> stored/);
     assert.match(run.stdout, /core\.credentials\.get read api-token \(<redacted, 12 bytes>\)/);
     assert.match(run.stdout, /core\.credentials\.delete delete api-token \(deleted/);
-    assert.match(run.stdout, /"loadedLength":12,"writes":1,"deletes":1,"failures":0/);
+    assert.match(run.stdout, /core\.credentials\.set rejected over_bound/);
+    assert.match(run.stdout, /"loadedLength":12,"writes":1,"deletes":1,"failures":1/);
     assert.doesNotMatch(run.stdout, /super-secret/);
+    assert.doesNotMatch(run.stdout, /must-not-store/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

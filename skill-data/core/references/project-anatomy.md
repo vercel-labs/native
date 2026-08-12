@@ -63,7 +63,7 @@ Keep product-level metadata and policies in `app.zon`:
 
 Important manifest fields:
 
-- `id`: reverse-DNS bundle identifier. Used for bundle metadata and log/state paths.
+- `id`: reverse-DNS bundle identifier, at most 128 bytes. Used for bundle metadata, credential service namespacing, and log/state paths.
 - `name`: short machine name.
 - `display_name`: human app name — shown by the application menu, Dock, app switcher, and About panel in dev runs and packaged bundles alike.
 - `description`: optional one-line About-panel description (max 256 bytes, single line).

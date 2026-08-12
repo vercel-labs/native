@@ -35,7 +35,9 @@ pub const Binding = struct {
 };
 
 pub fn validKey(key: []const u8) bool {
-    return key.len > 0 and key.len <= max_key_bytes and std.unicode.utf8ValidateSlice(key);
+    return key.len > 0 and key.len <= max_key_bytes and
+        std.mem.indexOfScalar(u8, key, 0) == null and
+        std.unicode.utf8ValidateSlice(key);
 }
 
 pub fn outcomeName(outcome: Outcome) []const u8 {
@@ -52,6 +54,7 @@ pub fn outcomeFromName(name: []const u8) ?Outcome {
 pub fn execute(binding: Binding, operation: Operation, key: []const u8, secret: []const u8, output: []u8) Execution {
     if (!binding.permitted) return .{ .outcome = .denied };
     if (!validKey(key) or binding.service.len == 0 or binding.service.len > platform.max_credential_service_bytes or
+        std.mem.indexOfScalar(u8, binding.service, 0) != null or
         !std.unicode.utf8ValidateSlice(binding.service))
     {
         return .{ .outcome = .over_bound };
@@ -105,6 +108,7 @@ fn classifyError(err: anyerror) Outcome {
 test "credential adapter validates keys and names closed outcomes" {
     try std.testing.expect(validKey("token"));
     try std.testing.expect(!validKey(""));
+    try std.testing.expect(!validKey("token\x00suffix"));
     try std.testing.expect(!validKey(&.{ 0xff, 0xfe }));
     try std.testing.expectEqualStrings("locked", outcomeName(.locked));
     try std.testing.expectEqual(Outcome.denied, outcomeFromName("denied").?);

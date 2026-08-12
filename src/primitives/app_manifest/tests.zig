@@ -617,7 +617,10 @@ test "app id validation" {
     try validateAppId("com.example.app", .reverse_dns);
     try validateAppId("my-tool", .simple);
 
+    const oversized_id = [_]u8{'a'} ** (types.max_app_id_bytes + 1);
+
     try std.testing.expectError(error.InvalidId, validateAppId("", .reverse_dns));
+    try std.testing.expectError(error.InvalidId, validateAppId(&oversized_id, .simple));
     try std.testing.expectError(error.InvalidId, validateAppId("example", .reverse_dns));
     try std.testing.expectError(error.InvalidId, validateAppId("Com.example.app", .reverse_dns));
     try std.testing.expectError(error.InvalidId, validateAppId("com/example/app", .reverse_dns));

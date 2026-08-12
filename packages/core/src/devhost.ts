@@ -1161,7 +1161,7 @@ function performCredentialsCmd(cmd: Cmdish): void {
   } catch {
     return rejectCredentials(cmd, "over_bound");
   }
-  if (keyBytes.length === 0 || keyBytes.length > 256) return rejectCredentials(cmd, "over_bound");
+  if (keyBytes.length === 0 || keyBytes.length > 256 || key.includes("\0")) return rejectCredentials(cmd, "over_bound");
   const identity = `${appId}\0${key}`;
   if (name === "core.credentials.set") {
     const secret = fields[1]!;

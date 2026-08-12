@@ -893,6 +893,11 @@ pub const MobileHostApp = struct {
         // embedding app keeps past destroy can never wake the freed
         // host storage (the embedded null platform included).
         self.embedded.deinit();
+        // Effects reports any detached platform call through the null
+        // platform's abandon latch. Such a call still resolves this wrapper
+        // from the services context, so preserve the complete host block just
+        // as desktop platform destroy paths preserve theirs.
+        if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) return;
         std.heap.page_allocator.destroy(self);
     }
 
