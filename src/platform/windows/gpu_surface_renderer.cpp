@@ -1536,10 +1536,21 @@ private:
             profile_flushed_bitmaps_ = dimensions_changed ? image_bitmaps_.size() : 0;
         }
         if (dimensions_changed) {
-            /* Phase 2 keeps this teardown exactly as the blt-model path
-             * had it, so the presentation swap can be measured on its
-             * own. Phase 3 is what removes the image-cache flush. */
-            releaseImageBitmaps();
+            /* The image cache is NOT dropped here any more, and that is
+             * the whole point of the migration.
+             *
+             * Under the blt model these bitmaps belonged to the backing
+             * render target, which this branch recreated, so every one of
+             * them had to go and be re-uploaded from CPU memory on the
+             * next frame -- 1.5 ms per resize step at the runtime's
+             * 16 MiB registry ceiling. They are created from the
+             * `ID2D1Device` now, so they outlive any surface resize and
+             * `ensureImageBitmap` keeps hitting its cache mid-drag.
+             *
+             * The two surfaces that genuinely are size-shaped still go:
+             * the backing bitmap (a D2D bitmap's pixel size and DPI are
+             * fixed at creation) and the blur snapshot (allocated at
+             * surface size). */
             releaseCom(blur_snapshot_);
             releaseCom(backing_bitmap_);
             content_valid_ = false;
