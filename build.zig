@@ -523,6 +523,18 @@ pub fn build(b: *std.Build) void {
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
         ts_services_e2e_step.dependOn(&services_e2e_run.step);
+        // Service-host carrier benchmark: cold start (lazy spawn + hello),
+        // warm round-trip latency for small and large payloads, and queued
+        // throughput, all through the production carrier binding against a
+        // bytes-echo service (see tools/bench_service_host.zig).
+        const bench_service_host_run = b.addRunArtifact(ts_core_artifacts.service_host_bench);
+        bench_service_host_run.has_side_effects = true;
+        // Repo root as cwd so the generated service executable path and the
+        // benchmark's scratch directory resolve regardless of where
+        // `zig build` ran from.
+        bench_service_host_run.setCwd(b.path("."));
+        const bench_service_host_step = b.step("bench-service-host", "Run the service-host carrier benchmark (cold start, round-trip latency, queued throughput; requires node and `npm ci` in packages/core; pass -Doptimize=ReleaseFast for baselines)");
+        bench_service_host_step.dependOn(&bench_service_host_run.step);
         const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
         const sidecar_conformance_step = b.step("sidecar-conformance", "Validate corewire-generated mirrors over every fixture's frontend-emitted contract (requires node)");
         sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
@@ -2853,6 +2865,10 @@ const TsCoreE2eArtifacts = struct {
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
     services: *std.Build.Step.Compile,
+    /// The service-host carrier benchmark: a bytes-echo service compiled
+    /// through the same lane, driven directly through the production
+    /// carrier binding (cold start, round-trip latency, queued throughput).
+    service_host_bench: *std.Build.Step.Compile,
     /// Sidecar-shim conformance (tests/sidecar): every fixture's
     /// generated mirror validated over its frontend-emitted contract
     /// (plus the hand-written ground-truth sidecars), and every shim
@@ -3086,6 +3102,39 @@ fn tsCoreE2eArtifact(
     service_test_options.addOption([]const u8, "node_executable", node);
     services_e2e_mod.addOptions("ts_services_options", service_test_options);
 
+    // Service-host carrier benchmark: the same production service lane
+    // (frontend contract -> corewire host/registry -> exact-pinned
+    // plain-scriptc executable) over a bytes-echo operation that returns
+    // its request unchanged, so tools/bench_service_host.zig measures the
+    // carrier — lazy spawn, framing, pipes, worker queueing — and never a
+    // workload.
+    const service_bench_core = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tools/service-host-bench/src/core.ts",
+        .src_dir = b.path("tools/service-host-bench/src"),
+        .name = "service_host_bench_core",
+        .emit_services = true,
+    });
+    const service_bench_fixture = externalServiceFixture(
+        b,
+        target,
+        optimize,
+        node,
+        corewire_exe,
+        b.path("tools/service-host-bench/src"),
+        service_bench_core.services_contract.?,
+        "service_host_bench_services",
+    );
+    const service_bench_mod = module(b, target, optimize, "tools/bench_service_host.zig");
+    service_bench_mod.addImport("native_sdk", desktop_mod);
+    service_bench_mod.addImport("service_registry", service_bench_fixture.registry);
+    const service_bench_options = b.addOptions();
+    service_bench_options.addOptionPath("service_executable", service_bench_fixture.executable);
+    service_bench_mod.addOptions("bench_options", service_bench_options);
+    const service_bench_exe = b.addExecutable(.{
+        .name = "bench-service-host",
+        .root_module = service_bench_mod,
+    });
+
     // Sidecar-shim conformance: a corewire-generated mirror per corpus
     // fixture. The markup fixture's sidecar is the committed
     // hand-written one (independent ground truth for the schema); the
@@ -3166,6 +3215,7 @@ fn tsCoreE2eArtifact(
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
+        .service_host_bench = service_bench_exe,
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
         .core_contracts = core_contracts.toOwnedSlice(b.allocator) catch @panic("OOM"),
