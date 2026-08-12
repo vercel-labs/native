@@ -31,6 +31,17 @@
 #                                                 webview/browser run their
 #                                                 in-dir `zig build test`)
 #   docs/**                                     -> docs `pnpm check`
+#   docs/**, skills/**, skill-data/**,
+#   packages/core/**                            -> service-surface claim check:
+#                                                 the generated compile-surface
+#                                                 table matches the pinned
+#                                                 compiler manifest, and no
+#                                                 hand-written SC-code or stale
+#                                                 compiler-version claims exist
+#                                                 in prose (requires
+#                                                 `npm ci --include=dev` in
+#                                                 packages/core, like the
+#                                                 service suites)
 #   **/src/services/**, service seam runtime,
 #   compiler, corewire, fixture, or skill paths -> real compiled service-host
 #                                                 success/error/crash/timeout/
@@ -41,7 +52,8 @@
 # A docs-ONLY diff runs only the docs check. The docs check is path-gated
 # in both tiers: it never runs unless docs/ changed (or --all in full).
 #
-# full — root test + validate, every example suite (frontends, native incl.
+# full — root test + validate, the service-surface claim check, every
+# example suite (frontends, native incl.
 # canvas-preview, mobile), the Chromium host link check (cef-host-link),
 # the macOS automation smokes (gpu-surface,
 # gpu-dashboard, gpu-components, canvas-preview, writeback; skipped off-macOS), a
@@ -108,6 +120,7 @@ macos_platform_changed=false
 docs_changed=false
 meta_changed=false
 service_seam_changed=false
+surface_claims_changed=false
 affected_examples=""   # space-separated example dir names
 mobile_affected=false
 
@@ -152,6 +165,9 @@ while IFS= read -r file; do
     */src/services/*|src/runtime/service_host.zig|src/app_runner/ts_core_main.zig|tests/ts-services/*|tools/corewire/emit_service.zig|tools/corewire/service_contract.zig|packages/core/src/checker.ts|packages/core/src/cli.ts|packages/core/src/diagnostics.ts|packages/core/src/frontend.ts|packages/core/src/modules.ts|packages/core/src/service_contract.ts|packages/core/src/typed_ast.ts|packages/core/scripts/compiler_typecheck.mjs|packages/core/scripts/stage_external_services.mjs|packages/core/scripts/run_external_service_compiler.mjs|skill-data/ts-services/*|packages/native-sdk/*service_host*|build.zig|build/app.zig)
       service_seam_changed=true
       ;;
+  esac
+  case "$file" in
+    docs/*|skills/*|skill-data/*|packages/core/*) surface_claims_changed=true ;;
   esac
 done <<EOF_FILES
 $changed_files
@@ -292,6 +308,12 @@ if [ "$tier" = "fast" ]; then
     skip_step "ts-services-e2e" "service seam paths unchanged vs $base_ref"
   fi
 
+  if $surface_claims_changed; then
+    run_step "surface-claims" node packages/core/scripts/gen_service_surface.mjs --check
+  else
+    skip_step "surface-claims" "docs/skills/skill-data/packages-core unchanged vs $base_ref"
+  fi
+
   if $macos_platform_changed; then
     cef_host_step
   else
@@ -308,6 +330,7 @@ else # full
   run_step "zig-validate" zig build validate
   run_step "ts-services-frontend" node --test packages/core/test/services.test.ts
   run_step "ts-services-e2e" zig build test-ts-services-e2e
+  run_step "surface-claims" node packages/core/scripts/gen_service_surface.mjs --check
   run_step "examples-frontends" zig build test-examples-frontends
   run_step "examples-native" zig build test-examples-native
   run_step "examples-mobile" zig build test-examples-mobile
