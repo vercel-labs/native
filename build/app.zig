@@ -405,6 +405,8 @@ fn tsCoreStage(
     persist_capability: bool,
     store_capability: bool,
     relational_capability: bool,
+    credentials_capability: bool,
+    credentials_permission: bool,
     persist_version: ?u64,
     service_packages: []const ServicePackageConfig,
 ) TsCoreStage {
@@ -481,6 +483,8 @@ fn tsCoreStage(
     }
     if (store_capability) check.addArgs(&.{ "--capability", "store" });
     if (relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
+    if (credentials_capability) check.addArgs(&.{ "--capability", "credentials" });
+    if (credentials_permission) check.addArgs(&.{ "--permission", "credentials" });
     if (relational_capability) {
         check.addArg("--sdk-core");
         check.addFileArg(checked_sdk_core);
@@ -752,6 +756,7 @@ pub const mobile_export_symbol_names = [_][]const u8{
     "native_sdk_app_text_input_state",
     "native_sdk_app_set_text_measure",
     "native_sdk_app_set_audio_service",
+    "native_sdk_app_set_credential_service",
     "native_sdk_app_audio_event",
     "native_sdk_app_set_image_service",
     "native_sdk_app_set_automation_dir",
@@ -812,6 +817,12 @@ pub const MobileLibOptions = struct {
     /// Generated append-only migration module. Direct low-level callers may
     /// omit it and open an empty version-0 database.
     relational_migrations: ?std.Build.LazyPath = null,
+    /// Compile the Tier-4 core credential effects into the mobile host.
+    credentials_capability: bool = false,
+    /// Grant those effects access to the registered OS credential service.
+    credentials_permission: bool = false,
+    /// Stable app identity used as the Keychain/Keystore service namespace.
+    credentials_service: []const u8 = "dev.native_sdk.app",
 };
 
 /// Mobile counterpart of `addApp`: produce the embed static library
@@ -852,6 +863,9 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         const mobile_options = b.addOptions();
         mobile_options.addOption(bool, "store_capability", options.store_capability);
         mobile_options.addOption(bool, "relational_capability", options.relational_capability);
+        mobile_options.addOption(bool, "credentials_capability", options.credentials_capability);
+        mobile_options.addOption(bool, "credentials_permission", options.credentials_permission);
+        mobile_options.addOption([]const u8, "credentials_service", options.credentials_service);
         exports_mod.addImport("mobile_build_options", mobile_options.createModule());
         const migration_path = options.relational_migrations orelse dep.path("src/app_runner/no_migrations.zig");
         const migration_mod = b.createModule(.{ .root_source_file = migration_path, .target = target, .optimize = optimize });
@@ -955,6 +969,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_config.persist_capability,
             app_config.store_capability,
             app_config.relational_capability,
+            app_config.credentials_capability,
+            app_config.credentials_permission,
             app_config.persist_version,
             app_config.service_packages,
         )
@@ -979,6 +995,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .store_capability = app_config.store_capability,
             .relational_capability = app_config.relational_capability,
             .relational_migrations = relational_migrations,
+            .credentials_capability = app_config.credentials_capability,
+            .credentials_permission = app_config.credentials_permission,
+            .credentials_service = app_config.app_id,
         });
     }
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
@@ -1897,6 +1916,7 @@ fn addCefCheck(b: *std.Build, target: std.Build.ResolvedTarget, cef_dir: []const
 /// manifest falls back to the system engine WITH the web layer kept —
 /// over-inclusion is a size cost, wrong exclusion is a broken app.
 const AppManifestBuildConfig = struct {
+    app_id: []const u8 = "dev.native_sdk.app",
     web_engine: WebEngineOption = .system,
     cef_dir: []const u8 = "third_party/cef/macos",
     cef_auto_install: bool = false,
@@ -1908,6 +1928,8 @@ const AppManifestBuildConfig = struct {
     service_packages: []const ServicePackageConfig = &.{},
     store_capability: bool = false,
     relational_capability: bool = false,
+    credentials_capability: bool = false,
+    credentials_permission: bool = false,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
@@ -1926,6 +1948,7 @@ const ServicePackageConfig = struct {
 /// the TypeScript checker. Everything else is ignored. Full schema validation
 /// stays with `native validate` and the runner's comptime import.
 const InferenceManifest = struct {
+    id: []const u8 = "dev.native_sdk.app",
     capabilities: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     web_engine: []const u8 = "system",
@@ -1982,6 +2005,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         @panic("\napp.zon .core_compiler must be \"external\" (the default and only lane)\n");
     }
     return .{
+        .app_id = raw.id,
         .web_engine = web_layer_contract.parseWebEngine(raw.web_engine) orelse .system,
         .cef_dir = raw.cef.dir,
         .cef_auto_install = raw.cef.auto_install,
@@ -1993,6 +2017,8 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .service_packages = raw.service_packages,
         .store_capability = hasManifestCapability(raw.capabilities, "store"),
         .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
+        .credentials_capability = hasManifestCapability(raw.capabilities, "credentials"),
+        .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };

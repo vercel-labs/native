@@ -60,6 +60,7 @@ pub const RunOptions = struct {
     /// binding uniformly into each platform's runtime options.
     record_store: ?native_sdk.RecordStoreBinding = null,
     relational_store: ?native_sdk.RelationalStoreBinding = null,
+    credentials_enabled: bool = false,
     relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
 
     fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
@@ -462,6 +463,15 @@ fn manifestDeclaresSqlite() bool {
     return false;
 }
 
+fn manifestDeclaresCredentials() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    inline for (app_manifest.capabilities) |capability| {
+        const name: []const u8 = capability;
+        if (comptime std.mem.eql(u8, name, "credentials")) return true;
+    }
+    return false;
+}
+
 fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
     const values = if (@hasField(@TypeOf(shortcut), "modifiers")) shortcut.modifiers else .{};
     var modifiers: native_sdk.ShortcutModifiers = .{};
@@ -497,6 +507,7 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     var record_store_value: RecordStoreType = undefined;
     var record_store_open = false;
     var resolved_options = options;
+    resolved_options.credentials_enabled = manifestDeclaresCredentials();
     if (comptime manifestDeclaresStore()) {
         var data_dir_buffer: [512]u8 = undefined;
         const app_data_dir = native_sdk.app_dirs.resolveOne(
@@ -604,6 +615,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .window_state_store = store,
         .record_store = options.record_store,
         .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -670,6 +682,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .window_state_store = store,
         .record_store = options.record_store,
         .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -733,6 +746,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .window_state_store = store,
         .record_store = options.record_store,
         .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -795,6 +809,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .window_state_store = store,
         .record_store = options.record_store,
         .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });

@@ -312,7 +312,8 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
         "QuartzCore",    "-framework",   "Foundation",
         "-framework",    "CoreGraphics", "-framework",
         "AVFoundation",  "-framework",   "ImageIO",
-        "-o",            executable_path,
+        "-framework",    "Security",     "-o",
+        executable_path,
     }, error.HostCompileFailed);
     try runInherit(io, &.{ "codesign", "--force", "--sign", "-", bundle_path }, error.HostCompileFailed);
 
@@ -497,6 +498,11 @@ test "the embedded host sources are the toolkit host" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "handleSessionInterruption") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_audio_service_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_audio_event") != null);
+    // Tier-4 credentials: generic-password Keychain entries registered
+    // through the shared mobile credential service ABI.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_app_set_credential_service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SecItemCopyMatching") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_credential_service_t") != null);
     // Platform push/pop navigation: the depth projection poll, the REAL
     // interactive pop recognizer, and the completed gesture's exactly-once
     // back-command dispatch.

@@ -300,8 +300,8 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Open an allowed HTTP(S) URL in the system browser or reveal a path in Finder/Files/Explorer; both are fire-and-forget and fail closed</td>
     </tr>
     <tr>
-      <td><code>Cmd.credentialSet(...)</code> / <code>credentialGet(...)</code> / <code>credentialDelete(...)</code></td>
-      <td>Routed access to Keychain, Secret Service, or Credential Manager; get returns the secret bytes and missing items route <code>not_found</code></td>
+      <td><code>Cmd.credentials.set(...)</code> / <code>Cmd.credentials.get(...)</code> / <code>Cmd.credentials.delete(...)</code></td>
+      <td>App-scoped access to the OS credential store; get returns secret bytes, missing items route <code>miss</code>, and the manifest must declare the <code>credentials</code> capability and permission</td>
     </tr>
     <tr>
       <td><code>Cmd.formatLocalTime(timestampMs, style, route)</code></td>

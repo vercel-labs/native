@@ -169,6 +169,98 @@ pub fn setAudioService(self: anytype, service: types.MobileAudioService, context
     self.null_platform.system_audio_capture = false;
 }
 
+/// Host-owned callback table for the mobile OS credential store.
+pub const MobileCredentials = struct {
+    service: types.MobileCredentialService = .{},
+    context: ?*anyopaque = null,
+};
+
+fn MobileCredentialBridge(comptime Host: type) type {
+    return struct {
+        fn hostFromContext(context: ?*anyopaque) *Host {
+            const null_platform: *platform.NullPlatform = @ptrCast(@alignCast(context.?));
+            return @alignCast(@fieldParentPtr("null_platform", null_platform));
+        }
+
+        fn setCredential(context: ?*anyopaque, credential: platform.Credential) anyerror!void {
+            const store = &hostFromContext(context).credentials;
+            const set_fn = store.service.set orelse return error.UnsupportedService;
+            return switch (set_fn(
+                store.context,
+                credential.service.ptr,
+                credential.service.len,
+                credential.account.ptr,
+                credential.account.len,
+                credential.secret.ptr,
+                credential.secret.len,
+            )) {
+                1 => {},
+                -2 => error.CredentialStoreLocked,
+                -3 => error.AccessDenied,
+                else => error.CredentialStoreFailed,
+            };
+        }
+
+        fn getCredential(context: ?*anyopaque, key: platform.CredentialKey, output: []u8) anyerror![]const u8 {
+            const store = &hostFromContext(context).credentials;
+            const get_fn = store.service.get orelse return error.UnsupportedService;
+            const result = get_fn(
+                store.context,
+                key.service.ptr,
+                key.service.len,
+                key.account.ptr,
+                key.account.len,
+                output.ptr,
+                output.len,
+            );
+            return switch (result) {
+                -1 => error.CredentialNotFound,
+                -2 => error.CredentialStoreLocked,
+                -3 => error.AccessDenied,
+                -4 => error.NoSpaceLeft,
+                else => if (result < 0 or result > output.len)
+                    error.CredentialStoreFailed
+                else
+                    output[0..@intCast(result)],
+            };
+        }
+
+        fn deleteCredential(context: ?*anyopaque, key: platform.CredentialKey) anyerror!void {
+            const store = &hostFromContext(context).credentials;
+            const delete_fn = store.service.delete orelse return error.UnsupportedService;
+            return switch (delete_fn(
+                store.context,
+                key.service.ptr,
+                key.service.len,
+                key.account.ptr,
+                key.account.len,
+            )) {
+                1 => {},
+                0 => error.CredentialNotFound,
+                -2 => error.CredentialStoreLocked,
+                -3 => error.AccessDenied,
+                else => error.CredentialStoreFailed,
+            };
+        }
+    };
+}
+
+/// Install or clear the mobile OS credential service. Partial tables are
+/// refused so a successful set can never be paired with an unavailable get
+/// or delete. Registration only supplies the backing; the manifest
+/// capability and permission remain independent runtime gates.
+pub fn setCredentialService(self: anytype, service: types.MobileCredentialService, context: ?*anyopaque) anyerror!void {
+    const Host = std.meta.Child(@TypeOf(self));
+    const Bridge = MobileCredentialBridge(Host);
+    const complete = service.complete();
+    if (!complete and !service.empty()) return error.InvalidCommand;
+    self.credentials = .{ .service = service, .context = if (complete) context else null };
+    const services = &self.embedded.runtime.options.platform.services;
+    services.set_credential_fn = if (complete) Bridge.setCredential else null;
+    services.get_credential_fn = if (complete) Bridge.getCredential else null;
+    services.delete_credential_fn = if (complete) Bridge.deleteCredential else null;
+}
+
 /// Host-owned storage for the shim's registered image-decode service
 /// (callback table + shim context). Lives on the (heap-allocated) host
 /// beside the audio store so the platform-services bridge can reach it
@@ -696,6 +788,7 @@ pub const MobileHostApp = struct {
     automation_io: ?*std.Io.Threaded = null,
     text_measure: MobileTextMeasure = .{},
     audio: MobileAudio = .{},
+    credentials: MobileCredentials = .{},
     // Image decode stays declined until the shim registers a real codec
     // (`native_sdk_app_set_image_service`): the null platform's strict
     // test decoder is opt-in (`image_decode`, default off), so with no
@@ -771,6 +864,7 @@ pub const MobileHostApp = struct {
         self.automation_io = null;
         self.text_measure = .{};
         self.audio = .{};
+        self.credentials = .{};
         self.image = .{};
         self.form_factor = .unknown;
         self.chrome_tabs_projected = false;
@@ -783,6 +877,10 @@ pub const MobileHostApp = struct {
             .source_fn = mobileSource,
             .event_fn = handleEvent,
         }, self.null_platform.platform());
+        // A real mobile host must register Keychain/Keystore backing before
+        // start. Do not expose the NullPlatform's hermetic test map to an
+        // installed app while that registration is absent.
+        try setCredentialService(self, .{}, null);
         return self;
     }
 

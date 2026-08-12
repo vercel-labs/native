@@ -689,7 +689,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var audio_cache_dir_len: usize = 0;
         var audio_cache_dir_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
         var audio_cache_path_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
-        var requests: [runtime_effects.max_effects + runtime_effects.max_store_effects]RequestEntry = @splat(.{});
+        var requests: [runtime_effects.max_effects + runtime_effects.max_store_effects + runtime_effects.max_credentials_effects]RequestEntry = @splat(.{});
         var timers: [runtime_effects.max_effect_timers]TimerEntry = @splat(.{});
         var effects_table: [runtime_effects.max_effects]EffectEntry = @splat(.{});
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
@@ -2632,27 +2632,38 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         }
 
-        /// Allocate a routed request slot. The regular host-request and
-        /// record-store pools are disjoint, while their wire keys still share
-        /// one replacement namespace.
+        const RequestPool = enum { host, store, credentials };
+
+        fn requestPoolAt(index: usize) RequestPool {
+            if (index < runtime_effects.max_effects) return .host;
+            if (index < runtime_effects.max_effects + runtime_effects.max_store_effects) return .store;
+            return .credentials;
+        }
+
+        /// Allocate a routed request slot. Host, record-store, and credential
+        /// pools are disjoint, while wire keys still share one replacement
+        /// namespace.
         fn allocRequestEntry(
             fx: *Fx,
             key: []const u8,
             ok_tag: u8,
             err_tag: u8,
             ok_void: bool,
-            store_request: bool,
+            pool: RequestPool,
         ) ?u64 {
             const index = blk: {
                 if (key.len > 0) {
                     if (findRequest(key)) |existing| {
-                        const existing_is_store = existing >= runtime_effects.max_effects;
-                        if (existing_is_store == store_request) break :blk existing;
+                        if (requestPoolAt(existing) == pool) break :blk existing;
                         fx.cancelHostRequest(request_key_base + existing);
                         requests[existing].used = false;
                     }
                 }
-                break :blk (if (store_request) freeStoreRequestIndex() else freeRequestIndex()) orelse return null;
+                break :blk switch (pool) {
+                    .host => freeRequestIndex(),
+                    .store => freeStoreRequestIndex(),
+                    .credentials => freeCredentialsRequestIndex(),
+                } orelse return null;
             };
             const entry = &requests[index];
             entry.used = true;
@@ -2667,8 +2678,16 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn allocStoreRequestEntry(fx: *Fx, head: RoutedHead, ok_void: bool) ?u64 {
-            const index = allocRequestEntry(fx, head.key, head.ok_tag, head.err_tag, ok_void, true) orelse {
+            const index = allocRequestEntry(fx, head.key, head.ok_tag, head.err_tag, ok_void, .store) orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return null;
+            };
+            return request_key_base + index;
+        }
+
+        fn allocCredentialsRequestEntry(fx: *Fx, key: []const u8, ok_tag: u8, err_tag: u8, ok_void: bool) ?u64 {
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, ok_void, .credentials) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
                 return null;
             };
             return request_key_base + index;
@@ -2681,11 +2700,15 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the route and table slot it started with. Unkeyed requests each
         /// take a fresh entry.
         fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, typed_service: bool, payload: []const u8) void {
+            if (!typed_service and std.mem.startsWith(u8, name, "core.credentials.")) {
+                issueCredentialsRequest(fx, name, key, ok_tag, err_tag, payload);
+                return;
+            }
             if (key.len > 0 and findRequest(key) != null and (typed_service or fx.rejectsDuplicateHostRequestKeys())) {
                 stageRequestRejected(fx, err_tag);
                 return;
             }
-            const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, false) orelse {
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, .host) orelse {
                 stageRequestRejected(fx, err_tag);
                 return;
             };
@@ -2705,6 +2728,47 @@ pub fn TsCoreHost(comptime core: type) type {
                 .payload = payload,
                 .on_result = hostResultMsg,
             });
+        }
+
+        fn issueCredentialsRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+            var at: usize = 0;
+            const credential_key = takeLongBytes(payload, &at);
+            if (std.mem.eql(u8, name, "core.credentials.set")) {
+                const secret = takeLongBytes(payload, &at);
+                if (at != payload.len) @panic("ts core host: malformed core.credentials.set payload");
+                const request_key = allocCredentialsRequestEntry(fx, key, ok_tag, err_tag, true) orelse return;
+                fx.credentialsSet(.{
+                    .key = request_key,
+                    .credential_key = credential_key,
+                    .secret = secret,
+                    .host_result = hostResultMsg,
+                });
+                return;
+            }
+            if (at != payload.len) @panic("ts core host: malformed core.credentials payload");
+            const request_key = allocCredentialsRequestEntry(
+                fx,
+                key,
+                ok_tag,
+                err_tag,
+                std.mem.eql(u8, name, "core.credentials.delete"),
+            ) orelse return;
+            if (std.mem.eql(u8, name, "core.credentials.get")) {
+                fx.credentialsGet(.{
+                    .key = request_key,
+                    .credential_key = credential_key,
+                    .host_result = hostResultMsg,
+                });
+            } else if (std.mem.eql(u8, name, "core.credentials.delete")) {
+                fx.credentialsDelete(.{
+                    .key = request_key,
+                    .credential_key = credential_key,
+                    .host_result = hostResultMsg,
+                });
+            } else {
+                requests[@intCast(request_key - request_key_base)].used = false;
+                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+            }
         }
 
         /// Streaming services are one admission, not a channel-open/request
@@ -2775,7 +2839,17 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn freeStoreRequestIndex() ?usize {
-            for (requests[runtime_effects.max_effects..], runtime_effects.max_effects..) |*entry, index| {
+            const first = runtime_effects.max_effects;
+            const end = first + runtime_effects.max_store_effects;
+            for (requests[first..end], first..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        fn freeCredentialsRequestIndex() ?usize {
+            const first = runtime_effects.max_effects + runtime_effects.max_store_effects;
+            for (requests[first..], first..) |*entry, index| {
                 if (!entry.used) return index;
             }
             return null;

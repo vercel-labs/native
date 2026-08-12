@@ -332,6 +332,13 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .credentials and credentialsRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: credential record for key {d} has a payload or redaction shape the recorder never writes - the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -585,6 +592,17 @@ fn dbRecordDamaged(record: journal.EffectResultRecord) bool {
     };
 }
 
+fn credentialsRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.payload.len != 0 or record.exit_reason != .exited) return true;
+    const redacted_get = record.credentials_operation == .get and record.credentials_outcome == .ok;
+    if (redacted_get) return record.credentials_secret_len > runtime_effects.max_effect_credentials_secret_bytes or
+        std.mem.allEqual(u8, &record.credentials_salt, 0) or
+        std.mem.allEqual(u8, &record.credentials_digest, 0);
+    if (record.credentials_secret_len != 0) return true;
+    return !std.mem.allEqual(u8, &record.credentials_salt, 0) or
+        !std.mem.allEqual(u8, &record.credentials_digest, 0);
+}
+
 /// Recorder truth for pty provenance: output records always carry
 /// `.exited` (the live drain never touches the exit reason on an
 /// output); every reason is legal on an `.exit` record (`.rejected` =
@@ -742,6 +760,7 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,
         .db => record.exit_reason == .rejected,
+        .credentials => false,
         // Image `.rejected` terminals journal from BOTH sides of the
         // executor seam, so the outcome alone is not provenance: only
         // loop-side validation refusals — which the replayed

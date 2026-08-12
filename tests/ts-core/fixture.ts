@@ -162,6 +162,9 @@ export type Msg =
   | { readonly kind: "store_many" }
   | { readonly kind: "db_exec" }
   | { readonly kind: "db_query" }
+  | { readonly kind: "credential_set" }
+  | { readonly kind: "credential_get" }
+  | { readonly kind: "credential_delete" }
   | { readonly kind: "open_pty" }
   | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number }
   | { readonly kind: "store_scan_invalid" };
@@ -492,6 +495,12 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
         [7, true],
         { key: "relational", page: "loaded", done: "wrote", err: "failed" },
       )];
+    case "credential_set":
+      return [model, Cmd.credentials.set("api-token", model.status, { key: "credential", ok: "wrote", err: "failed" })];
+    case "credential_get":
+      return [model, Cmd.credentials.get("api-token", { key: "credential", ok: "loaded", err: "failed" })];
+    case "credential_delete":
+      return [model, Cmd.credentials.delete("api-token", { key: "credential", ok: "wrote", err: "failed" })];
     case "open_pty":
       return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
     case "pty_evt":

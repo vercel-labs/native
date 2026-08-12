@@ -7550,7 +7550,7 @@ int native_sdk_windows_clear_recent_documents(Host *host) {
 
 int native_sdk_windows_set_credential(Host *host, const char *service, size_t service_len, const char *account, size_t account_len, const char *secret, size_t secret_len) {
     (void)host;
-    if (!service || service_len == 0 || !account || account_len == 0 || !secret || secret_len == 0 || secret_len > UINT32_MAX) return 0;
+    if (!service || service_len == 0 || !account || account_len == 0 || (!secret && secret_len > 0) || secret_len > UINT32_MAX) return 0;
     HMODULE advapi = LoadLibraryW(L"advapi32.dll");
     if (!advapi) return 0;
     auto cred_write = reinterpret_cast<BOOL (WINAPI *)(PCREDENTIALW, DWORD)>(GetProcAddress(advapi, "CredWriteW"));
@@ -7572,28 +7572,32 @@ int native_sdk_windows_set_credential(Host *host, const char *service, size_t se
     credential.UserName = const_cast<LPWSTR>(user_name.c_str());
 
     BOOL ok = cred_write(&credential, 0);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
     FreeLibrary(advapi);
-    return ok ? 1 : 0;
+    if (ok) return 1;
+    return error == ERROR_ACCESS_DENIED ? -3 : -1;
 }
 
 size_t native_sdk_windows_get_credential(Host *host, const char *service, size_t service_len, const char *account, size_t account_len, char *buffer, size_t buffer_len) {
     (void)host;
-    if (!service || service_len == 0 || !account || account_len == 0 || !buffer) return 0;
+    if (!service || service_len == 0 || !account || account_len == 0 || (!buffer && buffer_len > 0)) return SIZE_MAX - 1;
     HMODULE advapi = LoadLibraryW(L"advapi32.dll");
-    if (!advapi) return 0;
+    if (!advapi) return SIZE_MAX - 1;
     auto cred_read = reinterpret_cast<BOOL (WINAPI *)(LPCWSTR, DWORD, DWORD, PCREDENTIALW *)>(GetProcAddress(advapi, "CredReadW"));
     auto cred_free = reinterpret_cast<void (WINAPI *)(PVOID)>(GetProcAddress(advapi, "CredFree"));
     if (!cred_read || !cred_free) {
         FreeLibrary(advapi);
-        return 0;
+        return SIZE_MAX - 1;
     }
 
     std::wstring target = credentialTarget(slice(service, service_len), slice(account, account_len));
     PCREDENTIALW credential = nullptr;
     BOOL ok = cred_read(target.c_str(), CRED_TYPE_GENERIC, 0, &credential);
     if (!ok || !credential) {
+        DWORD error = GetLastError();
         FreeLibrary(advapi);
-        return 0;
+        if (error == ERROR_NOT_FOUND) return SIZE_MAX;
+        return error == ERROR_ACCESS_DENIED ? SIZE_MAX - 3 : SIZE_MAX - 1;
     }
 
     size_t secret_len = credential->CredentialBlobSize;
@@ -7612,17 +7616,20 @@ int native_sdk_windows_delete_credential(Host *host, const char *service, size_t
     (void)host;
     if (!service || service_len == 0 || !account || account_len == 0) return 0;
     HMODULE advapi = LoadLibraryW(L"advapi32.dll");
-    if (!advapi) return 0;
+    if (!advapi) return -1;
     auto cred_delete = reinterpret_cast<BOOL (WINAPI *)(LPCWSTR, DWORD, DWORD)>(GetProcAddress(advapi, "CredDeleteW"));
     if (!cred_delete) {
         FreeLibrary(advapi);
-        return 0;
+        return -1;
     }
 
     std::wstring target = credentialTarget(slice(service, service_len), slice(account, account_len));
     BOOL ok = cred_delete(target.c_str(), CRED_TYPE_GENERIC, 0);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
     FreeLibrary(advapi);
-    return ok ? 1 : 0;
+    if (ok) return 1;
+    if (error == ERROR_NOT_FOUND) return 0;
+    return error == ERROR_ACCESS_DENIED ? -3 : -1;
 }
 
 size_t native_sdk_windows_format_local_time(Host *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len) {

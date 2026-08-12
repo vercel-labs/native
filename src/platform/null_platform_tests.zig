@@ -279,6 +279,7 @@ test "null platform preserves the tray title when presentation styles are set" {
 
 test "null platform records OS actions" {
     var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
     const services = null_platform.platform().services;
 
     try services.showNotification(.{
@@ -338,9 +339,13 @@ test "null platform records OS actions" {
     const secret = try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer);
     try std.testing.expectEqualStrings("secret-token", secret);
     try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{ .service = "dev.native-sdk.test", .account = "bob" }, &credential_buffer));
+    try services.setCredential(.{ .service = "dev.native-sdk.test", .account = "bob", .secret = "second-token" });
+    try std.testing.expectEqualStrings("secret-token", try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer));
+    try std.testing.expectEqualStrings("second-token", try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "bob" }, &credential_buffer));
     try services.deleteCredential(.{ .service = "dev.native-sdk.test", .account = "alice" });
     try std.testing.expectEqual(@as(usize, 1), null_platform.credentialDeleteCount());
     try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer));
+    try std.testing.expectEqualStrings("second-token", try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "bob" }, &credential_buffer));
 
     null_platform.local_time_offset_minutes = -360;
     var local_time_buffer: [max_local_time_text_bytes]u8 = undefined;

@@ -99,12 +99,95 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <AVFoundation/AVFoundation.h>
 #import <ImageIO/ImageIO.h>
+#import <Security/Security.h>
 
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "native_sdk_app.h"
+
+// ----------------------------------------------------------- credentials
+// Generic-password Keychain entries shared by the WebView bridge and core
+// effects through the runtime's one service/account namespace.
+static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
+    if (status == errSecSuccess) return 1;
+    if (status == errSecItemNotFound) return missingCode;
+    if (status == errSecInteractionNotAllowed || status == errSecNotAvailable) return -2;
+    if (status == errSecAuthFailed || status == errSecUserCanceled || status == errSecMissingEntitlement) return -3;
+    return -5;
+}
+
+static NSMutableDictionary *NativeSdkCredentialQuery(const char *service, uintptr_t service_len,
+                                                       const char *account, uintptr_t account_len) {
+    NSString *serviceString = [[NSString alloc] initWithBytes:service length:service_len encoding:NSUTF8StringEncoding];
+    NSString *accountString = [[NSString alloc] initWithBytes:account length:account_len encoding:NSUTF8StringEncoding];
+    if (!serviceString || !accountString) return nil;
+    return [@{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: serviceString,
+        (__bridge id)kSecAttrAccount: accountString,
+    } mutableCopy];
+}
+
+static int NativeSdkCredentialSet(void *context,
+                                  const char *service, uintptr_t service_len,
+                                  const char *account, uintptr_t account_len,
+                                  const uint8_t *secret, uintptr_t secret_len) {
+    (void)context;
+    @autoreleasepool {
+        NSMutableDictionary *query = NativeSdkCredentialQuery(service, service_len, account, account_len);
+        if (!query) return -5;
+        NSData *data = [NSData dataWithBytes:secret length:secret_len];
+        NSDictionary *update = @{ (__bridge id)kSecValueData: data };
+        OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query,
+                                        (__bridge CFDictionaryRef)update);
+        if (status == errSecItemNotFound) {
+            query[(__bridge id)kSecValueData] = data;
+            query[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+            status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
+        }
+        return status == errSecSuccess ? 1 : NativeSdkCredentialStatus(status, -5);
+    }
+}
+
+static int64_t NativeSdkCredentialGet(void *context,
+                                      const char *service, uintptr_t service_len,
+                                      const char *account, uintptr_t account_len,
+                                      uint8_t *output, uintptr_t output_len) {
+    (void)context;
+    @autoreleasepool {
+        NSMutableDictionary *query = NativeSdkCredentialQuery(service, service_len, account, account_len);
+        if (!query) return -5;
+        query[(__bridge id)kSecReturnData] = @YES;
+        query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+        CFTypeRef raw = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &raw);
+        if (status != errSecSuccess) return NativeSdkCredentialStatus(status, -1);
+        NSData *data = (__bridge NSData *)raw;
+        if (data.length > output_len) {
+            CFRelease(raw);
+            return -4;
+        }
+        if (data.length > 0) memcpy(output, data.bytes, data.length);
+        int64_t result = (int64_t)data.length;
+        CFRelease(raw);
+        return result;
+    }
+}
+
+static int NativeSdkCredentialDelete(void *context,
+                                     const char *service, uintptr_t service_len,
+                                     const char *account, uintptr_t account_len) {
+    (void)context;
+    @autoreleasepool {
+        NSMutableDictionary *query = NativeSdkCredentialQuery(service, service_len, account, account_len);
+        if (!query) return -5;
+        OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+        return status == errSecSuccess ? 1 : NativeSdkCredentialStatus(status, 0);
+    }
+}
 
 // Zig's std.debug stack-trace symbolication (pulled in by the embed lib's
 // panic path) references `_dyld_get_image_header_containing_address`, which
@@ -1664,6 +1747,16 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     };
     native_sdk_app_set_audio_service(self.nativeApp, &audioService, (__bridge void *)self.audioEngine);
     [self logNativeErrorIfAny:@"audio_service"];
+
+    // Secure credentials use generic-password Keychain entries. Register
+    // before start so boot effects see the same namespace as the bridge.
+    native_sdk_credential_service_t credentialService = {
+        .set = NativeSdkCredentialSet,
+        .get = NativeSdkCredentialGet,
+        .delete = NativeSdkCredentialDelete,
+    };
+    native_sdk_app_set_credential_service(self.nativeApp, &credentialService, NULL);
+    [self logNativeErrorIfAny:@"credential_service"];
 
     // The platform image decoder (registered before start, like the audio
     // service, so a boot-effect fx.registerImageBytes already decodes):

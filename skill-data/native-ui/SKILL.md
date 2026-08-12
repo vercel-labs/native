@@ -712,6 +712,24 @@ File rules:
 - Writes replace the file whole; `writeFile` bytes are copied at call time so the caller's buffer is immediately reusable. Reads deliver drain-scratch bytes — copy what the model keeps.
 - In the fake executor: `pendingFileAt(0)` records `key`/`op`/`path`/`bytes` for assertions; `feedFileResult(key, .ok, "{...}")` answers a read (over-bound content is cut and rewritten to `.truncated`, mirroring the real reader), `feedFileResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed.
 
+`fx.credentialsSet` / `fx.credentialsGet` / `fx.credentialsDelete` are the only place authentication tokens, passwords, and similar app secrets belong. Declare both `.capabilities = .{ "credentials" }` and `.permissions = .{ "credentials" }` in `app.zon`; the stable app id is the OS keychain service namespace, while the supplied key is its account. Never copy a fetched secret into Model: consume the drain-scratch `result.bytes` immediately while constructing the next effect, so persistence, state fingerprints, and diagnostics cannot capture it.
+
+```zig
+pub const Msg = union(enum) {
+    load_token,
+    token_result: native_sdk.EffectCredentialsResult,
+};
+
+.load_token => fx.credentialsGet(.{
+    .key = 41,
+    .credential_key = "api-token",        // UTF-8, 1..256 bytes
+    .on_result = Effects.credentialsMsg(.token_result),
+}),
+.token_result => |result| model.useTokenNow(result), // COPY nothing into Model
+```
+
+Credential effects have their own four worker slots and file-style replacement: reissuing a key cancels the old operation silently and starts the new one. `result.outcome` is closed: `.ok`, `.miss`, `.denied`, `.locked`, `.io_failed`, `.over_bound`, or `.rejected`; get secrets are binary-safe and bounded at 64 KiB, and delete is idempotent. Session recording elides every secret and replay delivers same-length placeholder bytes, so replay can verify control flow but cannot authenticate with the original value. Tests stay hermetic with `TestHarness(App).createWithCredentials(...)`; they never open the developer's live keychain.
+
 `fx.writeClipboard` / `fx.readClipboard` put text on (and read it from) the system clipboard through the platform pasteboard — the same seam the runtime's cmd+C copy uses. Never spawn `pbcopy`/`pbpaste`/`xclip` for this. Same discipline: key-based (shared key space and 16 slots), exactly one terminal Msg with an explicit outcome. The pasteboard call is synchronous on the loop thread (no worker), but the result still arrives as an ordinary Msg on the next drain:
 
 ```zig

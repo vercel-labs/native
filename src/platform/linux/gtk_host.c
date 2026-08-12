@@ -4982,11 +4982,26 @@ static native_sdk_secret_api_t *native_sdk_load_secret_api(void) {
     return &native_sdk_secret_api;
 }
 
-static void native_sdk_secure_free(char *bytes, size_t len) {
+static void native_sdk_secure_gfree(char *bytes, size_t len) {
     if (!bytes) return;
     volatile char *cursor = bytes;
     for (size_t i = 0; i < len; i++) cursor[i] = 0;
-    free(bytes);
+    g_free(bytes);
+}
+
+static const char native_sdk_credential_bytes_prefix[] = "native-sdk:bytes:v1:";
+
+/* libsecret reports a locked collection through GError rather than a
+ * dedicated return value. Keep that condition distinct at the C seam so the
+ * core effect can deliver its closed `locked` outcome instead of flattening
+ * it into `io_failed`. */
+static int native_sdk_secret_error_locked(const GError *error) {
+    if (!error || !error->message) return 0;
+    char *lower = g_ascii_strdown(error->message, -1);
+    if (!lower) return 0;
+    int locked = strstr(lower, "locked") != NULL;
+    g_free(lower);
+    return locked;
 }
 
 int native_sdk_gtk_credentials_available(native_sdk_gtk_host_t *host) {
@@ -4997,15 +5012,17 @@ int native_sdk_gtk_credentials_available(native_sdk_gtk_host_t *host) {
 int native_sdk_gtk_set_credential(native_sdk_gtk_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len, const char *secret, size_t secret_len) {
     (void)host;
     native_sdk_secret_api_t *api = native_sdk_load_secret_api();
-    if (!api || !service || service_len == 0 || !account || account_len == 0 || !secret || secret_len == 0) return 0;
+    if (!api || !service || service_len == 0 || !account || account_len == 0 || (!secret && secret_len > 0)) return 0;
 
     char *service_copy = native_sdk_strndup(service, service_len);
     char *account_copy = native_sdk_strndup(account, account_len);
-    char *secret_copy = native_sdk_strndup(secret, secret_len);
+    gchar *encoded = g_base64_encode((const guchar *)(secret ? secret : ""), secret_len);
+    char *secret_copy = encoded ? g_strdup_printf("%s%s", native_sdk_credential_bytes_prefix, encoded) : NULL;
     if (!service_copy || !account_copy || !secret_copy) {
         free(service_copy);
         free(account_copy);
-        native_sdk_secure_free(secret_copy, secret_len);
+        if (encoded) native_sdk_secure_gfree(encoded, strlen(encoded));
+        if (secret_copy) native_sdk_secure_gfree(secret_copy, strlen(secret_copy));
         return 0;
     }
 
@@ -5013,32 +5030,35 @@ int native_sdk_gtk_set_credential(native_sdk_gtk_host_t *host, const char *servi
     if (!label) {
         free(service_copy);
         free(account_copy);
-        native_sdk_secure_free(secret_copy, secret_len);
+        native_sdk_secure_gfree(encoded, strlen(encoded));
+        native_sdk_secure_gfree(secret_copy, strlen(secret_copy));
         return 0;
     }
 
     GError *error = NULL;
     gboolean ok = api->store_sync(&native_sdk_credential_schema, "default", label, secret_copy, NULL, &error, "service", service_copy, "account", account_copy, NULL);
+    int locked = native_sdk_secret_error_locked(error);
     if (error) g_error_free(error);
 
     g_free(label);
     free(service_copy);
     free(account_copy);
-    native_sdk_secure_free(secret_copy, secret_len);
-    return ok ? 1 : 0;
+    native_sdk_secure_gfree(encoded, strlen(encoded));
+    native_sdk_secure_gfree(secret_copy, strlen(secret_copy));
+    return locked ? -2 : (ok ? 1 : 0);
 }
 
 size_t native_sdk_gtk_get_credential(native_sdk_gtk_host_t *host, const char *service, size_t service_len, const char *account, size_t account_len, char *buffer, size_t buffer_len) {
     (void)host;
     native_sdk_secret_api_t *api = native_sdk_load_secret_api();
-    if (!api || !service || service_len == 0 || !account || account_len == 0 || !buffer) return 0;
+    if (!api || !service || service_len == 0 || !account || account_len == 0 || (!buffer && buffer_len > 0)) return SIZE_MAX - 1;
 
     char *service_copy = native_sdk_strndup(service, service_len);
     char *account_copy = native_sdk_strndup(account, account_len);
     if (!service_copy || !account_copy) {
         free(service_copy);
         free(account_copy);
-        return 0;
+        return SIZE_MAX - 1;
     }
 
     GError *error = NULL;
@@ -5046,14 +5066,28 @@ size_t native_sdk_gtk_get_credential(native_sdk_gtk_host_t *host, const char *se
     free(service_copy);
     free(account_copy);
     if (error) {
+        int locked = native_sdk_secret_error_locked(error);
         g_error_free(error);
-        return (size_t)-1;
+        return locked ? SIZE_MAX - 2 : SIZE_MAX - 1;
     }
-    if (!password) return 0;
+    if (!password) return SIZE_MAX;
 
     size_t password_len = strlen(password);
+    const size_t prefix_len = sizeof(native_sdk_credential_bytes_prefix) - 1;
+    if (password_len >= prefix_len && memcmp(password, native_sdk_credential_bytes_prefix, prefix_len) == 0) {
+        gsize decoded_len = 0;
+        guchar *decoded = g_base64_decode(password + prefix_len, &decoded_len);
+        if (!decoded && decoded_len != 0) {
+            native_sdk_secure_gfree(password, password_len);
+            return SIZE_MAX - 1;
+        }
+        if (decoded_len <= buffer_len && decoded_len > 0) memcpy(buffer, decoded, decoded_len);
+        if (decoded) native_sdk_secure_gfree((char *)decoded, decoded_len);
+        native_sdk_secure_gfree(password, password_len);
+        return decoded_len;
+    }
     if (password_len <= buffer_len && password_len > 0) memcpy(buffer, password, password_len);
-    g_free(password);
+    native_sdk_secure_gfree(password, password_len);
     return password_len;
 }
 
@@ -5075,8 +5109,9 @@ int native_sdk_gtk_delete_credential(native_sdk_gtk_host_t *host, const char *se
     free(service_copy);
     free(account_copy);
     if (error) {
+        int locked = native_sdk_secret_error_locked(error);
         g_error_free(error);
-        return -1;
+        return locked ? -2 : -1;
     }
     return ok ? 1 : 0;
 }

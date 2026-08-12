@@ -109,6 +109,9 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.storemany")) return .store_many;
     if (std.mem.eql(u8, name, "core.dbexec")) return .db_exec;
     if (std.mem.eql(u8, name, "core.dbquery")) return .db_query;
+    if (std.mem.eql(u8, name, "core.credentialset")) return .credential_set;
+    if (std.mem.eql(u8, name, "core.credentialget")) return .credential_get;
+    if (std.mem.eql(u8, name, "core.credentialdelete")) return .credential_delete;
     return null;
 }
 
@@ -251,7 +254,10 @@ const Harness = struct {
         errdefer std.testing.allocator.destroy(self);
         self.clock = .{};
         self.clock.setWallMs(50_000);
-        self.harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
+        // This fixture declares the credentials capability/permission. The
+        // standard test lane must bind the hermetic NullPlatform store before
+        // UiApp installs its first-bind-sticks effect seams.
+        self.harness = try native_sdk.TestHarness().createWithCredentials(std.testing.allocator, .{
             .size = native_sdk.geometry.SizeF.init(400, 300),
         });
         errdefer self.harness.destroy(std.testing.allocator);
@@ -677,6 +683,42 @@ test "Cmd.db wire values execute against SQLite and route an encoded page throug
     try std.testing.expectEqual(@as(u8, 0), page[at]);
     at += 1;
     try std.testing.expectEqual(page.len, at);
+}
+
+test "every Cmd.credentials factory emits app-scoped bounded records through the external core" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    try h.menu("core.credentialset");
+    var request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.credentials.set", request.name);
+    var at: usize = 0;
+    try std.testing.expectEqualStrings("api-token", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("ready", storePayloadField(request.payload, &at));
+    try std.testing.expectEqual(request.payload.len, at);
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+
+    try h.menu("core.credentialget");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.credentials.get", request.name);
+    at = 0;
+    try std.testing.expectEqualStrings("api-token", storePayloadField(request.payload, &at));
+    try std.testing.expectEqual(request.payload.len, at);
+    try fx.feedHostResult(request.key, true, "secret-from-host");
+    try h.wake();
+    try std.testing.expectEqualStrings("secret-from-host", Bridge.model().status);
+
+    try h.menu("core.credentialdelete");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.credentials.delete", request.name);
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
 }
 
 test "clipboardWrite and clipboardRead ride the platform pasteboard" {

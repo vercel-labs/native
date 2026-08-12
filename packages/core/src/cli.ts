@@ -36,6 +36,7 @@ function main(argv: string[]): number {
   let persistErr: string | null = null;
   let sdkCorePath: string | null = null;
   const capabilities: string[] = [];
+  const permissions: string[] = [];
   const servicePackages: ServicePackage[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--contract") {
@@ -63,6 +64,13 @@ function main(argv: string[]): number {
         return 2;
       }
       capabilities.push(capability);
+    } else if (args[i] === "--permission") {
+      const permission = args[++i] ?? null;
+      if (permission === null) {
+        console.error("--permission requires a name");
+        return 2;
+      }
+      permissions.push(permission);
     } else if (args[i] === "--persist-version") {
       const spelling = args[++i] ?? "";
       const version = Number(spelling);
@@ -135,6 +143,7 @@ function main(argv: string[]): number {
     servicesContract: servicesContractOut !== null,
     servicePackages,
     capabilities,
+    permissions,
     persistVersion: persistVersion ?? undefined,
     persistStatePath: persistStatePath ?? undefined,
     persistRoutes,

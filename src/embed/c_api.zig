@@ -195,6 +195,20 @@ pub fn MobileCApi(comptime Host: type) type {
             return 1;
         }
 
+        /// Register or clear the mobile host's OS-backed credential store.
+        /// This supplies platform backing only; app.zon capability and
+        /// permission gates are still enforced by the runtime.
+        pub fn native_sdk_app_set_credential_service(app: ?*anyopaque, service: ?*const types.MobileCredentialService, context: ?*anyopaque) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const table: types.MobileCredentialService = if (service) |value| value.* else .{};
+            host.setCredentialService(self, table, context) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            self.last_error = null;
+            return 1;
+        }
+
         /// One report from the shim's audio player (kind ordinals: 0
         /// loaded, 1 position, 2 completed, 3 failed), dispatched into the
         /// embedded runtime exactly like a desktop platform's `.audio`
@@ -778,6 +792,7 @@ pub const native_sdk_app_gpu_frame_state = FixedShellApi.native_sdk_app_gpu_fram
 pub const native_sdk_app_text_input_state = FixedShellApi.native_sdk_app_text_input_state;
 pub const native_sdk_app_set_text_measure = FixedShellApi.native_sdk_app_set_text_measure;
 pub const native_sdk_app_set_audio_service = FixedShellApi.native_sdk_app_set_audio_service;
+pub const native_sdk_app_set_credential_service = FixedShellApi.native_sdk_app_set_credential_service;
 pub const native_sdk_app_audio_event = FixedShellApi.native_sdk_app_audio_event;
 pub const native_sdk_app_set_image_service = FixedShellApi.native_sdk_app_set_image_service;
 pub const native_sdk_app_set_automation_dir = FixedShellApi.native_sdk_app_set_automation_dir;

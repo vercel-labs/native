@@ -482,6 +482,7 @@ pub fn checkCore(
     base_env: *std.process.Environ.Map,
     framework_root: []const u8,
     capabilities: []const []const u8,
+    permissions: []const []const u8,
     service_packages: []const ServicePackage,
     persist_version: ?u64,
     persist_routes: ?PersistRoutes,
@@ -499,6 +500,7 @@ pub fn checkCore(
     defer if (persist_version_arg) |value| allocator.free(value);
     try argv.appendSlice(allocator, &.{ "node", runner_path, cli_path, "src/core.ts" });
     for (capabilities) |capability| try argv.appendSlice(allocator, &.{ "--capability", capability });
+    for (permissions) |permission| try argv.appendSlice(allocator, &.{ "--permission", permission });
     var service_package_args: std.ArrayList([]u8) = .empty;
     defer {
         for (service_package_args.items) |value| allocator.free(value);
@@ -595,6 +597,7 @@ pub const DevHostOptions = struct {
     /// app.zon capabilities installed by the shipping host. The virtual host
     /// receives the same set so capability-shed effects reject identically.
     capabilities: []const []const u8 = &.{},
+    permissions: []const []const u8 = &.{},
     /// NDJSON message script; null = interactive stdin.
     script: ?[]const u8 = null,
     /// Re-run the harness whenever any module of the core changes.
@@ -672,6 +675,8 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     try argv.appendSlice(allocator, &.{
         "--app-name",
         options.app_name,
+        "--app-id",
+        options.app_id,
         "--canvas-label",
         options.canvas_label,
         "--window-width",
@@ -687,6 +692,9 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     }
     for (options.capabilities) |capability| {
         try argv.appendSlice(allocator, &.{ "--capability", capability });
+    }
+    for (options.permissions) |permission| {
+        try argv.appendSlice(allocator, &.{ "--permission", permission });
     }
     if (sqlite_source) |sdk_core| {
         try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core, "--sqlite-src", "src" });

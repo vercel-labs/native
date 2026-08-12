@@ -531,7 +531,7 @@ size_t native_sdk_gtk_get_credential(Host *host, const char *service, size_t ser
     (void)account_len;
     (void)buffer;
     (void)buffer_len;
-    return 0;
+    return SIZE_MAX - 1;
 }
 
 int native_sdk_gtk_delete_credential(Host *host, const char *service, size_t service_len, const char *account, size_t account_len) {

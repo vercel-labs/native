@@ -68,6 +68,7 @@
 package dev.native_sdk.host;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -80,8 +81,12 @@ import android.media.MediaPlayer;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.security.keystore.UserNotAuthenticatedException;
 import android.text.InputType;
 import android.util.LruCache;
+import android.util.Base64;
 import android.view.Choreographer;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -98,10 +103,17 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 
 public final class NativeSdkActivity extends Activity implements SurfaceHolder.Callback, Choreographer.FrameCallback {
     private static final int TOUCH_MODE_IDLE = 0;
@@ -230,6 +242,12 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
         // one real player behind the embed audio seam — see the audio
         // section below.
         nativeSetAudioService(nativeApp);
+
+        // Tier-4 secure storage: AndroidKeyStore holds the non-exportable
+        // AES key; app-private preferences hold only authenticated
+        // ciphertext. Register before start so boot credential effects can
+        // run without ever putting a token in Model state.
+        nativeSetCredentialService(nativeApp);
 
         // The platform image decoder (registered before start, so a
         // boot-effect fx.registerImageBytes already decodes): the
@@ -434,6 +452,112 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
         if (fontId == 5) return Typeface.create(Typeface.DEFAULT, Typeface.ITALIC);
         if (fontId == 6) return Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC);
         return Typeface.DEFAULT;
+    }
+
+    // --------------------------------------------------------- credentials
+
+    private static final String CREDENTIAL_KEY_ALIAS = "native-sdk.credentials.v1";
+    private static final String CREDENTIAL_PREFS = "native-sdk.credentials";
+
+    private synchronized SecretKey credentialEncryptionKey() throws GeneralSecurityException {
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
+        try {
+            store.load(null);
+        } catch (java.io.IOException e) {
+            throw new GeneralSecurityException(e);
+        }
+        java.security.Key existing = store.getKey(CREDENTIAL_KEY_ALIAS, null);
+        if (existing instanceof SecretKey) return (SecretKey)existing;
+        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        generator.init(new KeyGenParameterSpec.Builder(
+            CREDENTIAL_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
+            .build());
+        return generator.generateKey();
+    }
+
+    private String credentialEntryKey(byte[] service, byte[] account) throws GeneralSecurityException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        digest.update(service);
+        digest.update((byte)0);
+        digest.update(account);
+        return Base64.encodeToString(digest.digest(), Base64.NO_WRAP | Base64.URL_SAFE);
+    }
+
+    private SharedPreferences credentialPreferences() {
+        return getSharedPreferences(CREDENTIAL_PREFS, MODE_PRIVATE);
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int credentialSet(byte[] service, byte[] account, byte[] secret) {
+        try {
+            String entryKey = credentialEntryKey(service, account);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, credentialEncryptionKey());
+            cipher.updateAAD(entryKey.getBytes(StandardCharsets.UTF_8));
+            byte[] iv = cipher.getIV();
+            byte[] ciphertext = cipher.doFinal(secret);
+            if (iv.length > 255) return -5;
+            ByteBuffer packed = ByteBuffer.allocate(1 + iv.length + ciphertext.length);
+            packed.put((byte)iv.length).put(iv).put(ciphertext);
+            boolean committed = credentialPreferences().edit()
+                .putString(entryKey,
+                           Base64.encodeToString(packed.array(), Base64.NO_WRAP))
+                .commit();
+            return committed ? 1 : -5;
+        } catch (UserNotAuthenticatedException e) {
+            return -2;
+        } catch (SecurityException e) {
+            return -3;
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            return -5;
+        }
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    long credentialGet(byte[] service, byte[] account, ByteBuffer output) {
+        try {
+            String entryKey = credentialEntryKey(service, account);
+            String encoded = credentialPreferences().getString(entryKey, null);
+            if (encoded == null) return -1;
+            byte[] packed = Base64.decode(encoded, Base64.NO_WRAP);
+            if (packed.length < 2) return -5;
+            int ivLength = packed[0] & 0xff;
+            if (ivLength == 0 || 1 + ivLength >= packed.length) return -5;
+            byte[] iv = java.util.Arrays.copyOfRange(packed, 1, 1 + ivLength);
+            byte[] ciphertext = java.util.Arrays.copyOfRange(packed, 1 + ivLength, packed.length);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, credentialEncryptionKey(), new GCMParameterSpec(128, iv));
+            cipher.updateAAD(entryKey.getBytes(StandardCharsets.UTF_8));
+            byte[] secret = cipher.doFinal(ciphertext);
+            if (secret.length > output.capacity()) return -4;
+            output.position(0);
+            output.put(secret);
+            return secret.length;
+        } catch (UserNotAuthenticatedException e) {
+            return -2;
+        } catch (SecurityException e) {
+            return -3;
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            return -5;
+        }
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int credentialDelete(byte[] service, byte[] account) {
+        try {
+            String key = credentialEntryKey(service, account);
+            SharedPreferences preferences = credentialPreferences();
+            if (!preferences.contains(key)) return 0;
+            return preferences.edit().remove(key).commit() ? 1 : -5;
+        } catch (SecurityException e) {
+            return -3;
+        } catch (GeneralSecurityException e) {
+            return -5;
+        }
     }
 
     // -------------------------------------------------------------- images
@@ -1370,6 +1494,7 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     private native void nativeSetAutomationDir(long app, String path);
     private native void nativeSetTextMeasure(long app);
     private native void nativeSetAudioService(long app);
+    private native void nativeSetCredentialService(long app);
     private native void nativeSetImageService(long app);
     private native void nativeAudioEvent(long app, int kind, long positionMs, long durationMs, int playing, int buffering);
     private native String nativeLastError(long app);

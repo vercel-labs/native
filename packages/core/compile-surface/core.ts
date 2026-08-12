@@ -719,6 +719,18 @@ export const Cmd = {
     },
   },
 
+  credentials: {
+    set(credentialKey: string, secret: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "request", name: "core.credentials.set", key: route.key ?? "", okKind: route.ok, errKind: route.err, typedService: false, payload: hostRecordBytes({ key: utf8Bytes(credentialKey), secret }) };
+    },
+    get(credentialKey: string, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return Cmd.request("core.credentials.get", hostRecordBytes({ key: utf8Bytes(credentialKey) }), route);
+    },
+    delete(credentialKey: string, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return { op: "request", name: "core.credentials.delete", key: route.key ?? "", okKind: route.ok, errKind: route.err, typedService: false, payload: hostRecordBytes({ key: utf8Bytes(credentialKey) }) };
+    },
+  },
+
   db: {
     query(sql: string, params: ReadonlyArray<DbValue>, route: { readonly key?: string; readonly page: string; readonly done: string; readonly err: string }): CmdData {
       return { op: "db_query", key: route.key ?? "", pageKind: route.page, doneKind: route.done, errKind: route.err, sql, params };
@@ -790,31 +802,6 @@ export const Cmd = {
 
   revealPath(path: Uint8Array): CmdData {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
-  },
-
-  credentialSet(
-    service: Uint8Array,
-    account: Uint8Array,
-    secret: Uint8Array,
-    route: { readonly key?: string; readonly ok: string; readonly err: string },
-  ): CmdData {
-    return Cmd.request("native-sdk.credentials.set", hostRecordBytes({ service, account, secret }), route);
-  },
-
-  credentialGet(
-    service: Uint8Array,
-    account: Uint8Array,
-    route: { readonly key?: string; readonly ok: string; readonly err: string },
-  ): CmdData {
-    return Cmd.request("native-sdk.credentials.get", hostRecordBytes({ service, account }), route);
-  },
-
-  credentialDelete(
-    service: Uint8Array,
-    account: Uint8Array,
-    route: { readonly key?: string; readonly ok: string; readonly err: string },
-  ): CmdData {
-    return Cmd.request("native-sdk.credentials.delete", hostRecordBytes({ service, account }), route);
   },
 
   formatLocalTime(

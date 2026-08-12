@@ -1025,6 +1025,130 @@ const MobileRelationalHost = ui_host.UiAppHostWithStorage(MobileCounterDef, fals
 const MobileRelationalApi = c_api.MobileCApi(MobileRelationalHost);
 const MobileBothStorageHost = ui_host.UiAppHostWithStorage(MobileCounterDef, true, true, &.{});
 const MobileBothStorageApi = c_api.MobileCApi(MobileBothStorageHost);
+const MobileCredentialHost = ui_host.UiAppHostWithStorageAndCredentials(
+    MobileCounterDef,
+    false,
+    false,
+    &.{},
+    true,
+    true,
+    "dev.native-sdk.mobile-credentials",
+);
+const MobileCredentialApi = c_api.MobileCApi(MobileCredentialHost);
+
+const MobileCredentialRecorder = struct {
+    secret: [64]u8 = undefined,
+    secret_len: usize = 0,
+    present: bool = false,
+};
+
+fn mobileCredentialRecorder(context: ?*anyopaque) *MobileCredentialRecorder {
+    return @ptrCast(@alignCast(context.?));
+}
+
+fn mobileCredentialSet(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    secret: ?[*]const u8,
+    secret_len: usize,
+) callconv(.c) c_int {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (secret_len > recorder.secret.len) return -5;
+    if (secret_len > 0) @memcpy(recorder.secret[0..secret_len], secret.?[0..secret_len]);
+    recorder.secret_len = secret_len;
+    recorder.present = true;
+    return 1;
+}
+
+fn mobileCredentialGet(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    output: ?[*]u8,
+    output_len: usize,
+) callconv(.c) i64 {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (!recorder.present) return -1;
+    if (recorder.secret_len > output_len) return -4;
+    if (recorder.secret_len > 0) @memcpy(output.?[0..recorder.secret_len], recorder.secret[0..recorder.secret_len]);
+    return @intCast(recorder.secret_len);
+}
+
+fn mobileCredentialDelete(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+) callconv(.c) c_int {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (!recorder.present) return 0;
+    recorder.present = false;
+    recorder.secret_len = 0;
+    return 1;
+}
+
+test "mobile credential service uses app identity and preserves misses" {
+    const app = MobileCredentialApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileCredentialApi.native_sdk_app_destroy(app);
+    const self: *MobileCredentialHost = @ptrCast(@alignCast(app));
+
+    try std.testing.expect(self.embedded.runtime.options.credentials_enabled);
+    try std.testing.expectEqualStrings(
+        "dev.native-sdk.mobile-credentials",
+        self.embedded.runtime.options.platform.app_info.bundle_id,
+    );
+    try std.testing.expect(self.embedded.runtime.options.platform.services.set_credential_fn == null);
+
+    var recorder = MobileCredentialRecorder{};
+    const service: types.MobileCredentialService = .{
+        .set = mobileCredentialSet,
+        .get = mobileCredentialGet,
+        .delete = mobileCredentialDelete,
+    };
+    try std.testing.expectEqual(
+        @as(c_int, 1),
+        MobileCredentialApi.native_sdk_app_set_credential_service(app, &service, &recorder),
+    );
+
+    const services = self.embedded.runtime.options.platform.services;
+    try services.setCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+        .secret = "secret-bytes",
+    });
+    var output: [64]u8 = undefined;
+    const secret = try services.getCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    }, &output);
+    try std.testing.expectEqualStrings("secret-bytes", secret);
+    try services.deleteCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    });
+    try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    }, &output));
+}
 
 fn expectNoUiHostError(app: ?*anyopaque) !void {
     try std.testing.expectEqualStrings("", std.mem.span(MobileCounterApi.native_sdk_app_last_error_name(app)));

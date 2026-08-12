@@ -98,6 +98,45 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(quit.warnings.some((d) => d.id === "NS1070"), false);
 });
 
+test("NS1071/NS1072 keep core credentials behind capability and permission", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly token: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly token: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { token: asciiBytes("secret") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.credentials.set("api-token", model.token, { key: "set", ok: "wrote", err: "failed" }),
+      Cmd.credentials.get("api-token", { key: "get", ok: "loaded", err: "failed" }),
+      Cmd.credentials.delete("api-token", { key: "delete", ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1071"), false);
+
+  const missingPermission = check(source, { capabilities: ["credentials"] });
+  assert.equal(missingPermission.ok, false);
+  assert.equal(missingPermission.diagnostics.filter((d) => d.id === "NS1072").length, 3);
+
+  const missingCapability = check(source, { permissions: ["credentials"] });
+  assert.equal(missingCapability.ok, true);
+  assert.equal(missingCapability.warnings.filter((d) => d.id === "NS1071").length, 3);
+
+  const unused = check(core, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1071").length, 1);
+});
+
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {
   const source = `
 import { Cmd } from "@native-sdk/core";

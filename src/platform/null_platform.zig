@@ -474,8 +474,12 @@ pub const NullPlatform = struct {
     credential_service_len: usize = 0,
     credential_account: [max_credential_account_bytes]u8 = undefined,
     credential_account_len: usize = 0,
-    credential_secret: [max_credential_secret_bytes]u8 = undefined,
-    credential_secret_len: usize = 0,
+    /// Hermetic process-local keychain. Real credential effects use four
+    /// worker threads, so the fake must be synchronized too; one old
+    /// bridge-era "last secret" buffer silently lost distinct keys.
+    credential_mutex: std.atomic.Mutex = .unlocked,
+    credential_entries: std.StringHashMapUnmanaged([]u8) = .empty,
+    credential_last_secret: ?[]const u8 = null,
     credential_set_count: usize = 0,
     credential_delete_count: usize = 0,
     /// Deterministic local-zone model for tests. Real hosts consult the OS
@@ -813,6 +817,18 @@ pub const NullPlatform = struct {
             std.debug.print("null platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it, process-lived, so the stale call stays safe\n", .{});
             return;
         }
+        if (self.destroyed) return;
+        self.lockCredentials();
+        var credentials = self.credential_entries.iterator();
+        while (credentials.next()) |entry| {
+            @memset(entry.value_ptr.*, 0);
+            std.heap.page_allocator.free(entry.value_ptr.*);
+            std.heap.page_allocator.free(entry.key_ptr.*);
+        }
+        self.credential_entries.deinit(std.heap.page_allocator);
+        self.credential_entries = .empty;
+        self.credential_last_secret = null;
+        self.credential_mutex.unlock();
         self.destroyed = true;
     }
 
@@ -1531,29 +1547,80 @@ pub const NullPlatform = struct {
         self.notification_count += 1;
     }
 
+    const max_credential_identity_bytes = max_credential_service_bytes + 1 + max_credential_account_bytes;
+
+    fn lockCredentials(self: *NullPlatform) void {
+        while (!self.credential_mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn credentialIdentity(buffer: *[max_credential_identity_bytes]u8, key: CredentialKey) anyerror![]const u8 {
+        if (key.service.len == 0 or key.service.len > max_credential_service_bytes or
+            key.account.len == 0 or key.account.len > max_credential_account_bytes)
+        {
+            return error.CredentialFieldTooLarge;
+        }
+        @memcpy(buffer[0..key.service.len], key.service);
+        buffer[key.service.len] = 0;
+        @memcpy(buffer[key.service.len + 1 ..][0..key.account.len], key.account);
+        return buffer[0 .. key.service.len + 1 + key.account.len];
+    }
+
     fn setCredential(context: ?*anyopaque, credential: Credential) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (credential.secret.len > max_credential_secret_bytes) return error.CredentialFieldTooLarge;
+        var identity_storage: [max_credential_identity_bytes]u8 = undefined;
+        const identity = try credentialIdentity(&identity_storage, .{
+            .service = credential.service,
+            .account = credential.account,
+        });
+
+        self.lockCredentials();
+        defer self.credential_mutex.unlock();
+        const secret = try std.heap.page_allocator.dupe(u8, credential.secret);
+        errdefer std.heap.page_allocator.free(secret);
+        if (self.credential_entries.getPtr(identity)) |existing| {
+            @memset(existing.*, 0);
+            std.heap.page_allocator.free(existing.*);
+            existing.* = secret;
+        } else {
+            const owned_identity = try std.heap.page_allocator.dupe(u8, identity);
+            errdefer std.heap.page_allocator.free(owned_identity);
+            try self.credential_entries.put(std.heap.page_allocator, owned_identity, secret);
+        }
+
         self.credential_service = undefined;
         self.credential_account = undefined;
-        self.credential_secret = undefined;
-        self.credential_service_len = (try copyInto(&self.credential_service, credential.service)).len;
-        self.credential_account_len = (try copyInto(&self.credential_account, credential.account)).len;
-        self.credential_secret_len = (try copyInto(&self.credential_secret, credential.secret)).len;
+        @memcpy(self.credential_service[0..credential.service.len], credential.service);
+        @memcpy(self.credential_account[0..credential.account.len], credential.account);
+        self.credential_service_len = credential.service.len;
+        self.credential_account_len = credential.account.len;
+        self.credential_last_secret = secret;
         self.credential_set_count += 1;
     }
 
     fn getCredential(context: ?*anyopaque, key: CredentialKey, buffer: []u8) anyerror![]const u8 {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        if (self.credential_secret_len == 0) return error.CredentialNotFound;
-        if (!std.mem.eql(u8, key.service, self.lastCredentialService()) or !std.mem.eql(u8, key.account, self.lastCredentialAccount())) return error.CredentialNotFound;
-        return try copyInto(buffer, self.lastCredentialSecret());
+        var identity_storage: [max_credential_identity_bytes]u8 = undefined;
+        const identity = try credentialIdentity(&identity_storage, key);
+        self.lockCredentials();
+        defer self.credential_mutex.unlock();
+        const secret = self.credential_entries.get(identity) orelse return error.CredentialNotFound;
+        return try copyInto(buffer, secret);
     }
 
     fn deleteCredential(context: ?*anyopaque, key: CredentialKey) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        if (self.credential_secret_len == 0) return error.CredentialNotFound;
-        if (!std.mem.eql(u8, key.service, self.lastCredentialService()) or !std.mem.eql(u8, key.account, self.lastCredentialAccount())) return error.CredentialNotFound;
-        self.credential_secret_len = 0;
+        var identity_storage: [max_credential_identity_bytes]u8 = undefined;
+        const identity = try credentialIdentity(&identity_storage, key);
+        self.lockCredentials();
+        defer self.credential_mutex.unlock();
+        const removed = self.credential_entries.fetchRemove(identity) orelse return error.CredentialNotFound;
+        if (self.credential_last_secret) |last| {
+            if (last.ptr == removed.value.ptr) self.credential_last_secret = null;
+        }
+        @memset(removed.value, 0);
+        std.heap.page_allocator.free(removed.value);
+        std.heap.page_allocator.free(removed.key);
         self.credential_delete_count += 1;
     }
 
@@ -2937,7 +3004,7 @@ pub const NullPlatform = struct {
     }
 
     pub fn lastCredentialSecret(self: *const NullPlatform) []const u8 {
-        return self.credential_secret[0..self.credential_secret_len];
+        return self.credential_last_secret orelse "";
     }
 
     pub fn credentialSetCount(self: *const NullPlatform) usize {

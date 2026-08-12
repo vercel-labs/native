@@ -459,11 +459,13 @@ export class SubsetChecker {
   /// service files exist, but none exported a callable operation.
   private readonly serviceOps: ReadonlySet<string> | null;
   private readonly capabilities: Set<string>;
+  private readonly permissions: Set<string>;
   private readonly persistRoutes: PersistRoutes | undefined;
   private readonly sdkCorePath: string;
   private usesPersist = false;
   private usesStore = false;
   private usesSqlite = false;
+  private usesCredentials = false;
 
   constructor(
     tast: TypedAst,
@@ -471,6 +473,7 @@ export class SubsetChecker {
     files: readonly ts.SourceFile[] | ts.SourceFile,
     serviceOps: ReadonlySet<string> | null = null,
     capabilities: readonly string[] = [],
+    permissions: readonly string[] = [],
     persistRoutes?: PersistRoutes,
     sdkCorePath: string = sdkCoreModulePath,
   ) {
@@ -481,6 +484,7 @@ export class SubsetChecker {
     this.fileSet = new Set(this.files);
     this.serviceOps = serviceOps;
     this.capabilities = new Set(capabilities);
+    this.permissions = new Set(permissions);
     this.persistRoutes = persistRoutes;
     this.sdkCorePath = sdkCorePath;
   }
@@ -513,6 +517,9 @@ export class SubsetChecker {
     }
     if (this.capabilities.has("sqlite") && !this.usesSqlite) {
       this.warn("NS1070", "app.zon declares the `sqlite` capability, but this core has no raw or generated relational command/subscription.", this.entry);
+    }
+    if (this.capabilities.has("credentials") && !this.usesCredentials) {
+      this.warn("NS1071", "app.zon declares the `credentials` capability, but this core has no `Cmd.credentials.*` call.", this.entry);
     }
     this.checkExceptions();
     return {
@@ -2538,6 +2545,27 @@ export class SubsetChecker {
         }
         if (node.expression.name.text === "query" && ts.isStringLiteralLike(node.arguments[0])) {
           this.warn("NS1420", "This raw Cmd.db.query uses a string literal that native check cannot name or generate.", node.arguments[0]);
+        }
+      }
+
+      // NS1071/NS1072 — keychain effects require both the build capability
+      // and the runtime permission. Missing permission is a hard check error:
+      // shipping a command guaranteed to receive `denied` is never useful.
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isPropertyAccessExpression(node.expression.expression) &&
+        node.expression.expression.name.text === "credentials" &&
+        ts.isIdentifier(node.expression.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression.expression)
+      ) {
+        this.usesCredentials = true;
+        if (!this.capabilities.has("credentials")) {
+          this.warn("NS1071", "`Cmd.credentials.*` requires the `credentials` capability in app.zon.", node);
+        }
+        if (!this.permissions.has("credentials")) {
+          this.report("NS1072", "`Cmd.credentials.*` requires the `credentials` permission in app.zon.", node);
         }
       }
 

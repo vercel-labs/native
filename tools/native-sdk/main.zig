@@ -319,6 +319,7 @@ pub fn main(init: std.process.Init) !void {
                 .window_width = dev_window_width,
                 .window_height = dev_window_height,
                 .capabilities = dev_metadata.capabilities,
+                .permissions = dev_metadata.permissions,
                 .script = try flagValue(args, "--script"),
                 .watch = flagBool(args, "--watch"),
                 .persist_routes = if (dev_metadata.persist) |persist| .{
@@ -676,6 +677,7 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
             env_map,
             framework_root,
             metadata.capabilities,
+            metadata.permissions,
             check_service_packages,
             if (metadata.persist) |persist| persist.version else null,
             if (metadata.persist) |persist| .{

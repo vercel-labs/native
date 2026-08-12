@@ -35,6 +35,9 @@ export interface FrontendOptions {
   /// frontend stays manifest-format agnostic; it needs only declared names
   /// for capability-backed effect diagnostics.
   readonly capabilities?: readonly string[];
+  /// app.zon permissions supplied beside capabilities. Core credential
+  /// effects are refused unless the explicit runtime grant is present.
+  readonly permissions?: readonly string[];
   /// Manifest schema version for engine-owned model persistence. When a
   /// state path is also supplied, the frontend remembers the last accepted
   /// version/fingerprint pair and warns if a shape moves without a bump.
@@ -198,6 +201,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     coreFiles,
     serviceOps,
     options.capabilities ?? [],
+    options.permissions ?? [],
     options.persistRoutes,
     options.sdkCorePath,
   );

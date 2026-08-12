@@ -32,6 +32,7 @@ const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const app_manifest = @import("app_manifest");
+const security = @import("../security/root.zig");
 const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const canvas_frame = @import("canvas_frame.zig");
@@ -1410,6 +1411,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (runtime.options.relational_store) |binding| {
                 self.effects.bindRelationalStore(binding);
             }
+            self.effects.bindCredentialsStore(.{
+                .services = &runtime.options.platform.services,
+                .service = runtime.options.platform.app_info.bundle_id,
+                .permitted = runtime.options.credentials_enabled and
+                    security.hasPermission(runtime.options.security.permissions, security.permission_credentials),
+            });
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
             self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
@@ -1425,9 +1432,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = runtime,
                 .open_external_url_fn = effectsOpenExternalUrl,
                 .reveal_path_fn = effectsRevealPath,
-                .set_credential_fn = effectsSetCredential,
-                .get_credential_fn = effectsGetCredential,
-                .delete_credential_fn = effectsDeleteCredential,
                 .format_local_time_fn = effectsFormatLocalTime,
             });
             if (runtime.options.session_recorder) |recorder| {
@@ -1495,6 +1499,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // `.rejected` and regenerate from the same
                     // deterministic validation, like `.timer` records.
                     .host => try self.effects.feedHostResult(record.key, record.code == 0, record.payload),
+                    .credentials => try self.effects.feedCredentialsResult(
+                        record.key,
+                        record.credentials_operation,
+                        record.credentials_outcome,
+                        record.credentials_secret_len,
+                        record.credentials_digest,
+                    ),
                     .db => try self.effects.feedDbResult(
                         record.key,
                         runtime_effects.dbKindFromJournalCode(record.code) orelse return error.ReplayDamagedRecord,
@@ -6214,21 +6225,6 @@ fn effectsOpenExternalUrl(context: *anyopaque, url: []const u8) anyerror!void {
 fn effectsRevealPath(context: *anyopaque, path: []const u8) anyerror!void {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     return runtime.revealPath(path);
-}
-
-fn effectsSetCredential(context: *anyopaque, credential: platform.Credential) anyerror!void {
-    const runtime: *Runtime = @ptrCast(@alignCast(context));
-    return runtime.setCredential(credential);
-}
-
-fn effectsGetCredential(context: *anyopaque, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8 {
-    const runtime: *Runtime = @ptrCast(@alignCast(context));
-    return runtime.getCredential(key, buffer);
-}
-
-fn effectsDeleteCredential(context: *anyopaque, key: platform.CredentialKey) anyerror!bool {
-    const runtime: *Runtime = @ptrCast(@alignCast(context));
-    return runtime.deleteCredential(key);
 }
 
 fn effectsFormatLocalTime(context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {

@@ -1065,6 +1065,16 @@ pub fn TestHarness() type {
             return RelationalStoreTestHarness().create(gpa, surface);
         }
 
+        /// Credential-capability counterpart of `create`. It enables both
+        /// gates against the NullPlatform's process-local byte store, so
+        /// `native test` never opens a real desktop keychain/keyring.
+        pub fn createWithCredentials(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
+            const self = try create(gpa, surface);
+            self.runtime.options.credentials_enabled = true;
+            self.runtime.options.security.permissions = &.{security.permission_credentials};
+            return self;
+        }
+
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
             // The harness embeds the runtime's platform: deinit both
             // returns the runtime's heap-owned storage (registered font
@@ -1074,6 +1084,7 @@ pub fn TestHarness() type {
             // tests) can never wake the freed host — the run loop's exit
             // defer for real apps, this line for harness-driven ones.
             self.runtime.deinit();
+            self.null_platform.deinit();
             gpa.destroy(self);
         }
 

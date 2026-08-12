@@ -9,10 +9,13 @@ const mobile_build_options = @import("mobile_build_options");
 const relational_migrations = @import("relational_migrations");
 
 comptime {
-    native_sdk.embed.exportMobileCApi(native_sdk.embed.UiAppHostWithStorage(
+    native_sdk.embed.exportMobileCApi(native_sdk.embed.UiAppHostWithStorageAndCredentials(
         @import("app"),
         mobile_build_options.store_capability,
         mobile_build_options.relational_capability,
         &relational_migrations.migrations,
+        mobile_build_options.credentials_capability,
+        mobile_build_options.credentials_permission,
+        mobile_build_options.credentials_service,
     ));
 }

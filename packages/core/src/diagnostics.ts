@@ -442,6 +442,18 @@ export const rules = {
     fix: "Add `\"sqlite\"` to app.zon's `capabilities`, or remove the unused capability/command.",
     why: "The sqlite capability controls whether the relational database and its effect binding are linked into the app. Keeping the declaration and command in lockstep prevents a rejected effect and sheds SQLite from apps that do not use either storage tier.",
   },
+  NS1071: {
+    id: "NS1071",
+    title: "Cmd.credentials and its capability must agree",
+    fix: "Add `\"credentials\"` to app.zon's `capabilities`, or remove the unused capability/command.",
+    why: "The credentials capability controls whether the core keychain path is linked into the app; keeping it in lockstep prevents a guaranteed denied effect and sheds the path from apps that do not use it.",
+  },
+  NS1072: {
+    id: "NS1072",
+    title: "core credentials require explicit permission",
+    fix: "Add `\"credentials\"` to app.zon's `permissions`, or remove the `Cmd.credentials.*` call.",
+    why: "Secrets are the first permission-gated core effect: the runtime refuses every undeclared access with `denied`, even when the build capability is present.",
+  },
   NS1420: {
     id: "NS1420",
     title: "declare stable SQL in src/queries.sql",

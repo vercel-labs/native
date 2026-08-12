@@ -2982,6 +2982,7 @@ fn tsCoreE2eArtifact(
         .name = "host_fixture_core",
         .store_capability = true,
         .relational_capability = true,
+        .credentials_capability = true,
         // The fixture drives pastBytes to the f64-exact boundary (2^53):
         // no honest i64 declaration exists there, so the compiled
         // projection carries the slot as f64.
@@ -3430,6 +3431,9 @@ const ExternalCoreFixtureSpec = struct {
     store_capability: bool = false,
     /// The fixture stands in for an app whose manifest declares Tier 3.
     relational_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares the Tier-4
+    /// build capability and its matching core-effect permission.
+    credentials_capability: bool = false,
     /// Attested integer slots the compiled projection carries as f64
     /// (values that reach the f64-exact boundary have no honest i64
     /// declaration on that side) — corewire's --f64-slot demotions,
@@ -3481,6 +3485,7 @@ fn externalCoreFixtureModule(
     if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
     if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
+    if (spec.credentials_capability) check.addArgs(&.{ "--capability", "credentials", "--permission", "credentials" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{

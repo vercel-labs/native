@@ -496,6 +496,10 @@ pub const Options = struct {
     /// Engine-owned relational database, installed only for the `sqlite`
     /// capability. Replay keeps it null and feeds journaled DB results.
     relational_store: ?runtime_effects.RelationalStoreBinding = null,
+    /// Whether the app declared the `credentials` capability. Permission is
+    /// checked separately; both gates must be open before core effects may
+    /// reach the platform keychain.
+    credentials_enabled: bool = false,
     js_window_api: bool = false,
     /// Whether this build ships the embedded web layer. The app runner
     /// sets it from the build graph's app.zon inference (declare-to-use:

@@ -2114,7 +2114,7 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
 
 fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    if (native_sdk_appkit_set_credential(
+    const result = native_sdk_appkit_set_credential(
         self.host,
         credential.service.ptr,
         credential.service.len,
@@ -2122,7 +2122,10 @@ fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anye
         credential.account.len,
         credential.secret.ptr,
         credential.secret.len,
-    ) == 0) return error.UnsupportedService;
+    );
+    if (result == -2) return error.CredentialStoreLocked;
+    if (result == -3) return error.AccessDenied;
+    if (result <= 0) return error.CredentialStoreFailed;
 }
 
 fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: []u8) anyerror![]const u8 {
@@ -2136,20 +2139,27 @@ fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: 
         buffer.ptr,
         buffer.len,
     );
-    if (len == 0) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize)) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize) - 2) return error.CredentialStoreLocked;
+    if (len == std.math.maxInt(usize) - 3) return error.AccessDenied;
+    if (len == std.math.maxInt(usize) - 1) return error.CredentialStoreFailed;
     if (len > buffer.len) return error.NoSpaceLeft;
     return buffer[0..len];
 }
 
 fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    if (native_sdk_appkit_delete_credential(
+    const result = native_sdk_appkit_delete_credential(
         self.host,
         key.service.ptr,
         key.service.len,
         key.account.ptr,
         key.account.len,
-    ) == 0) return error.CredentialNotFound;
+    );
+    if (result == -2) return error.CredentialStoreLocked;
+    if (result == -3) return error.AccessDenied;
+    if (result < 0) return error.CredentialStoreFailed;
+    if (result == 0) return error.CredentialNotFound;
 }
 
 fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {

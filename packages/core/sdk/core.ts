@@ -80,9 +80,9 @@
 //                                browser; denied/invalid URLs fail closed
 //   Cmd.revealPath(path)          reveal a path in the system file manager;
 //                                invalid/unavailable requests fail closed
-//   Cmd.credentialSet(service, account, secret, route)
-//   Cmd.credentialGet(service, account, route)
-//   Cmd.credentialDelete(service, account, route)
+//   Cmd.credentials.set(key, secret, route)
+//   Cmd.credentials.get(key, route)
+//   Cmd.credentials.delete(key, route)
 //                                routed access to Keychain / Secret Service /
 //                                Credential Manager
 //   Cmd.formatLocalTime(ms, style, route)
@@ -1570,6 +1570,41 @@ export const Cmd = {
     },
   },
 
+  /// App-scoped OS credential storage. The app manifest id supplies the
+  /// service namespace, so authored code chooses only a UTF-8 key. Declare
+  /// both the `credentials` capability and permission in app.zon.
+  credentials: {
+    set<M extends Msgish>(credentialKey: string, secret: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+      return {
+        op: "request",
+        name: "core.credentials.set",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        typedService: false,
+        payload: hostRecordBytes({ key: utf8Bytes(credentialKey), secret }),
+      };
+    },
+
+    /// The ok arm carries secret bytes; a miss routes err with `miss`.
+    get<M extends Msgish>(credentialKey: string, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("core.credentials.get", { key: utf8Bytes(credentialKey) }, route);
+    },
+
+    /// Deleting an absent key succeeds.
+    delete<M extends Msgish>(credentialKey: string, route: WriteRoute<M>): Cmd<M> {
+      return {
+        op: "request",
+        name: "core.credentials.delete",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        typedService: false,
+        payload: hostRecordBytes({ key: utf8Bytes(credentialKey) }),
+      };
+    },
+  },
+
   /// Capability-gated relational SQLite. Reads remain effects: pages and the
   /// terminal arrive as Msg values after the issuing model has committed.
   /// Every exec statement in one command commits atomically or all roll back.
@@ -1632,30 +1667,6 @@ export const Cmd = {
   /// Fire-and-forget; invalid or unavailable requests fail closed.
   revealPath(path: Uint8Array): Cmd<never> {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
-  },
-
-  /// Store a secret in the platform credential store. The ok arm receives
-  /// empty bytes; the err arm receives `invalid_request`, `unsupported`, or
-  /// `failed`.
-  credentialSet<M extends Msgish>(
-    service: Uint8Array,
-    account: Uint8Array,
-    secret: Uint8Array,
-    route: RequestRoute<M>,
-  ): Cmd<M> {
-    return Cmd.request("native-sdk.credentials.set", { service, account, secret }, route);
-  },
-
-  /// Read a secret from the platform credential store. The ok arm receives
-  /// the secret bytes; a missing item routes err with `not_found`.
-  credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
-    return Cmd.request("native-sdk.credentials.get", { service, account }, route);
-  },
-
-  /// Delete a secret from the platform credential store. The ok arm receives
-  /// empty bytes; a missing item routes err with `not_found`.
-  credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
-    return Cmd.request("native-sdk.credentials.delete", { service, account }, route);
   },
 
   /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in

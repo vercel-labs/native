@@ -132,6 +132,14 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
     } mutableCopy];
 }
 
+static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
+    if (status == errSecSuccess) return 1;
+    if (status == errSecItemNotFound) return missingCode;
+    if (status == errSecInteractionNotAllowed || status == errSecNotAvailable) return -2;
+    if (status == errSecAuthFailed || status == errSecUserCanceled || status == errSecMissingEntitlement) return -3;
+    return -1;
+}
+
 class NativeSdkCefBridgeV8Handler final : public CefV8Handler {
 public:
     bool Execute(const CefString& name, CefRefPtr<CefV8Value> object, const CefV8ValueList& arguments, CefRefPtr<CefV8Value>& retval, CefString& exception) override {
@@ -3209,7 +3217,7 @@ int native_sdk_appkit_set_credential(native_sdk_appkit_host_t *host, const char 
     @autoreleasepool {
         NSString *serviceString = NativeSdkStringFromBytes(service, service_len);
         NSString *accountString = NativeSdkStringFromBytes(account, account_len);
-        if (serviceString.length == 0 || accountString.length == 0 || !secret || secret_len == 0) return 0;
+        if (serviceString.length == 0 || accountString.length == 0 || (!secret && secret_len > 0)) return 0;
         NSData *secretData = [NSData dataWithBytes:secret length:secret_len];
         NSMutableDictionary *query = NativeSdkCredentialQuery(serviceString, accountString);
         NSDictionary *update = @{ (__bridge id)kSecValueData: secretData };
@@ -3218,7 +3226,7 @@ int native_sdk_appkit_set_credential(native_sdk_appkit_host_t *host, const char 
             query[(__bridge id)kSecValueData] = secretData;
             status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
         }
-        return status == errSecSuccess ? 1 : 0;
+        return NativeSdkCredentialStatus(status, -1);
     }
 }
 
@@ -3227,13 +3235,16 @@ size_t native_sdk_appkit_get_credential(native_sdk_appkit_host_t *host, const ch
     @autoreleasepool {
         NSString *serviceString = NativeSdkStringFromBytes(service, service_len);
         NSString *accountString = NativeSdkStringFromBytes(account, account_len);
-        if (serviceString.length == 0 || accountString.length == 0 || !buffer) return 0;
+        if (serviceString.length == 0 || accountString.length == 0 || (!buffer && buffer_len > 0)) return SIZE_MAX - 1;
         NSMutableDictionary *query = NativeSdkCredentialQuery(serviceString, accountString);
         query[(__bridge id)kSecReturnData] = @YES;
         query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
         CFTypeRef result = NULL;
         OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-        if (status != errSecSuccess || !result) return 0;
+        if (status == errSecItemNotFound) return SIZE_MAX;
+        if (status == errSecInteractionNotAllowed || status == errSecNotAvailable) return SIZE_MAX - 2;
+        if (status == errSecAuthFailed || status == errSecUserCanceled || status == errSecMissingEntitlement) return SIZE_MAX - 3;
+        if (status != errSecSuccess || !result) return SIZE_MAX - 1;
         NSData *data = CFBridgingRelease(result);
         if (data.length > buffer_len) return data.length;
         memcpy(buffer, data.bytes, data.length);
@@ -3249,7 +3260,7 @@ int native_sdk_appkit_delete_credential(native_sdk_appkit_host_t *host, const ch
         if (serviceString.length == 0 || accountString.length == 0) return 0;
         NSMutableDictionary *query = NativeSdkCredentialQuery(serviceString, accountString);
         OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-        return status == errSecSuccess ? 1 : 0;
+        return NativeSdkCredentialStatus(status, 0);
     }
 }
 

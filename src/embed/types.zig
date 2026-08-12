@@ -267,6 +267,57 @@ pub const MobileAudioService = extern struct {
     }
 };
 
+// ----------------------------------------------------------- credentials
+//
+// The secure credential service over the embed C ABI. Mobile toolkit hosts
+// register an OS-backed implementation before app start: Keychain Services
+// on iOS and an AndroidKeyStore-wrapped private preferences entry on Android.
+// The callback result codes keep the closed core-effect outcomes intact:
+// locked and denied remain distinguishable from ordinary I/O failure, and a
+// missing get/delete remains a normal `miss` rather than an error.
+
+pub const MobileCredentialSetFn = *const fn (
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    secret: ?[*]const u8,
+    secret_len: usize,
+) callconv(.c) c_int;
+
+pub const MobileCredentialGetFn = *const fn (
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    output: ?[*]u8,
+    output_len: usize,
+) callconv(.c) i64;
+
+pub const MobileCredentialDeleteFn = *const fn (
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+) callconv(.c) c_int;
+
+pub const MobileCredentialService = extern struct {
+    set: ?MobileCredentialSetFn = null,
+    get: ?MobileCredentialGetFn = null,
+    delete: ?MobileCredentialDeleteFn = null,
+
+    pub fn complete(self: MobileCredentialService) bool {
+        return self.set != null and self.get != null and self.delete != null;
+    }
+
+    pub fn empty(self: MobileCredentialService) bool {
+        return self.set == null and self.get == null and self.delete == null;
+    }
+};
+
 // ------------------------------------------------------------ image decode
 //
 // The platform image-decode service over the embed C ABI. A mobile shim

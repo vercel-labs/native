@@ -226,6 +226,18 @@ typedef struct native_sdk_audio_service {
   int (*set_volume)(void *context, double volume);
 } native_sdk_audio_service_t;
 int native_sdk_app_set_audio_service(void *app, const native_sdk_audio_service_t *service, void *context);
+// Secure credential service. Result codes preserve the core effect's closed
+// outcomes: set returns 1 success, -2 locked, -3 denied, 0 I/O failure;
+// get returns a non-negative byte length, -1 miss, -2 locked, -3 denied,
+// -4 output too small, -5 I/O failure; delete returns 1 deleted, 0 miss,
+// -2 locked, -3 denied, -5 I/O failure.
+typedef struct native_sdk_credential_service {
+  int (*set)(void *context, const char *service, uintptr_t service_len, const char *account, uintptr_t account_len, const uint8_t *secret, uintptr_t secret_len);
+  int64_t (*get)(void *context, const char *service, uintptr_t service_len, const char *account, uintptr_t account_len, uint8_t *output, uintptr_t output_len);
+  int (*delete)(void *context, const char *service, uintptr_t service_len, const char *account, uintptr_t account_len);
+} native_sdk_credential_service_t;
+int native_sdk_app_set_credential_service(void *app, const native_sdk_credential_service_t *service, void *context);
+
 // One audio player report (kind ordinals above; position/duration in ms).
 // Call between runtime entry points on the loop thread, never from inside
 // an audio service callback.

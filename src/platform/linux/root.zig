@@ -449,7 +449,7 @@ pub const LinuxPlatform = struct {
             .app_activation_events,
             .gpu_surfaces,
             => self.web_engine == .system,
-            .credentials => self.web_engine == .system and credentialsAvailable(self.host),
+            .credentials => credentialsAvailable(self.host),
             // Audio rides GStreamer (playbin), runtime-loaded like
             // libsecret: the report is a live probe, so a host without
             // the library honestly answers false and playback degrades
@@ -1347,9 +1347,8 @@ fn clearRecentDocuments(context: ?*anyopaque) anyerror!void {
 
 fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    if (native_sdk_gtk_credentials_available(self.host) == 0) return error.UnsupportedService;
-    if (native_sdk_gtk_set_credential(
+    if (native_sdk_gtk_credentials_available(self.host) == 0) return error.CredentialStoreLocked;
+    const result = native_sdk_gtk_set_credential(
         self.host,
         credential.service.ptr,
         credential.service.len,
@@ -1357,13 +1356,14 @@ fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anye
         credential.account.len,
         credential.secret.ptr,
         credential.secret.len,
-    ) == 0) return error.UnsupportedService;
+    );
+    if (result == -2) return error.CredentialStoreLocked;
+    if (result <= 0) return error.CredentialStoreFailed;
 }
 
 fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: []u8) anyerror![]const u8 {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    if (native_sdk_gtk_credentials_available(self.host) == 0) return error.UnsupportedService;
+    if (native_sdk_gtk_credentials_available(self.host) == 0) return error.CredentialStoreLocked;
     const len = native_sdk_gtk_get_credential(
         self.host,
         key.service.ptr,
@@ -1373,16 +1373,16 @@ fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: 
         buffer.ptr,
         buffer.len,
     );
-    if (len == std.math.maxInt(usize)) return error.UnsupportedService;
-    if (len == 0) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize)) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize) - 2) return error.CredentialStoreLocked;
+    if (len == std.math.maxInt(usize) - 1) return error.CredentialStoreFailed;
     if (len > buffer.len) return error.NoSpaceLeft;
     return buffer[0..len];
 }
 
 fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    if (native_sdk_gtk_credentials_available(self.host) == 0) return error.UnsupportedService;
+    if (native_sdk_gtk_credentials_available(self.host) == 0) return error.CredentialStoreLocked;
     const result = native_sdk_gtk_delete_credential(
         self.host,
         key.service.ptr,
@@ -1390,7 +1390,8 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
         key.account.ptr,
         key.account.len,
     );
-    if (result < 0) return error.UnsupportedService;
+    if (result == -2) return error.CredentialStoreLocked;
+    if (result < 0) return error.CredentialStoreFailed;
     if (result == 0) return error.CredentialNotFound;
 }
 

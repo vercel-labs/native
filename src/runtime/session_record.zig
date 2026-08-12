@@ -58,6 +58,11 @@ pub const SessionRecorder = struct {
     effect_count: u64 = 0,
     checkpoint_count: u64 = 0,
     screenshot_count: u64 = 0,
+    /// Per-session salt for credential replay-placeholder digests. The digest
+    /// is deliberately independent of the secret, so a shareable journal is
+    /// not an offline guessing oracle. Successful secret bytes are never
+    /// written to either the journal or its blob store.
+    credentials_salt: [16]u8 = @splat(0),
     /// Frame index of the last recorded checkpoint, so exactly one
     /// checkpoint follows each published frame.
     last_checkpoint_frame: u64 = 0,
@@ -84,6 +89,20 @@ pub const SessionRecorder = struct {
     pub fn begin(self: *SessionRecorder, header: Header) void {
         if (self.began or self.failed) return;
         self.began = true;
+        // SessionRecorder deliberately has no ambient-I/O handle. Derive a
+        // per-session salt from the already-journaled header identity and
+        // timestamp. The resulting placeholder digest is metadata only and
+        // never hashes credential bytes.
+        var salt_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        salt_hasher.update(header.platform_name);
+        salt_hasher.update(header.app_name);
+        var salt_scalars: [16]u8 = undefined;
+        std.mem.writeInt(u64, salt_scalars[0..8], header.protocol_fingerprint, .little);
+        std.mem.writeInt(i64, salt_scalars[8..16], header.recorded_at_wall_ms, .little);
+        salt_hasher.update(&salt_scalars);
+        var salt_digest: [32]u8 = undefined;
+        salt_hasher.final(&salt_digest);
+        @memcpy(&self.credentials_salt, salt_digest[0..self.credentials_salt.len]);
         var preamble_buffer: [journal.preamble_len]u8 = undefined;
         self.write(journal.writePreamble(&preamble_buffer));
         const payload = journal.encodeHeader(header, &self.small_buffer) catch {
@@ -206,6 +225,22 @@ pub const SessionRecorder = struct {
     pub fn recordEffect(self: *SessionRecorder, record: runtime_effects.EffectResultRecord) void {
         if (!self.began or self.failed or self.finished) return;
         var journaled = record;
+        if (record.kind == .credentials) {
+            // Error bytes duplicate the closed outcome and successful get
+            // bytes are secrets. Neither belongs in a shareable artifact.
+            journaled.payload = "";
+            if (record.credentials_operation == .get and record.credentials_outcome == .ok) {
+                var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+                hasher.update(&self.credentials_salt);
+                var ordinal: [8]u8 = undefined;
+                std.mem.writeInt(u64, ordinal[0..], self.effect_count, .little);
+                hasher.update(&ordinal);
+                hasher.update(@tagName(record.credentials_operation));
+                hasher.final(&journaled.credentials_digest);
+                journaled.credentials_salt = self.credentials_salt;
+                journaled.credentials_secret_len = record.payload.len;
+            }
+        }
         if (record.kind == .image and record.payload.len > 0) {
             const blob_sink = self.blob_sink orelse {
                 return self.fail("an image effect result needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
@@ -421,6 +456,61 @@ test "recorder moves model restore snapshots into the session blob store" {
     var scratch: [64]u8 = undefined;
     const restored = try blobs.read(effect.persist_blob_hash, &scratch);
     try testing.expectEqualStrings("canonical model", restored);
+}
+
+test "recorder redacts credential bytes from journal and blob storage" {
+    const secret = "storage-tier-four-live-token";
+    const set_secret = "storage-tier-four-set-token";
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+
+    recorder.begin(.{
+        .platform_name = "test",
+        .app_name = "credentials",
+        .recorded_at_wall_ms = 1_723_000_000_000,
+    });
+    recorder.recordEffect(.{
+        .kind = .credentials,
+        .key = 44,
+        .payload = secret,
+        .credentials_operation = .get,
+        .credentials_outcome = .ok,
+    });
+    // Set requests are not journaled at all, but keep the result encoder
+    // defensive: if a caller ever supplies request bytes here, credential
+    // records elide them for every operation, not only successful gets.
+    recorder.recordEffect(.{
+        .kind = .credentials,
+        .key = 45,
+        .payload = set_secret,
+        .credentials_operation = .set,
+        .credentials_outcome = .ok,
+    });
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    try testing.expect(std.mem.indexOf(u8, buffer_sink.bytes(), secret) == null);
+    try testing.expect(std.mem.indexOf(u8, buffer_sink.bytes(), set_secret) == null);
+    try testing.expectEqual(@as(usize, 0), blobs.count);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(runtime_effects.EffectResultKind.credentials, effect.kind);
+    try testing.expectEqual(runtime_effects.EffectCredentialsOperation.get, effect.credentials_operation);
+    try testing.expectEqual(runtime_effects.EffectCredentialsOutcome.ok, effect.credentials_outcome);
+    try testing.expectEqual(@as(u64, secret.len), effect.credentials_secret_len);
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expect(!std.mem.allEqual(u8, &effect.credentials_salt, 0));
+    try testing.expect(!std.mem.allEqual(u8, &effect.credentials_digest, 0));
+    const set_effect = (try reader.next()).?.effect;
+    try testing.expectEqual(runtime_effects.EffectCredentialsOperation.set, set_effect.credentials_operation);
+    try testing.expectEqual(@as(usize, 0), set_effect.payload.len);
+    try testing.expectEqual(@as(u64, 0), set_effect.credentials_secret_len);
 }
 
 test "recorder spills large relational pages into the session blob store" {

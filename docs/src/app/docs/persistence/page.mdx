@@ -75,4 +75,4 @@ export function migrate(snapshot: Uint8Array, fromVersion: number): Model {
 
 The checker requires the exact `(Uint8Array, number) => Model` shape. A successful migration is encoded in the current format, installed as the new snapshot, restored before delivery, and journaled as an ordinary successful restore. A thrown value, missing hook, or invalid result reports `migrate_failed`.
 
-Version 1 persists the whole model. Do not put tokens or passwords in it; credentials belong in an OS keychain-backed effect. Raw `Cmd.readFile` and `Cmd.writeFile` remain the escape hatch for user-visible files, exports, and blobs—not the default model store.
+Version 1 persists the whole model. Do not put tokens or passwords in it; declare the `credentials` capability and permission, store them with [`Cmd.credentials.set`](/docs/capabilities), and consume get-result bytes without retaining them in Model. Credential recording is redacted and replay receives only a deterministic same-length placeholder. Raw `Cmd.readFile` and `Cmd.writeFile` remain the escape hatch for user-visible files, exports, and blobs—not the default model store.

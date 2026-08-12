@@ -1,4 +1,5 @@
 const std = @import("std");
+const credentials_store = @import("credentials_store.zig");
 const json = @import("json");
 const validation = @import("validation.zig");
 const bridge_payload = @import("bridge_payload.zig");
@@ -88,24 +89,47 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
 
         pub fn setCredential(self: *Runtime, credential: platform.Credential) anyerror!void {
             try validateCredential(credential);
-            try self.options.platform.services.setCredential(credential);
+            const execution = credentials_store.execute(.{
+                .services = &self.options.platform.services,
+                .service = credential.service,
+                .permitted = true,
+            }, .set, credential.account, credential.secret, &.{});
+            try credentialOutcome(execution.outcome);
         }
 
         pub fn getCredential(self: *Runtime, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8 {
             try validateCredentialKey(key);
-            return self.options.platform.services.getCredential(key, buffer) catch |err| switch (err) {
-                error.CredentialNotFound => null,
-                else => |e| return e,
-            };
+            const execution = credentials_store.execute(.{
+                .services = &self.options.platform.services,
+                .service = key.service,
+                .permitted = true,
+            }, .get, key.account, "", buffer);
+            if (execution.outcome == .miss) return null;
+            try credentialOutcome(execution.outcome);
+            return buffer[0..execution.len];
         }
 
         pub fn deleteCredential(self: *Runtime, key: platform.CredentialKey) anyerror!bool {
             try validateCredentialKey(key);
-            self.options.platform.services.deleteCredential(key) catch |err| switch (err) {
-                error.CredentialNotFound => return false,
-                else => |e| return e,
-            };
+            const execution = credentials_store.execute(.{
+                .services = &self.options.platform.services,
+                .service = key.service,
+                .permitted = true,
+            }, .delete, key.account, "", &.{});
+            if (execution.outcome == .miss) return false;
+            try credentialOutcome(execution.outcome);
             return true;
+        }
+
+        fn credentialOutcome(outcome: credentials_store.Outcome) anyerror!void {
+            return switch (outcome) {
+                .ok => {},
+                .miss => error.CredentialNotFound,
+                .locked => error.UnsupportedService,
+                .denied => error.PermissionDenied,
+                .over_bound => error.CredentialFieldTooLarge,
+                .io_failed, .rejected => error.CredentialStoreFailed,
+            };
         }
 
         pub fn formatLocalTime(self: *Runtime, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {

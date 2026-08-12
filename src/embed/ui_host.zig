@@ -28,6 +28,7 @@ const app_manifest = @import("app_manifest");
 const canvas = @import("canvas");
 const runtime = @import("../runtime/root.zig");
 const platform = @import("../platform/root.zig");
+const security = @import("../security/root.zig");
 const types = @import("types.zig");
 const host = @import("host.zig");
 const conversions = @import("conversions.zig");
@@ -75,6 +76,28 @@ pub fn UiAppHostWithStorage(
     comptime relational_store_enabled: bool,
     comptime relational_migrations: []const runtime.relational_store.Migration,
 ) type {
+    return UiAppHostWithStorageAndCredentials(
+        AppDef,
+        record_store_enabled,
+        relational_store_enabled,
+        relational_migrations,
+        false,
+        false,
+        "dev.native_sdk.app",
+    );
+}
+
+/// Capability-specialized mobile host including the OS credential-store
+/// gate and the app identity used as its service namespace.
+pub fn UiAppHostWithStorageAndCredentials(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+    comptime credentials_enabled: bool,
+    comptime credentials_permitted: bool,
+    comptime credentials_service: []const u8,
+) type {
     const features: runtime.UiAppFeatures = if (@hasDecl(AppDef, "features")) AppDef.features else .{};
     const RecordStoreType = if (record_store_enabled) runtime.RecordStore else void;
     const RelationalStoreType = if (relational_store_enabled) runtime.RelationalStore else void;
@@ -107,6 +130,7 @@ pub fn UiAppHostWithStorage(
         automation_io: ?*std.Io.Threaded = null,
         text_measure: host.MobileTextMeasure = .{},
         audio: host.MobileAudio = .{},
+        credentials: host.MobileCredentials = .{},
         // Image decode stays declined until the shim registers a real
         // codec (`native_sdk_app_set_image_service`): the null platform's
         // strict test decoder is opt-in (`image_decode`, default off), so
@@ -137,7 +161,10 @@ pub fn UiAppHostWithStorage(
             const options = AppDef.mobileOptions();
             if (!std.mem.eql(u8, options.canvas_label, mobile_gpu_surface_label)) return error.InvalidViewOptions;
             if (!sceneHasMobileSurface(options.scene)) return error.ViewNotFound;
-            self.null_platform = platform.NullPlatform.init(.{});
+            self.null_platform = platform.NullPlatform.initWithOptions(.{}, .system, .{
+                .app_name = options.name,
+                .bundle_id = credentials_service,
+            });
             self.null_platform.gpu_surfaces = true;
             // Audio is declined until the shim registers a real service
             // (`native_sdk_app_set_audio_service`): without one,
@@ -169,6 +196,7 @@ pub fn UiAppHostWithStorage(
             self.automation_io = null;
             self.text_measure = .{};
             self.audio = .{};
+            self.credentials = .{};
             self.image = .{};
             self.form_factor = .unknown;
             self.chrome_tabs_projected = false;
@@ -188,6 +216,15 @@ pub fn UiAppHostWithStorage(
                 .event_fn = hostEvent,
                 .stop_fn = hostStop,
             }, self.null_platform.platform());
+            // The NullPlatform map is for native test only. Installed mobile
+            // apps start with no backing until the UIKit/Android shim
+            // registers its OS credential service.
+            try host.setCredentialService(self, .{}, null);
+            self.embedded.runtime.options.credentials_enabled = credentials_enabled;
+            self.embedded.runtime.options.security.permissions = if (credentials_permitted)
+                &.{security.permission_credentials}
+            else
+                &.{};
             // The damage seam: capture pixel presents (chained through
             // the null platform's recording present, so nonblank
             // sampling keeps working), drop the packet presenters no

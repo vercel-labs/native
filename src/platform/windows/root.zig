@@ -524,7 +524,6 @@ pub const WindowsPlatform = struct {
             .reveal_path,
             .notifications,
             .recent_documents,
-            .credentials,
             .file_drops,
             .app_activation_events,
             .gpu_surfaces,
@@ -533,6 +532,9 @@ pub const WindowsPlatform = struct {
             .microphone_capture,
             .system_audio_capture,
             => self.web_engine == .system,
+            // Credential Manager backs both core effects and the builtin
+            // bridge and does not depend on WebView2 being selected.
+            .credentials => true,
             // close_policy .hide: WM_CLOSE hides (ShowWindow SW_HIDE),
             // the window stays in the host map, and the tray is the
             // ONLY re-show affordance — SW_HIDE removes the taskbar
@@ -1586,8 +1588,7 @@ fn clearRecentDocuments(context: ?*anyopaque) anyerror!void {
 
 fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    if (native_sdk_windows_set_credential(
+    const result = native_sdk_windows_set_credential(
         self.host,
         credential.service.ptr,
         credential.service.len,
@@ -1595,12 +1596,13 @@ fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anye
         credential.account.len,
         credential.secret.ptr,
         credential.secret.len,
-    ) == 0) return error.UnsupportedService;
+    );
+    if (result == -3) return error.AccessDenied;
+    if (result <= 0) return error.CredentialStoreFailed;
 }
 
 fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: []u8) anyerror![]const u8 {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
     const len = native_sdk_windows_get_credential(
         self.host,
         key.service.ptr,
@@ -1610,21 +1612,25 @@ fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: 
         buffer.ptr,
         buffer.len,
     );
-    if (len == 0) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize)) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize) - 3) return error.AccessDenied;
+    if (len == std.math.maxInt(usize) - 1) return error.CredentialStoreFailed;
     if (len > buffer.len) return error.NoSpaceLeft;
     return buffer[0..len];
 }
 
 fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    if (native_sdk_windows_delete_credential(
+    const result = native_sdk_windows_delete_credential(
         self.host,
         key.service.ptr,
         key.service.len,
         key.account.ptr,
         key.account.len,
-    ) == 0) return error.CredentialNotFound;
+    );
+    if (result == -3) return error.AccessDenied;
+    if (result < 0) return error.CredentialStoreFailed;
+    if (result == 0) return error.CredentialNotFound;
 }
 
 fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {

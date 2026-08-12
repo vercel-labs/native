@@ -8,6 +8,8 @@ The model stores source-of-truth state only: the raw items, the current filter, 
 
 For small in-memory apps, the Model owns the domain data and [model persistence](/docs/persistence) snapshots it. For relational apps, [SQLite](/docs/sqlite) owns the domain data; the Model holds view state plus the row pages most recently delivered by a query. Writes go out as one atomic `Cmd.db.exec`, and reads return as later Msg values—never as a database handle or a synchronous call inside `update`. Derived UI values still come from the Model's current rows, so the rule below does not change.
 
+Secrets are the exception: tokens and passwords never belong in the Model, even temporarily. Store them with [`Cmd.credentials.set`](/docs/capabilities), retrieve them as an effect result, and consume the returned Msg bytes immediately to construct the next command (for example, an authenticated fetch) while returning a Model that does not retain them. That keeps secrets out of model snapshots, state fingerprints, and ordinary view data. Session recording redacts successful credential reads and replay supplies only a same-length placeholder.
+
 ## Derive, don't store
 
 A cached derivable must be re-maintained in every `update` arm and goes stale the moment one is missed; a derived function cannot go stale.

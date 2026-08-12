@@ -507,6 +507,11 @@ export declare const Cmd: {
         scan<M extends Msgish>(prefix: string, options: StoreScanOptions, route: RequestRoute<M>): Cmd<M>;
         setMany<M extends Msgish>(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: WriteRoute<M>): Cmd<M>;
     };
+    credentials: {
+        set<M extends Msgish>(credentialKey: string, secret: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+        get<M extends Msgish>(credentialKey: string, route: RequestRoute<M>): Cmd<M>;
+        delete<M extends Msgish>(credentialKey: string, route: WriteRoute<M>): Cmd<M>;
+    };
     db: {
         query<M extends Msgish>(sql: string, params: ReadonlyArray<DbValue>, route: DbRowsRoute<M>): Cmd<M>;
         exec<M extends Msgish>(statements: ReadonlyArray<DbStatement>, route: WriteRoute<M>): Cmd<M>;
@@ -517,9 +522,6 @@ export declare const Cmd: {
     showNotification(spec: NotificationSpec): Cmd<never>;
     openExternalUrl(url: Uint8Array): Cmd<never>;
     revealPath(path: Uint8Array): Cmd<never>;
-    credentialSet<M extends Msgish>(service: Uint8Array, account: Uint8Array, secret: Uint8Array, route: RequestRoute<M>): Cmd<M>;
-    credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
-    credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
     formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;

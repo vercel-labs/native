@@ -66,7 +66,7 @@ interface Cmdish {
 }
 
 function usage(): never {
-  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>] [--service-cwd <app-data-dir>] [--capability <name>]... [--sdk-core <generated-core.ts>] [--sqlite-src <src>]");
+  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>] [--service-cwd <app-data-dir>] [--app-id <id>] [--capability <name>]... [--permission <name>]... [--sdk-core <generated-core.ts>] [--sqlite-src <src>]");
   console.error("core-logic loop only (update/effects under a virtual host) - not a renderer;");
   console.error("run the real app with `native dev`.");
   process.exit(2);
@@ -87,14 +87,21 @@ let canvasLabel = "canvas";
 let windowWidth = 800;
 let windowHeight = 600;
 let appName: string | null = null;
+let appId = "app";
 const servicePackages: { name: string; version: string; content_hash: string }[] = [];
 const capabilities = new Set<string>();
+const permissions = new Set<string>();
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--script") script = args[++i] ?? null;
   else if (args[i] === "--capability") {
     const capability = args[++i] ?? null;
     if (capability === null) usage();
     capabilities.add(capability);
+  }
+  else if (args[i] === "--permission") {
+    const permission = args[++i] ?? null;
+    if (permission === null) usage();
+    permissions.add(permission);
   }
   else if (args[i] === "--persist-ok") persistOk = args[++i] ?? null;
   else if (args[i] === "--persist-none") persistNone = args[++i] ?? null;
@@ -108,6 +115,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === "--window-width") windowWidth = Number(args[++i]);
   else if (args[i] === "--window-height") windowHeight = Number(args[++i]);
   else if (args[i] === "--app-name") appName = args[++i] ?? null;
+  else if (args[i] === "--app-id") appId = args[++i] ?? appId;
   else if (args[i] === "--service-package") {
     const [name, version, content_hash] = (args[++i] ?? "").split("|");
     if (!name || !version || !/^[0-9a-f]{64}$/.test(content_hash ?? "")) usage();
@@ -135,12 +143,13 @@ if (serviceCwd !== null) {
 const persistRouteCount = [persistOk, persistNone, persistErr].filter((route) => route !== null).length;
 if (persistRouteCount !== 0 && persistRouteCount !== 3) usage();
 let checked: ReturnType<typeof checkFile> | null = null;
-if (capabilities.size > 0 || (persistOk !== null && persistNone !== null && persistErr !== null) || fs.existsSync(path.join(path.dirname(path.resolve(entry)), "services"))) {
+if (capabilities.size > 0 || permissions.size > 0 || (persistOk !== null && persistNone !== null && persistErr !== null) || fs.existsSync(path.join(path.dirname(path.resolve(entry)), "services"))) {
   // Type information is erased by the time this module imports the app core.
   // Run the frontend inside the watched process so every node --watch restart
   // revalidates manifest-owned routes against the newly edited Msg union.
   checked = checkFile(entry, {
     capabilities: [...new Set([...capabilities, ...(persistOk === null ? [] : ["persist"])])],
+    permissions: [...permissions],
     persistRoutes: persistOk !== null && persistNone !== null && persistErr !== null ? { ok: persistOk, none: persistNone, err: persistErr } : undefined,
     servicesContract: true,
     servicePackages,
@@ -317,6 +326,10 @@ interface VirtualStoreRecord {
 /// surrogate to U+FFFD, so strings with the same encoded bytes must address
 /// one record here just as they do in the native host.
 const recordStore = new Map<string, VirtualStoreRecord>();
+/// Process-local Tier-4 backing. The namespace includes the manifest app id,
+/// matching the native keychain service/account split. Transcript output
+/// never includes the stored bytes.
+const credentialStore = new Map<string, Uint8Array>();
 
 interface PendingStoreResult {
   readonly seq: number;
@@ -1112,6 +1125,68 @@ function performStoreCmd(cmd: Cmdish): void {
   }
 }
 
+function credentialFields(payload: unknown): Uint8Array[] | null {
+  if (!(payload instanceof Uint8Array)) return null;
+  const fields: Uint8Array[] = [];
+  let at = 0;
+  while (at < payload.length) {
+    if (payload.length - at < 4) return null;
+    const length = new DataView(payload.buffer, payload.byteOffset + at, 4).getUint32(0, true);
+    at += 4;
+    if (length > payload.length - at) return null;
+    fields.push(payload.slice(at, at + length));
+    at += length;
+  }
+  return fields;
+}
+
+function rejectCredentials(cmd: Cmdish, outcome: string): void {
+  say(`cmd ${cmd.name} rejected ${outcome}`);
+  queueStoreResult(cmd, false, encoder.encode(outcome), false);
+}
+
+function performCredentialsCmd(cmd: Cmdish): void {
+  const name = cmd.name as string;
+  if (!capabilities.has("credentials") || !permissions.has("credentials")) {
+    rejectCredentials(cmd, "denied");
+    return;
+  }
+  const fields = credentialFields(cmd.payload);
+  const expected = name === "core.credentials.set" ? 2 : 1;
+  if (!fields || fields.length !== expected) return rejectCredentials(cmd, "rejected");
+  const keyBytes = fields[0]!;
+  let key: string;
+  try {
+    key = strictDecoder.decode(keyBytes);
+  } catch {
+    return rejectCredentials(cmd, "over_bound");
+  }
+  if (keyBytes.length === 0 || keyBytes.length > 256) return rejectCredentials(cmd, "over_bound");
+  const identity = `${appId}\0${key}`;
+  if (name === "core.credentials.set") {
+    const secret = fields[1]!;
+    if (secret.length > 64 * 1024) return rejectCredentials(cmd, "over_bound");
+    credentialStore.set(identity, secret.slice());
+    say(`cmd ${name} ${cmd.key as string} ${key} (<redacted, ${secret.length} bytes> stored in virtual host memory)`);
+    queueStoreResult(cmd, true, new Uint8Array(0), true);
+    return;
+  }
+  if (name === "core.credentials.get") {
+    const secret = credentialStore.get(identity);
+    say(`cmd ${name} ${cmd.key as string} ${key} (${secret ? `<redacted, ${secret.length} bytes>` : "miss"})`);
+    if (!secret) queueStoreResult(cmd, false, encoder.encode("miss"), false);
+    else queueStoreResult(cmd, true, secret.slice(), false);
+    return;
+  }
+  if (name === "core.credentials.delete") {
+    credentialStore.delete(identity);
+    say(`cmd ${name} ${cmd.key as string} ${key} (deleted from virtual host memory)`);
+    queueStoreResult(cmd, true, new Uint8Array(0), true);
+    return;
+  }
+  rejectCredentials(cmd, "rejected");
+}
+
 type DbBindValue = null | bigint | number | string | Uint8Array;
 
 function validDbSql(value: unknown): value is string {
@@ -1642,6 +1717,10 @@ function performCmd(cmd: Cmdish): void {
       return;
     }
     case "request": {
+      if (typeof cmd.name === "string" && cmd.name.startsWith("core.credentials.")) {
+        performCredentialsCmd(cmd);
+        return;
+      }
       const operation = serviceOperations.get(cmd.name as string);
       if (!operation) break;
       try {

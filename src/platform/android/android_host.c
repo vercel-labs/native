@@ -80,6 +80,13 @@ static struct {
     jmethodID audio_stop_method;
     jmethodID audio_seek_method;
     jmethodID audio_set_volume_method;
+    // Secure credential upcalls. Core credential effects execute on their
+    // own worker family, so callbacks attach that worker to the VM for the
+    // duration of each synchronous AndroidKeyStore operation.
+    jobject credential_activity;
+    jmethodID credential_set_method;
+    jmethodID credential_get_method;
+    jmethodID credential_delete_method;
     // Image decode upcall target, registered by nativeSetImageService: the
     // activity owns the platform codec (BitmapFactory on the Java side),
     // and the embed image service callback below calls back into it.
@@ -127,6 +134,13 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeDestroy
         host_state.audio_stop_method = NULL;
         host_state.audio_seek_method = NULL;
         host_state.audio_set_volume_method = NULL;
+    }
+    if (host_state.credential_activity) {
+        (*env)->DeleteGlobalRef(env, host_state.credential_activity);
+        host_state.credential_activity = NULL;
+        host_state.credential_set_method = NULL;
+        host_state.credential_get_method = NULL;
+        host_state.credential_delete_method = NULL;
     }
     if (host_state.image_activity) {
         (*env)->DeleteGlobalRef(env, host_state.image_activity);
@@ -613,6 +627,140 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetAudi
     native_sdk_app_set_audio_service((void *)app, &service, NULL);
     host_log_error((void *)app, "audio_service");
     NATIVE_SDK_LOGI("audio service registered");
+}
+
+// ----------------------------------------------------------- credentials
+
+static JNIEnv *host_credential_env(int *attached) {
+    *attached = 0;
+    if (!host_state.vm || !host_state.credential_activity) return NULL;
+    JNIEnv *env = NULL;
+    jint state = (*host_state.vm)->GetEnv(host_state.vm, (void **)&env, JNI_VERSION_1_6);
+    if (state == JNI_OK) return env;
+    if (state != JNI_EDETACHED ||
+        (*host_state.vm)->AttachCurrentThread(host_state.vm, &env, NULL) != JNI_OK) return NULL;
+    *attached = 1;
+    return env;
+}
+
+static void host_credential_done(int attached) {
+    if (attached) (*host_state.vm)->DetachCurrentThread(host_state.vm);
+}
+
+static int host_credential_set(void *context,
+                               const char *service, uintptr_t service_len,
+                               const char *account, uintptr_t account_len,
+                               const uint8_t *secret, uintptr_t secret_len) {
+    (void)context;
+    int attached = 0;
+    JNIEnv *env = host_credential_env(&attached);
+    if (!env) return -5;
+    jbyteArray service_bytes = host_audio_bytes(env, service, service_len);
+    jbyteArray account_bytes = host_audio_bytes(env, account, account_len);
+    jbyteArray secret_bytes = host_audio_bytes(env, (const char *)secret, secret_len);
+    if (!service_bytes || !account_bytes || !secret_bytes) {
+        if (service_bytes) (*env)->DeleteLocalRef(env, service_bytes);
+        if (account_bytes) (*env)->DeleteLocalRef(env, account_bytes);
+        if (secret_bytes) (*env)->DeleteLocalRef(env, secret_bytes);
+        host_credential_done(attached);
+        return -5;
+    }
+    jint result = (*env)->CallIntMethod(env, host_state.credential_activity,
+                                        host_state.credential_set_method,
+                                        service_bytes, account_bytes, secret_bytes);
+    (*env)->DeleteLocalRef(env, secret_bytes);
+    (*env)->DeleteLocalRef(env, account_bytes);
+    (*env)->DeleteLocalRef(env, service_bytes);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        result = -5;
+    }
+    host_credential_done(attached);
+    return (int)result;
+}
+
+static int64_t host_credential_get(void *context,
+                                   const char *service, uintptr_t service_len,
+                                   const char *account, uintptr_t account_len,
+                                   uint8_t *output, uintptr_t output_len) {
+    (void)context;
+    int attached = 0;
+    JNIEnv *env = host_credential_env(&attached);
+    if (!env) return -5;
+    jbyteArray service_bytes = host_audio_bytes(env, service, service_len);
+    jbyteArray account_bytes = host_audio_bytes(env, account, account_len);
+    jobject output_buffer = (*env)->NewDirectByteBuffer(env, output, (jlong)output_len);
+    if (!service_bytes || !account_bytes || !output_buffer) {
+        if (service_bytes) (*env)->DeleteLocalRef(env, service_bytes);
+        if (account_bytes) (*env)->DeleteLocalRef(env, account_bytes);
+        if (output_buffer) (*env)->DeleteLocalRef(env, output_buffer);
+        host_credential_done(attached);
+        return -5;
+    }
+    jlong result = (*env)->CallLongMethod(env, host_state.credential_activity,
+                                          host_state.credential_get_method,
+                                          service_bytes, account_bytes, output_buffer);
+    (*env)->DeleteLocalRef(env, output_buffer);
+    (*env)->DeleteLocalRef(env, account_bytes);
+    (*env)->DeleteLocalRef(env, service_bytes);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        result = -5;
+    }
+    host_credential_done(attached);
+    return (int64_t)result;
+}
+
+static int host_credential_delete(void *context,
+                                  const char *service, uintptr_t service_len,
+                                  const char *account, uintptr_t account_len) {
+    (void)context;
+    int attached = 0;
+    JNIEnv *env = host_credential_env(&attached);
+    if (!env) return -5;
+    jbyteArray service_bytes = host_audio_bytes(env, service, service_len);
+    jbyteArray account_bytes = host_audio_bytes(env, account, account_len);
+    if (!service_bytes || !account_bytes) {
+        if (service_bytes) (*env)->DeleteLocalRef(env, service_bytes);
+        if (account_bytes) (*env)->DeleteLocalRef(env, account_bytes);
+        host_credential_done(attached);
+        return -5;
+    }
+    jint result = (*env)->CallIntMethod(env, host_state.credential_activity,
+                                        host_state.credential_delete_method,
+                                        service_bytes, account_bytes);
+    (*env)->DeleteLocalRef(env, account_bytes);
+    (*env)->DeleteLocalRef(env, service_bytes);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        result = -5;
+    }
+    host_credential_done(attached);
+    return (int)result;
+}
+
+JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetCredentialService(JNIEnv *env, jobject self, jlong app) {
+    if ((*env)->GetJavaVM(env, &host_state.vm) != JNI_OK) return;
+    if (host_state.credential_activity) (*env)->DeleteGlobalRef(env, host_state.credential_activity);
+    host_state.credential_activity = (*env)->NewGlobalRef(env, self);
+    jclass cls = (*env)->GetObjectClass(env, self);
+    host_state.credential_set_method = (*env)->GetMethodID(env, cls, "credentialSet", "([B[B[B)I");
+    host_state.credential_get_method = (*env)->GetMethodID(env, cls, "credentialGet", "([B[BLjava/nio/ByteBuffer;)J");
+    host_state.credential_delete_method = (*env)->GetMethodID(env, cls, "credentialDelete", "([B[B)I");
+    (*env)->DeleteLocalRef(env, cls);
+    if (!host_state.credential_activity || !host_state.credential_set_method ||
+        !host_state.credential_get_method || !host_state.credential_delete_method) {
+        NATIVE_SDK_LOGE("credential_service registration failed");
+        return;
+    }
+    static const native_sdk_credential_service_t service = {
+        .set = host_credential_set,
+        .get = host_credential_get,
+        .delete = host_credential_delete,
+    };
+    native_sdk_app_set_credential_service((void *)app, &service, NULL);
+    host_log_error((void *)app, "credential_service");
+    NATIVE_SDK_LOGI("credential service registered");
 }
 
 // ------------------------------------------------------------------ images
