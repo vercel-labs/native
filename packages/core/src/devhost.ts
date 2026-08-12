@@ -58,6 +58,7 @@ import { Worker } from "node:worker_threads";
 import { installTextMethods } from "./text_polyfill.ts";
 import { checkFile, formatDiagnostic } from "./frontend.ts";
 import { DevhostJournalWriter, readDevhostJournal, requestKeyBase } from "./devhost_journal.mjs";
+import { relationalRuntimePolicy } from "./sqlite_runtime_policy.ts";
 
 interface Cmdish {
   readonly op: string;
@@ -361,12 +362,6 @@ interface PendingDbResult {
 
 const relationalDb = new DatabaseSync(":memory:");
 relationalDb.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=250;");
-const relationalOwnedPragmas = new Set([
-  "user_version", "schema_version", "writable_schema", "query_only",
-  "journal_mode", "synchronous", "locking_mode", "foreign_keys",
-  "defer_foreign_keys", "busy_timeout", "wal_autocheckpoint", "temp_store",
-  "temp_store_directory", "data_store_directory",
-]);
 let relationalTrackWrites = false;
 let relationalAllowTransaction = false;
 const relationalChangedTables = new Set<string>();
@@ -393,11 +388,7 @@ const relationalAuthorizer = (action: number, first: string | null, second: stri
       (action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT)) {
     return sqliteConstants.SQLITE_DENY;
   }
-  if (action === sqliteConstants.SQLITE_ATTACH || action === sqliteConstants.SQLITE_DETACH) return sqliteConstants.SQLITE_DENY;
-  if (action === sqliteConstants.SQLITE_PRAGMA && second !== null && relationalOwnedPragmas.has((first ?? "").toLowerCase())) {
-    return sqliteConstants.SQLITE_DENY;
-  }
-  return sqliteConstants.SQLITE_OK;
+  return relationalRuntimePolicy(action, first, second);
 };
 relationalDb.setAuthorizer(relationalAuthorizer);
 
@@ -1325,6 +1316,7 @@ function dbBindArgs(sql: string, params: ReadonlyArray<DbBindValue>): ReadonlyAr
 
 function beginDbOperation(cmd: Cmdish, query: boolean): PendingDbOperation | null {
   const routeKey = cmd.key as string;
+  if (routeKey.length > 0 && liveDbByKey.has(routeKey)) return null;
   const active = routeKey.length === 0 ? undefined : pendingDbByKey.get(routeKey);
   if (active) {
     if (!query) return null;
@@ -1400,7 +1392,7 @@ function runDbQuery(sql: unknown, rawParams: unknown, operation: PendingDbOperat
 function performDbCmd(cmd: Cmdish): void {
   const query = cmd.op === "db_query";
   const operation = beginDbOperation(cmd, query);
-  if (!operation) return rejectDbOperation(cmd, false, "rejected");
+  if (!operation) return rejectDbOperation(cmd, query, "rejected");
   if (!capabilities.has("sqlite")) return rejectDbOperation(cmd, query, "rejected", operation);
 
   if (query) {
@@ -1709,6 +1701,7 @@ function reconcileSubs(): void {
     if (!Array.isArray(tables) || tables.length === 0 || !tables.every((table) => typeof table === "string" && table.length > 0) || !Array.isArray(params)) {
       throw new Error(`live query ${key} carries an invalid generated dependency or parameter set`);
     }
+    if (pendingDbByKey.has(key)) throw new Error(`live-query key ${key} collides with an in-flight database command`);
     const signature = JSON.stringify([
       sub.pageKind, sub.doneKind, sub.errKind, sub.sql,
       jsonable(params), tables,

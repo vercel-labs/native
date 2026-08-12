@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { constants as sqliteConstants, DatabaseSync, type StatementSync } from "node:sqlite";
+import { relationalRuntimePolicy } from "./sqlite_runtime_policy.ts";
 
 export interface SqliteDiagnostic {
   readonly rule: `NS14${number}`;
@@ -178,17 +179,17 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
     let migrationAuthorizerInstalled = false;
     let activeMigration: MigrationSource | undefined;
     try {
-      db.setAuthorizer((action) =>
-        action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT
-          ? sqliteConstants.SQLITE_DENY
-          : sqliteConstants.SQLITE_OK,
-      );
+      db.setAuthorizer((action, first, second) => {
+        if (action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT) {
+          return sqliteConstants.SQLITE_DENY;
+        }
+        return relationalRuntimePolicy(action, first, second);
+      });
       migrationAuthorizerInstalled = true;
       for (const migration of migrations) {
         activeMigration = migration;
         try {
           db.exec(migration.sql);
-          db.exec(`PRAGMA user_version=${migration.version};`);
         } catch (error) {
           diagnostics.push(diag("NS1404", migration.file, 1, `SQLite rejected migration ${String(migration.version).padStart(4, "0")}: ${sqliteMessage(error)}.`, "Fix the SQL at this migration; native check applies the real SQLite dialect in memory.", "Shipping a migration that fails would prevent the app database from opening."));
           break;
@@ -196,7 +197,10 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
       }
       db.setAuthorizer(null);
       migrationAuthorizerInstalled = false;
-      if (diagnostics.length === 0) db.exec("COMMIT;");
+      if (diagnostics.length === 0) {
+        db.exec(`PRAGMA user_version=${migrations.at(-1)?.version ?? 0};`);
+        db.exec("COMMIT;");
+      }
       else db.exec("ROLLBACK;");
     } catch (error) {
       if (migrationAuthorizerInstalled) {
@@ -233,10 +237,10 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
   if (fs.existsSync(queriesFile) && diagnostics.length === 0) {
     let statementWrites = false;
     let statementControlsTransaction = false;
-    db.setAuthorizer((action) => {
+    db.setAuthorizer((action, first, second) => {
       if (action === sqliteConstants.SQLITE_INSERT || action === sqliteConstants.SQLITE_UPDATE || action === sqliteConstants.SQLITE_DELETE) statementWrites = true;
       if (action === sqliteConstants.SQLITE_TRANSACTION || action === sqliteConstants.SQLITE_SAVEPOINT) statementControlsTransaction = true;
-      return sqliteConstants.SQLITE_OK;
+      return relationalRuntimePolicy(action, first, second);
     });
     const source = fs.readFileSync(queriesFile, "utf8").replaceAll("\r\n", "\n");
     const lines = source.split("\n");

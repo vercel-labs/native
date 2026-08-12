@@ -248,15 +248,18 @@ export interface Model { readonly refused: number; }
 export type Msg =
   | { readonly kind: "go" }
   | { readonly kind: "next" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
   | { readonly kind: "failed"; readonly reason: Uint8Array };
 export function initialModel(): Model { return { refused: 0 }; }
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.db.exec([["ATTACH DATABASE ':memory:' AS escaped", []]], { ok: "next", err: "failed" })];
     case "next": return model;
+    case "page": return model;
     case "failed": {
       const next = { refused: model.refused + 1 };
       if (next.refused === 1) return [next, Cmd.db.exec([["PRAGMA user_version=9", []]], { ok: "next", err: "failed" })];
+      if (next.refused === 2) return [next, Cmd.db.query("SELECT sqrt(4)", [], { page: "page", done: "next", err: "failed" })];
       return next;
     }
   }
@@ -268,7 +271,52 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     ], { cwd: tmp, encoding: "utf8" });
     assert.equal(run.status, 0, run.stderr);
     assert.equal((run.stdout.match(/cmd db_exec rejected misuse/g) ?? []).length, 2);
-    assert.match(run.stdout, /"refused":2/);
+    assert.match(run.stdout, /cmd db_query rejected misuse/);
+    assert.match(run.stdout, /"refused":3/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the devhost rejects commands that collide with a live-query key", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-live-key-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd, Sub } from "@native-sdk/core";
+export interface Model { readonly pages: number; readonly rejected: boolean; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { pages: 0, rejected: false }; }
+export function subscriptions(_model: Model): Sub<Msg> {
+  return { op: "db_live", key: "shared", pageKind: "page", doneKind: "done", errKind: "failed",
+    sql: "SELECT 1 AS value", params: [], tables: ["note"] };
+}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.db.query("SELECT 2 AS value", [], {
+      key: "shared", page: "page", done: "done", err: "failed",
+    })];
+    case "page": return { ...model, pages: model.pages + 1 };
+    case "done": return model;
+    case "failed": return { ...model, rejected: msg.reason[0] === 114 };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /sub db_live shared/);
+    assert.match(run.stdout, /cmd db_query rejected rejected/);
+    assert.doesNotMatch(run.stdout, /cmd db_query shared \(/);
+    assert.match(run.stdout, /"pages":1,"rejected":true/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

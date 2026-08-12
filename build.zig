@@ -3429,7 +3429,7 @@ fn externalCoreFixtureModule(
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{
-        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "sqlite_runtime_policy.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
     };
     for (frontend_sources) |source| {
         check.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));

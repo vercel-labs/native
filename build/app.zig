@@ -108,7 +108,7 @@ const TsCoreStage = struct {
 /// The frontend's own sources — the staleness set of every build step
 /// that runs it (a frontend edit re-checks every core).
 const frontend_sources = [_][]const u8{
-    "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "ownership.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+    "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "ownership.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "sqlite_runtime_policy.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
 };
 
 /// Whether the frontend's TypeScript compiler (@typescript/old, the
@@ -406,6 +406,7 @@ fn tsCoreStage(
             sqlite_check.addFileInput(b.path(appPath(b, app_root, "src/schema/migrations.lock.json")));
         }
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
+        sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
         addAppSqlDirInputs(b, sqlite_check, appPath(b, app_root, "src"));
     }
 
@@ -617,6 +618,7 @@ fn sqliteMigrationsStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []
         generate.addFileInput(b.path(appPath(b, app_root, "src/schema/migrations.lock.json")));
     }
     generate.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
+    generate.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
     addAppSqlDirInputs(b, generate, appPath(b, app_root, "src"));
     return migrations;
 }

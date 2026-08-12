@@ -69,6 +69,20 @@ test "relational query pagination emits every row without truncation" {
     try std.testing.expect(fx.takeMsg() == null);
 }
 
+test "callback-less relational queries release staged page storage" {
+    var database = try relational_store.Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindRelationalStore(database.binding());
+
+    fx.dbQuery(.{
+        .key = 23,
+        .sql = "SELECT zeroblob(4096) AS payload;",
+    });
+    try std.testing.expect(fx.takeMsg() == null);
+}
+
 test "relational exec rolls back the whole command and reports constraint" {
     var database = try relational_store.Database.openMemory(std.testing.allocator);
     defer database.deinit();

@@ -10620,7 +10620,11 @@ pub fn Effects(comptime Msg: type) type {
                                 .code = dbJournalCode(entry.kind, entry.outcome),
                                 .exit_reason = if (entry.regenerates) .rejected else .exited,
                             });
-                            const db_fn = entry.db_fn orelse continue;
+                            const db_fn = entry.db_fn orelse {
+                                if (self.drain_db_bytes) |owned| self.allocator.free(owned);
+                                self.drain_db_bytes = null;
+                                continue;
+                            };
                             return db_fn(result);
                         },
                         .audio => |entry| {

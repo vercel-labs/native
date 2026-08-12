@@ -278,3 +278,73 @@ test("migrations cannot terminate the analyzer-owned transaction", () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("migration analysis applies the packaged runtime SQLite sandbox", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-check-"));
+  try {
+    fs.mkdirSync(path.join(root, "schema"));
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      "PRAGMA user_version=99;\nCREATE TABLE note(id INTEGER PRIMARY KEY) STRICT;\n",
+    );
+    const pragma = analyzeSqlite(root);
+    assert.equal(pragma.diagnostics[0]?.rule, "NS1404");
+    assert.match(pragma.diagnostics[0]?.message ?? "", /not authorized/i);
+
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      "ATTACH DATABASE ':memory:' AS escaped;\nCREATE TABLE note(id INTEGER PRIMARY KEY) STRICT;\n",
+    );
+    const attach = analyzeSqlite(root);
+    assert.equal(attach.diagnostics[0]?.rule, "NS1404");
+    assert.match(attach.diagnostics[0]?.message ?? "", /not authorized/i);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("analysis rejects Node-only SQLite modules and functions", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-check-"));
+  try {
+    fs.mkdirSync(path.join(root, "schema"));
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      "CREATE VIRTUAL TABLE box USING rtree(id, min_x, max_x);\n",
+    );
+    const module = analyzeSqlite(root);
+    assert.equal(module.diagnostics[0]?.rule, "NS1404");
+    assert.match(module.diagnostics[0]?.message ?? "", /not authorized/i);
+
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      "CREATE TABLE item(id INTEGER PRIMARY KEY) STRICT;\n",
+    );
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: distance\nSELECT sqrt(:value) AS distance;\n",
+    );
+    const scalar = analyzeSqlite(root);
+    assert.equal(scalar.diagnostics[0]?.rule, "NS1414");
+    assert.match(scalar.diagnostics[0]?.message ?? "", /not authorized/i);
+
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: pages\nSELECT name FROM dbstat;\n",
+    );
+    const table = analyzeSqlite(root);
+    assert.equal(table.diagnostics[0]?.rule, "NS1414");
+    assert.match(table.diagnostics[0]?.message ?? "", /not authorized|prohibited/i);
+
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      "CREATE VIRTUAL TABLE search_index USING fts5(body);\n",
+    );
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: matches\nSELECT body FROM search_index WHERE search_index MATCH :term;\n",
+    );
+    assert.deepEqual(analyzeSqlite(root).diagnostics, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
