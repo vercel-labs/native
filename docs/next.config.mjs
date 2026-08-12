@@ -58,6 +58,13 @@ const nextConfig = {
     return [
       // The Philosophy page became the Introduction, the opening page of the docs.
       { source: "/philosophy", destination: "/docs/introduction", permanent: true },
+      // docsSlugs() only yields nested slugs, so the /docs segment itself has
+      // neither a route nor a generated redirect and 404s. It is the parent of
+      // every documentation link on the site and the likeliest hand-typed entry
+      // point, so open it on the Introduction instead. The .md sibling keeps the
+      // Markdown surface whole for agents that reach for it.
+      { source: "/docs", destination: "/docs/introduction", permanent: true },
+      { source: "/docs.md", destination: "/docs/introduction.md", permanent: true },
       ...legacyDocsRedirects,
     ];
   },
