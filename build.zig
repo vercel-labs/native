@@ -1270,7 +1270,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "InvalidateRect(view.hwnd, &info.dirty_rects[index], FALSE)" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "for (size_t y_index = y0; y_index < y1; ++y_index)" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "InvalidateRect(view.hwnd, partial_update ? &dirty_pixels : nullptr, FALSE)" },
-        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "D2D1_RENDER_TARGET_TYPE_HARDWARE" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "D3D11_CREATE_DEVICE_BGRA_SUPPORT" },
         .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "retained_commands_ = std::move(next_retained)" },
         .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "PushAxisAlignedClip(d2dRect(requested)" },
         .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "const float expansion = effect.spread + blur" },
