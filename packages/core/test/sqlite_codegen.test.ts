@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { analyzeSqlite, checkMigrationState, generateCoreSurface, generateMigrationsZig } from "../src/sqlite_codegen.ts";
+import { inspectRelationalSql } from "../src/sqlite_runtime_policy.ts";
 
 function fixture(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-check-"));
@@ -112,6 +113,24 @@ test("outer joins widen generated result nullability", () => {
     assert.deepEqual(result.diagnostics, []);
     assert.equal(result.queries[0]?.columns[0]?.nullable, true);
     assert.match(generateCoreSurface("// @native-sqlite-generated-types\n// @native-sqlite-generated-cmds\n// @native-sqlite-generated-subs", result), /readonly title: Uint8Array \| null/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scalar subqueries widen generated result nullability", () => {
+  const root = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: maybeNote\nSELECT (SELECT id FROM note WHERE id = -1) AS id;\n",
+    );
+    const result = analyzeSqlite(root);
+    assert.deepEqual(result.diagnostics, []);
+    assert.deepEqual(result.queries[0]?.columns, [
+      { name: "id", sqlType: "INTEGER", nullable: true },
+    ]);
+    assert.match(generateCoreSurface("// @native-sqlite-generated-types\n// @native-sqlite-generated-cmds\n// @native-sqlite-generated-subs", result), /readonly id: number \| null/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -304,9 +323,29 @@ test("migration analysis applies the packaged runtime SQLite sandbox", () => {
     const attach = analyzeSqlite(root);
     assert.equal(attach.diagnostics[0]?.rule, "NS1404");
     assert.match(attach.diagnostics[0]?.message ?? "", /not authorized/i);
+
+    fs.writeFileSync(
+      path.join(root, "schema", "0001_init.sql"),
+      "CREATE TEMP TABLE session_note(id INTEGER PRIMARY KEY) STRICT;\n",
+    );
+    const temporary = analyzeSqlite(root);
+    assert.equal(temporary.diagnostics[0]?.rule, "NS1404");
+    assert.match(temporary.diagnostics[0]?.message ?? "", /not authorized/i);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the Node 22 policy fallback rejects TEMP access and load_extension", () => {
+  for (const sql of [
+    "CREATE TEMP TABLE session_note(id INTEGER);",
+    "CREATE TABLE temp.session_note(id INTEGER);",
+    "SELECT * FROM temp.session_note;",
+    "SELECT load_extension(:path);",
+  ]) {
+    assert.match(inspectRelationalSql(sql, true).error ?? "", /not authorized|unavailable/i);
+  }
+  assert.equal(inspectRelationalSql("SELECT main.note.id FROM main.note;", true).error, null);
 });
 
 test("analysis rejects Node-only SQLite modules and functions", () => {
@@ -332,6 +371,14 @@ test("analysis rejects Node-only SQLite modules and functions", () => {
     const scalar = analyzeSqlite(root);
     assert.equal(scalar.diagnostics[0]?.rule, "NS1414");
     assert.match(scalar.diagnostics[0]?.message ?? "", /not authorized/i);
+
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      "-- name: extension\nSELECT load_extension(:path) AS loaded;\n",
+    );
+    const extension = analyzeSqlite(root);
+    assert.equal(extension.diagnostics[0]?.rule, "NS1414");
+    assert.match(extension.diagnostics[0]?.message ?? "", /load_extension.*not authorized/i);
 
     fs.writeFileSync(
       path.join(root, "queries.sql"),

@@ -372,7 +372,48 @@ function inferColumn(db: DatabaseSync, column: ReturnType<StatementSync["columns
   // result columns in an outer-join statement; generated decoding must never
   // reject a legal row merely to claim a narrower type.
   if (/\b(?:left|right|full)(?:\s+outer)?\s+join\b/i.test(sql)) nullable = true;
+  // SQLite retains the origin metadata of a NOT NULL table column through a
+  // scalar subquery, but an empty scalar subquery produces NULL. The origin
+  // still determines the storage class; only its nullability must widen.
+  const expressions = topLevelSelectExpressions(sql);
+  if (expressions.length === columnCount && containsSubquery(expressions[index] ?? "")) nullable = true;
   return { name: column.name, sqlType, nullable };
+}
+
+function containsSubquery(expression: string): boolean {
+  let quote = "";
+  for (let at = 0; at < expression.length; at++) {
+    const char = expression[at]!;
+    if (quote) {
+      if (char === quote && expression[at + 1] === quote) { at += 1; continue; }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "'" || char === "\"" || char === "`") { quote = char; continue; }
+    if (char === "[") {
+      const end = expression.indexOf("]", at + 1);
+      at = end < 0 ? expression.length : end;
+      continue;
+    }
+    if (char !== "(") continue;
+    let next = at + 1;
+    while (next < expression.length) {
+      if (/\s/.test(expression[next]!)) { next += 1; continue; }
+      if (expression[next] === "-" && expression[next + 1] === "-") {
+        const end = expression.indexOf("\n", next + 2);
+        next = end < 0 ? expression.length : end + 1;
+        continue;
+      }
+      if (expression[next] === "/" && expression[next + 1] === "*") {
+        const end = expression.indexOf("*/", next + 2);
+        next = end < 0 ? expression.length : end + 2;
+        continue;
+      }
+      break;
+    }
+    if (/^(?:select|with)\b/i.test(expression.slice(next))) return true;
+  }
+  return false;
 }
 
 function hasTopLevelCompoundSelect(sql: string): boolean {

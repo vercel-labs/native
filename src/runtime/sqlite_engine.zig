@@ -35,8 +35,16 @@ const c = struct {
     const SQLITE_OK_AUTHORIZER: c_int = 0;
     const SQLITE_DENY_AUTHORIZER: c_int = 1;
     const SQLITE_CREATE_INDEX: c_int = 1;
+    const SQLITE_CREATE_TEMP_INDEX: c_int = 3;
+    const SQLITE_CREATE_TEMP_TABLE: c_int = 4;
+    const SQLITE_CREATE_TEMP_TRIGGER: c_int = 5;
+    const SQLITE_CREATE_TEMP_VIEW: c_int = 6;
     const SQLITE_CREATE_VIEW: c_int = 8;
     const SQLITE_DROP_INDEX: c_int = 10;
+    const SQLITE_DROP_TEMP_INDEX: c_int = 12;
+    const SQLITE_DROP_TEMP_TABLE: c_int = 13;
+    const SQLITE_DROP_TEMP_TRIGGER: c_int = 14;
+    const SQLITE_DROP_TEMP_VIEW: c_int = 15;
     const SQLITE_DROP_VIEW: c_int = 17;
     const SQLITE_PRAGMA: c_int = 19;
     const SQLITE_TRANSACTION: c_int = 22;
@@ -393,6 +401,7 @@ fn relationalMigrationAuthorizer(
 
 fn relationalPolicy(action: c_int, first: ?[*:0]const u8, second: ?[*:0]const u8) c_int {
     if (action == c.SQLITE_ATTACH or action == c.SQLITE_DETACH) return c.SQLITE_DENY_AUTHORIZER;
+    if (temporarySchemaOperation(action)) return c.SQLITE_DENY_AUTHORIZER;
     if (action == c.SQLITE_PRAGMA and second != null) {
         const name = if (first) |value| std.mem.span(value) else "";
         for (relational_owned_pragmas) |owned| {
@@ -400,6 +409,11 @@ fn relationalPolicy(action: c_int, first: ?[*:0]const u8, second: ?[*:0]const u8
         }
     }
     return c.SQLITE_OK_AUTHORIZER;
+}
+
+fn temporarySchemaOperation(action: c_int) bool {
+    return (action >= c.SQLITE_CREATE_TEMP_INDEX and action <= c.SQLITE_CREATE_TEMP_VIEW) or
+        (action >= c.SQLITE_DROP_TEMP_INDEX and action <= c.SQLITE_DROP_TEMP_VIEW);
 }
 
 /// SQLite's schema authorizer action codes are stable and contiguous across

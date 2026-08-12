@@ -69,6 +69,44 @@ test "relational query pagination emits every row without truncation" {
     try std.testing.expect(fx.takeMsg() == null);
 }
 
+test "relational queries reject whole results beyond the total row bound" {
+    var database = try relational_store.Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindRelationalStore(database.binding());
+
+    var sql_buffer: [256]u8 = undefined;
+    const sql = try std.fmt.bufPrint(
+        &sql_buffer,
+        "WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < {d}) SELECT value FROM n;",
+        .{relational_store.max_result_rows + 1},
+    );
+    fx.dbQuery(.{ .key = 24, .sql = sql, .on_result = Fx.dbMsg(.db) });
+    const rejected = try takeResult(&fx);
+    try std.testing.expectEqual(effects_mod.EffectDbResultKind.done, rejected.kind);
+    try std.testing.expectEqual(effects_mod.EffectDbOutcome.rejected, rejected.outcome);
+    try std.testing.expectEqual(@as(usize, 0), rejected.bytes.len);
+    try std.testing.expect(fx.takeMsg() == null);
+}
+
+test "relational exec rejects TEMP schema objects" {
+    var database = try relational_store.Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindRelationalStore(database.binding());
+
+    fx.dbExec(.{
+        .key = 25,
+        .statements = &.{.{ .sql = "CREATE TEMP TABLE session_note(id INTEGER PRIMARY KEY) STRICT;" }},
+        .on_result = Fx.dbMsg(.db),
+    });
+    const rejected = try takeResult(&fx);
+    try std.testing.expectEqual(effects_mod.EffectDbResultKind.exec, rejected.kind);
+    try std.testing.expectEqual(effects_mod.EffectDbOutcome.misuse, rejected.outcome);
+}
+
 test "callback-less relational queries release staged page storage" {
     var database = try relational_store.Database.openMemory(std.testing.allocator);
     defer database.deinit();
@@ -124,6 +162,27 @@ test "query keys replace and cancel silently while exec duplicates reject loudly
     const rejected = try takeResult(&fx);
     try std.testing.expectEqual(effects_mod.EffectDbResultKind.exec, rejected.kind);
     try std.testing.expectEqual(effects_mod.EffectDbOutcome.rejected, rejected.outcome);
+}
+
+test "replacing a real relational query purges its staged pages" {
+    var database = try relational_store.Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindRelationalStore(database.binding());
+
+    fx.dbQuery(.{
+        .key = 12,
+        .sql = "WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 300) SELECT value FROM n;",
+        .on_result = Fx.dbMsg(.db),
+    });
+    fx.dbQuery(.{ .key = 12, .sql = "SELECT 2 AS value;", .on_result = Fx.dbMsg(.db) });
+    const page = try takeResult(&fx);
+    try std.testing.expectEqual(effects_mod.EffectDbResultKind.page, page.kind);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, page.bytes[4..8], .little));
+    const done = try takeResult(&fx);
+    try std.testing.expectEqual(effects_mod.EffectDbResultKind.done, done.kind);
+    try std.testing.expect(fx.takeMsg() == null);
 }
 
 test "relational effects have a dedicated bounded slot family" {

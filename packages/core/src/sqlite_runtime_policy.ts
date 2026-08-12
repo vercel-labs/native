@@ -6,7 +6,13 @@
 
 import { constants as sqliteConstants, type DatabaseSync } from "node:sqlite";
 
-type SqliteAuthorizer = (action: number, first: string | null, second: string | null) => number;
+type SqliteAuthorizer = (
+  action: number,
+  first: string | null,
+  second: string | null,
+  databaseName?: string | null,
+  triggerOrView?: string | null,
+) => number;
 type AuthorizerDatabase = DatabaseSync & {
   setAuthorizer?: (callback: SqliteAuthorizer | null) => void;
 };
@@ -25,6 +31,12 @@ const relationalOwnedPragmas = new Set([
 
 const relationalVirtualTableModules = new Set(["fts5", "fts5vocab"]);
 const relationalUnavailableReadTables = new Set(["dbstat", "fts3tokenize"]);
+const relationalTempSchemaActions = new Set([
+  sqliteConstants.SQLITE_CREATE_TEMP_INDEX, sqliteConstants.SQLITE_CREATE_TEMP_TABLE,
+  sqliteConstants.SQLITE_CREATE_TEMP_TRIGGER, sqliteConstants.SQLITE_CREATE_TEMP_VIEW,
+  sqliteConstants.SQLITE_DROP_TEMP_INDEX, sqliteConstants.SQLITE_DROP_TEMP_TABLE,
+  sqliteConstants.SQLITE_DROP_TEMP_TRIGGER, sqliteConstants.SQLITE_DROP_TEMP_VIEW,
+]);
 
 // SQLITE_ENABLE_MATH_FUNCTIONS is enabled in Node's SQLite but not in the
 // app engine. These names are otherwise absent from the vendored build (the
@@ -37,6 +49,9 @@ const relationalOptionalFunctions = new Set([
   // Node also enables RTREE/GEOPOLY. CREATE VIRTUAL TABLE is gated below;
   // reject their scalar inspection helpers as well.
   "rtreecheck", "rtreedepth", "rtreenode",
+  // The app engine is compiled with SQLITE_OMIT_LOAD_EXTENSION. Node keeps
+  // the function in its parser surface even though execution is unauthorized.
+  "load_extension",
 ]);
 
 function sqlTokens(sql: string): SqlToken[] {
@@ -172,6 +187,9 @@ export function inspectRelationalSql(sql: string, denyTransactions: boolean): Re
   if (keyword === "attach" || keyword === "detach" || keyword === "vacuum") {
     return { error: "not authorized to access databases outside the relational store", writes };
   }
+  if (ddlTargetsTempSchema(tokens, main, keyword)) {
+    return { error: "TEMP schema objects are not authorized because native reads use a separate connection", writes };
+  }
   if (denyTransactions && (keyword === "begin" || keyword === "commit" || keyword === "end" || keyword === "rollback" || keyword === "savepoint" || keyword === "release")) {
     return { error: "transaction control is not authorized", writes };
   }
@@ -218,7 +236,13 @@ export function inspectRelationalSql(sql: string, denyTransactions: boolean): Re
     if (tokens[at]?.kind !== "word" || !["from", "join", "update", "into"].includes(tokens[at]!.text)) continue;
     let tableAt = at + 1;
     let qualified = false;
-    if (tokens[tableAt + 1]?.text === ".") { tableAt += 2; qualified = true; }
+    if (tokens[tableAt + 1]?.text === ".") {
+      if (sqliteName(tokens[tableAt]) === "temp") {
+        return { error: "TEMP schema objects are not authorized because native reads use a separate connection", writes };
+      }
+      tableAt += 2;
+      qualified = true;
+    }
     const table = sqliteName(tokens[tableAt]);
     if (table !== null && relationalUnavailableReadTables.has(table) && (qualified || !ctes.has(table))) {
       return { error: `SQLite table ${table} is not authorized because it is unavailable in the packaged runtime`, writes };
@@ -227,12 +251,27 @@ export function inspectRelationalSql(sql: string, denyTransactions: boolean): Re
   return { error: null, writes };
 }
 
+function ddlTargetsTempSchema(tokens: readonly SqlToken[], main: number, keyword: string): boolean {
+  if (keyword !== "create" && keyword !== "drop" && keyword !== "alter") return false;
+  let at = main + 1;
+  if (keyword === "create" && (sqliteName(tokens[at]) === "temp" || sqliteName(tokens[at]) === "temporary")) return true;
+  if (keyword === "create" && sqliteName(tokens[at]) === "unique") at += 1;
+  if (keyword === "create" && sqliteName(tokens[at]) === "virtual") at += 1;
+  if (!["table", "index", "trigger", "view"].includes(sqliteName(tokens[at]) ?? "")) return false;
+  at += 1;
+  if (sqliteName(tokens[at]) === "if") at += keyword === "create" ? 3 : 2;
+  return sqliteName(tokens[at]) === "temp" && tokens[at + 1]?.text === ".";
+}
+
 export function relationalRuntimePolicy(
   action: number,
   first: string | null,
   second: string | null,
 ): number {
   if (action === sqliteConstants.SQLITE_ATTACH || action === sqliteConstants.SQLITE_DETACH) {
+    return sqliteConstants.SQLITE_DENY;
+  }
+  if (relationalTempSchemaActions.has(action)) {
     return sqliteConstants.SQLITE_DENY;
   }
   if (action === sqliteConstants.SQLITE_PRAGMA && second !== null && relationalOwnedPragmas.has((first ?? "").toLowerCase())) {

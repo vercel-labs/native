@@ -196,6 +196,8 @@ pub const max_effect_db_parameter_bytes: usize = relational_store.max_parameter_
 pub const max_effect_db_exec_parameter_bytes: usize = relational_store.max_exec_parameter_bytes;
 pub const default_effect_db_page_rows: usize = relational_store.default_page_rows;
 pub const max_effect_db_page_bytes: usize = relational_store.max_page_bytes;
+pub const max_effect_db_result_rows: usize = relational_store.max_result_rows;
+pub const max_effect_db_result_bytes: usize = relational_store.max_result_bytes;
 pub const max_effect_db_live_tables: usize = relational_store.max_changed_tables;
 pub const EffectDbValue = relational_store.Value;
 pub const EffectDbStatement = relational_store.Statement;
@@ -8295,15 +8297,18 @@ pub fn Effects(comptime Msg: type) type {
         /// or report a terminal outcome.
         pub fn cancelDbQuery(self: *Self, key: u64) void {
             const index = self.findDbSlot(key) orelse return;
-            if (self.db_slots[index].kind != .query) return;
-            self.db_slots[index].active = false;
-            self.db_slots[index].generation = self.takeDbGeneration();
+            const slot = &self.db_slots[index];
+            if (slot.kind != .query) return;
+            self.discardPendingDbGeneration(slot.key, slot.generation);
+            slot.active = false;
+            slot.generation = self.takeDbGeneration();
         }
 
         pub fn dbUnsubscribe(self: *Self, key: u64) void {
             const index = self.findDbSlot(key) orelse return;
             const slot = &self.db_slots[index];
             if (slot.kind != .live) return;
+            self.discardPendingDbGeneration(slot.key, slot.generation);
             self.freeDbLive(slot);
             slot.active = false;
             slot.generation = self.takeDbGeneration();
@@ -8316,7 +8321,9 @@ pub fn Effects(comptime Msg: type) type {
                 return self.rejectDb(slot.key, .done, slot.on_result);
             };
             var page_context: DbPageContext = .{ .effects = self, .slot_index = slot_index, .generation = slot.generation };
+            const pending_start = self.pending_db_len;
             const outcome = binding.query_fn(binding.context, sql, params, &page_context, dbPageBound);
+            if (outcome != .ok) self.discardPendingDbTail(pending_start);
             self.stageDb(.{
                 .seq = self.nextPendingSeq(),
                 .key = slot.key,
@@ -8446,6 +8453,7 @@ pub fn Effects(comptime Msg: type) type {
             if (self.findDbSlot(key)) |index| {
                 const existing = &self.db_slots[index];
                 if (kind != .query or existing.kind != .query) return null;
+                self.discardPendingDbGeneration(existing.key, existing.generation);
                 existing.generation = self.takeDbGeneration();
                 existing.on_result = on_result;
                 existing.fake = false;
@@ -13658,6 +13666,46 @@ pub fn Effects(comptime Msg: type) type {
             active[(self.pending_db_head + self.pending_db_len) % active.len] = entry;
             self.pending_db_len += 1;
             self.wakeHost();
+        }
+
+        fn discardPendingDbTail(self: *Self, retained_len: usize) void {
+            std.debug.assert(retained_len <= self.pending_db_len);
+            const storage = self.pendingDbStorage();
+            while (self.pending_db_len > retained_len) {
+                const index = (self.pending_db_head + self.pending_db_len - 1) % storage.len;
+                if (storage[index].bytes) |bytes| self.allocator.free(bytes);
+                self.pending_db_len -= 1;
+            }
+            if (self.pending_db_len == 0) {
+                self.pending_db_head = 0;
+                if (self.pending_db_spill.len > 0) {
+                    self.allocator.free(self.pending_db_spill);
+                    self.pending_db_spill = &.{};
+                }
+            }
+        }
+
+        fn discardPendingDbGeneration(self: *Self, key: u64, generation: u64) void {
+            const storage = self.pendingDbStorage();
+            const original_len = self.pending_db_len;
+            var kept: usize = 0;
+            for (0..original_len) |offset| {
+                const entry = storage[(self.pending_db_head + offset) % storage.len];
+                if (entry.key == key and entry.generation == generation) {
+                    if (entry.bytes) |bytes| self.allocator.free(bytes);
+                    continue;
+                }
+                storage[(self.pending_db_head + kept) % storage.len] = entry;
+                kept += 1;
+            }
+            self.pending_db_len = kept;
+            if (kept == 0) {
+                self.pending_db_head = 0;
+                if (self.pending_db_spill.len > 0) {
+                    self.allocator.free(self.pending_db_spill);
+                    self.pending_db_spill = &.{};
+                }
+            }
         }
 
         fn takePendingDb(self: *Self) PendingDb {

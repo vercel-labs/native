@@ -197,6 +197,83 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   }
 });
 
+test("the devhost rejects whole relational results beyond the total row bound", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-result-bound-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly pages: number; readonly rejected: boolean; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { pages: 0, rejected: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.db.query(
+      "WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 8193) SELECT value FROM n", [],
+      { key: "large", page: "page", done: "done", err: "failed" },
+    )];
+    case "page": return { ...model, pages: model.pages + 1 };
+    case "done": return model;
+    case "failed": return { ...model, rejected: msg.reason[0] === 114 };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /cmd db_query rejected rejected/);
+    assert.match(run.stdout, /"pages":0,"rejected":true/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the devhost purges staged pages when a keyed query is replaced", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-replace-pages-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly pages: number; readonly rows: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { pages: 0, rows: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.db.query("WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v + 1 FROM n WHERE v < 300) SELECT v FROM n", [], { key: "q", page: "page", done: "done", err: "failed" }),
+      Cmd.db.query("SELECT 2 AS v", [], { key: "q", page: "page", done: "done", err: "failed" }),
+    ])];
+    case "page": return { pages: model.pages + 1, rows: model.rows + msg.bytes[4] };
+    case "done":
+    case "failed": return model;
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /"pages":1,"rows":1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("the devhost preserves command-stream order across store and relational results", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-mixed-order-"));

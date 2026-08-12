@@ -13,6 +13,8 @@ pub const max_parameter_bytes: usize = 1024 * 1024;
 pub const max_exec_parameter_bytes: usize = 8 * 1024 * 1024;
 pub const default_page_rows: usize = 256;
 pub const max_page_bytes: usize = 256 * 1024;
+pub const max_result_rows: usize = 8 * 1024;
+pub const max_result_bytes: usize = 8 * 1024 * 1024;
 pub const max_migrations: usize = 9999;
 pub const max_migration_bytes: usize = 1024 * 1024;
 pub const max_changed_tables: usize = 64;
@@ -254,16 +256,21 @@ pub const Database = struct {
         var page = PageWriter.init(&page_buffer);
         writeHeader(&page, &statement, column_count) catch return .misuse;
         var row_count: u32 = 0;
+        var total_rows: usize = 0;
+        var total_bytes: usize = 0;
         var emitted = false;
 
         while (true) switch (statement.step() catch |err| return failure(err)) {
             .done => break,
             .row => {
+                if (total_rows == max_result_rows) return .rejected;
                 var row = PageWriter.init(&row_buffer);
                 writeRow(&row, &statement, column_count) catch return .misuse;
                 if (page.remaining() < row.at) {
                     if (row_count == 0) return .misuse;
                     patchRowCount(&page, row_count);
+                    if (page.at > max_result_bytes - total_bytes) return .rejected;
+                    total_bytes += page.at;
                     page_fn(page_context, page.written());
                     emitted = true;
                     page = PageWriter.init(&page_buffer);
@@ -272,8 +279,11 @@ pub const Database = struct {
                 }
                 page.writeRaw(row.written()) catch return .misuse;
                 row_count += 1;
+                total_rows += 1;
                 if (row_count == default_page_rows) {
                     patchRowCount(&page, row_count);
+                    if (page.at > max_result_bytes - total_bytes) return .rejected;
+                    total_bytes += page.at;
                     page_fn(page_context, page.written());
                     emitted = true;
                     page = PageWriter.init(&page_buffer);
@@ -285,6 +295,7 @@ pub const Database = struct {
 
         if (row_count > 0 or !emitted) {
             patchRowCount(&page, row_count);
+            if (page.at > max_result_bytes - total_bytes) return .rejected;
             page_fn(page_context, page.written());
         }
         return .ok;

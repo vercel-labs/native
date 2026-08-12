@@ -474,6 +474,8 @@ const maxDbParameterBytes = 1024 * 1024;
 const maxDbExecParameterBytes = 8 * 1024 * 1024;
 const maxDbPageRows = 256;
 const maxDbPageBytes = 256 * 1024;
+const maxDbResultRows = 8 * 1024;
+const maxDbResultBytes = 8 * 1024 * 1024;
 
 /// Timer/now/delay arms carry exactly one number payload field (tsc pins
 /// the shape), so a proxy that answers every non-kind read with the
@@ -1237,40 +1239,52 @@ function dbHeader(columnNames: ReadonlyArray<string>, rowCount: number): Uint8Ar
   return concatDbParts(parts, length);
 }
 
-function encodeDbPages(columnNames: ReadonlyArray<string>, rows: ReadonlyArray<ReadonlyArray<unknown>>): ReadonlyArray<Uint8Array> | null {
+type EncodedDbPages =
+  | { readonly outcome: "ok"; readonly pages: ReadonlyArray<Uint8Array>; readonly rowCount: number }
+  | { readonly outcome: "misuse" | "rejected" };
+
+function encodeDbPages(columnNames: ReadonlyArray<string>, rows: Iterable<ReadonlyArray<unknown>>): EncodedDbPages {
   const emptyHeader = dbHeader(columnNames, 0);
-  if (!emptyHeader) return null;
-  const encodedRows: Uint8Array[] = [];
+  if (!emptyHeader) return { outcome: "misuse" };
+  const pages: Uint8Array[] = [];
+  let members: Uint8Array[] = [];
+  let pageLength = emptyHeader.length;
+  let resultBytes = 0;
+  let rowCount = 0;
+
+  const flush = (): boolean => {
+    const header = dbHeader(columnNames, members.length);
+    if (!header || resultBytes + pageLength > maxDbResultBytes) return false;
+    pages.push(concatDbParts([header, ...members], pageLength));
+    resultBytes += pageLength;
+    members = [];
+    pageLength = emptyHeader.length;
+    return true;
+  };
+
   for (const row of rows) {
+    if (rowCount === maxDbResultRows) return { outcome: "rejected" };
     const values: Uint8Array[] = [];
     let length = 0;
     for (const value of row) {
       const bytes = dbValue(value);
-      if (!bytes) return null;
+      if (!bytes) return { outcome: "misuse" };
       length += bytes.length;
-      if (length + emptyHeader.length > maxDbPageBytes) return null;
+      if (length + emptyHeader.length > maxDbPageBytes) return { outcome: "misuse" };
       values.push(bytes);
     }
-    encodedRows.push(concatDbParts(values, length));
-  }
-
-  const pages: Uint8Array[] = [];
-  let at = 0;
-  do {
-    const members: Uint8Array[] = [];
-    let pageLength = emptyHeader.length;
-    while (at < encodedRows.length && members.length < maxDbPageRows) {
-      const row = encodedRows[at]!;
-      if (members.length > 0 && pageLength + row.length > maxDbPageBytes) break;
-      if (pageLength + row.length > maxDbPageBytes) return null;
-      members.push(row);
-      pageLength += row.length;
-      at += 1;
+    const encoded = concatDbParts(values, length);
+    if (members.length > 0 && (members.length === maxDbPageRows || pageLength + encoded.length > maxDbPageBytes)) {
+      if (!flush()) return { outcome: "rejected" };
     }
-    const header = dbHeader(columnNames, members.length)!;
-    pages.push(concatDbParts([header, ...members], pageLength));
-  } while (at < encodedRows.length);
-  return pages;
+    members.push(encoded);
+    pageLength += encoded.length;
+    rowCount += 1;
+  }
+  if (members.length > 0 || pages.length === 0) {
+    if (!flush()) return { outcome: "rejected" };
+  }
+  return { outcome: "ok", pages, rowCount };
 }
 
 function dbBindArgs(sql: string, params: ReadonlyArray<DbBindValue>): ReadonlyArray<unknown> {
@@ -1328,6 +1342,7 @@ function beginDbOperation(cmd: Cmdish, query: boolean): PendingDbOperation | nul
   if (active) {
     if (!query) return null;
     active.active = false;
+    discardDbResults(active);
   }
   const operation: PendingDbOperation = {
     routeKey,
@@ -1344,6 +1359,12 @@ function beginDbOperation(cmd: Cmdish, query: boolean): PendingDbOperation | nul
 
 function queueDbResult(operation: PendingDbOperation, kind: DbResultKind, outcome: "ok" | DbOutcome, bytes = new Uint8Array(0)): void {
   pendingDbResults.push({ seq: nextEffectResultSeq++, operation, kind, outcome, bytes });
+}
+
+function discardDbResults(operation: PendingDbOperation): void {
+  for (let index = pendingDbResults.length - 1; index >= 0; index--) {
+    if (pendingDbResults[index]!.operation === operation) pendingDbResults.splice(index, 1);
+  }
 }
 
 function rejectDbOperation(cmd: Cmdish, query: boolean, outcome: DbOutcome, operation?: PendingDbOperation): void {
@@ -1382,14 +1403,14 @@ function runDbQuery(sql: unknown, rawParams: unknown, operation: PendingDbOperat
       rejectDbOperation({ op: operation.live ? "db_live" : "db_query" }, true, "misuse", operation);
       return;
     }
-    const rows = statement.all(...dbBindArgs(sql, params)) as ReadonlyArray<ReadonlyArray<unknown>>;
-    const pages = encodeDbPages(columns, rows);
-    if (!pages) {
-      rejectDbOperation({ op: operation.live ? "db_live" : "db_query" }, true, "misuse", operation);
+    const rows = statement.iterate(...dbBindArgs(sql, params)) as Iterable<ReadonlyArray<unknown>>;
+    const encoded = encodeDbPages(columns, rows);
+    if (encoded.outcome !== "ok") {
+      rejectDbOperation({ op: operation.live ? "db_live" : "db_query" }, true, encoded.outcome, operation);
       return;
     }
-    say(`${operation.live ? "sub db_live" : "cmd db_query"} ${operation.routeKey} (${rows.length} rows in ${pages.length} page${pages.length === 1 ? "" : "s"})`);
-    for (const page of pages) queueDbResult(operation, "page", "ok", page);
+    say(`${operation.live ? "sub db_live" : "cmd db_query"} ${operation.routeKey} (${encoded.rowCount} rows in ${encoded.pages.length} page${encoded.pages.length === 1 ? "" : "s"})`);
+    for (const page of encoded.pages) queueDbResult(operation, "page", "ok", page);
     queueDbResult(operation, "done", "ok");
   } catch (reason) {
     rejectDbOperation({ op: operation.live ? "db_live" : "db_query" }, true, dbErrorOutcome(reason), operation);
@@ -1463,6 +1484,7 @@ function cancelPendingDb(routeKey: string): boolean {
   const operation = pendingDbByKey.get(routeKey);
   if (!operation || !operation.query) return false;
   operation.active = false;
+  discardDbResults(operation);
   pendingDbByKey.delete(routeKey);
   return true;
 }
@@ -1720,7 +1742,10 @@ function reconcileSubs(): void {
     ]);
     const active = liveDbByKey.get(key);
     if (active?.signature === signature) continue;
-    if (active) active.operation.active = false;
+    if (active) {
+      active.operation.active = false;
+      discardDbResults(active.operation);
+    }
     const operation: PendingDbOperation = {
       routeKey: key,
       query: true,
@@ -1746,6 +1771,7 @@ function reconcileSubs(): void {
   for (const [key, active] of [...liveDbByKey]) {
     if (!declaredLive.has(key)) {
       active.operation.active = false;
+      discardDbResults(active.operation);
       liveDbByKey.delete(key);
       dirtyLiveDbKeys.delete(key);
       say(`sub cancel db_live ${key}`);

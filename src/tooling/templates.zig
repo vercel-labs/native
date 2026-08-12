@@ -1743,7 +1743,20 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        generate.addFileInput(b.path("src/schema/migrations.lock.json"));
         \\    } else |_| {}
         \\    generate.addFileInput(nativeSdkPath(b, native_sdk_path, "packages/core/src/sqlite_codegen.ts"));
+        \\    generate.addFileInput(nativeSdkPath(b, native_sdk_path, "packages/core/src/sqlite_runtime_policy.ts"));
+        \\    addAppSqlDirInputs(b, generate, "src");
         \\    return migrations;
+        \\}
+        \\
+        \\fn addAppSqlDirInputs(b: *std.Build, run: *std.Build.Step.Run, src_path: []const u8) void {
+        \\    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch return;
+        \\    defer dir.close(b.graph.io);
+        \\    var walker = dir.walk(b.allocator) catch return;
+        \\    defer walker.deinit();
+        \\    while (walker.next(b.graph.io) catch null) |entry| {
+        \\        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
+        \\        run.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
+        \\    }
         \\}
         \\
         \\fn addSqliteEngine(b: *std.Build, app_mod: *std.Build.Module, native_sdk_path: []const u8) void {
@@ -4004,6 +4017,9 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "hasManifestCapability(raw.capabilities, \"store\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "addSqliteEngine(b, app_mod, native_sdk_path)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "sqliteMigrationsSource(b, native_sdk_path)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "sqlite_runtime_policy.ts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "addAppSqlDirInputs(b, generate, \"src\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "run.addFileInput(b.path(b.fmt") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "runner_mod.addImport(\"relational_migrations\", migrations_mod)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSMicrophoneUsageDescription") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSAudioCaptureUsageDescription") != null);
