@@ -401,7 +401,7 @@ fn tsCoreStage(
         migrations_zig = sqlite_check.addOutputFileArg("migrations.zig");
         sqlite_check.addArg("--metadata-out");
         _ = sqlite_check.addOutputFileArg("sqlite.meta.json");
-        sqlite_check.addArgs(&.{ "--state", appPath(b, app_root, "src/schema/migrations.lock.json") });
+        sqlite_check.addArgs(&.{ "--state", b.pathFromRoot(appPath(b, app_root, "src/schema/migrations.lock.json")) });
         if (appFileExists(b, app_root, "src/schema/migrations.lock.json")) {
             sqlite_check.addFileInput(b.path(appPath(b, app_root, "src/schema/migrations.lock.json")));
         }
@@ -612,7 +612,7 @@ fn sqliteMigrationsStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []
     generate.addDirectoryArg(b.path(appPath(b, app_root, "src")));
     generate.addArg("--zig-out");
     const migrations = generate.addOutputFileArg("migrations.zig");
-    generate.addArgs(&.{ "--state", appPath(b, app_root, "src/schema/migrations.lock.json") });
+    generate.addArgs(&.{ "--state", b.pathFromRoot(appPath(b, app_root, "src/schema/migrations.lock.json")) });
     if (appFileExists(b, app_root, "src/schema/migrations.lock.json")) {
         generate.addFileInput(b.path(appPath(b, app_root, "src/schema/migrations.lock.json")));
     }

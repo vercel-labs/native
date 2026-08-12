@@ -367,7 +367,7 @@ test("a devhost service recording replays without starting services and uses the
 
     const pins = spawnSync("zig", ["build", "print-pins"], { cwd: repo, encoding: "utf8" });
     assert.equal(pins.status, 0, pins.stderr);
-    assert.match(pins.stdout, new RegExp(`session journal format\\s+0x${journalFormatFingerprint.toString(16)}`));
+    assert.match(pins.stdout, new RegExp(`session journal format\\s+0x${journalFormatFingerprint.toString(16).padStart(16, "0")}`));
     assert.match(pins.stdout, new RegExp(`automation protocol\\s+0x${automationProtocolFingerprint.toString(16).padStart(16, "0")}`));
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });

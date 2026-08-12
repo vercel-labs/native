@@ -370,7 +370,21 @@ const relationalOwnedPragmas = new Set([
 let relationalTrackWrites = false;
 let relationalAllowTransaction = false;
 const relationalChangedTables = new Set<string>();
+let relationalChangedAllTables = false;
+const relationalSchemaActions = new Set([
+  sqliteConstants.SQLITE_CREATE_INDEX, sqliteConstants.SQLITE_CREATE_TABLE,
+  sqliteConstants.SQLITE_CREATE_TEMP_INDEX, sqliteConstants.SQLITE_CREATE_TEMP_TABLE,
+  sqliteConstants.SQLITE_CREATE_TEMP_TRIGGER, sqliteConstants.SQLITE_CREATE_TEMP_VIEW,
+  sqliteConstants.SQLITE_CREATE_TRIGGER, sqliteConstants.SQLITE_CREATE_VIEW,
+  sqliteConstants.SQLITE_DROP_INDEX, sqliteConstants.SQLITE_DROP_TABLE,
+  sqliteConstants.SQLITE_DROP_TEMP_INDEX, sqliteConstants.SQLITE_DROP_TEMP_TABLE,
+  sqliteConstants.SQLITE_DROP_TEMP_TRIGGER, sqliteConstants.SQLITE_DROP_TEMP_VIEW,
+  sqliteConstants.SQLITE_DROP_TRIGGER, sqliteConstants.SQLITE_DROP_VIEW,
+  sqliteConstants.SQLITE_ALTER_TABLE, sqliteConstants.SQLITE_CREATE_VTABLE,
+  sqliteConstants.SQLITE_DROP_VTABLE,
+]);
 const relationalAuthorizer = (action: number, first: string | null, second: string | null): number => {
+  if (relationalTrackWrites && relationalSchemaActions.has(action)) relationalChangedAllTables = true;
   if (relationalTrackWrites && first !== null &&
       (action === sqliteConstants.SQLITE_INSERT || action === sqliteConstants.SQLITE_UPDATE || action === sqliteConstants.SQLITE_DELETE)) {
     relationalChangedTables.add(first);
@@ -1414,6 +1428,7 @@ function performDbCmd(cmd: Cmdish): void {
   let began = false;
   try {
     relationalChangedTables.clear();
+    relationalChangedAllTables = false;
     relationalTrackWrites = true;
     relationalTransaction("BEGIN IMMEDIATE;");
     began = true;
@@ -1426,7 +1441,7 @@ function performDbCmd(cmd: Cmdish): void {
     relationalTransaction("COMMIT;");
     began = false;
     for (const [key, live] of liveDbByKey) {
-      if (live.tables.some((table) => relationalChangedTables.has(table))) dirtyLiveDbKeys.add(key);
+      if (relationalChangedAllTables || live.tables.some((table) => relationalChangedTables.has(table))) dirtyLiveDbKeys.add(key);
     }
     say(`cmd db_exec ${operation.routeKey} (${validated.length} statements committed atomically)`);
     queueDbResult(operation, "exec", "ok");

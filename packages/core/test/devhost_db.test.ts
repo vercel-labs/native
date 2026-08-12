@@ -109,6 +109,57 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   }
 });
 
+test("the devhost re-evaluates live queries after schema DDL", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-schema-live-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd, Sub } from "@native-sdk/core";
+export interface Model { readonly pages: number; readonly done: number; }
+export type Msg =
+  | { readonly kind: "alter" }
+  | { readonly kind: "created" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [{ pages: 0, done: 0 }, Cmd.db.exec([
+    ["CREATE TABLE note(id INTEGER PRIMARY KEY) STRICT", []],
+  ], { ok: "created", err: "failed" })];
+}
+export function subscriptions(_model: Model): Sub<Msg> {
+  return { op: "db_live", key: "notes", pageKind: "page", doneKind: "done", errKind: "failed",
+    sql: "SELECT id FROM note ORDER BY id", params: [], tables: ["note"] };
+}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "alter": return [model, Cmd.db.exec([
+      ["ALTER TABLE note RENAME TO notes", []],
+    ], { ok: "wrote", err: "failed" })];
+    case "page": return { ...model, pages: model.pages + 1 };
+    case "done": return { ...model, done: model.done + 1 };
+    case "created":
+    case "wrote":
+    case "failed": return model;
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"alter"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal((run.stdout.match(/sub db_live notes/g) ?? []).length, 1, run.stdout);
+    assert.match(run.stdout, /cmd db_live rejected misuse/);
+    assert.match(run.stdout, /"pages":1,"done":1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("the devhost rejects relational commands without the sqlite capability", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-capability-"));

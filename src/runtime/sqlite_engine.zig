@@ -34,10 +34,17 @@ const c = struct {
 
     const SQLITE_OK_AUTHORIZER: c_int = 0;
     const SQLITE_DENY_AUTHORIZER: c_int = 1;
+    const SQLITE_CREATE_INDEX: c_int = 1;
+    const SQLITE_CREATE_VIEW: c_int = 8;
+    const SQLITE_DROP_INDEX: c_int = 10;
+    const SQLITE_DROP_VIEW: c_int = 17;
     const SQLITE_PRAGMA: c_int = 19;
     const SQLITE_TRANSACTION: c_int = 22;
     const SQLITE_ATTACH: c_int = 24;
     const SQLITE_DETACH: c_int = 25;
+    const SQLITE_ALTER_TABLE: c_int = 26;
+    const SQLITE_CREATE_VTABLE: c_int = 29;
+    const SQLITE_DROP_VTABLE: c_int = 30;
     const SQLITE_SAVEPOINT: c_int = 32;
 
     const SQLITE_INSERT: c_int = 18;
@@ -99,6 +106,7 @@ pub const Step = enum { row, done };
 pub const RelationalWriteObserver = struct {
     context: *anyopaque,
     write_fn: *const fn (context: *anyopaque, table: []const u8) void,
+    all_fn: *const fn (context: *anyopaque) void,
 };
 
 pub const Connection = struct {
@@ -360,7 +368,10 @@ fn relationalExecAuthorizer(
     _: ?[*:0]const u8,
 ) callconv(.c) c_int {
     if (action == c.SQLITE_TRANSACTION or action == c.SQLITE_SAVEPOINT) return c.SQLITE_DENY_AUTHORIZER;
-    if (updateOperation(action) != null) {
+    if (schemaOperation(action)) {
+        const observer: *RelationalWriteObserver = @ptrCast(@alignCast(context orelse return c.SQLITE_DENY_AUTHORIZER));
+        observer.all_fn(observer.context);
+    } else if (updateOperation(action) != null) {
         const observer: *RelationalWriteObserver = @ptrCast(@alignCast(context orelse return c.SQLITE_DENY_AUTHORIZER));
         const table = if (first) |value| std.mem.span(value) else "";
         if (table.len > 0) observer.write_fn(observer.context, table);
@@ -389,6 +400,17 @@ fn relationalPolicy(action: c_int, first: ?[*:0]const u8, second: ?[*:0]const u8
         }
     }
     return c.SQLITE_OK_AUTHORIZER;
+}
+
+/// SQLite's schema authorizer action codes are stable and contiguous across
+/// the CREATE and DROP families, including their TEMP variants. A successful
+/// runtime DDL statement can change any prepared live-query shape, so callers
+/// conservatively invalidate every subscription instead of trusting the DML
+/// hooks, which report only sqlite_master for ALTER TABLE.
+fn schemaOperation(action: c_int) bool {
+    return (action >= c.SQLITE_CREATE_INDEX and action <= c.SQLITE_CREATE_VIEW) or
+        (action >= c.SQLITE_DROP_INDEX and action <= c.SQLITE_DROP_VIEW) or
+        action == c.SQLITE_ALTER_TABLE or action == c.SQLITE_CREATE_VTABLE or action == c.SQLITE_DROP_VTABLE;
 }
 
 const relational_owned_pragmas = [_][]const u8{

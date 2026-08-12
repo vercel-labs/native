@@ -117,6 +117,49 @@ test("outer joins widen generated result nullability", () => {
   }
 });
 
+test("compound selects widen every result across all arms", () => {
+  const root = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(root, "queries.sql"),
+      `-- name: mixedId
+SELECT id FROM note UNION ALL SELECT NULL;
+
+-- name: mixedCount
+SELECT count(*) AS value FROM note UNION ALL SELECT title FROM note;
+`,
+    );
+    const result = analyzeSqlite(root);
+    assert.deepEqual(result.diagnostics, []);
+    assert.deepEqual(result.queries.map((query) => query.columns), [
+      [{ name: "id", sqlType: "ANY", nullable: true }],
+      [{ name: "value", sqlType: "ANY", nullable: true }],
+    ]);
+    const source = generateCoreSurface("// @native-sqlite-generated-types\n// @native-sqlite-generated-cmds\n// @native-sqlite-generated-subs", result);
+    assert.match(source, /readonly id: DbDecodedValue/);
+    assert.match(source, /readonly value: DbDecodedValue/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("comment-only migration drafts stay invalid and unlocked", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-check-"));
+  try {
+    fs.mkdirSync(path.join(root, "schema"));
+    fs.writeFileSync(path.join(root, "schema", "0001_draft.sql"), `-- Append-only SQLite migration.
+-- Add the schema change before accepting this version.
+`);
+    const result = analyzeSqlite(root);
+    assert.equal(result.diagnostics[0]?.rule, "NS1403");
+    const state = path.join(root, "schema", "migrations.lock.json");
+    assert.deepEqual(checkMigrationState(result, state), []);
+    assert.equal(fs.existsSync(state), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("generated members and result fields cannot collide", () => {
   const root = fixture();
   try {

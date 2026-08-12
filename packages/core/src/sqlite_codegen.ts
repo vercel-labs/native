@@ -166,7 +166,7 @@ export function analyzeSqlite(srcDir: string): SqliteAnalysis {
   for (let i = 0; i < migrations.length; i++) {
     const expected = i + 1;
     if (migrations[i]!.version !== expected) diagnostics.push(diag("NS1402", migrations[i]!.file, 1, `Migration version ${migrations[i]!.version} appears where ${expected} is required.`, `Number migrations contiguously; the next filename is ${String(expected).padStart(4, "0")}_name.sql.`, "The runtime advances PRAGMA user_version one append-only step at a time and never guesses across gaps."));
-    if (migrations[i]!.sql.trim().length === 0) diagnostics.push(diag("NS1403", migrations[i]!.file, 1, "A migration is empty.", "Add the schema change, or remove the unshipped migration and create it again.", "Every published version is monotonic and may never be reused."));
+    if (!tailHasStatement(migrations[i]!.sql, "")) diagnostics.push(diag("NS1403", migrations[i]!.file, 1, "A migration is empty.", "Add the schema change, or remove the unshipped migration and create it again.", "Every published version is monotonic and may never be reused."));
     if (migrations[i]!.sql.includes("\0")) diagnostics.push(diag("NS1403", migrations[i]!.file, 1, "A migration contains a NUL byte.", "Remove the NUL byte and keep the migration as ordinary UTF-8 SQL.", "Both SQLite's C API and the generated runtime module require an unambiguous SQL boundary."));
     if (Buffer.byteLength(migrations[i]!.sql) > 1024 * 1024) diagnostics.push(diag("NS1403", migrations[i]!.file, 1, "A migration exceeds the 1 MiB runtime bound.", "Split the schema change across consecutive migrations.", "Migration input has its own explicit bound so startup memory is predictable."));
   }
@@ -344,12 +344,53 @@ function inferColumn(db: DatabaseSync, column: ReturnType<StatementSync["columns
     nullable = false;
     sqlType = "INTEGER";
   }
+  // Statement.columns() reports the origin and declared type of the first
+  // SELECT arm only. Later compound arms may legally contribute NULL or any
+  // other SQLite storage class, so that metadata cannot narrow the row wire.
+  if (hasTopLevelCompoundSelect(sql)) {
+    nullable = true;
+    sqlType = "ANY";
+  }
   // SQLite's column-origin metadata names the underlying NOT NULL column,
   // but an outer join may synthesize NULL for it. Conservatively widen all
   // result columns in an outer-join statement; generated decoding must never
   // reject a legal row merely to claim a narrower type.
   if (/\b(?:left|right|full)(?:\s+outer)?\s+join\b/i.test(sql)) nullable = true;
   return { name: column.name, sqlType, nullable };
+}
+
+function hasTopLevelCompoundSelect(sql: string): boolean {
+  let depth = 0;
+  let quote = "";
+  for (let at = 0; at < sql.length; at++) {
+    const char = sql[at]!;
+    if (quote) {
+      if (char === quote && sql[at + 1] === quote) { at += 1; continue; }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") { quote = char; continue; }
+    if (char === "[") {
+      const end = sql.indexOf("]", at + 1);
+      at = end < 0 ? sql.length : end;
+      continue;
+    }
+    if (char === "-" && sql[at + 1] === "-") {
+      const end = sql.indexOf("\n", at + 2);
+      at = end < 0 ? sql.length : end;
+      continue;
+    }
+    if (char === "/" && sql[at + 1] === "*") {
+      const end = sql.indexOf("*/", at + 2);
+      at = end < 0 ? sql.length : end + 1;
+      continue;
+    }
+    if (char === "(") { depth += 1; continue; }
+    if (char === ")") { depth -= 1; continue; }
+    if (depth !== 0 || /[A-Za-z0-9_]/.test(sql[at - 1] ?? "")) continue;
+    if (/^(?:union|intersect|except)\b/i.test(sql.slice(at))) return true;
+  }
+  return false;
 }
 
 function isDirectCountColumn(sql: string, index: number, columnCount: number): boolean {

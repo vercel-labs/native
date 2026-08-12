@@ -311,7 +311,7 @@ pub const Database = struct {
         self.write_db.exec("BEGIN IMMEDIATE;") catch |err| return failure(err);
         var committed = false;
         defer if (!committed) self.write_db.exec("ROLLBACK;") catch {};
-        var observer: sqlite.RelationalWriteObserver = .{ .context = self, .write_fn = observeWrite };
+        var observer: sqlite.RelationalWriteObserver = .{ .context = self, .write_fn = observeWrite, .all_fn = observeAllWrites };
         self.write_db.installRelationalExecAuthorizer(&observer) catch |err| return failure(err);
         defer self.write_db.installRelationalAuthorizer() catch {};
 
@@ -409,6 +409,11 @@ fn observeWrite(context: *anyopaque, table: []const u8) void {
     entry.len = @intCast(table.len);
     @memcpy(entry.bytes[0..table.len], table);
     self.transaction_table_count += 1;
+}
+
+fn observeAllWrites(context: *anyopaque) void {
+    const self: *Database = @ptrCast(@alignCast(context));
+    self.transaction_all_tables = true;
 }
 
 fn validMigrations(migrations: []const Migration) bool {
@@ -673,6 +678,19 @@ test "changed-table overflow conservatively invalidates every live query" {
     const changes = Database.changesBound(&database, 0);
     try std.testing.expect(changes.all_tables);
     try std.testing.expectEqual(@as(u64, 1), changes.revision);
+}
+
+test "relational schema changes conservatively invalidate every live query" {
+    var database = try Database.openMemory(std.testing.allocator);
+    defer database.deinit();
+
+    try std.testing.expectEqual(Outcome.ok, database.exec(&.{.{ .sql = "CREATE TABLE note(id INTEGER PRIMARY KEY) STRICT;" }}));
+    const before_alter = database.revision;
+    try std.testing.expectEqual(Outcome.ok, database.exec(&.{.{ .sql = "ALTER TABLE note RENAME TO notes;" }}));
+
+    const changes = Database.changesBound(&database, before_alter);
+    try std.testing.expect(changes.all_tables);
+    try std.testing.expect(changes.revision > before_alter);
 }
 
 test "relational exec rolls every statement back on constraint failure" {
