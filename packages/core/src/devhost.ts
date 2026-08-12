@@ -37,7 +37,8 @@
 //     by tsc), so the harness constructs them shape-directed without
 //     needing the field's name.
 // Cmd.persist snapshots the committed model in virtual-host memory, and
-// Cmd.store performs against a process-local byte map. Every other effect
+// capability-enabled Cmd.store performs against a process-local byte map.
+// Every other effect
 // (files, buffered/streaming fetch, clipboard,
 // notifications, spawn, audio, host commands)
 // is printed as `cmd ...` and NOT performed — feed its result back yourself
@@ -58,7 +59,7 @@ interface Cmdish {
 }
 
 function usage(): never {
-  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>]");
+  console.error("usage: devhost.ts <core.ts> [--script <msgs.ndjson>] [--capability <name>]...");
   console.error("core-logic loop only (update/effects under a virtual host) - not a renderer;");
   console.error("run the real app with `native dev`.");
   process.exit(2);
@@ -70,8 +71,14 @@ let script: string | null = null;
 let persistOk: string | null = null;
 let persistNone: string | null = null;
 let persistErr: string | null = null;
+const capabilities = new Set<string>();
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--script") script = args[++i] ?? null;
+  else if (args[i] === "--capability") {
+    const capability = args[++i] ?? null;
+    if (capability === null) usage();
+    capabilities.add(capability);
+  }
   else if (args[i] === "--persist-ok") persistOk = args[++i] ?? null;
   else if (args[i] === "--persist-none") persistNone = args[++i] ?? null;
   else if (args[i] === "--persist-err") persistErr = args[++i] ?? null;
@@ -87,7 +94,7 @@ if (persistOk !== null && persistNone !== null && persistErr !== null) {
   // Run the frontend inside the watched process so every node --watch restart
   // revalidates manifest-owned routes against the newly edited Msg union.
   const checked = checkFile(entry, {
-    capabilities: ["persist"],
+    capabilities: [...new Set([...capabilities, "persist"])],
     persistRoutes: { ok: persistOk, none: persistNone, err: persistErr },
   });
   for (const error of checked.typeErrors) console.error(error);
@@ -158,6 +165,25 @@ let persistedModel: unknown | null = null;
 /// Process-local Tier-2 store. Like a real app database, it survives the
 /// harness's simulated process restart while remaining hermetic to this run.
 const recordStore = new Map<string, Uint8Array>();
+
+interface PendingStoreResult {
+  readonly routeKey: string;
+  readonly okKind: string;
+  readonly errKind: string;
+  readonly ok: boolean;
+  readonly okVoid: boolean;
+  readonly bytes: Uint8Array;
+  active: boolean;
+}
+
+/// Store operations are performed in command-stream order, but their routed
+/// results wait until the dispatch's complete command walk has returned. This
+/// is the native effect boundary: a later command in one Cmd.batch can replace
+/// or cancel an earlier result before either arm runs.
+const pendingStoreResults: PendingStoreResult[] = [];
+const pendingStoreByKey = new Map<string, PendingStoreResult>();
+let dispatchDepth = 0;
+let drainingStoreResults = false;
 
 const maxStoreKeyBytes = 512;
 const maxStoreValueBytes = 1024 * 1024;
@@ -247,13 +273,62 @@ function frameStoreScan(entries: ReadonlyArray<readonly [Uint8Array, Uint8Array]
   return output;
 }
 
+function queueStoreResult(cmd: Cmdish, ok: boolean, bytes: Uint8Array, okVoid: boolean): void {
+  const routeKey = cmd.key as string;
+  if (routeKey.length > 0) {
+    const replaced = pendingStoreByKey.get(routeKey);
+    if (replaced) replaced.active = false;
+  }
+  const result: PendingStoreResult = {
+    routeKey,
+    okKind: cmd.okKind as string,
+    errKind: cmd.errKind as string,
+    ok,
+    okVoid,
+    bytes,
+    active: true,
+  };
+  pendingStoreResults.push(result);
+  if (routeKey.length > 0) pendingStoreByKey.set(routeKey, result);
+}
+
+function cancelPendingStore(routeKey: string): boolean {
+  const pending = pendingStoreByKey.get(routeKey);
+  if (!pending) return false;
+  pending.active = false;
+  pendingStoreByKey.delete(routeKey);
+  return true;
+}
+
+function drainStoreResults(): void {
+  if (dispatchDepth !== 0 || drainingStoreResults) return;
+  drainingStoreResults = true;
+  try {
+    while (pendingStoreResults.length > 0) {
+      const result = pendingStoreResults.shift()!;
+      if (!result.active) continue;
+      if (result.routeKey.length > 0) {
+        if (pendingStoreByKey.get(result.routeKey) !== result) continue;
+        pendingStoreByKey.delete(result.routeKey);
+      }
+      result.active = false;
+      if (!result.ok) dispatch(bytesMsg(result.errKind, result.bytes));
+      else if (result.okVoid) dispatch(emptyMsg(result.okKind));
+      else dispatch(bytesMsg(result.okKind, result.bytes));
+    }
+  } finally {
+    drainingStoreResults = false;
+  }
+}
+
 function rejectStore(cmd: Cmdish, reason: string): void {
   say(`cmd ${cmd.op} rejected ${reason}`);
-  dispatch(bytesMsg(cmd.errKind as string, encoder.encode(reason)));
+  queueStoreResult(cmd, false, encoder.encode(reason), false);
 }
 
 function performStoreCmd(cmd: Cmdish): void {
   const routeKey = cmd.key as string;
+  if (!capabilities.has("store")) return rejectStore(cmd, "rejected");
   switch (cmd.op) {
     case "store_set": {
       const key = cmd.storeKey as string;
@@ -263,7 +338,7 @@ function performStoreCmd(cmd: Cmdish): void {
       if (!(bytes instanceof Uint8Array) || bytes.length > maxStoreValueBytes) return rejectStore(cmd, "over_bound");
       recordStore.set(key, bytes.slice());
       say(`cmd store_set ${routeKey} ${key} (stored in virtual host memory)`);
-      dispatch(emptyMsg(cmd.okKind as string));
+      queueStoreResult(cmd, true, new Uint8Array(0), true);
       return;
     }
     case "store_get": {
@@ -276,7 +351,7 @@ function performStoreCmd(cmd: Cmdish): void {
         result.set(value, 1);
       }
       say(`cmd store_get ${routeKey} ${key} (${value === undefined ? "miss" : "hit"})`);
-      dispatch(bytesMsg(cmd.okKind as string, result));
+      queueStoreResult(cmd, true, result, false);
       return;
     }
     case "store_delete": {
@@ -284,7 +359,7 @@ function performStoreCmd(cmd: Cmdish): void {
       if (!storeKeyBytes(key)) return rejectStore(cmd, "bad_key");
       recordStore.delete(key);
       say(`cmd store_delete ${routeKey} ${key} (deleted from virtual host memory)`);
-      dispatch(emptyMsg(cmd.okKind as string));
+      queueStoreResult(cmd, true, new Uint8Array(0), true);
       return;
     }
     case "store_scan": {
@@ -314,7 +389,7 @@ function performStoreCmd(cmd: Cmdish): void {
       const hasMore = page.length < matches.length;
       const next = hasMore ? page.at(-1)![0] : new Uint8Array(0);
       say(`cmd store_scan ${routeKey} ${prefix} (${page.length} records${hasMore ? ", more" : ""})`);
-      dispatch(bytesMsg(cmd.okKind as string, frameStoreScan(page, next)));
+      queueStoreResult(cmd, true, frameStoreScan(page, next), false);
       return;
     }
     case "store_set_many": {
@@ -330,7 +405,7 @@ function performStoreCmd(cmd: Cmdish): void {
       }
       for (const [key, value] of entries) recordStore.set(key, value.slice());
       say(`cmd store_set_many ${routeKey} (${entries.length} records stored atomically)`);
-      dispatch(emptyMsg(cmd.okKind as string));
+      queueStoreResult(cmd, true, new Uint8Array(0), true);
       return;
     }
   }
@@ -356,7 +431,9 @@ function performCmd(cmd: Cmdish): void {
     }
     case "cancel": {
       const key = cmd.key as string;
-      if (delays.delete(key)) {
+      if (cancelPendingStore(key)) {
+        say(`cmd cancel ${key} (store result dropped)`);
+      } else if (delays.delete(key)) {
         say(`cmd cancel ${key} (delay dropped)`);
       } else {
         say(`cmd cancel ${key} (not performed here - a live request or buffered named op drops silently; a live spawn or streaming fetch ends loudly, err arm "cancelled")`);
@@ -473,19 +550,31 @@ function boot(): void {
   const restored = persistedModel !== null;
   model = restored ? structuredClone(persistedModel) : first;
   say(`model ${JSON.stringify(jsonable(model))}`);
-  if (cmd) performCmd(cmd as Cmdish);
-  reconcileSubs();
+  dispatchDepth += 1;
+  try {
+    if (cmd) performCmd(cmd as Cmdish);
+    reconcileSubs();
+  } finally {
+    dispatchDepth -= 1;
+  }
+  drainStoreResults();
   const route = restored ? persistOk : persistNone;
   if (route) dispatch({ kind: route });
 }
 
 function dispatch(msg: unknown): void {
-  const result = mod.update(model, msg);
-  const [next, cmd] = Array.isArray(result) ? result : [result, null];
-  model = next;
-  say(`model ${JSON.stringify(jsonable(model))}`);
-  if (cmd) performCmd(cmd as Cmdish);
-  reconcileSubs();
+  dispatchDepth += 1;
+  try {
+    const result = mod.update(model, msg);
+    const [next, cmd] = Array.isArray(result) ? result : [result, null];
+    model = next;
+    say(`model ${JSON.stringify(jsonable(model))}`);
+    if (cmd) performCmd(cmd as Cmdish);
+    reconcileSubs();
+  } finally {
+    dispatchDepth -= 1;
+  }
+  drainStoreResults();
 }
 
 function handleLine(raw: string): void {

@@ -37,7 +37,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 `);
     fs.writeFileSync(script, '{"kind":"go"}\n{"restart":true}\n{"kind":"again"}\n');
-    const run = spawnSync(process.execPath, [path.join(packageDir, "src", "devhost.ts"), core, "--script", script], {
+    const run = spawnSync(process.execPath, [path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "store"], {
       cwd: tmp,
       encoding: "utf8",
     });
@@ -47,6 +47,128 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     assert.match(run.stdout, /cmd store_scan page chat\/ \(1 records, more\)/);
     assert.match(run.stdout, /"hits":1,"pageCount":1/);
     assert.equal((run.stdout.match(/cmd store_get read chat\/1 \(hit\)/g) ?? []).length, 2);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the devhost defers store results so replacement and cancel match native batches", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-store-devhost-order-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly first: number; readonly second: number; readonly cancelled: number; readonly hit: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "first" }
+  | { readonly kind: "second" }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { first: 0, second: 0, cancelled: 0, hit: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.store.set("doc/replaced", asciiBytes("one"), { key: "replace", ok: "first", err: "failed" }),
+      Cmd.store.set("doc/replaced", asciiBytes("two"), { key: "replace", ok: "second", err: "failed" }),
+      Cmd.store.set("doc/cancelled", asciiBytes("kept"), { key: "cancel", ok: "cancelled", err: "failed" }),
+      Cmd.cancel("cancel"),
+    ])];
+    case "first": return { ...model, first: model.first + 1 };
+    case "second": return [{ ...model, second: model.second + 1 }, Cmd.store.get("doc/cancelled", { key: "read", ok: "loaded", err: "failed" })];
+    case "cancelled": return { ...model, cancelled: model.cancelled + 1 };
+    case "loaded": return { ...model, hit: msg.bytes[0] };
+    case "failed": return model;
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "store",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /cmd cancel cancel \(store result dropped\)/);
+    assert.match(run.stdout, /"first":0,"second":1,"cancelled":0,"hit":1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the devhost keeps initial-model store results behind the complete boot batch", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-store-devhost-boot-order-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly first: number; readonly second: number; readonly ticks: number; }
+export type Msg =
+  | { readonly kind: "first" }
+  | { readonly kind: "second" }
+  | { readonly kind: "tick"; readonly atMs: number }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [{ first: 0, second: 0, ticks: 0 }, Cmd.batch([
+    Cmd.store.set("doc/boot", asciiBytes("one"), { key: "replace", ok: "first", err: "failed" }),
+    Cmd.now("tick"),
+    Cmd.store.set("doc/boot", asciiBytes("two"), { key: "replace", ok: "second", err: "failed" }),
+  ])];
+}
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "first": return { ...model, first: model.first + 1 };
+    case "second": return { ...model, second: model.second + 1 };
+    case "tick": return { ...model, ticks: model.ticks + 1 };
+    case "failed": return model;
+  }
+}
+`);
+    fs.writeFileSync(script, "");
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "store",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /"first":0,"second":1,"ticks":1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the devhost rejects store commands without the app.zon capability", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-store-devhost-capability-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly rejected: boolean; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { rejected: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.store.set("doc/one", asciiBytes("one"), { key: "write", ok: "wrote", err: "failed" })];
+    case "wrote": return model;
+    case "failed": return { rejected: msg.reason.length === 8 && msg.reason[0] === 114 };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [path.join(packageDir, "src", "devhost.ts"), core, "--script", script], {
+      cwd: tmp,
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /cmd store_set rejected rejected/);
+    assert.match(run.stdout, /"rejected":true/);
+    assert.doesNotMatch(run.stdout, /stored in virtual host memory/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

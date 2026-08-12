@@ -260,6 +260,7 @@ pub fn main(init: std.process.Init) !void {
             const dev_metadata = try tooling.manifest.readMetadata(allocator, init.io, "app.zon");
             tooling.ts_core.runDevHost(allocator, init.io, framework_root, .{
                 .base_env = init.environ_map,
+                .capabilities = dev_metadata.capabilities,
                 .script = try flagValue(args, "--script"),
                 .watch = flagBool(args, "--watch"),
                 .persist_routes = if (dev_metadata.persist) |persist| .{
