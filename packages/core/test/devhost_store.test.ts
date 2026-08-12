@@ -138,6 +138,63 @@ export function update(model: Model, msg: Msg): Model {
   }
 });
 
+test("the devhost uses encoded key identity and rejects fractional scan limits", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-store-devhost-key-bytes-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    fs.writeFileSync(core, `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model {
+  readonly value: number;
+  readonly records: number;
+  readonly invalidLimit: number;
+  readonly rejected: boolean;
+}
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "scanned"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model {
+  return { value: 0, records: 0, invalidLimit: 0.5, rejected: false };
+}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.store.set("\\uD800", asciiBytes("one"), { key: "first", ok: "wrote", err: "failed" }),
+      Cmd.store.set("\\uD801", asciiBytes("two"), { key: "second", ok: "wrote", err: "failed" }),
+      Cmd.store.get("\\uD800", { key: "read", ok: "loaded", err: "failed" }),
+    ])];
+    case "wrote": return model;
+    case "loaded": return [
+      { ...model, value: msg.bytes[1] },
+      Cmd.store.scan("", { limit: 10 }, { key: "page", ok: "scanned", err: "failed" }),
+    ];
+    case "scanned": return [
+      { ...model, records: msg.bytes[0] },
+      Cmd.store.scan("", { limit: model.invalidLimit }, { key: "invalid", ok: "scanned", err: "failed" }),
+    ];
+    case "failed": return { ...model, rejected: msg.reason[0] === 111 };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "store",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /cmd store_get read .+ \(hit\)/);
+    assert.match(run.stdout, /cmd store_scan page  \(1 records\)/);
+    assert.match(run.stdout, /cmd store_scan rejected over_bound/);
+    assert.match(run.stdout, /"value":116,"records":1,"invalidLimit":0.5,"rejected":true/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("the devhost rejects store commands without the app.zon capability", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-store-devhost-capability-"));

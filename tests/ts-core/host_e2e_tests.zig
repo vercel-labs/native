@@ -105,6 +105,7 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.storeget")) return .store_get;
     if (std.mem.eql(u8, name, "core.storedelete")) return .store_delete;
     if (std.mem.eql(u8, name, "core.storescan")) return .store_scan;
+    if (std.mem.eql(u8, name, "core.storescaninvalid")) return .store_scan_invalid;
     if (std.mem.eql(u8, name, "core.storemany")) return .store_many;
     return null;
 }
@@ -597,6 +598,15 @@ test "every Cmd.store factory emits its bounded v3 record through the external c
     try std.testing.expectEqualStrings("fixture/café/🚀", storePayloadField(request.payload, &at));
     try fx.feedHostResult(request.key, true, "page");
     try h.wake();
+
+    // A dynamic fractional limit must not truncate to zero (the default page
+    // size) in the facade. It reaches the host as the over-bound sentinel and
+    // takes the declared error route without issuing a storage request.
+    try h.menu("core.storescaninvalid");
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("over_bound", Bridge.model().lastErr);
 
     try h.menu("core.storemany");
     request = fx.pendingHostAt(0).?;

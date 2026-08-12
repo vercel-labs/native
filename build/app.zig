@@ -4,6 +4,7 @@
 //! come from the native-sdk dependency.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// The shared web-layer inference contract: this build graph is one thin
 /// adapter over it (the CLI's manifest tooling and the app runner are the
@@ -727,12 +728,7 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         exports_mod.addIncludePath(dep.path("third_party/sqlite"));
         exports_mod.addCSourceFile(.{
             .file = dep.path("third_party/sqlite/sqlite3.c"),
-            .flags = &.{
-                "-DSQLITE_THREADSAFE=1",
-                "-DSQLITE_OMIT_LOAD_EXTENSION",
-                "-DSQLITE_DQS=0",
-                "-DSQLITE_DEFAULT_MEMSTATUS=0",
-            },
+            .flags = sqliteCFlags(b, target),
         });
         exports_mod.link_libc = true;
     }
@@ -1208,6 +1204,163 @@ fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
     query.os_tag = .macos;
     query.os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } };
     return b.resolveTargetQuery(query);
+}
+
+const sqlite_c_defines = [_][]const u8{
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_OMIT_LOAD_EXTENSION",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_DEFAULT_MEMSTATUS=0",
+};
+
+/// Zig deliberately supplies no libc headers for Apple/Android cross targets.
+/// Store-capable mobile libraries therefore compile the vendored amalgamation
+/// against the same platform SDK the host tier will use to link the archive.
+/// Desktop targets keep Zig's ordinary libc discovery.
+fn sqliteCFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
+    if (target.result.os.tag == .ios) {
+        const sysroot = b.sysroot orelse iosSdkPath(b, target.result.abi == .simulator) orelse
+            std.debug.panic("a store-capable iOS library needs the Apple SDK; install Xcode or pass --sysroot <iphone SDK path>", .{});
+        return b.dupeStrings(&.{
+            sqlite_c_defines[0],
+            sqlite_c_defines[1],
+            sqlite_c_defines[2],
+            sqlite_c_defines[3],
+            "-isysroot",
+            sysroot,
+            b.fmt("-isystem{s}/usr/include", .{sysroot}),
+        });
+    }
+    if (target.result.abi.isAndroid()) {
+        const sysroot = b.sysroot orelse androidNdkSysrootPath(b) orelse
+            std.debug.panic("a store-capable Android library needs the NDK; set ANDROID_NDK_ROOT or ANDROID_HOME, or pass --sysroot <NDK sysroot>", .{});
+        const triple = target.result.linuxTriple(b.allocator) catch @panic("out of memory");
+        return b.dupeStrings(&.{
+            sqlite_c_defines[0],
+            sqlite_c_defines[1],
+            sqlite_c_defines[2],
+            sqlite_c_defines[3],
+            b.fmt("-isystem{s}/usr/include/{s}", .{ sysroot, triple }),
+            b.fmt("-isystem{s}/usr/include", .{sysroot}),
+        });
+    }
+    return &sqlite_c_defines;
+}
+
+fn iosSdkPath(b: *std.Build, simulator: bool) ?[]const u8 {
+    const result = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ "xcrun", "--sdk", if (simulator) "iphonesimulator" else "iphoneos", "--show-sdk-path" },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return null;
+    defer b.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        b.allocator.free(result.stdout);
+        return null;
+    }
+    return std.mem.trimEnd(u8, result.stdout, "\r\n");
+}
+
+fn androidNdkSysrootPath(b: *std.Build) ?[]const u8 {
+    for ([_][]const u8{ "ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK_LATEST_HOME" }) |name| {
+        if (b.graph.environ_map.get(name)) |root| {
+            if (root.len > 0) {
+                if (ndkSysrootUnder(b, root)) |sysroot| return sysroot;
+            }
+        }
+    }
+
+    const sdk_root = androidSdkRoot(b) orelse return null;
+    const ndk_root = latestVersionSubdir(b, sdk_root, "ndk") orelse blk: {
+        const legacy = b.pathJoin(&.{ sdk_root, "ndk-bundle" });
+        break :blk if (buildDirExists(b, legacy)) legacy else return null;
+    };
+    return ndkSysrootUnder(b, ndk_root);
+}
+
+fn androidSdkRoot(b: *std.Build) ?[]const u8 {
+    for ([_][]const u8{ "ANDROID_HOME", "ANDROID_SDK_ROOT" }) |name| {
+        if (b.graph.environ_map.get(name)) |root| {
+            if (root.len > 0 and buildDirExists(b, root)) return root;
+        }
+    }
+    return switch (builtin.os.tag) {
+        .macos => if (b.graph.environ_map.get("HOME")) |home|
+            b.pathJoin(&.{ home, "Library", "Android", "sdk" })
+        else
+            null,
+        .windows => if (b.graph.environ_map.get("LOCALAPPDATA")) |local_app_data|
+            b.pathJoin(&.{ local_app_data, "Android", "Sdk" })
+        else
+            null,
+        else => if (b.graph.environ_map.get("HOME")) |home|
+            b.pathJoin(&.{ home, "Android", "Sdk" })
+        else
+            null,
+    };
+}
+
+fn ndkSysrootUnder(b: *std.Build, ndk_root: []const u8) ?[]const u8 {
+    const prebuilt_path = b.pathJoin(&.{ ndk_root, "toolchains", "llvm", "prebuilt" });
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(b.graph.io, prebuilt_path, .{ .iterate = true }) catch return null;
+    defer dir.close(b.graph.io);
+    var iterator = dir.iterate();
+    while (iterator.next(b.graph.io) catch return null) |entry| {
+        if (entry.kind != .directory) continue;
+        const sysroot = b.pathJoin(&.{ prebuilt_path, entry.name, "sysroot" });
+        if (buildDirExists(b, b.pathJoin(&.{ sysroot, "usr", "include" }))) return sysroot;
+    }
+    return null;
+}
+
+fn latestVersionSubdir(b: *std.Build, root: []const u8, parent: []const u8) ?[]const u8 {
+    const parent_path = b.pathJoin(&.{ root, parent });
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(b.graph.io, parent_path, .{ .iterate = true }) catch return null;
+    defer dir.close(b.graph.io);
+    var best: ?[]const u8 = null;
+    defer if (best) |name| b.allocator.free(name);
+    var iterator = dir.iterate();
+    while (iterator.next(b.graph.io) catch return null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (best) |current| {
+            if (!versionLess(current, entry.name)) continue;
+            b.allocator.free(current);
+            best = null;
+        }
+        best = b.allocator.dupe(u8, entry.name) catch @panic("out of memory");
+    }
+    const name = best orelse return null;
+    return b.pathJoin(&.{ parent_path, name });
+}
+
+fn versionLess(a: []const u8, b: []const u8) bool {
+    var a_parts = std.mem.splitScalar(u8, a, '.');
+    var b_parts = std.mem.splitScalar(u8, b, '.');
+    while (true) {
+        const a_part = a_parts.next();
+        const b_part = b_parts.next();
+        if (a_part == null and b_part == null) return false;
+        if (a_part == null) return true;
+        if (b_part == null) return false;
+        const a_num = std.fmt.parseUnsigned(u64, a_part.?, 10) catch null;
+        const b_num = std.fmt.parseUnsigned(u64, b_part.?, 10) catch null;
+        if (a_num != null and b_num != null) {
+            if (a_num.? != b_num.?) return a_num.? < b_num.?;
+        } else switch (std.mem.order(u8, a_part.?, b_part.?)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+    }
+}
+
+fn buildDirExists(b: *std.Build, path: []const u8) bool {
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(b.graph.io, path, .{}) catch return false;
+    dir.close(b.graph.io);
+    return true;
 }
 
 fn macosSdkPath(b: *std.Build) ?[]const u8 {

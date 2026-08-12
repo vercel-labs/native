@@ -2671,6 +2671,14 @@ const FacadeEmitter = struct {
             \\const nscfAudioCaptureSources = ["microphone", "system"];
             \\const nscfVideoVerbs = ["play", "pause", "stop", "seek", "volume", "muted", "loop"];
             \\
+            \\// Preserve the store err route for dynamic invalid limits. Writing a
+            \\// fractional or out-of-u32 number directly into the byte sink would
+            \\// truncate/wrap it into a different, potentially valid request. 257
+            \\// is the host's stable over-bound sentinel (the public maximum is 256).
+            \\function nscfStoreScanLimit(value: number): number {{
+            \\  return Number.isInteger(value) && value >= 0 && value <= 256 ? value : 257;
+            \\}}
+            \\
             \\function nscfEncodeCmd(sink: nscfSink, cmd: nscfCmd<{s}>): void {{
             \\
         , .{msg});
@@ -2835,7 +2843,7 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
             \\      nscfWU32(sink, 0);
             \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.prefix));
-            \\      nscfWU32(sink, cmd.limit);
+            \\      nscfWU32(sink, nscfStoreScanLimit(cmd.limit));
             \\      nscfWBytes(sink, typeof cmd.after === "string" ? nscfUtf8TextBytes(cmd.after) : cmd.after);
             \\      return;
             \\    case "store_set_many":
@@ -3683,6 +3691,8 @@ test "facade emission is deterministic and carries the adapter surface" {
     // collide with them.
     try testing.expect(std.mem.indexOf(u8, first, "type nscfSink = number[];") != null);
     try testing.expect(std.mem.indexOf(u8, first, "import type { Cmd as nscfCmd }") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "Number.isInteger(value) && value >= 0 && value <= 256 ? value : 257") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "nscfWU32(sink, nscfStoreScanLimit(cmd.limit));") != null);
     try testing.expect(std.mem.indexOf(u8, first, "NscfSink") == null);
     try testing.expect(std.mem.indexOf(u8, first, "NSCF_TAG_") == null);
 }

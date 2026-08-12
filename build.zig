@@ -1662,13 +1662,44 @@ pub fn build(b: *std.Build) void {
     mobile_canvas_store_lib_step.dependOn(&build_mobile_canvas_store_lib.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_store_lib.step);
 
-    // Android cross-compile proof: pure Zig (no NDK sysroot — the static
-    // lib links no libc), PIC so the objects can land in the shim's .so.
+    // Android cross-compile proofs: the capability-free archive remains pure
+    // Zig, while the store variant must discover the NDK sysroot and compile
+    // the vendored SQLite amalgamation for bionic. Keeping both catches a
+    // capability branch that a host-only store build cannot exercise.
     const build_mobile_canvas_lib_android = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dtarget=aarch64-linux-android" });
     build_mobile_canvas_lib_android.setCwd(b.path("examples/mobile-canvas"));
     const mobile_canvas_lib_android_step = b.step("test-example-mobile-canvas-lib-android", "Cross-compile the mobile-canvas embed static library for aarch64-linux-android");
     mobile_canvas_lib_android_step.dependOn(&build_mobile_canvas_lib_android.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_lib_android.step);
+
+    const build_mobile_canvas_store_lib_android = b.addSystemCommand(&.{
+        "zig",      "build",                      "lib", "-Dstore=true", "-Dtarget=aarch64-linux-android",
+        "--prefix", "zig-out/test-android-store",
+    });
+    build_mobile_canvas_store_lib_android.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_store_lib_android_step = b.step("test-example-mobile-canvas-lib-android-store", "Cross-compile SQLite-backed mobile storage for aarch64-linux-android");
+    mobile_canvas_store_lib_android_step.dependOn(&build_mobile_canvas_store_lib_android.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_android.step);
+
+    // Apple SDK headers only exist on macOS. This is still part of the local
+    // mobile aggregate there, and CI invokes the named step on its macOS tier.
+    if (b.graph.host.result.os.tag == .macos) {
+        const build_mobile_canvas_store_lib_ios = b.addSystemCommand(&.{
+            "zig",      "build",                  "lib", "-Dstore=true", "-Dtarget=aarch64-ios-simulator",
+            "--prefix", "zig-out/test-ios-store",
+        });
+        build_mobile_canvas_store_lib_ios.setCwd(b.path("examples/mobile-canvas"));
+        const build_mobile_canvas_store_lib_ios_device = b.addSystemCommand(&.{
+            "zig",      "build",                         "lib", "-Dstore=true", "-Dtarget=aarch64-ios",
+            "--prefix", "zig-out/test-ios-device-store",
+        });
+        build_mobile_canvas_store_lib_ios_device.setCwd(b.path("examples/mobile-canvas"));
+        const mobile_canvas_store_lib_ios_step = b.step("test-example-mobile-canvas-lib-ios-store", "Cross-compile SQLite-backed mobile storage for iOS simulator and device");
+        mobile_canvas_store_lib_ios_step.dependOn(&build_mobile_canvas_store_lib_ios.step);
+        mobile_canvas_store_lib_ios_step.dependOn(&build_mobile_canvas_store_lib_ios_device.step);
+        mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_ios.step);
+        mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_ios_device.step);
+    }
 
     const examples_step = b.step("test-examples", "Run all example tests and layout checks");
     examples_step.dependOn(frontend_examples_step);

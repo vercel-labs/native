@@ -162,9 +162,17 @@ const delays = new Map<string, { msgKind: string; at: number }>();
 /// Process-local Tier-1 store. `structuredClone` preserves Uint8Array and
 /// nested model data without making the app own a serialization format.
 let persistedModel: unknown | null = null;
-/// Process-local Tier-2 store. Like a real app database, it survives the
-/// harness's simulated process restart while remaining hermetic to this run.
-const recordStore = new Map<string, Uint8Array>();
+interface VirtualStoreRecord {
+  readonly key: Uint8Array;
+  readonly value: Uint8Array;
+}
+
+/// Process-local Tier-2 store. Like SQLite, record identity is the encoded
+/// UTF-8 key rather than the source JavaScript string. That distinction is
+/// observable for ill-formed UTF-16: TextEncoder canonicalizes every lone
+/// surrogate to U+FFFD, so strings with the same encoded bytes must address
+/// one record here just as they do in the native host.
+const recordStore = new Map<string, VirtualStoreRecord>();
 
 interface PendingStoreResult {
   readonly routeKey: string;
@@ -223,6 +231,12 @@ function storeKeyBytes(key: string, allowEmpty = false): Uint8Array | null {
   const bytes = encoder.encode(key);
   if ((!allowEmpty && bytes.length === 0) || bytes.length > maxStoreKeyBytes) return null;
   return bytes;
+}
+
+function storeKeyIdentity(bytes: Uint8Array): string {
+  let identity = "";
+  for (const byte of bytes) identity += String.fromCharCode(byte);
+  return identity;
 }
 
 function validStoreKeyBytes(bytes: Uint8Array, allowEmpty = false): Uint8Array | null {
@@ -336,15 +350,16 @@ function performStoreCmd(cmd: Cmdish): void {
       const bytes = cmd.bytes;
       if (!keyBytes) return rejectStore(cmd, "bad_key");
       if (!(bytes instanceof Uint8Array) || bytes.length > maxStoreValueBytes) return rejectStore(cmd, "over_bound");
-      recordStore.set(key, bytes.slice());
+      recordStore.set(storeKeyIdentity(keyBytes), { key: keyBytes.slice(), value: bytes.slice() });
       say(`cmd store_set ${routeKey} ${key} (stored in virtual host memory)`);
       queueStoreResult(cmd, true, new Uint8Array(0), true);
       return;
     }
     case "store_get": {
       const key = cmd.storeKey as string;
-      if (!storeKeyBytes(key)) return rejectStore(cmd, "bad_key");
-      const value = recordStore.get(key);
+      const keyBytes = storeKeyBytes(key);
+      if (!keyBytes) return rejectStore(cmd, "bad_key");
+      const value = recordStore.get(storeKeyIdentity(keyBytes))?.value;
       const result = new Uint8Array(value === undefined ? 1 : value.length + 1);
       if (value !== undefined) {
         result[0] = 1;
@@ -356,8 +371,9 @@ function performStoreCmd(cmd: Cmdish): void {
     }
     case "store_delete": {
       const key = cmd.storeKey as string;
-      if (!storeKeyBytes(key)) return rejectStore(cmd, "bad_key");
-      recordStore.delete(key);
+      const keyBytes = storeKeyBytes(key);
+      if (!keyBytes) return rejectStore(cmd, "bad_key");
+      recordStore.delete(storeKeyIdentity(keyBytes));
       say(`cmd store_delete ${routeKey} ${key} (deleted from virtual host memory)`);
       queueStoreResult(cmd, true, new Uint8Array(0), true);
       return;
@@ -373,8 +389,8 @@ function performStoreCmd(cmd: Cmdish): void {
       const limit = requested === 0 ? 100 : requested;
       if (!prefixBytes || !afterBytes) return rejectStore(cmd, "bad_key");
       if (!Number.isInteger(limit) || limit < 1 || limit > maxStoreScanLimit) return rejectStore(cmd, "over_bound");
-      const matches = [...recordStore.entries()]
-        .map(([key, value]) => [encoder.encode(key), value] as const)
+      const matches = [...recordStore.values()]
+        .map(({ key, value }) => [key, value] as const)
         .filter(([key]) => startsWithBytes(key, prefixBytes) && (afterBytes.length === 0 || compareBytes(key, afterBytes) > 0))
         .sort(([left], [right]) => compareBytes(left, right));
       const page: Array<readonly [Uint8Array, Uint8Array]> = [];
@@ -403,7 +419,10 @@ function performStoreCmd(cmd: Cmdish): void {
         encodedLength += 8 + keyBytes.length + value.length;
         if (encodedLength > maxStoreBatchBytes) return rejectStore(cmd, "over_bound");
       }
-      for (const [key, value] of entries) recordStore.set(key, value.slice());
+      for (const [key, value] of entries) {
+        const keyBytes = storeKeyBytes(key)!;
+        recordStore.set(storeKeyIdentity(keyBytes), { key: keyBytes.slice(), value: value.slice() });
+      }
       say(`cmd store_set_many ${routeKey} (${entries.length} records stored atomically)`);
       queueStoreResult(cmd, true, new Uint8Array(0), true);
       return;
