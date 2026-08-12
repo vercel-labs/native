@@ -650,6 +650,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "npm ci --include=dev" },
         .{ .path = "build/app.zig", .pattern = "cannot resolve its TypeScript toolchain" },
         .{ .path = "build/app.zig", .pattern = "std.process.exit(1);" },
+        // SQLite schema generation shares node/toolchain resolution but
+        // never the TS-core-only src/app.native shape assertion: Zig cores
+        // may own their view in code while still embedding migrations.
+        .{ .path = "build/app.zig", .pattern = "return tsToolingPreflight(b, dep, .app_core);" },
+        .{ .path = "build/app.zig", .pattern = "const node = tsToolingPreflight(b, dep, .sqlite_schema);" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-pin-cache-inputs", "Verify both TypeScript service build graphs invalidate frontend contracts when the exact scriptc pin changes", &.{
         .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },

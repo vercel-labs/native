@@ -570,7 +570,12 @@ fn dbRecordDamaged(record: journal.EffectResultRecord) bool {
     const kind = runtime_effects.dbKindFromJournalCode(record.code) orelse return true;
     const outcome = runtime_effects.dbOutcomeFromJournalCode(record.code) orelse return true;
     if (record.code != runtime_effects.dbJournalCode(kind, outcome)) return true;
-    if ((record.exit_reason == .rejected) != (outcome == .rejected)) return true;
+    // `.rejected` provenance identifies an admission refusal that replay
+    // regenerates. An executor may also return the closed `.rejected`
+    // outcome (for example when a result crosses its total bound); that
+    // terminal is external truth and correctly keeps `.exited` provenance.
+    if (record.exit_reason != .exited and record.exit_reason != .rejected) return true;
+    if (record.exit_reason == .rejected and outcome != .rejected) return true;
     if (record.db_blob_len > runtime_effects.max_effect_db_page_bytes) return true;
     return switch (kind) {
         .page => outcome != .ok or
@@ -855,6 +860,31 @@ test "audio records outside the exact-integer scalar window are damaged" {
     record.audio_position_ms = 0;
     record.audio_duration_ms = std.math.maxInt(u64);
     try std.testing.expect(audioScalarsDamaged(record));
+}
+
+test "relational rejection provenance distinguishes admission from executor truth" {
+    var record: journal.EffectResultRecord = .{
+        .kind = .db,
+        .key = 1,
+        .code = runtime_effects.dbJournalCode(.done, .rejected),
+        .exit_reason = .exited,
+    };
+
+    // A bounded executor result is a real terminal which replay must feed.
+    try std.testing.expect(!dbRecordDamaged(record));
+
+    // A deterministic admission refusal regenerates instead and uses the
+    // same outcome with explicit rejected provenance.
+    record.exit_reason = .rejected;
+    try std.testing.expect(!dbRecordDamaged(record));
+
+    // Rejected provenance cannot decorate a successful result, and DB
+    // records never carry process-only exit reasons.
+    record.code = runtime_effects.dbJournalCode(.done, .ok);
+    try std.testing.expect(dbRecordDamaged(record));
+    record.code = runtime_effects.dbJournalCode(.done, .rejected);
+    record.exit_reason = .cancelled;
+    try std.testing.expect(dbRecordDamaged(record));
 }
 
 /// Debug aid: `NATIVE_SDK_SESSION_REPLAY_DUMP=<dir>` writes each

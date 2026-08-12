@@ -399,6 +399,56 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   }
 });
 
+test("the devhost shares the sixteen relational slots across live and unkeyed operations", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-slots-"));
+  try {
+    const core = path.join(tmp, "core.ts");
+    const script = path.join(tmp, "msgs.ndjson");
+    const liveSubs = Array.from({ length: 15 }, (_, index) => `
+      { op: "db_live", key: "live-${index}", pageKind: "livePage", doneKind: "liveDone", errKind: "failed",
+        sql: "SELECT ${index} AS value", params: [], tables: ["note"] }`).join(",");
+    fs.writeFileSync(core, `
+import { Cmd, Sub } from "@native-sdk/core";
+export interface Model { readonly liveDone: number; readonly commandDone: number; readonly rejected: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "livePage"; readonly bytes: Uint8Array }
+  | { readonly kind: "liveDone" }
+  | { readonly kind: "commandPage"; readonly bytes: Uint8Array }
+  | { readonly kind: "commandDone" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { liveDone: 0, commandDone: 0, rejected: 0 }; }
+export function subscriptions(_model: Model): Sub<Msg> {
+  return Sub.batch([${liveSubs}
+  ]);
+}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.db.query("SELECT 101 AS value", [], { page: "commandPage", done: "commandDone", err: "failed" }),
+      Cmd.db.query("SELECT 102 AS value", [], { page: "commandPage", done: "commandDone", err: "failed" }),
+    ])];
+    case "livePage":
+    case "commandPage": return model;
+    case "liveDone": return { ...model, liveDone: model.liveDone + 1 };
+    case "commandDone": return { ...model, commandDone: model.commandDone + 1 };
+    case "failed": return { ...model, rejected: model.rejected + (msg.reason[0] === 114 ? 1 : 0) };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"go"}\n');
+    const run = spawnSync(process.execPath, [
+      path.join(packageDir, "src", "devhost.ts"), core, "--script", script, "--capability", "sqlite",
+    ], { cwd: tmp, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal((run.stdout.match(/cmd db_query rejected rejected/g) ?? []).length, 1, run.stdout);
+    assert.match(run.stdout, /"liveDone":15,"commandDone":1,"rejected":1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("the devhost rejects transaction control inside an exec batch and rolls it all back", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "native-db-devhost-transaction-"));

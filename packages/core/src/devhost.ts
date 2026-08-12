@@ -449,6 +449,10 @@ function relationalTransaction(sql: "BEGIN IMMEDIATE;" | "COMMIT;" | "ROLLBACK;"
 }
 const pendingDbResults: PendingDbResult[] = [];
 const pendingDbByKey = new Map<string, PendingDbOperation>();
+/// The packaged TS bridge and Zig Effects host share one fixed relational
+/// slot family. Track every devhost operation explicitly too: keyed,
+/// unkeyed, one-shot, and live subscriptions all consume the same capacity.
+const activeDbOperations = new Set<PendingDbOperation>();
 
 interface LiveDbSubscription {
   readonly operation: PendingDbOperation;
@@ -467,6 +471,7 @@ const maxStoreBatchEntries = 64;
 const maxStoreBatchBytes = 8 * 1024 * 1024;
 const maxStoreScanLimit = 256;
 const maxStoreResultBytes = maxStoreValueBytes + (2 * maxStoreKeyBytes) + 32;
+const maxDbEffects = 16;
 const maxDbSqlBytes = 64 * 1024;
 const maxDbParameters = 64;
 const maxDbExecStatements = 64;
@@ -1341,8 +1346,7 @@ function beginDbOperation(cmd: Cmdish, query: boolean): PendingDbOperation | nul
   const active = routeKey.length === 0 ? undefined : pendingDbByKey.get(routeKey);
   if (active) {
     if (!query) return null;
-    active.active = false;
-    discardDbResults(active);
+    releaseDbOperation(active, true);
   }
   const operation: PendingDbOperation = {
     routeKey,
@@ -1353,6 +1357,8 @@ function beginDbOperation(cmd: Cmdish, query: boolean): PendingDbOperation | nul
     errKind: cmd.errKind as string,
     active: true,
   };
+  if (activeDbOperations.size === maxDbEffects) return null;
+  activeDbOperations.add(operation);
   if (routeKey.length > 0) pendingDbByKey.set(routeKey, operation);
   return operation;
 }
@@ -1365,6 +1371,12 @@ function discardDbResults(operation: PendingDbOperation): void {
   for (let index = pendingDbResults.length - 1; index >= 0; index--) {
     if (pendingDbResults[index]!.operation === operation) pendingDbResults.splice(index, 1);
   }
+}
+
+function releaseDbOperation(operation: PendingDbOperation, discardResults: boolean): void {
+  operation.active = false;
+  activeDbOperations.delete(operation);
+  if (discardResults) discardDbResults(operation);
 }
 
 function rejectDbOperation(cmd: Cmdish, query: boolean, outcome: DbOutcome, operation?: PendingDbOperation): void {
@@ -1483,8 +1495,7 @@ function performDbCmd(cmd: Cmdish): void {
 function cancelPendingDb(routeKey: string): boolean {
   const operation = pendingDbByKey.get(routeKey);
   if (!operation || !operation.query) return false;
-  operation.active = false;
-  discardDbResults(operation);
+  releaseDbOperation(operation, true);
   pendingDbByKey.delete(routeKey);
   return true;
 }
@@ -1530,7 +1541,7 @@ function drainEffectResults(): void {
       const operation = result.operation;
       const terminal = result.outcome !== "ok" || result.kind !== "page";
       if (terminal && !operation.live) {
-        operation.active = false;
+        releaseDbOperation(operation, false);
         if (operation.routeKey.length > 0 && pendingDbByKey.get(operation.routeKey) === operation) {
           pendingDbByKey.delete(operation.routeKey);
         }
@@ -1743,8 +1754,7 @@ function reconcileSubs(): void {
     const active = liveDbByKey.get(key);
     if (active?.signature === signature) continue;
     if (active) {
-      active.operation.active = false;
-      discardDbResults(active.operation);
+      releaseDbOperation(active.operation, true);
     }
     const operation: PendingDbOperation = {
       routeKey: key,
@@ -1755,6 +1765,10 @@ function reconcileSubs(): void {
       errKind: sub.errKind as string,
       active: true,
     };
+    if (activeDbOperations.size === maxDbEffects) {
+      throw new Error("more relational commands and live queries are active than the database slot family can hold");
+    }
+    activeDbOperations.add(operation);
     const live: LiveDbSubscription = {
       operation,
       signature,
@@ -1770,8 +1784,7 @@ function reconcileSubs(): void {
   }
   for (const [key, active] of [...liveDbByKey]) {
     if (!declaredLive.has(key)) {
-      active.operation.active = false;
-      discardDbResults(active.operation);
+      releaseDbOperation(active.operation, true);
       liveDbByKey.delete(key);
       dirtyLiveDbKeys.delete(key);
       say(`sub cancel db_live ${key}`);

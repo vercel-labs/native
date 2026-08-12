@@ -292,19 +292,19 @@ fn tsSdkRoot(allocator: std.mem.Allocator, io: std.Io, dep: *std.Build.Dependenc
     return std.Io.Dir.cwd().realPathFileAlloc(io, raw_root, allocator) catch raw_root;
 }
 
-/// The TS-core preflight — the markup view, node, and the frontend
-/// toolchain gate — returning the resolved node program. The frontend
-/// (the subset checker and the contract-sidecar emitter) runs under
-/// node; the compile itself is the external toolchain's.
-fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) []const u8 {
-    if (!appFileExists(b, app_root, "src/app.native")) {
-        @panic("\nthis app has a TypeScript core (src/core.ts) but no view: TS apps render markup," ++
-            " so add src/app.native (the whole view tier binds the core's model)\n");
-    }
-    const node = b.findProgram(&.{"node"}, &.{}) catch {
-        @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core frontend checks the" ++
+const TsToolingConsumer = enum { app_core, sqlite_schema };
+
+/// Resolve the node + pinned TypeScript loader shared by the app-core
+/// frontend and relational schema generator. Keep app-shape assertions out
+/// of this helper: a Zig core may use SQLite without carrying a markup view.
+fn tsToolingPreflight(b: *std.Build, dep: *std.Build.Dependency, consumer: TsToolingConsumer) []const u8 {
+    const node = b.findProgram(&.{"node"}, &.{}) catch switch (consumer) {
+        .app_core => @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core frontend checks the" ++
             " core at build time; the binary you ship carries no JS runtime).\nInstall Node.js 22.15+ (on the 23" ++
-            " line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n");
+            " line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n"),
+        .sqlite_schema => @panic("\nbuilding relational SQLite migrations needs node on PATH (the schema checker and" ++
+            " migration generator run at build time; the binary you ship carries no JS runtime).\nInstall Node.js" ++
+            " 22.15+ (on the 23 line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n"),
     };
     switch (tsToolchainResolution(b, dep)) {
         .resolved => {},
@@ -316,16 +316,28 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
             // fail the configure phase cleanly — a teaching message, never
             // a panic stack trace.
             const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
-            std.debug.print(
-                \\
-                \\error: the @native-sdk/core frontend cannot resolve its TypeScript toolchain
-                \\(its compiler, @typescript/old). On a repo checkout, install it once with:
-                \\  cd {s}/packages/core && npm ci --include=dev
-                \\(An npm-installed @native-sdk/cli carries the toolchain automatically; if it
-                \\is missing there, the install is broken - reinstall @native-sdk/cli.)
-                \\
-                \\
-            , .{sdk_root});
+            switch (consumer) {
+                .app_core => std.debug.print(
+                    \\
+                    \\error: the @native-sdk/core frontend cannot resolve its TypeScript toolchain
+                    \\(its compiler, @typescript/old). On a repo checkout, install it once with:
+                    \\  cd {s}/packages/core && npm ci --include=dev
+                    \\(An npm-installed @native-sdk/cli carries the toolchain automatically; if it
+                    \\is missing there, the install is broken - reinstall @native-sdk/cli.)
+                    \\
+                    \\
+                , .{sdk_root}),
+                .sqlite_schema => std.debug.print(
+                    \\
+                    \\error: the relational SQLite schema generator cannot resolve its TypeScript toolchain
+                    \\(its compiler, @typescript/old). On a repo checkout, install it once with:
+                    \\  cd {s}/packages/core && npm ci --include=dev
+                    \\(An npm-installed @native-sdk/cli carries the toolchain automatically; if it
+                    \\is missing there, the install is broken - reinstall @native-sdk/cli.)
+                    \\
+                    \\
+                , .{sdk_root}),
+            }
             std.process.exit(1);
         },
         .version_mismatch => |mismatch| {
@@ -334,20 +346,43 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
             // @typescript/old shadows the SDK's exact pin, and no install
             // command fixes what is already installed — the conflict has
             // to move.
-            std.debug.print(
-                \\
-                \\error: the @native-sdk/core frontend's TypeScript compiler resolves at the
-                \\wrong version: @typescript/old resolves to typescript {s}, but the SDK pins
-                \\npm:typescript@{s}. Another package in this tree pins a conflicting
-                \\@typescript/old - align it with the SDK's pin (or remove it) and reinstall,
-                \\so the SDK's exact pin is the copy that resolves.
-                \\
-                \\
-            , .{ mismatch.resolved, mismatch.pinned });
+            switch (consumer) {
+                .app_core => std.debug.print(
+                    \\
+                    \\error: the @native-sdk/core frontend's TypeScript compiler resolves at the
+                    \\wrong version: @typescript/old resolves to typescript {s}, but the SDK pins
+                    \\npm:typescript@{s}. Another package in this tree pins a conflicting
+                    \\@typescript/old - align it with the SDK's pin (or remove it) and reinstall,
+                    \\so the SDK's exact pin is the copy that resolves.
+                    \\
+                    \\
+                , .{ mismatch.resolved, mismatch.pinned }),
+                .sqlite_schema => std.debug.print(
+                    \\
+                    \\error: the relational SQLite schema generator's TypeScript compiler resolves at the
+                    \\wrong version: @typescript/old resolves to typescript {s}, but the SDK pins
+                    \\npm:typescript@{s}. Another package in this tree pins a conflicting
+                    \\@typescript/old - align it with the SDK's pin (or remove it) and reinstall,
+                    \\so the SDK's exact pin is the copy that resolves.
+                    \\
+                    \\
+                , .{ mismatch.resolved, mismatch.pinned }),
+            }
             std.process.exit(1);
         },
     }
     return node;
+}
+
+/// The TS-core-only shape gate plus the shared tooling preflight. The
+/// frontend (the subset checker and contract-sidecar emitter) runs under
+/// node; the compile itself is the external toolchain's.
+fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) []const u8 {
+    if (!appFileExists(b, app_root, "src/app.native")) {
+        @panic("\nthis app has a TypeScript core (src/core.ts) but no view: TS apps render markup," ++
+            " so add src/app.native (the whole view tier binds the core's model)\n");
+    }
+    return tsToolingPreflight(b, dep, .app_core);
 }
 
 /// The TypeScript-core compile lane: the frontend checks the core and
@@ -605,7 +640,7 @@ fn tsCoreStage(
 }
 
 fn sqliteMigrationsStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) std.Build.LazyPath {
-    const node = tsCorePreflight(b, dep, app_root);
+    const node = tsToolingPreflight(b, dep, .sqlite_schema);
     const generate = b.addSystemCommand(&.{node});
     generate.addFileArg(dep.path("build/ts_run.mjs"));
     generate.addFileArg(dep.path("packages/core/src/sqlite_cli.ts"));

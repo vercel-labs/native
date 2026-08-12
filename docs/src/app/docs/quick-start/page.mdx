@@ -7,7 +7,7 @@ Native SDK is the complete toolkit for building beautiful native desktop applica
 ## Prerequisites
 
 - macOS 11 or newer, Linux, or Windows
-- Node.js 22.15+ (on the 23 line: 23.5+) for the default TypeScript scaffold — the TypeScript frontend (the checker) and the core dev loop run under it at build and dev time, and the external core compiler that builds the checked core to native code ships as an exact-pinned dependency of the CLI; the binary you ship carries no JS runtime. A Zig-core app (`--template zig-core`) does not need node.
+- Node.js 22.15+ (on the 23 line: 23.5+) for the default TypeScript scaffold — the TypeScript frontend (the checker) and the core dev loop run under it at build and dev time, and the external core compiler that builds the checked core to native code ships as an exact-pinned dependency of the CLI; the binary you ship carries no JS runtime. A Zig-core app (`--template zig-core`) needs Node only when it declares relational SQLite, whose schema checker and migration generator run at build time.
 
 ## Get the CLI
 
