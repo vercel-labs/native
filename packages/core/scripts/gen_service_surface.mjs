@@ -143,8 +143,8 @@ ${table(kinds["diagnostic-fence"])}`);
 
 sections.push(`## Node built-in modules
 
-Recognized modules (importable bare or \`node:\`-prefixed, except
-\`node:test\`, which is \`node:\`-prefixed only, like in Node):
+Recognized modules and their accepted specifier forms, as stated by each
+manifest row in the Notes column:
 
 ${table(builtinModules, { withCode: false })}
 
@@ -236,7 +236,7 @@ const markdownWrapper = "(?:`{1,3}|\\*{1,3}|_{1,3})?";
 const scriptcContext = String.raw`scriptc(?:\s+compiler)?(?:'s)?(?:\s+(?:version|pin))?`;
 const versionJoin = String.raw`(?:\s+(?:(?:is|at)\s*)?[:=]?\s*|[:=]\s*)`;
 const versionClaim = new RegExp(
-  String.raw`\b${scriptcContext}${versionJoin}${markdownWrapper}(?<![\d.])(?<before>${semver})(?!\d|\.\d)${markdownWrapper}|${markdownWrapper}(?<![\d.])(?<after>${semver})(?!\d|\.\d)${markdownWrapper}\s+(?:calibration|spike)\b`,
+  String.raw`\b${scriptcContext}${versionJoin}${markdownWrapper}(?<![\d.])(?<version>${semver})(?!\d|\.\d)${markdownWrapper}`,
   "gi",
 );
 const scClaim = /\bSC\d{4}\b/g;
@@ -251,7 +251,7 @@ for (const file of proseFiles()) {
     problems.push(`${rel}:${line}: hand-written compiler capability claim \`${match[0]}\` — SC codes live only in the generated ${outputRel}; state the fact there (regenerate) and link or describe it here without the code`);
   }
   for (const match of text.matchAll(versionClaim)) {
-    const claimedVersion = match.groups.before ?? match.groups.after;
+    const claimedVersion = match.groups.version;
     if (claimedVersion !== pin) {
       const versionOffset = match.index + match[0].indexOf(claimedVersion);
       const line = lineNumberAt(text, versionOffset);

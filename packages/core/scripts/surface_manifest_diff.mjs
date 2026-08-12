@@ -9,10 +9,10 @@
 //
 //   - entries flipped to static      -> compile fixtures to add BEFORE
 //                                       the pin moves (supported must
-//                                       compile; each flip may also
-//                                       retire a staging transform or a
-//                                       docs/skill caveat — flagged
-//                                       below when the id is watched)
+//                                       compile; each watched flip also
+//                                       names the repository layers to
+//                                       re-audit without assuming their
+//                                       independent constraints retire)
 //   - tier regressions               -> surface the candidate REMOVED;
 //                                       audit before moving anything
 //   - new / removed entries          -> projection growth or upstream
@@ -48,22 +48,25 @@ const pinnedManifestPath = path.join(
   coreRoot, "node_modules", "@scriptc", "compiler", "surface-manifest.json");
 const packagePath = path.join(coreRoot, "package.json");
 
-// Entries whose flip to `static` retires concrete machinery or teaching
-// in this repository, so the diff can say "this flip has a chore
-// attached" instead of relying on memory. Staging transforms with no
-// projected manifest entry yet (readonly-array erasure, alias folding/
-// dedupe, record storage in stage_external_core.mjs) are not listed —
+// Entries whose flip to `static` changes the compiler premise beneath
+// concrete machinery or teaching in this repository, so the diff can say
+// "this flip has an audit attached" instead of relying on memory. A compiler
+// flip does not, by itself, retire Native's service contract or runtime
+// constraints: those layers must change and prove the wider surface first.
+// Staging transforms with no projected manifest entry yet (readonly-array
+// erasure, alias folding/dedupe, record storage in stage_external_core.mjs)
+// are not listed —
 // absence from the manifest means "not projected", and their eventual
 // entries will surface in the added-entries section first.
-const RETIREMENT_WATCH = {
-  "diagnostic.sc1012": "default-export caveat in service authoring docs/skills",
-  "diagnostic.sc1013": "namespace-import caveat in service authoring docs/skills",
-  "diagnostic.sc1014": "re-export/export-list caveat in service authoring docs/skills",
-  "diagnostic.sc1031": "destructuring caveat in service authoring docs/skills",
-  "diagnostic.sc1070": "sync-only service operations (async entry points become possible)",
-  "diagnostic.sc1071": "generator caveat in service authoring docs/skills",
-  "syntax.typeof-expressions": "typeof caveat in service authoring docs/skills",
-  "syntax.spread-arguments": "spread-argument caveat in service authoring docs/skills",
+const STATIC_FLIP_AUDITS = {
+  "diagnostic.sc1012": "compiler-level default import/export caveats; service operations remain named-export only until contract dispatch changes",
+  "diagnostic.sc1013": "namespace-import caveats in service authoring docs/skills",
+  "diagnostic.sc1014": "compiler-level re-export/export-list caveats; service operations still require direct declarations until contract extraction changes",
+  "diagnostic.sc1031": "destructuring caveats in service authoring docs/skills",
+  "diagnostic.sc1070": "compiler-level async/await caveats; service operations remain synchronous until contract and runtime support change",
+  "diagnostic.sc1071": "compiler-level generator caveats; service operations remain non-generator until contract and runtime support change",
+  "syntax.typeof-expressions": "typeof caveats in service authoring docs/skills",
+  "syntax.spread-arguments": "spread-argument caveats in service authoring docs/skills",
 };
 
 function fail(message) {
@@ -170,7 +173,7 @@ const diff = {
   codeChanges: [],       // SC code moved, including alongside a tier move
   noteChanges: [],       // semantic note changed, including alongside a tier move
   nameChanges: [],       // same id, display name changed
-  retirementsDue: [],    // watched entries among flippedToStatic
+  followUpAudits: [],    // repository layers to re-audit for watched static flips
   coverageChanges: {
     added: [...newCoverage].filter((statement) => !oldCoverage.has(statement)),
     removed: [...oldCoverage].filter((statement) => !newCoverage.has(statement)),
@@ -184,7 +187,7 @@ for (const [id, oldEntry] of oldById) {
     const move = { ...summarize(newEntry), oldStatus: oldEntry.status, ...(oldEntry.code !== undefined && { oldCode: oldEntry.code }) };
     if (newEntry.status === "static") {
       diff.flippedToStatic.push(move);
-      if (RETIREMENT_WATCH[id]) diff.retirementsDue.push({ id, retires: RETIREMENT_WATCH[id] });
+      if (STATIC_FLIP_AUDITS[id]) diff.followUpAudits.push({ id, audit: STATIC_FLIP_AUDITS[id] });
     } else if (rank(newEntry.status) < rank(oldEntry.status)) {
       diff.tierRegressions.push(move);
     } else {
@@ -226,9 +229,9 @@ const section = (title, items, render) => {
 };
 
 section("flipped to static (add compile fixtures before any pin move)", diff.flippedToStatic, line);
-if (diff.retirementsDue.length > 0) {
-  console.log("\n  retirements due with these flips (delete in the same commit as the pin move, with the proving fixture):");
-  for (const r of diff.retirementsDue) console.log(`    ${r.id}  retires: ${r.retires}`);
+if (diff.followUpAudits.length > 0) {
+  console.log("\n  follow-up audits due with these flips (compiler support alone does not retire Native contract/runtime constraints):");
+  for (const item of diff.followUpAudits) console.log(`    ${item.id}  audit: ${item.audit}`);
 }
 section("tier regressions (the candidate REMOVED surface — audit before moving)", diff.tierRegressions, line);
 section("eased to dynamic-only (still unusable: this SDK never passes --dynamic)", diff.otherTierMoves, line);

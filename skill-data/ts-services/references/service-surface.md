@@ -103,8 +103,8 @@ each one refuses.
 
 ## Node built-in modules
 
-Recognized modules (importable bare or `node:`-prefixed, except
-`node:test`, which is `node:`-prefixed only, like in Node):
+Recognized modules and their accepted specifier forms, as stated by each
+manifest row in the Notes column:
 
 | Entry id | Surface | Status | Notes |
 |---|---|---|---|

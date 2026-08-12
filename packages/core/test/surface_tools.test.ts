@@ -1,6 +1,6 @@
 // The compile-surface tooling, held to its contract: the manifest diff
 // categorizes every change class by stable id (flips to static carry
-// their retirement call-outs; regressions never masquerade as
+// their cross-layer audit call-outs; regressions never masquerade as
 // easings), and the generated service-surface reference stays
 // byte-derived from the pinned compiler manifest — the check that the
 // gate runs must pass on the committed tree, or capability claims are
@@ -103,8 +103,10 @@ test("surface_manifest_diff categorizes every change class by stable id", () => 
   assert.deepEqual(diff.flippedToStatic.map((e: { id: string }) => e.id), ["diagnostic.sc1070"]);
   assert.equal(diff.flippedToStatic[0].oldStatus, "unsupported");
   assert.equal(diff.flippedToStatic[0].oldCode, "SC1070");
-  assert.equal(diff.retirementsDue.length, 1);
-  assert.equal(diff.retirementsDue[0].id, "diagnostic.sc1070");
+  assert.equal(diff.followUpAudits.length, 1);
+  assert.equal(diff.followUpAudits[0].id, "diagnostic.sc1070");
+  assert.match(diff.followUpAudits[0].audit, /service operations remain synchronous/);
+  assert.ok(!("retirementsDue" in diff));
   assert.deepEqual(diff.tierRegressions.map((e: { id: string }) => e.id), ["stdlib.math.abs"]);
   assert.deepEqual(diff.otherTierMoves.map((e: { id: string }) => e.id), ["syntax.namespaces"]);
   assert.deepEqual(diff.added.map((e: { id: string }) => e.id), ["node-builtin.sqlite"]);
@@ -117,7 +119,10 @@ test("surface_manifest_diff categorizes every change class by stable id", () => 
   const human = spawnSync(process.execPath, [diffScript, oldManifest, newManifest], { encoding: "utf8" });
   assert.equal(human.status, 0, human.stderr);
   assert.match(human.stdout, /flipped to static/);
-  assert.match(human.stdout, /retirements due/);
+  assert.match(human.stdout, /follow-up audits due/);
+  assert.match(human.stdout, /compiler support alone does not retire Native contract\/runtime constraints/);
+  assert.match(human.stdout, /service operations remain synchronous/);
+  assert.doesNotMatch(human.stdout, /async entry points become possible|delete in the same commit|retirements due/);
   assert.match(human.stdout, /SC1070 -> \(none\)/);
   assert.match(human.stdout, /old: sync-only operations/);
   assert.match(human.stdout, /new: native async operations/);
@@ -194,6 +199,7 @@ test("the generated reference keeps subpath modules and unknown kinds visible", 
     { id: "node-builtin.fs", kind: "node-builtin", name: "fs", status: "static", note: "recognized module (bare and node:-prefixed specifiers)" },
     { id: "node-builtin.fs.promises", kind: "node-builtin", name: "fs/promises", status: "static", note: "recognized module (bare and node:-prefixed specifiers)" },
     { id: "node-builtin.fs.promises.readFile", kind: "node-builtin", name: "fs/promises.readFile", status: "static" },
+    { id: "node-builtin.sqlite", kind: "node-builtin", name: "node:sqlite", status: "static", note: "recognized module (node:-prefixed specifier only, matching Node)" },
     { id: "host-capability.clipboard", kind: "host-capability", name: "clipboard", status: "unsupported", code: "SC2999" },
   ]);
   const run = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
@@ -205,6 +211,9 @@ test("the generated reference keeps subpath modules and unknown kinds visible", 
   const memberSection = rendered.slice(moduleEnd, rendered.indexOf("## Standard library"));
   assert.ok(moduleSection.includes("`node-builtin.fs.promises`"));
   assert.ok(!moduleSection.includes("`node-builtin.fs.promises.readFile`"));
+  assert.ok(moduleSection.includes("`node-builtin.sqlite`"));
+  assert.match(moduleSection, /accepted specifier forms[\s\S]*node:-prefixed specifier only/);
+  assert.doesNotMatch(moduleSection, /except\s+`node:test`/);
   assert.ok(memberSection.includes("`node-builtin.fs.promises.readFile`"));
   assert.match(rendered, /### `host-capability`[\s\S]*`host-capability\.clipboard`/);
 });
@@ -283,6 +292,15 @@ test("the claim scan covers Markdown formatting and docs while ignoring unrelate
   fs.writeFileSync(skill, "The Zig compiler version is 0.16.0.\n");
   const otherCompiler = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(otherCompiler.status, 0, otherCompiler.stderr);
+
+  fs.writeFileSync(skill, "The Zig 0.16.0 calibration established these timings.\nThe Node 24.15.0 spike covers fetch.\n");
+  const unrelatedCalibration = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(unrelatedCalibration.status, 0, unrelatedCalibration.stderr);
+
+  fs.writeFileSync(skill, "The scriptc 0.0.22 calibration established this service surface.\n");
+  const scriptcCalibration = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
+  assert.equal(scriptcCalibration.status, 1);
+  assert.match(scriptcCalibration.stderr, /compiler version 0\.0\.22 but the pin is 0\.0\.26/);
 
   for (const formattedVersion of ["**0.0.22**", "_0.0.21_", "```0.0.20```"]) {
     fs.writeFileSync(skill, `The scriptc version is ${formattedVersion}.\n`);
