@@ -12,9 +12,11 @@
 //!
 //! Dispatch and ordering:
 //! - Requests queue centrally; a worker takes the oldest request whose key
-//!   has no earlier queued twin and no uncancelled active twin. Same-key
-//!   requests therefore run strictly FIFO and never concurrently; different
-//!   keys run in parallel across instances.
+//!   has no earlier queued twin and no active twin. Same-key requests
+//!   therefore run strictly FIFO and never concurrently; different keys run
+//!   in parallel across instances. A poisoned instance retains its key until
+//!   its detached dispatch physically returns, so replacement work cannot
+//!   overlap side effects from an operation that ignored cancellation.
 //! - Fire-and-forget sends share key 0 and serialize among themselves.
 //!
 //! Cancellation and deadlines ride the same cooperative token the child
@@ -67,6 +69,11 @@ pub fn defaultWorkerCount() usize {
 /// How often the supervisor tails active stream-relay files.
 const stream_poll_ms: u32 = 2;
 
+/// Detached dispatches expose one atomic returned flag. The supervisor polls
+/// it at the same low cadence as stream relays so it can release the key and
+/// the request resources without letting the abandoned thread touch the pool.
+const abandoned_poll_ms: u32 = 2;
+
 pub const PoolOptions = struct {
     /// Worker-thread count; null resolves `defaultWorkerCount()` on first use.
     max_workers: ?usize = null,
@@ -117,6 +124,7 @@ pub fn ServicePool(comptime Registry: type) type {
         const Active = struct {
             key: u64,
             request_id: u32,
+            payload: []u8,
             answer: bool,
             deadline: std.Io.Clock.Timestamp,
             cancelled: bool = false,
@@ -135,20 +143,29 @@ pub fn ServicePool(comptime Registry: type) type {
         };
 
         const WorkerState = enum { idle, busy, poisoned, exited };
+        const ExecutionState = enum(u8) { running, completing, trapping, poisoned };
 
         const Worker = struct {
             pool: *Self,
+            /// Process-lifetime executor handle copied out of the pool. A
+            /// poisoned thread may need to park after the pool itself was
+            /// destroyed (for example when an abandoned dispatch traps).
+            io: std.Io,
             thread: std.Thread = undefined,
             /// Guarded by pool.mutex.
             state: WorkerState = .idle,
             active: ?Active = null,
             exited_event: std.Io.Event = .unset,
-            /// Lock-free mirror of poisoning for the abandoned thread's
-            /// re-entry check: a stuck operation that eventually returns
-            /// must leave without touching pool memory that may already be
-            /// freed. The Worker struct itself is leaked on poison so this
-            /// flag stays readable forever.
-            poisoned_flag: std.atomic.Value(bool) = .init(false),
+            /// Atomic ownership handoff around the archive call. Completion
+            /// and the supervisor race to claim `running`; a trap can preempt
+            /// either execution or completion. Only the winner may touch
+            /// request teardown. The Worker struct itself is leaked on poison
+            /// so this stays readable after the pool is gone.
+            execution_state: std.atomic.Value(ExecutionState) = .init(.running),
+            /// A poisoned dispatch sets this after it physically stops. The
+            /// supervisor then releases its key/resources; until then a
+            /// same-key replacement remains queued.
+            returned_flag: std.atomic.Value(bool) = .init(false),
         };
 
         allocator: std.mem.Allocator,
@@ -243,6 +260,9 @@ pub fn ServicePool(comptime Registry: type) type {
             if (self.last_polled) |bytes| self.allocator.free(bytes);
             self.last_polled = null;
             for (self.workers.items) |worker| {
+                if (worker.state == .poisoned and worker.returned_flag.load(.acquire)) {
+                    _ = self.reapReturnedPoisonedLocked(worker);
+                }
                 // Poisoned workers' structs stay allocated: their abandoned
                 // threads may still read the atomic re-entry flag. Bounded
                 // by the poison count.
@@ -323,7 +343,9 @@ pub fn ServicePool(comptime Registry: type) type {
                     self.publishCancellationLocked(active);
                 }
             }
-            // A cancelled active twin no longer blocks its key.
+            // Wake workers so queue removals and newly published cancellation
+            // state are observed. The active request keeps its key reserved
+            // until its dispatch physically returns.
             self.condition.broadcast(self.io);
             self.supervisor_event.set(self.io);
             self.mutex.unlock(self.io);
@@ -405,8 +427,16 @@ pub fn ServicePool(comptime Registry: type) type {
                 if (timed_out and worker.state != .exited) {
                     // The operation ignored its token even at shutdown:
                     // abandon the instance like every other hard timeout.
-                    self.poisonWorkerLocked(worker);
-                    continue;
+                    if (self.poisonWorkerLocked(worker, .running)) continue;
+
+                    // Completion or the trap sink claimed teardown first.
+                    // Let that owner finish while the pool is still alive;
+                    // both paths signal the same state-change latch.
+                    if (worker.execution_state.load(.acquire) == .poisoned) continue;
+                    self.mutex.unlock(self.io);
+                    worker.exited_event.waitUncancelable(self.io);
+                    self.mutex.lockUncancelable(self.io);
+                    if (worker.state == .poisoned) continue;
                 }
                 self.mutex.unlock(self.io);
                 worker.thread.join();
@@ -541,7 +571,7 @@ pub fn ServicePool(comptime Registry: type) type {
 
         fn spawnWorkerLocked(self: *Self) bool {
             const worker = self.allocator.create(Worker) catch return false;
-            worker.* = .{ .pool = self };
+            worker.* = .{ .pool = self, .io = self.io };
             self.workers.append(self.allocator, worker) catch {
                 self.allocator.destroy(worker);
                 return false;
@@ -558,15 +588,16 @@ pub fn ServicePool(comptime Registry: type) type {
 
         fn keyBusyLocked(self: *Self, key: u64) bool {
             for (self.workers.items) |worker| {
-                if (worker.state != .busy) continue;
                 const active = worker.active orelse continue;
-                if (active.key == key and !active.cancelled and !active.retired) return true;
+                if (active.key != key) continue;
+                if (worker.state == .busy) return true;
+                if (worker.state == .poisoned and !worker.returned_flag.load(.acquire)) return true;
             }
             return false;
         }
 
         /// The oldest queue entry whose key is not blocked by an earlier
-        /// same-key entry or an uncancelled active twin — FIFO per key,
+        /// same-key entry or an active/abandoned twin — FIFO per key,
         /// parallel across keys.
         fn pickRequestLocked(self: *Self) ?Request {
             var skipped: [64]u64 = undefined;
@@ -614,19 +645,22 @@ pub fn ServicePool(comptime Registry: type) type {
                 // The active slot installs atomically with the dequeue:
                 // from here a same-key twin is blocked and a cancel or
                 // deadline finds this request supervisable.
+                worker.execution_state.store(.running, .release);
+                worker.returned_flag.store(false, .release);
                 worker.active = .{
                     .key = work.key,
                     .request_id = work.request_id,
+                    .payload = work.payload,
                     .answer = work.answer,
                     .deadline = work.deadline,
                 };
                 self.supervisor_event.set(self.io);
                 self.mutex.unlock(self.io);
                 self.executeRequest(worker, work);
-                // A hard-timed-out request abandoned this worker while its
-                // operation ran; the pool may already be torn down by the
-                // time the operation returns, so leave touching nothing.
-                if (worker.poisoned_flag.load(.acquire)) return;
+                // A hard-timed-out request abandoned this worker. The
+                // request path set `returned_flag` without touching the pool;
+                // the supervisor owns resource/key retirement from here.
+                if (worker.execution_state.load(.acquire) == .poisoned) return;
                 self.mutex.lockUncancelable(self.io);
                 worker.state = .idle;
             }
@@ -645,17 +679,6 @@ pub fn ServicePool(comptime Registry: type) type {
                 }
             }
             const setup_failed = cancel_path == null or (work.channel != null and stream == null);
-            if (setup_failed) {
-                self.mutex.lockUncancelable(self.io);
-                if (worker.active) |*active| active.retired = true;
-                self.retireActiveLocked(worker);
-                self.mutex.unlock(self.io);
-                if (cancel_path) |path| self.allocator.free(path);
-                self.allocator.free(work.payload);
-                if (work.answer) self.stageStatic(work.key, false, transport_error);
-                return;
-            }
-
             self.mutex.lockUncancelable(self.io);
             if (worker.active) |*active| {
                 active.cancel_path = cancel_path;
@@ -670,6 +693,20 @@ pub fn ServicePool(comptime Registry: type) type {
                 // The supervisor may be parked on a distant deadline; an
                 // attached stream needs its 2 ms tailing cadence now.
                 if (stream != null) self.supervisor_event.set(self.io);
+            }
+            if (worker.state == .poisoned) {
+                if (worker.active) |*active| active.retired = true;
+                worker.returned_flag.store(true, .release);
+                self.supervisor_event.set(self.io);
+                self.mutex.unlock(self.io);
+                return;
+            }
+            if (setup_failed) {
+                if (worker.active) |*active| active.retired = true;
+                self.retireActiveLocked(worker);
+                self.mutex.unlock(self.io);
+                if (work.answer) self.stageStatic(work.key, false, transport_error);
+                return;
             }
             const already_expired = std.Io.Clock.Timestamp.compare(
                 std.Io.Clock.Timestamp.now(self.io, .awake),
@@ -693,7 +730,6 @@ pub fn ServicePool(comptime Registry: type) type {
                 self.retireActiveLocked(worker);
                 self.mutex.unlock(self.io);
                 self.finishWake(services);
-                self.allocator.free(work.payload);
                 return;
             }
             self.mutex.unlock(self.io);
@@ -716,12 +752,16 @@ pub fn ServicePool(comptime Registry: type) type {
                 &out_ptr,
                 &out_len,
             );
-            // A trapped dispatch never returns here (the sink parks this
-            // thread); a hard-timed-out one may return arbitrarily late,
-            // after this worker was abandoned and possibly after the pool
-            // was freed — leave without touching pool memory.
-            if (worker.poisoned_flag.load(.acquire)) return;
-            self.allocator.free(work.payload);
+            // Atomically claim completion before touching any pool-owned
+            // request resource. If the supervisor won the race, the Worker
+            // is process-lived but the pool may already be gone: publish the
+            // one safe returned bit and leave everything else to the
+            // supervisor (or leak it at process teardown).
+            if (worker.execution_state.cmpxchgStrong(.running, .completing, .acq_rel, .acquire)) |actual| {
+                std.debug.assert(actual == .poisoned);
+                worker.returned_flag.store(true, .release);
+                return;
+            }
 
             var completion: ?Result = null;
             if (work.answer) {
@@ -779,6 +819,7 @@ pub fn ServicePool(comptime Registry: type) type {
         /// resources. Pool mutex held.
         fn retireActiveLocked(self: *Self, worker: *Worker) void {
             const active = worker.active orelse return;
+            self.allocator.free(active.payload);
             if (active.cancel_path) |path| {
                 std.Io.Dir.cwd().deleteFile(self.io, path) catch {};
                 self.allocator.free(path);
@@ -793,25 +834,34 @@ pub fn ServicePool(comptime Registry: type) type {
         // ------------------------------------------------------ poisoning
 
         /// Abandon a worker whose operation ignored its cooperative token
-        /// (or trapped): detach the thread, retire the request's resources,
-        /// and refill the pool. Pool mutex held.
-        fn poisonWorkerLocked(self: *Self, worker: *Worker) void {
-            if (worker.state == .poisoned) return;
+        /// (or trapped): detach the thread, retain the request's resources and
+        /// key until dispatch physically stops, and refill the pool. Pool mutex
+        /// held.
+        fn poisonWorkerLocked(self: *Self, worker: *Worker, expected: ExecutionState) bool {
+            if (worker.execution_state.cmpxchgStrong(expected, .poisoned, .acq_rel, .acquire) != null) return false;
+            std.debug.assert(worker.state != .poisoned);
             worker.state = .poisoned;
-            worker.poisoned_flag.store(true, .release);
             worker.thread.detach();
+            // This is a state-change latch too: shutdown waiters re-check
+            // `worker.state` and skip joining a detached poisoned thread.
+            worker.exited_event.set(self.io);
             self.poisoned_total += 1;
-            if (worker.active) |*active| {
-                // The cancellation marker file stays on disk: the abandoned
-                // operation may still observe it, unwind, and release its
-                // thread. The Zig-side resources retire now.
-                if (active.cancel_path) |path| self.allocator.free(path);
-                if (active.stream) |stream| self.releaseStreamLocked(stream);
-                worker.active = null;
-            }
+            // Keep the active slot and all request storage alive: the detached
+            // archive call may still be reading those bytes/paths. Its key
+            // remains reserved until `returned_flag`; then the supervisor can
+            // reclaim the resources because the dispatch physically stopped.
             self.condition.broadcast(self.io);
             self.supervisor_event.set(self.io);
             if (!self.shutting_down) _ = self.spawnWorkerLocked();
+            return true;
+        }
+
+        /// Reclaim a poisoned request only after its detached dispatch has
+        /// physically stopped. Pool mutex held.
+        fn reapReturnedPoisonedLocked(self: *Self, worker: *Worker) bool {
+            if (worker.state != .poisoned or !worker.returned_flag.load(.acquire) or worker.active == null) return false;
+            self.retireActiveLocked(worker);
+            return true;
         }
 
         /// The per-instance trap sink: runs on the trapping worker thread,
@@ -820,6 +870,22 @@ pub fn ServicePool(comptime Registry: type) type {
         fn trapSink(context: ?*anyopaque, msg: [*]const u8, msg_len: usize, address: u64) callconv(.c) void {
             _ = address;
             const worker: *Worker = @ptrCast(@alignCast(context.?));
+            var state = worker.execution_state.load(.acquire);
+            while (state != .poisoned) {
+                const claimable = state == .running or state == .completing;
+                std.debug.assert(claimable);
+                if (worker.execution_state.cmpxchgWeak(state, .trapping, .acq_rel, .acquire)) |actual| {
+                    state = actual;
+                    continue;
+                }
+                break;
+            }
+            if (state == .poisoned) {
+                // The supervisor already detached this instance. A later
+                // trap must never follow Worker.pool into freed pool memory.
+                worker.returned_flag.store(true, .release);
+                parkWorker(worker);
+            }
             const self = worker.pool;
             const message = msg[0..msg_len];
             self.mutex.lockUncancelable(self.io);
@@ -835,15 +901,23 @@ pub fn ServicePool(comptime Registry: type) type {
                     active.retired = true;
                 }
             }
-            self.poisonWorkerLocked(worker);
+            const poisoned = self.poisonWorkerLocked(worker, .trapping);
+            std.debug.assert(poisoned);
+            // A trapped dispatch can never resume past the sink, so it has
+            // physically stopped for same-key serialization purposes.
+            worker.returned_flag.store(true, .release);
+            self.supervisor_event.set(self.io);
             const services = if (staged) self.takeWakeLocked() else null;
             self.mutex.unlock(self.io);
             self.finishWake(services);
-            // Park: the instance is poisoned and this thread IS the
-            // instance; only its stack remains resident. The pool's io is
-            // process-lifetime in every embedding.
+            parkWorker(worker);
+        }
+
+        fn parkWorker(worker: *Worker) noreturn {
+            // The instance is poisoned and this thread IS the instance; only
+            // its stack and process-lived Worker remain resident.
             var park: std.Io.Event = .unset;
-            while (true) park.waitUncancelable(self.io);
+            while (true) park.waitUncancelable(worker.io);
         }
 
         // ------------------------------------------------------ supervisor
@@ -862,12 +936,37 @@ pub fn ServicePool(comptime Registry: type) type {
 
                 self.mutex.lockUncancelable(self.io);
                 var any_busy = false;
+                var any_abandoned = false;
                 const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+                // Queue time belongs to the request deadline. Expire queued
+                // work here as well as at pick time, including a same-key
+                // replacement waiting for an abandoned predecessor.
+                var queue_index: usize = 0;
+                while (queue_index < self.queue.items.len) {
+                    const queued = self.queue.items[queue_index];
+                    if (!std.Io.Clock.Timestamp.compare(now, .gte, queued.deadline)) {
+                        next_deadline = earlier(next_deadline, queued.deadline);
+                        queue_index += 1;
+                        continue;
+                    }
+                    const expired = self.queue.orderedRemove(queue_index);
+                    self.allocator.free(expired.payload);
+                    if (expired.answer) {
+                        if (self.allocator.dupe(u8, timeout_error)) |copy| {
+                            self.stageOwnedLocked(.{ .key = expired.key, .ok = false, .bytes = copy });
+                            staged_wake = true;
+                        } else |_| {}
+                    }
+                }
                 // Index-based: poisoning refills the pool, which appends to
                 // this list mid-iteration.
                 var worker_index: usize = 0;
                 while (worker_index < self.workers.items.len) : (worker_index += 1) {
                     const worker = self.workers.items[worker_index];
+                    if (worker.state == .poisoned) {
+                        if (!self.reapReturnedPoisonedLocked(worker) and worker.active != null) any_abandoned = true;
+                        continue;
+                    }
                     if (worker.state != .busy) continue;
                     any_busy = true;
                     if (worker.active) |*active| {
@@ -875,14 +974,16 @@ pub fn ServicePool(comptime Registry: type) type {
                             if (std.Io.Clock.Timestamp.compare(now, .gte, grace) and !active.retired) {
                                 // The token was ignored through the grace:
                                 // abandon this instance.
-                                if (active.timed_out and active.answer and !active.cancelled) {
-                                    if (self.allocator.dupe(u8, timeout_error)) |copy| {
-                                        self.stageOwnedLocked(.{ .key = active.key, .ok = false, .bytes = copy });
-                                        staged_wake = true;
-                                    } else |_| {}
+                                if (self.poisonWorkerLocked(worker, .running)) {
+                                    if (active.timed_out and active.answer and !active.cancelled) {
+                                        if (self.allocator.dupe(u8, timeout_error)) |copy| {
+                                            self.stageOwnedLocked(.{ .key = active.key, .ok = false, .bytes = copy });
+                                            staged_wake = true;
+                                        } else |_| {}
+                                    }
+                                    active.retired = true;
+                                    any_abandoned = true;
                                 }
-                                active.retired = true;
-                                self.poisonWorkerLocked(worker);
                                 continue;
                             }
                             if (!active.retired) next_deadline = earlier(next_deadline, grace);
@@ -915,6 +1016,13 @@ pub fn ServicePool(comptime Registry: type) type {
                 if (streams_len > 0) {
                     const poll_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
                         .raw = std.Io.Duration.fromMilliseconds(stream_poll_ms),
+                        .clock = .awake,
+                    });
+                    next_deadline = earlier(next_deadline, poll_deadline);
+                }
+                if (any_abandoned and !self.shutting_down) {
+                    const poll_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                        .raw = std.Io.Duration.fromMilliseconds(abandoned_poll_ms),
                         .clock = .awake,
                     });
                     next_deadline = earlier(next_deadline, poll_deadline);

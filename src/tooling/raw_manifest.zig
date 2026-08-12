@@ -12,8 +12,8 @@ pub const RawManifest = struct {
     capabilities: []const []const u8 = &.{},
     persist: ?RawPersist = null,
     service_packages: []const RawServicePackage = &.{},
-    /// Which carrier runs src/services operations: "auto" (the default —
-    /// in-process where supported), "in_process", or "child".
+    /// Which carrier runs src/services operations: "auto" (the default child
+    /// carrier), "in_process", or "child".
     service_carrier: []const u8 = "auto",
     /// In-process service pool width (1-16); 0 keeps the runtime default
     /// (min(4, cores)).

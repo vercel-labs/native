@@ -15,7 +15,7 @@ case "parse":
   })];
 ```
 
-Services run on a supervised carrier — compiled into the app binary on a worker-thread pool by default, or as a separate child process — and are desktop-only today (see [Runtime behavior](#runtime-behavior)).
+Services run on a supervised carrier — as a separate child process by default, or compiled into the app binary on an explicitly selected worker-thread pool — and are desktop-only today (see [Runtime behavior](#runtime-behavior)).
 
 ## The two tiers
 
@@ -306,24 +306,42 @@ Small, source-shipping, dependency-light utilities are the realistic fit. There 
 
 Two carriers run the same operations behind the same routes, keys, deadlines, cancellation, streaming, and replay semantics. The build selects one:
 
-| Carrier | Where services run | Default on |
-| --- | --- | --- |
-| `in_process` | Compiled into the app binary; a small thread pool, one isolated instance per thread | Host-native macOS and Linux builds |
-| `child` | A second native executable — `<app>_services` — beside the app binary, packaged with it | Windows; any build the in-process carrier cannot serve |
+<table>
+  <thead>
+    <tr>
+      <th>Carrier</th>
+      <th>Where services run</th>
+      <th>Selection</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>child</code></td>
+      <td>A second native executable — <code>&lt;app&gt;_services</code> — beside the app binary, packaged with it</td>
+      <td>Unset/<code>auto</code> default; available on every supported desktop build</td>
+    </tr>
+    <tr>
+      <td><code>in_process</code></td>
+      <td>Compiled into the app binary; a small thread pool, one isolated module instance per thread</td>
+      <td>Explicit opt-in on host-native macOS and Linux builds</td>
+    </tr>
+  </tbody>
+</table>
 
-`.service_carrier = "in_process" | "child"` in app.zon (or `-Dservice-carrier`) states the choice; unset means the supported default. `.service_pool_size` (or `-Dservice-pool-size`, 1-16) sets the in-process pool width; the default is min(4, cores).
+`.service_carrier = "in_process" | "child"` in app.zon (or `-Dservice-carrier`) states the choice; unset/`"auto"` selects the child carrier. `.service_pool_size` (or `-Dservice-pool-size`, 1-16) sets the in-process pool width; the default is min(4, cores).
 
 Shared guarantees:
 
 - **Lazy start.** Nothing starts before the first real request — no child process, no pool thread. A session that never calls a service pays nothing.
 - **Verified pairing.** The child's startup handshake checks the protocol version and a fingerprint of the generated operation/type/package registry; the in-process carrier checks the same fingerprint against the linked archive. A mismatch rejects before any operation dispatches.
-- **Supervision.** Same-key requests run strictly FIFO. The in-process pool runs different keys in parallel across its instances; the child runs everything on one worker. A cancellation or deadline publishes the cooperative token and grants a short grace: an operation that returns inside it keeps its instance (or process) warm. Past the grace, the child is killed and respawns on the next request; the in-process carrier abandons the instance's thread, routes the failure, and adds a fresh instance to the pool. A detected trap poisons only the instance it fired in (`kind: "service_trap"`); other instances keep answering. Every failure produces a routed result: a dead transport `kind: "service_host"`, an expired deadline `kind: "timeout"`.
+- **Supervision.** Same-key requests run strictly FIFO. The in-process pool runs different keys in parallel across its instances; the child runs everything on one worker. A cancellation or deadline publishes the cooperative token and grants a short grace: an operation that returns inside it keeps its instance (or process) warm. Past the grace, the child is killed and respawns on the next request; the in-process carrier abandons the instance's thread, routes the failure, and adds a fresh instance to the pool. An abandoned dispatch keeps its key reserved until it physically stops, so a same-key replacement cannot overlap its side effects (and can itself expire while waiting). A detected trap poisons only the instance it fired in (`kind: "service_trap"`); other instances keep answering. Every failure produces a routed result: a dead transport `kind: "service_host"`, an expired deadline `kind: "timeout"`.
 - **Replay.** Terminal results and stream events are journaled like every other effect. Replaying a recorded session parks each request and feeds the recorded result; neither carrier starts anything.
 - **Scope.** Services are desktop-only today and build for the build host: a cross-target build of a service-bearing app fails with a teaching. Operations are synchronous.
 
 In-process specifics:
 
 - Service code shares the app process: its ambient authority is the app's own (no environment allowlist, the app's working directory), and a hardware fault in service code — a stack overflow above all — is process-wide. The child carrier remains the fully isolated option.
+- Each pool worker owns a separate instance of the service modules. Mutable module globals are worker-local, so different-key requests may observe different copies; keep shared durable state outside service-module globals.
 - An abandoned instance's memory is reclaimed only at process exit; each trap or ignored token costs one leaked instance.
 - `process.exit()` in service code exits the app.
 

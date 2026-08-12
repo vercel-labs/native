@@ -82,6 +82,25 @@ export function order(request: ParseRequest): ParseResult {
   return parse(request);
 }
 
+// Keeps running briefly after observing cancellation, so the pool suite can
+// prove a replacement with the same key does not overlap the old dispatch.
+/** @deadlineMs 10000 */
+export function cancelOrder(request: ParseRequest, cancel: ServiceCancellation): ParseResult {
+  const text = new TextDecoder().decode(request.source);
+  const separator = text.indexOf("|");
+  const logPath = text.slice(0, separator);
+  const tag = text.slice(separator + 1);
+  const fd = fs.openSync(logPath, "a");
+  fs.writeSync(fd, `s${tag};`);
+  while (!cancel.cancelled()) {}
+  const start = Date.now();
+  while (Date.now() - start < 50) {}
+  fs.writeSync(fd, `e${tag};`);
+  fs.closeSync(fd);
+  cancel.throwIfCancelled();
+  return parse(request);
+}
+
 // A detected runtime trap (typed-array read out of bounds) that no catch
 // can absorb: the in-process suite proves it poisons exactly one instance.
 export function trap(): ParseResult {
@@ -107,6 +126,24 @@ export function hangAt(request: ParseRequest, cancel: ServiceCancellation): Pars
 export function stubborn(request: ParseRequest): ParseResult {
   const start = Date.now();
   while (Date.now() - start < 1000) {}
+  return parse(request);
+}
+
+// The ordered form makes the abandoned dispatch's physical lifetime visible:
+// a same-key replacement must not append until this ignored-token operation
+// has really stopped.
+/** @deadlineMs 100 */
+export function stubbornOrder(request: ParseRequest): ParseResult {
+  const text = new TextDecoder().decode(request.source);
+  const separator = text.indexOf("|");
+  const logPath = text.slice(0, separator);
+  const tag = text.slice(separator + 1);
+  const fd = fs.openSync(logPath, "a");
+  fs.writeSync(fd, `s${tag};`);
+  const start = Date.now();
+  while (Date.now() - start < 1000) {}
+  fs.writeSync(fd, `e${tag};`);
+  fs.closeSync(fd);
   return parse(request);
 }
 

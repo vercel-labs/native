@@ -3605,16 +3605,19 @@ fn externalCoreFixtureModule(
     };
 }
 
-/// Declare every .ts file in `dir_path` (relative to the build root) as a
-/// file input of the transpile step — the multi-file staleness set.
+/// Declare every .ts file under `dir_path` (relative to the build root) as a
+/// file input of the transpile step — the recursive multi-file staleness set.
+/// Service modules live below src/services/, so a flat scan would let their
+/// generated contract stay stale in a warm fixture build.
 fn tsCoreAddDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, dir_path: []const u8) void {
     var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(b.graph.io);
-    var it = dir.iterate();
-    while (it.next(b.graph.io) catch null) |entry| {
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".ts")) continue;
-        transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.name })));
+        if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
+        transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
     }
 }
 

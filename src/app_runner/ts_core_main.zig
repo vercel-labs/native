@@ -137,11 +137,11 @@ pub fn main(init: std.process.Init) !void {
     if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, app_data_dir) catch {};
 
     // TypeScript services, on the build-selected carrier (service_carrier.zig).
-    // In-process (the default where supported): the service archive is linked
-    // into this binary and ServicePool runs one instance per worker thread.
-    // Child: a lazily-spawned sibling executable with an explicit environment
-    // allowlist and the app data directory as its cwd. Either way, replay
-    // never calls the binding, so nothing starts under replay.
+    // In-process (explicit opt-in): the service archive is linked into this
+    // binary and ServicePool runs one instance per worker thread. Child (the
+    // auto/default carrier): a lazily-spawned sibling executable with an
+    // explicit environment allowlist and the app data directory as its cwd.
+    // Either way, replay never calls the binding, so nothing starts under replay.
     const use_pool = comptime (services.enabled and service_carrier.kind == .in_process);
     const use_child = comptime (services.enabled and !use_pool);
     var service_env = std.process.Environ.Map.init(std.heap.page_allocator);

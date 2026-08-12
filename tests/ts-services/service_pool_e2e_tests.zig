@@ -24,9 +24,8 @@ const ServiceCarrier = native_sdk.ServicePool(registry);
 const runtime_ns = native_sdk.runtime;
 
 /// Pools allocate from the page allocator in this suite: poisoning tests
-/// deliberately abandon instances whose request-scoped memory is never
-/// reclaimed, and the leak-checking test allocator would report those
-/// documented leaks as failures.
+/// deliberately abandon worker/instance allocations, and the leak-checking
+/// test allocator would report those documented leaks as failures.
 const pool_allocator = std.heap.page_allocator;
 
 const canvas_label = "fixture-canvas";
@@ -488,13 +487,18 @@ test "a cooperative deadline reports timeout and preserves the instance" {
     try std.testing.expect(parsed[0].ok);
 }
 
-test "an operation that ignores its token is abandoned and the pool refills" {
+test "an ignored token reserves its key until the abandoned dispatch returns" {
     const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 2 });
     defer d.destroy();
+    const log_path = try absoluteFixturePath(std.testing.allocator, "stubborn-order.log");
+    defer std.testing.allocator.free(log_path);
+    std.Io.Dir.cwd().deleteFile(std.testing.io, "queued-probe.started") catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "queued-probe.started") catch {};
 
-    var payload_buffer: [64]u8 = undefined;
-    const payload = encodeParseRequest(&payload_buffer, "feed");
-    d.request("feeds.stubborn", 8, payload);
+    var stubborn_buffer: [256]u8 = undefined;
+    var stubborn_source_buffer: [192]u8 = undefined;
+    const stubborn_source = try std.fmt.bufPrint(&stubborn_source_buffer, "{s}|0", .{log_path});
+    d.request("feeds.stubbornOrder", 8, encodeParseRequest(&stubborn_buffer, stubborn_source));
     try d.awaitCompletions(1);
     const timed = d.takeCompletions();
     defer DirectPool(ServiceCarrier).freeCompletions(timed);
@@ -502,16 +506,34 @@ test "an operation that ignores its token is abandoned and the pool refills" {
     try std.testing.expect(std.mem.indexOf(u8, timed[0].bytes, "\"kind\":\"timeout\"") != null);
     try std.testing.expectEqual(@as(u64, 1), d.pool.poisonedCount());
 
-    // The replacement instance answers.
-    var parse_buffer: [64]u8 = undefined;
-    d.request("feeds.parse", 9, encodeParseRequest(&parse_buffer, "feed"));
+    // The replacement instance is available, but the predecessor's key stays
+    // reserved until its detached dispatch physically stops.
+    const still_running = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, log_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(still_running);
+    try std.testing.expectEqualStrings("s0;", still_running);
+
+    // A short-deadline same-key request expires in the queue rather than
+    // overlapping or waiting forever behind the abandoned dispatch.
+    d.request("feeds.queuedProbe", 8, "");
+    try d.awaitCompletions(1);
+    const queued_timeout = d.takeCompletions();
+    defer DirectPool(ServiceCarrier).freeCompletions(queued_timeout);
+    try std.testing.expect(!queued_timeout[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, queued_timeout[0].bytes, "\"kind\":\"timeout\"") != null);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, "queued-probe.started", .{}));
+
+    var replacement_buffer: [256]u8 = undefined;
+    var replacement_source_buffer: [192]u8 = undefined;
+    const replacement_source = try std.fmt.bufPrint(&replacement_source_buffer, "{s}|1", .{log_path});
+    d.request("feeds.order", 8, encodeParseRequest(&replacement_buffer, replacement_source));
     try d.awaitCompletions(1);
     const parsed = d.takeCompletions();
     defer DirectPool(ServiceCarrier).freeCompletions(parsed);
     try std.testing.expect(parsed[0].ok);
-    // Give the abandoned operation time to return and release its thread
-    // before the pool tears down (it spins for one second in total).
-    try sleepMs(1200);
+
+    const log = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, log_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(log);
+    try std.testing.expectEqualStrings("s0;e0;s1;e1;", log);
 }
 
 test "cancelling an active cooperative request discards its result and keeps the instance" {
@@ -544,6 +566,42 @@ test "cancelling an active cooperative request discards its result and keeps the
     const parsed = d.takeCompletions();
     defer DirectPool(ServiceCarrier).freeCompletions(parsed);
     try std.testing.expect(parsed[0].ok);
+}
+
+test "cancelling an active request keeps its key serialized through unwind" {
+    const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 2 });
+    defer d.destroy();
+    const log_path = try absoluteFixturePath(std.testing.allocator, "cancel-order.log");
+    defer std.testing.allocator.free(log_path);
+
+    var first_buffer: [256]u8 = undefined;
+    var first_source_buffer: [192]u8 = undefined;
+    const first_source = try std.fmt.bufPrint(&first_source_buffer, "{s}|0", .{log_path});
+    d.request("feeds.cancelOrder", 6, encodeParseRequest(&first_buffer, first_source));
+    var waited_ms: usize = 0;
+    while (waited_ms < 30_000) : (waited_ms += 2) {
+        std.Io.Dir.cwd().access(std.testing.io, log_path, .{}) catch {
+            try sleepMs(2);
+            continue;
+        };
+        break;
+    }
+    try std.testing.expect(waited_ms < 30_000);
+
+    d.cancel(6);
+    var second_buffer: [256]u8 = undefined;
+    var second_source_buffer: [192]u8 = undefined;
+    const second_source = try std.fmt.bufPrint(&second_source_buffer, "{s}|1", .{log_path});
+    d.request("feeds.order", 6, encodeParseRequest(&second_buffer, second_source));
+    try d.awaitCompletions(1);
+    const parsed = d.takeCompletions();
+    defer DirectPool(ServiceCarrier).freeCompletions(parsed);
+    try std.testing.expect(parsed[0].ok);
+    try std.testing.expectEqual(@as(u64, 0), d.pool.poisonedCount());
+
+    const log = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, log_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(log);
+    try std.testing.expectEqualStrings("s0;e0;s1;e1;", log);
 }
 
 test "the pool refuses an archive built from a different registry" {

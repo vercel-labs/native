@@ -110,11 +110,10 @@ const TsCoreStage = struct {
     service_archive: ?std.Build.LazyPath = null,
 };
 
-/// Which carrier runs src/services/ operations. In-process is the default
-/// where it is supported: host-native desktop builds on macOS and Linux
-/// (runtime localization is host-native there; Windows and cross builds
-/// keep the child process). `.service_carrier` in app.zon and the
-/// `-Dservice-carrier` flag state the choice explicitly.
+/// Which carrier runs src/services/ operations. Auto preserves the isolated,
+/// single-instance child carrier; host-native macOS/Linux apps can explicitly
+/// opt into the parallel in-process pool. `.service_carrier` in app.zon and
+/// the `-Dservice-carrier` flag state the choice.
 const ServiceCarrierOption = enum { auto, in_process, child };
 
 const ServiceCarrier = enum { none, child, in_process };
@@ -131,12 +130,12 @@ fn resolveServiceCarrier(
         target.result.cpu.arch == host.cpu.arch and
         (target.result.os.tag == .macos or target.result.os.tag == .linux);
     return switch (choice) {
-        .auto => if (supported) .in_process else .child,
+        .auto => .child,
         .in_process => if (supported) .in_process else @panic(
             "\nservice_carrier = \"in_process\" requires a host-native macOS or Linux build:" ++
                 " the service archive compiles with runtime localization, which is host-native" ++
-                " on those platforms only.\nUse \"child\" (or drop the setting — the default" ++
-                " picks the supported carrier) for this target.\n",
+                " on those platforms only.\nUse \"child\" (or drop the setting — auto selects" ++
+                " the child carrier) for this target.\n",
         ),
         .child => .child,
     };
@@ -912,7 +911,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
     }
     // The service-carrier selection: `-Dservice-carrier` overrides app.zon's
-    // `.service_carrier`; both default to auto (in-process where supported).
+    // `.service_carrier`; both default to auto (the child carrier).
     const service_carrier_choice: ServiceCarrierOption = choice: {
         if (b.option([]const u8, "service-carrier", "How src/services operations run: auto (default), in_process, child")) |flag| {
             break :choice parseServiceCarrierOption(flag);
