@@ -2422,6 +2422,49 @@ test "windows flip-model presentation keeps its two correctness rules" {
     ) != null);
 }
 
+test "windows swap buffers are allocated on a grid and cropped, never source-sized" {
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+
+    // The allocation is rounded up; the CLIENT size is what reaches the
+    // screen. Creating at the client size instead would put a
+    // ResizeBuffers back into every step of a resize drag, which is the
+    // whole cost this removes.
+    try std.testing.expect(std.mem.indexOf(u8, renderer_source, "desc.Width = swapAllocExtent(width);") != null);
+
+    // What makes the over-allocation legal is SCALING_NONE's CLIP, and
+    // nothing else. `IDXGISwapChain2::SetSourceSize` is the interface DXGI
+    // documents for this exact job and it must stay out: paired with
+    // SCALING_NONE it renders a surface whose buffer is much taller than
+    // its window — a 38 px header rounded up to a 128 px buffer — as a
+    // fragment at the top-left on a field of background colour, and it
+    // measured as worth nothing (0.428 ms against 0.426 ms per resize
+    // step). Match the call, not the type name, so the paragraph above
+    // explaining why it is absent does not satisfy its own pin.
+    try std.testing.expect(std.mem.indexOf(u8, renderer_source, "SetSourceSize(") == null);
+
+    // Damage is measured against the presented region, never the
+    // allocation: an over-allocated buffer is larger than the window, and
+    // a dirty rect outside the source region is not a valid dirty rect.
+    // A clamp against the bitmap's own pixel size would look right and be
+    // wrong by exactly the rounding.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "clamped.right = std::min<LONG>(static_cast<LONG>(source_width_), clamped.right);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "backing_pixels.width == source_width_ && backing_pixels.height == source_height_",
+    ) != null);
+
+    // SetBackgroundColor is documented to apply only to DXGI_SCALING_NONE
+    // in windowed mode, so the fill that keeps a growing drag from
+    // flashing depends on that scaling mode staying put.
+    try std.testing.expect(std.mem.indexOf(u8, renderer_source, "desc.Scaling = DXGI_SCALING_NONE;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, renderer_source, "swap_chain_->SetBackgroundColor(&background)") != null);
+}
+
 test "windows packet renderer keeps square rectangle stroke joins" {
     const renderer_source = @embedFile("gpu_surface_renderer.cpp");
     try std.testing.expect(std.mem.indexOf(

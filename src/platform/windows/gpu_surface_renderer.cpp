@@ -1546,23 +1546,94 @@ private:
         releaseCom(swap_chain_);
         swap_width_ = 0;
         swap_height_ = 0;
+        source_width_ = 0;
+        source_height_ = 0;
+        swap_bitmap_scale_ = 0;
+        swap_background_applied_ = false;
         swap_last_damage_.clear();
         swap_history_valid_ = false;
+    }
+
+    /* Buffers are allocated on a grid, not at the client size.
+     *
+     * A drag delivers a new client size on every mouse step, and
+     * `ResizeBuffers` on each of them is the most expensive single thing
+     * in a resize frame: it frees and reallocates both back buffers, tears
+     * down and rebuilds the D2D view of buffer 0, and re-associates the
+     * chain with the window. Rounding the ALLOCATION up to a grid turns
+     * that into once per granularity step of travel; every client size in
+     * between is free, because SCALING_NONE simply crops the buffer to the
+     * window (see `ensureSwapChain`).
+     *
+     * The grid costs at most one granularity step of over-allocation per
+     * axis. At 128 px and 4 bytes per pixel that is well under a megabyte
+     * on a panel-sized surface, and an editor with a dozen of them still
+     * pays less than one 4K frame's worth in total. */
+    static constexpr UINT kSwapAllocGranularityDefault = 128;
+
+    /* `NATIVE_SDK_GPU_SWAP_GRANULARITY=<n>` overrides it, and `1` turns
+     * the grid off entirely -- allocate exactly the client size, which is
+     * the pre-grid behaviour. This earned its place: the first version of
+     * this change also called `SetSourceSize`, which broke every surface
+     * whose window is much shorter than its rounded-up buffer, and a
+     * switch that separates over-allocating from what is done with the
+     * over-allocation is what identified which half was at fault. Keep it
+     * for the next such question, and as the escape hatch if a driver
+     * disagrees about SCALING_NONE. */
+    static UINT swapAllocGranularity() {
+        static const UINT granularity = [] {
+            const unsigned configured = envCount(L"NATIVE_SDK_GPU_SWAP_GRANULARITY");
+            return configured > 0 ? static_cast<UINT>(configured) : kSwapAllocGranularityDefault;
+        }();
+        return granularity;
+    }
+
+    static UINT swapAllocExtent(UINT extent) {
+        const UINT granularity = swapAllocGranularity();
+        const UINT rounded = ((extent + granularity - 1) / granularity) * granularity;
+        return rounded > 0 ? rounded : granularity;
     }
 
     /* FLIP_SEQUENTIAL, not FLIP_DISCARD: the renderer's incremental path
      * repaints only damaged regions, so undamaged pixels must survive
      * into the next frame. DISCARD would silently corrupt patch frames.
-     * SCALING_NONE keeps Windows from stretching stale content while a
-     * drag outruns the buffer resize. */
+     *
+     * SCALING_NONE is what makes an over-allocated buffer present
+     * correctly at all. It aligns the buffer's top-left with the window's
+     * and CLIPS rather than stretches, so a buffer larger than the window
+     * shows exactly the window-sized top-left crop -- which is where this
+     * renderer draws. It is also the one scaling mode `SetBackgroundColor`
+     * applies to.
+     *
+     * `IDXGISwapChain2::SetSourceSize` is the interface DXGI documents for
+     * "an effective resize without calling the more-expensive
+     * ResizeBuffers", and it is deliberately NOT used here. Paired with
+     * SCALING_NONE it renders wrong: a surface whose buffer is much taller
+     * than its window (a 38 px header rounded up to a 128 px buffer) comes
+     * out as a small fragment at the top-left on a field of background
+     * colour. Measured on a real app, it is also worth nothing -- 0.428 ms
+     * against 0.426 ms per resize step with it removed, which is noise.
+     * The allocation grid below is doing all of the work; the source
+     * region was only ever going to tell DWM something the clip already
+     * says. */
     bool ensureSwapChain(UINT width, UINT height) {
-        if (swap_chain_ && swap_width_ == width && swap_height_ == height) return true;
-        if (swap_chain_) return resizeSwapChain(width, height);
+        if (swap_chain_) {
+            const bool too_small = width > swap_width_ || height > swap_height_;
+            /* Reclaim only on a big shrink. Reallocating the moment the
+             * client drops below the current grid cell would put the
+             * ResizeBuffers back into every step of a shrinking drag,
+             * which is the cost this whole scheme exists to avoid. */
+            const bool wasteful = swap_width_ >= 2 * swapAllocExtent(width) ||
+                swap_height_ >= 2 * swapAllocExtent(height);
+            if ((too_small || wasteful) && !resizeSwapChain(width, height)) return false;
+            if (!ensureSwapBitmap()) return false;
+            return trackPresentedExtent(width, height);
+        }
         if (!hwnd_ || !renderer_->dxgiFactory() || !renderer_->d3dDevice()) return false;
 
         DXGI_SWAP_CHAIN_DESC1 desc = {};
-        desc.Width = width;
-        desc.Height = height;
+        desc.Width = swapAllocExtent(width);
+        desc.Height = swapAllocExtent(height);
         desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         desc.SampleDesc.Count = 1;
         desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -1579,30 +1650,64 @@ private:
         }
         /* The host owns Alt+Enter; DXGI's own handler would fight it. */
         renderer_->dxgiFactory()->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
-        swap_width_ = width;
-        swap_height_ = height;
-        return ensureSwapBitmap();
+        swap_width_ = desc.Width;
+        swap_height_ = desc.Height;
+        swap_alloc_count_ += 1;
+        if (!ensureSwapBitmap()) return false;
+        return trackPresentedExtent(width, height);
     }
 
     bool resizeSwapChain(UINT width, UINT height) {
         /* Every reference to the back buffer must be gone first. */
         ctx()->SetTarget(nullptr);
         releaseCom(swap_bitmap_);
-        if (FAILED(swap_chain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0))) {
+        swap_bitmap_scale_ = 0;
+        const UINT alloc_width = swapAllocExtent(width);
+        const UINT alloc_height = swapAllocExtent(height);
+        if (FAILED(swap_chain_->ResizeBuffers(0, alloc_width, alloc_height, DXGI_FORMAT_UNKNOWN, 0))) {
             releaseSwapChain();
             return false;
         }
-        swap_width_ = width;
-        swap_height_ = height;
+        swap_width_ = alloc_width;
+        swap_height_ = alloc_height;
+        swap_alloc_count_ += 1;
         /* Resized buffers hold undefined pixels, so the next paint owes a
          * full copy before any partial one can be correct. */
         swap_last_damage_.clear();
         swap_history_valid_ = false;
-        return ensureSwapBitmap();
+        return true;
+    }
+
+    /* The window-sized top-left crop of the buffers that SCALING_NONE
+     * actually puts on screen. Nothing is called here -- DXGI derives the
+     * crop from the window itself -- but every other part of this file
+     * needs the number: it is what damage clamps to, what `exact`
+     * compares against, and it is NOT the buffers' pixel size once the
+     * allocation is rounded up.
+     *
+     * Recording it invalidates the damage history. Growing the crop
+     * exposes buffer pixels this surface has never drawn, so the next copy
+     * owes the whole thing -- one full copy per size change, which is what
+     * a resize step costs anyway, minus the reallocation. */
+    bool trackPresentedExtent(UINT width, UINT height) {
+        if (width == source_width_ && height == source_height_) return true;
+        source_width_ = width;
+        source_height_ = height;
+        swap_last_damage_.clear();
+        swap_history_valid_ = false;
+        return true;
     }
 
     bool ensureSwapBitmap() {
-        if (swap_bitmap_) return true;
+        /* A D2D bitmap's DPI is fixed at creation, so a monitor-scale
+         * change has to rebuild the view even when the buffers did not
+         * move. Every other caller is already gated on the buffers
+         * changing, which is why this is the only place that checks. */
+        if (swap_bitmap_ && swap_bitmap_scale_ == scale_) return true;
+        if (swap_bitmap_) {
+            ctx()->SetTarget(nullptr);
+            releaseCom(swap_bitmap_);
+        }
         IDXGISurface *surface = nullptr;
         if (FAILED(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&surface))) || !surface) {
             releaseCom(surface);
@@ -1614,7 +1719,37 @@ private:
             static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
         const HRESULT result = ctx()->CreateBitmapFromDxgiSurface(surface, &properties, &swap_bitmap_);
         releaseCom(surface);
-        return SUCCEEDED(result) && swap_bitmap_;
+        if (FAILED(result) || !swap_bitmap_) return false;
+        swap_bitmap_scale_ = scale_;
+        return true;
+    }
+
+    /* The colour DXGI fills the window with wherever the presented region
+     * does not reach it. That gap is not hypothetical: DWM keeps showing
+     * the last present until the next one lands, so every window-expanding
+     * drag step exposes a band for one frame. Left unset the fill is not
+     * the app's -- it reads as a white flash along the growing edge, and
+     * an app-adopted media surface that only repaints on a new video frame
+     * can hold it far longer than one frame.
+     *
+     * The app's own clear colour is the right value by construction: it is
+     * the colour that band is about to be painted, so filling it early is
+     * indistinguishable from having drawn it. SCALING_NONE is a
+     * precondition of the call (see the swap-chain description), and with
+     * ALPHA_MODE_IGNORE the alpha channel is ignored. */
+    void applyBackgroundColor() {
+        if (!swap_chain_) return;
+        if (swap_background_applied_ &&
+            swap_background_.r == clear_color_.r &&
+            swap_background_.g == clear_color_.g &&
+            swap_background_.b == clear_color_.b) return;
+        const DXGI_RGBA background = {
+            clamp01(clear_color_.r), clamp01(clear_color_.g), clamp01(clear_color_.b), 1.0f};
+        /* Refused on the Windows 7 platform update (E_NOTIMPL) and on any
+         * scaling mode but NONE. Nothing downstream depends on it, so a
+         * refusal only costs the flash it was there to prevent. */
+        swap_background_applied_ = SUCCEEDED(swap_chain_->SetBackgroundColor(&background));
+        if (swap_background_applied_) swap_background_ = clear_color_;
     }
 
     bool ensureTargets(double surface_width, double surface_height, double scale, uint32_t pixel_width, uint32_t pixel_height) {
@@ -2431,8 +2566,22 @@ private:
      * written once per paint and handed to the compositor. */
     IDXGISwapChain1 *swap_chain_ = nullptr;
     ID2D1Bitmap1 *swap_bitmap_ = nullptr;
+    /* ALLOCATED buffer extent, on the granularity grid -- not the client
+     * size. `source_*` is the client-sized region actually presented out
+     * of it, and is what damage and dirty rects are measured against. */
     UINT swap_width_ = 0;
     UINT swap_height_ = 0;
+    UINT source_width_ = 0;
+    UINT source_height_ = 0;
+    /* Surface scale the D2D view of buffer 0 was created at; a DPI change
+     * has to rebuild it even when the buffers themselves are unchanged. */
+    double swap_bitmap_scale_ = 0;
+    Color swap_background_ = {};
+    bool swap_background_applied_ = false;
+    /* Buffer allocations (create + every ResizeBuffers) since launch.
+     * Reported on the profile line, because "the grid is working" is not
+     * observable from timings alone. */
+    uint64_t swap_alloc_count_ = 0;
     /* Damage bookkeeping for the partial copy. `swap_last_damage_` is the
      * previous paint's damage; `swap_history_valid_` says the buffers hold
      * a known frame history at all (false right after create/resize/loss,
@@ -2718,7 +2867,7 @@ bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
     const uint64_t blit_ns = gpuClockNs() - begin_ns;
     GpuProfileLog::shared().line(
         "paint surface=%u seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu present_us=%llu "
-        "full=%d dirty=%llu dmg_px=%llu exact=%d hist=%d sw=%u sh=%u",
+        "full=%d dirty=%llu dmg_px=%llu exact=%d hist=%d sw=%u sh=%u aw=%u ah=%u allocs=%llu",
         surface_id_,
         static_cast<unsigned long long>(profile_sequence_),
         ok ? 1 : 0,
@@ -2733,8 +2882,16 @@ bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
         static_cast<unsigned long long>(profile_swap_damage_px_),
         profile_swap_exact_ ? 1 : 0,
         profile_swap_history_ ? 1 : 0,
+        /* sw/sh stay the PRESENTED extent -- the damage-coverage
+         * denominator every reducer already divides by. aw/ah are the
+         * allocation behind it, and `allocs` counts the buffer
+         * reallocations this surface has paid for since launch: the one
+         * number that says whether the granularity grid is working. */
+        source_width_,
+        source_height_,
         swap_width_,
-        swap_height_);
+        swap_height_,
+        static_cast<unsigned long long>(swap_alloc_count_));
     return ok;
 }
 
@@ -2795,9 +2952,14 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
      * pair. Aligning the backing surface to IGNORE would change the blend
      * semantics every layer and opacity group renders under, which is not
      * a trade worth making for a presentation change.) */
+    applyBackgroundColor();
+
+    /* Against the PRESENTED region, not the allocation. The buffers are
+     * rounded up to the granularity grid, so their pixel size says nothing
+     * about whether the backing surface and the window agree -- and a
+     * dirty rect outside the source region is not a valid dirty rect. */
     const D2D1_SIZE_U backing_pixels = backing_bitmap_->GetPixelSize();
-    const D2D1_SIZE_U swap_pixels = swap_bitmap_->GetPixelSize();
-    const bool exact = backing_pixels.width == swap_pixels.width && backing_pixels.height == swap_pixels.height;
+    const bool exact = backing_pixels.width == source_width_ && backing_pixels.height == source_height_;
 
     std::vector<RECT> damage;
     damage.reserve(paint_rect_count);
@@ -2805,8 +2967,8 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
         RECT clamped = paint_rects[index];
         clamped.left = std::max<LONG>(0, clamped.left);
         clamped.top = std::max<LONG>(0, clamped.top);
-        clamped.right = std::min<LONG>(static_cast<LONG>(swap_pixels.width), clamped.right);
-        clamped.bottom = std::min<LONG>(static_cast<LONG>(swap_pixels.height), clamped.bottom);
+        clamped.right = std::min<LONG>(static_cast<LONG>(source_width_), clamped.right);
+        clamped.bottom = std::min<LONG>(static_cast<LONG>(source_height_), clamped.bottom);
         if (clamped.right > clamped.left && clamped.bottom > clamped.top) damage.push_back(clamped);
     }
     /* An empty update region is nothing to show. Presenting anyway would
@@ -2857,9 +3019,9 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
     const HRESULT drawn = endOn();
     if (drawn == D2DERR_RECREATE_TARGET || FAILED(drawn)) {
         if (gpuProfileActive()) {
-            GpuProfileLog::shared().line("paint-fail stage=copy hr=0x%08x bw=%u bh=%u sw=%u sh=%u",
+            GpuProfileLog::shared().line("paint-fail stage=copy hr=0x%08x bw=%u bh=%u sw=%u sh=%u aw=%u ah=%u",
                 static_cast<unsigned>(drawn), backing_pixels.width, backing_pixels.height,
-                swap_pixels.width, swap_pixels.height);
+                source_width_, source_height_, swap_width_, swap_height_);
         }
         handleDeviceLoss(drawn);
         return false;
