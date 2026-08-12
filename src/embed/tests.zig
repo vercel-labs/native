@@ -1021,6 +1021,10 @@ const MobileCounterHost = ui_host.UiAppHost(MobileCounterDef);
 const MobileCounterApi = c_api.MobileCApi(MobileCounterHost);
 const MobileStoreHost = ui_host.UiAppHostWithRecordStore(MobileCounterDef, true);
 const MobileStoreApi = c_api.MobileCApi(MobileStoreHost);
+const MobileRelationalHost = ui_host.UiAppHostWithStorage(MobileCounterDef, false, true, &.{});
+const MobileRelationalApi = c_api.MobileCApi(MobileRelationalHost);
+const MobileBothStorageHost = ui_host.UiAppHostWithStorage(MobileCounterDef, true, true, &.{});
+const MobileBothStorageApi = c_api.MobileCApi(MobileBothStorageHost);
 
 fn expectNoUiHostError(app: ?*anyopaque) !void {
     try std.testing.expectEqualStrings("", std.mem.span(MobileCounterApi.native_sdk_app_last_error_name(app)));
@@ -1079,6 +1083,50 @@ test "mobile store capability requires and binds the OS app-data root before sta
     try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
     try std.testing.expect(self.ui.effects.record_store_binding != null);
     MobileStoreApi.native_sdk_app_stop(app);
+}
+
+test "mobile relational capability opens app.db from the OS app-data root" {
+    const app = MobileRelationalApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileRelationalApi.native_sdk_app_destroy(app);
+    const self: *MobileRelationalHost = @ptrCast(@alignCast(app));
+
+    MobileRelationalApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("SqliteDataDirUnavailable", std.mem.span(MobileRelationalApi.native_sdk_app_last_error_name(app)));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-relational", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileRelationalApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.relational_store_open);
+    try std.testing.expect(self.embedded.runtime.options.relational_store != null);
+
+    MobileRelationalApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("", std.mem.span(MobileRelationalApi.native_sdk_app_last_error_name(app)));
+    var surface_token: u8 = 0;
+    MobileRelationalApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileRelationalApi.native_sdk_app_frame(app);
+    try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
+    try std.testing.expect(self.ui.effects.relational_store_binding != null);
+    MobileRelationalApi.native_sdk_app_stop(app);
+}
+
+test "mobile host binds record and relational databases together" {
+    const app = MobileBothStorageApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileBothStorageApi.native_sdk_app_destroy(app);
+    const self: *MobileBothStorageHost = @ptrCast(@alignCast(app));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-both-storage", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileBothStorageApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.record_store_open);
+    try std.testing.expect(self.relational_store_open);
+    try std.testing.expect(self.embedded.runtime.options.record_store != null);
+    try std.testing.expect(self.embedded.runtime.options.relational_store != null);
 }
 
 test "mobile C ABI drives a user UiApp canvas scene end to end" {

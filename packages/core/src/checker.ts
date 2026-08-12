@@ -5,6 +5,7 @@
 // rule during emission and turns any gap into a loud internal error.
 
 import { ts, TypedAst, lineColumn, hasExportModifier, exportListBindings, sdkCoreModulePath, type ExportListBinding } from "./typed_ast.ts";
+import path from "node:path";
 import { makeDiagnostic, type SubsetDiagnostic, type RuleId } from "./diagnostics.ts";
 import type { TypeTable } from "./types.ts";
 import {
@@ -459,8 +460,10 @@ export class SubsetChecker {
   private readonly serviceOps: ReadonlySet<string> | null;
   private readonly capabilities: Set<string>;
   private readonly persistRoutes: PersistRoutes | undefined;
+  private readonly sdkCorePath: string;
   private usesPersist = false;
   private usesStore = false;
+  private usesSqlite = false;
 
   constructor(
     tast: TypedAst,
@@ -469,6 +472,7 @@ export class SubsetChecker {
     serviceOps: ReadonlySet<string> | null = null,
     capabilities: readonly string[] = [],
     persistRoutes?: PersistRoutes,
+    sdkCorePath: string = sdkCoreModulePath,
   ) {
     this.tast = tast;
     this.table = table;
@@ -478,6 +482,7 @@ export class SubsetChecker {
     this.serviceOps = serviceOps;
     this.capabilities = new Set(capabilities);
     this.persistRoutes = persistRoutes;
+    this.sdkCorePath = sdkCorePath;
   }
 
   check(): CheckResult {
@@ -505,6 +510,9 @@ export class SubsetChecker {
     }
     if (this.capabilities.has("store") && !this.usesStore) {
       this.warn("NS1069", "app.zon declares the `store` capability, but this core has no `Cmd.store.*` call.", this.entry);
+    }
+    if (this.capabilities.has("sqlite") && !this.usesSqlite) {
+      this.warn("NS1070", "app.zon declares the `sqlite` capability, but this core has no raw or generated relational command/subscription.", this.entry);
     }
     this.checkExceptions();
     return {
@@ -1910,7 +1918,7 @@ export class SubsetChecker {
     if (!ts.isIdentifier(expr)) return null;
     const decl = this.tast.declarationOf(expr);
     if (!decl || !ts.isFunctionDeclaration(decl) || !decl.name) return null;
-    if (decl.getSourceFile().fileName !== sdkCoreModulePath) return null;
+    if (path.resolve(decl.getSourceFile().fileName) !== path.resolve(this.sdkCorePath)) return null;
     return decl.name.text;
   }
 
@@ -2511,6 +2519,40 @@ export class SubsetChecker {
         if (!this.capabilities.has("store")) {
           this.warn("NS1069", "`Cmd.store.*` requires the `store` capability in app.zon.", node);
         }
+      }
+
+      // NS1070 — raw relational effects are a separate capability from the
+      // record store even though both tiers share the vendored SQLite object.
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isPropertyAccessExpression(node.expression.expression) &&
+        node.expression.expression.name.text === "db" &&
+        ts.isIdentifier(node.expression.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression.expression)
+      ) {
+        this.usesSqlite = true;
+        if (!this.capabilities.has("sqlite")) {
+          this.warn("NS1070", "`Cmd.db.*` requires the `sqlite` capability in app.zon.", node);
+        }
+        if (node.expression.name.text === "query" && ts.isStringLiteralLike(node.arguments[0])) {
+          this.warn("NS1420", "This raw Cmd.db.query uses a string literal that native check cannot name or generate.", node.arguments[0]);
+        }
+      }
+
+      // Generated declared-query constructors and live subscriptions are the
+      // checked relational surface, and therefore count as sqlite use too.
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        /^q[A-Z]/.test(node.expression.name.text) &&
+        ts.isIdentifier(node.expression.expression) &&
+        ((this.cmdNames.has(node.expression.expression.text) || this.subNames.has(node.expression.expression.text)) &&
+          this.isSdkReference(node.expression.expression))
+      ) {
+        this.usesSqlite = true;
+        if (!this.capabilities.has("sqlite")) this.warn("NS1070", "Generated `Cmd.q<Name>` and `Sub.q<Name>` require the `sqlite` capability in app.zon.", node);
       }
 
       // NS1001/NS1022/NS1051 — mutation stays inside local ownership:

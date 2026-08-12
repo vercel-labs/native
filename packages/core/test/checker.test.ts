@@ -54,6 +54,50 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(unused.warnings.filter((d) => d.id === "NS1069").length, 1);
 });
 
+test("NS1070 keeps every Cmd.db factory in capability lockstep", () => {
+  const source = `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.db.query("SELECT ?", [1], { key: "q", page: "page", done: "done", err: "failed" }),
+      Cmd.db.exec([["CREATE TABLE note(id INTEGER)", []]], { key: "x", ok: "wrote", err: "failed" }),
+    ])];
+    case "page":
+    case "done":
+    case "wrote":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["sqlite"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1070"), false);
+
+  const missing = check(source);
+  assert.equal(missing.warnings.filter((d) => d.id === "NS1070").length, 2);
+  const unused = check(core, { capabilities: ["sqlite"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1070").length, 1);
+
+  const quit = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly done: boolean; }
+export type Msg = { readonly kind: "quit" };
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) { case "quit": return [model, Cmd.quitApp()]; }
+}
+`);
+  assert.equal(quit.warnings.some((d) => d.id === "NS1070"), false);
+});
+
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {
   const source = `
 import { Cmd } from "@native-sdk/core";

@@ -57,15 +57,27 @@ pub const mobile_shell_windows = [_]app_manifest.ShellWindow{.{
 pub const mobile_shell_scene: app_manifest.ShellConfig = .{ .windows = &mobile_shell_windows };
 
 pub fn UiAppHost(comptime AppDef: type) type {
-    return UiAppHostWithRecordStore(AppDef, false);
+    return UiAppHostWithStorage(AppDef, false, false, &.{});
 }
 
 /// Capability-specialized mobile host. The boolean is comptime so a mobile
 /// artifact without `store` never analyzes SQLite open/deinit and carries no
 /// database symbols; `build/app.zig` supplies the manifest-inferred value.
 pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_enabled: bool) type {
+    return UiAppHostWithStorage(AppDef, record_store_enabled, false, &.{});
+}
+
+/// Capability-specialized mobile host for the two SQLite-backed storage
+/// tiers. Both databases use the OS-owned data root but remain separate files.
+pub fn UiAppHostWithStorage(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+) type {
     const features: runtime.UiAppFeatures = if (@hasDecl(AppDef, "features")) AppDef.features else .{};
     const RecordStoreType = if (record_store_enabled) runtime.RecordStore else void;
+    const RelationalStoreType = if (relational_store_enabled) runtime.RelationalStore else void;
     return struct {
         const Self = @This();
 
@@ -79,6 +91,8 @@ pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_ena
         embedded: EmbeddedApp,
         record_store: RecordStoreType = undefined,
         record_store_open: bool = false,
+        relational_store: RelationalStoreType = undefined,
+        relational_store_open: bool = false,
         started: bool = false,
         frame_index: u64 = 0,
         last_error: ?anyerror = null,
@@ -141,6 +155,7 @@ pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_ena
             self.null_platform.gpu_surface_packets = false;
             self.started = false;
             self.record_store_open = false;
+            self.relational_store_open = false;
             self.frame_index = 0;
             self.last_error = null;
             self.command_count = 0;
@@ -194,6 +209,9 @@ pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_ena
             if (comptime record_store_enabled) {
                 if (self.record_store_open) self.record_store.deinit();
             }
+            if (comptime relational_store_enabled) {
+                if (self.relational_store_open) self.relational_store.deinit();
+            }
             // The embedded null platform lives inside `self`, so freeing
             // `self` IS this path's platform destruction — and an
             // abandoned channel wake call may still enter that platform
@@ -214,6 +232,9 @@ pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_ena
             if (comptime record_store_enabled) {
                 if (!self.record_store_open) return error.StoreDataDirUnavailable;
             }
+            if (comptime relational_store_enabled) {
+                if (!self.relational_store_open) return error.SqliteDataDirUnavailable;
+            }
             self.started = true;
             try self.embedded.start();
         }
@@ -222,17 +243,34 @@ pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_ena
         /// Library/Application Support and Android passes files/, exactly the
         /// `.data` directories resolved by `app_dirs` on those platforms.
         pub fn setDataRoot(self: *Self, data_root: []const u8) !void {
-            if (comptime !record_store_enabled) return;
+            if (comptime !record_store_enabled and !relational_store_enabled) return;
             if (self.started) return error.AppAlreadyStarted;
             if (data_root.len == 0 or data_root.len > max_mobile_asset_root_bytes) return error.InvalidStoreDataDir;
-            if (self.record_store_open) {
-                self.record_store.deinit();
-                self.record_store_open = false;
-                self.embedded.runtime.options.record_store = null;
+            if (comptime record_store_enabled) {
+                if (self.record_store_open) {
+                    self.record_store.deinit();
+                    self.record_store_open = false;
+                    self.embedded.runtime.options.record_store = null;
+                }
+                self.record_store = try runtime.RecordStore.open(std.heap.page_allocator, data_root);
+                self.record_store_open = true;
+                self.embedded.runtime.options.record_store = self.record_store.binding();
             }
-            self.record_store = try runtime.RecordStore.open(std.heap.page_allocator, data_root);
-            self.record_store_open = true;
-            self.embedded.runtime.options.record_store = self.record_store.binding();
+            if (comptime relational_store_enabled) {
+                if (self.relational_store_open) {
+                    self.relational_store.deinit();
+                    self.relational_store_open = false;
+                    self.embedded.runtime.options.relational_store = null;
+                }
+                const opened = try runtime.RelationalStore.openMigrated(std.heap.page_allocator, data_root, relational_migrations);
+                self.relational_store = switch (opened.outcome) {
+                    .ok => opened.database.?,
+                    .migrate_failed => return error.SqliteMigrationFailed,
+                    .version_unknown => return error.SqliteVersionUnknown,
+                };
+                self.relational_store_open = true;
+                self.embedded.runtime.options.relational_store = self.relational_store.binding();
+            }
         }
 
         /// Host-pumped frame step: the shim's display-link (or test) tick.

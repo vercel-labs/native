@@ -207,6 +207,13 @@ pub fn build(b: *std.Build) void {
     tooling_mod.addImport("app_icon", app_icon_mod);
     tooling_mod.addImport("ios_host", ios_host_mod);
     tooling_mod.addImport("android_host", android_host_mod);
+    tooling_mod.addImport("sqlite_engine", module(b, target, optimize, "src/runtime/sqlite_engine.zig"));
+    tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    tooling_mod.link_libc = true;
     const tooling_tests = testArtifact(b, tooling_mod);
 
     // Ejected-component identity proofs: a separate test module because
@@ -319,6 +326,13 @@ pub fn build(b: *std.Build) void {
     host_tooling_mod.addImport("app_icon", host_app_icon_mod);
     host_tooling_mod.addImport("ios_host", host_ios_host_mod);
     host_tooling_mod.addImport("android_host", host_android_host_mod);
+    host_tooling_mod.addImport("sqlite_engine", module(b, host_target, optimize, "src/runtime/sqlite_engine.zig"));
+    host_tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    host_tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    host_tooling_mod.link_libc = true;
     const host_ui_markup_mod = module(b, host_target, optimize, "src/primitives/canvas/ui_markup.zig");
     const host_markup_lsp_mod = module(b, host_target, optimize, "tools/native-sdk/markup_lsp.zig");
     host_markup_lsp_mod.addImport("ui_markup", host_ui_markup_mod);
@@ -1448,6 +1462,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-relational-notes", "Run relational notes example tests", "examples/relational-notes", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
@@ -1661,6 +1676,18 @@ pub fn build(b: *std.Build) void {
     const mobile_canvas_store_lib_step = b.step("test-example-mobile-canvas-lib-store", "Build a record-store-capable mobile embed static library");
     mobile_canvas_store_lib_step.dependOn(&build_mobile_canvas_store_lib.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_store_lib.step);
+
+    const build_mobile_canvas_relational_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dsqlite=true", "--prefix", "zig-out/test-relational" });
+    build_mobile_canvas_relational_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_relational_lib_step = b.step("test-example-mobile-canvas-lib-sqlite", "Build a relational-SQLite-capable mobile embed static library");
+    mobile_canvas_relational_lib_step.dependOn(&build_mobile_canvas_relational_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_relational_lib.step);
+
+    const build_mobile_canvas_both_storage_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dstore=true", "-Dsqlite=true", "--prefix", "zig-out/test-both-storage" });
+    build_mobile_canvas_both_storage_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_both_storage_lib_step = b.step("test-example-mobile-canvas-lib-storage", "Build both SQLite-backed mobile tiers with one vendored engine object");
+    mobile_canvas_both_storage_lib_step.dependOn(&build_mobile_canvas_both_storage_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_both_storage_lib.step);
 
     // Android cross-compile proofs: the capability-free archive remains pure
     // Zig, while the store variant must discover the NDK sysroot and compile
@@ -2779,9 +2806,13 @@ pub fn build(b: *std.Build) void {
 
 fn sqliteCompileFlags() []const []const u8 {
     return &.{
-        "-DSQLITE_THREADSAFE=1",
+        "-DSQLITE_THREADSAFE=2",
         "-DSQLITE_OMIT_LOAD_EXTENSION",
         "-DSQLITE_DQS=0",
+        "-DSQLITE_ENABLE_FTS5",
+        "-DSQLITE_ENABLE_JSON1",
+        "-DSQLITE_ENABLE_UPDATE_HOOK",
+        "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
         "-DSQLITE_DEFAULT_MEMSTATUS=0",
     };
 }
@@ -2925,6 +2956,7 @@ fn tsCoreE2eArtifact(
         .src_dir = host_src.getDirectory(),
         .name = "host_fixture_core",
         .store_capability = true,
+        .relational_capability = true,
         // The fixture drives pastBytes to the f64-exact boundary (2^53):
         // no honest i64 declaration exists there, so the compiled
         // projection carries the slot as f64.
@@ -3333,6 +3365,8 @@ const ExternalCoreFixtureSpec = struct {
     persist_capability: bool = false,
     /// The fixture stands in for an app whose manifest declares Tier 2.
     store_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares Tier 3.
+    relational_capability: bool = false,
     /// Attested integer slots the compiled projection carries as f64
     /// (values that reach the f64-exact boundary have no honest i64
     /// declaration on that side) — corewire's --f64-slot demotions,
@@ -3374,10 +3408,11 @@ fn externalCoreFixtureModule(
     } else null;
     if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
+    if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{
-        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
     };
     for (frontend_sources) |source| {
         check.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));

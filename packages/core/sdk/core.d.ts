@@ -121,6 +121,27 @@ export interface StoreScanOptions {
     readonly limit?: number;
     readonly after?: string | Uint8Array;
 }
+export interface DbText {
+    readonly __dbText: true;
+    readonly bytes: ReadonlyArray<number>;
+}
+export declare function dbText(bytes: Uint8Array): DbText;
+export type DbValue = null | number | string | Uint8Array | boolean | DbText;
+export type DbStatement = readonly [sql: string, params: ReadonlyArray<DbValue>];
+export interface DbRowsRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly page: BytesKind<M>;
+    readonly done: EmptyKind<M>;
+    readonly err: BytesKind<M>;
+}
+export interface TypedRowsRoute<Row, M extends Msgish> extends DbRowsRoute<M> {
+    readonly __row?: Row;
+}
+export interface TypedDbStatement {
+    readonly sql: string;
+    readonly params: ReadonlyArray<DbValue>;
+    readonly __typedDbStatement: true;
+}
 export interface FetchRoute<M extends Msgish> {
     readonly key?: string;
     readonly ok: FetchedKind<M>;
@@ -259,6 +280,20 @@ export type Cmd<M extends Msgish> = {
     readonly okKind: string;
     readonly errKind: string;
     readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
+} | {
+    readonly op: "db_query";
+    readonly key: string;
+    readonly pageKind: string;
+    readonly doneKind: string;
+    readonly errKind: string;
+    readonly sql: string;
+    readonly params: ReadonlyArray<DbValue>;
+} | {
+    readonly op: "db_exec";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly statements: ReadonlyArray<DbStatement>;
 } | {
     readonly op: "fetch";
     readonly key: string;
@@ -429,6 +464,10 @@ export declare const Cmd: {
         scan<M extends Msgish>(prefix: string, options: StoreScanOptions, route: RequestRoute<M>): Cmd<M>;
         setMany<M extends Msgish>(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: WriteRoute<M>): Cmd<M>;
     };
+    db: {
+        query<M extends Msgish>(sql: string, params: ReadonlyArray<DbValue>, route: DbRowsRoute<M>): Cmd<M>;
+        exec<M extends Msgish>(statements: ReadonlyArray<DbStatement>, route: WriteRoute<M>): Cmd<M>;
+    };
     fetch: typeof fetchCmd;
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
@@ -481,6 +520,15 @@ export type Sub<M extends Msgish> = {
     readonly key: string;
     readonly everyMs: number;
     readonly msgKind: string;
+} | {
+    readonly op: "db_live";
+    readonly key: string;
+    readonly pageKind: string;
+    readonly doneKind: string;
+    readonly errKind: string;
+    readonly sql: string;
+    readonly params: ReadonlyArray<DbValue>;
+    readonly tables: readonly string[];
 } | {
     readonly op: "batch";
     readonly subs: readonly Sub<M>[];

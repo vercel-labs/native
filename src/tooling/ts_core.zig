@@ -409,6 +409,55 @@ pub const PersistRoutes = struct {
     err: []const u8,
 };
 
+/// Run the real-SQLite schema/query lane used by the build and return the
+/// generated SDK core path that exposes this app's Cmd.q/Sub.q surface.
+/// Outputs live under ignored .native/cache so `native check`, devhost, and
+/// the build all enforce the same append-only migration history.
+pub fn generateSqliteSurface(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    base_env: *std.process.Environ.Map,
+    framework_root: []const u8,
+) ![]u8 {
+    const sqlite_cli = try transpilerPath(allocator, io, framework_root, "src/sqlite_cli.ts");
+    defer allocator.free(sqlite_cli);
+    const runner = try tsRunnerPath(allocator, io, framework_root);
+    defer allocator.free(runner);
+    const sdk_in = try transpilerPath(allocator, io, framework_root, "sdk/core.ts");
+    defer allocator.free(sdk_in);
+    const static_in = try transpilerPath(allocator, io, framework_root, "compile-surface/core.ts");
+    defer allocator.free(static_in);
+    try std.Io.Dir.cwd().createDirPath(io, ".native/cache/sqlite");
+    const sdk_out = try allocator.dupe(u8, ".native/cache/sqlite/core.ts");
+    errdefer allocator.free(sdk_out);
+    var child = std.process.spawn(io, .{
+        .argv = &.{
+            "node",                               runner,                                sqlite_cli,
+            "--src",                              "src",                                 "--sdk-in",
+            sdk_in,                               "--static-in",                         static_in,
+            "--sdk-out",                          sdk_out,                               "--dts-out",
+            ".native/cache/sqlite/core.d.ts",     "--static-out",                        ".native/cache/sqlite/core_static.ts",
+            "--zig-out",                          ".native/cache/sqlite/migrations.zig", "--metadata-out",
+            ".native/cache/sqlite/metadata.json", "--state",                             ".native/cache/sqlite-schema.json",
+        },
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .environ_map = base_env,
+    }) catch return nodeMissing();
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| if (code == 0) {
+            const absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, ".native/cache/sqlite/core.d.ts", allocator);
+            allocator.free(sdk_out);
+            return absolute;
+        },
+        else => {},
+    }
+    std.debug.print("native check: the relational schema or declared queries failed (diagnostics above)\n", .{});
+    return error.SqliteCheckFailed;
+}
+
 /// Run the TypeScript frontend in check-only mode on src/core.ts — and,
 /// through it, the core's whole import graph under src/ — and surface its NS
 /// diagnostics verbatim. Manifest-owned routes ride into the same typed Msg
@@ -421,6 +470,7 @@ pub fn checkCore(
     capabilities: []const []const u8,
     persist_version: ?u64,
     persist_routes: ?PersistRoutes,
+    sdk_core_path: ?[]const u8,
 ) !void {
     const cli_path = try transpilerPath(allocator, io, framework_root, "src/cli.ts");
     defer allocator.free(cli_path);
@@ -453,6 +503,7 @@ pub fn checkCore(
             routes.err,
         });
     }
+    if (sdk_core_path) |sdk_core| try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core });
     var child = std.process.spawn(io, .{
         .argv = argv.items,
         .stdin = .ignore,
@@ -477,11 +528,15 @@ pub fn checkCore(
 /// build verdict come from ONE compiler. Analyzer type errors fail the
 /// check with the compiler's own diagnostics; a toolchain that cannot
 /// reach a verdict defers to the build rather than wedging check.
-pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8) !void {
+pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8, sdk_core_path: ?[]const u8) !void {
     const script_path = try transpilerPath(allocator, io, framework_root, "scripts/compiler_typecheck.mjs");
     defer allocator.free(script_path);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{ "node", script_path, "src/core.ts" });
+    if (sdk_core_path) |sdk_core| try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core });
     var child = std.process.spawn(io, .{
-        .argv = &.{ "node", script_path, "src/core.ts" },
+        .argv = argv.items,
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -529,6 +584,17 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     // TypeScript toolchain to resolve exactly like check/build do.
     try ensureResolvedTranspiler(allocator, io, framework_root);
 
+    var sqlite_declarations: ?[]u8 = null;
+    defer if (sqlite_declarations) |path_value| allocator.free(path_value);
+    var sqlite_source: ?[]u8 = null;
+    defer if (sqlite_source) |path_value| allocator.free(path_value);
+    for (options.capabilities) |capability| {
+        if (!std.mem.eql(u8, capability, "sqlite")) continue;
+        sqlite_declarations = try generateSqliteSurface(allocator, io, options.base_env, framework_root);
+        sqlite_source = try std.Io.Dir.cwd().realPathFileAlloc(io, ".native/cache/sqlite/core.ts", allocator);
+        break;
+    }
+
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, "node");
@@ -547,6 +613,9 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     }
     for (options.capabilities) |capability| {
         try argv.appendSlice(allocator, &.{ "--capability", capability });
+    }
+    if (sqlite_source) |sdk_core| {
+        try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core, "--sqlite-src", "src" });
     }
     if (options.persist_routes) |routes| {
         try argv.appendSlice(allocator, &.{

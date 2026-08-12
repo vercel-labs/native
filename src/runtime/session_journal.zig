@@ -1090,6 +1090,10 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
         try cursor.writeBytes(&record.persist_blob_hash);
         try cursor.writeInt(u64, record.persist_blob_len);
     }
+    if (record.kind == .db) {
+        try cursor.writeBytes(&record.db_blob_hash);
+        try cursor.writeInt(u64, record.db_blob_len);
+    }
     return buffer[0..cursor.len];
 }
 
@@ -1152,6 +1156,10 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         record.persist_outcome = try cursor.readEnum(runtime_effects.EffectPersistOutcome);
         @memcpy(&record.persist_blob_hash, try cursor.readBytes(record.persist_blob_hash.len));
         record.persist_blob_len = try cursor.readInt(u64);
+    }
+    if (record.kind == .db) {
+        @memcpy(&record.db_blob_hash, try cursor.readBytes(record.db_blob_hash.len));
+        record.db_blob_len = try cursor.readInt(u64);
     }
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
@@ -1772,6 +1780,19 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expectEqual(runtime_effects.EffectPersistOutcome.ok, persist_decoded.persist_outcome);
     try testing.expectEqualSlices(u8, &persist_hash, &persist_decoded.persist_blob_hash);
     try testing.expectEqual(@as(u64, 4096), persist_decoded.persist_blob_len);
+
+    const db_hash: [runtime_effects.effect_image_blob_hash_len]u8 = @splat(0x5a);
+    const db_encoded = try encodeEffect(.{
+        .kind = .db,
+        .key = 73,
+        .code = runtime_effects.dbJournalCode(.page, .ok),
+        .db_blob_hash = db_hash,
+        .db_blob_len = 96 * 1024,
+    }, &buffer);
+    const db_decoded = try decodeEffect(db_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.db, db_decoded.kind);
+    try testing.expectEqualSlices(u8, &db_hash, &db_decoded.db_blob_hash);
+    try testing.expectEqual(@as(u64, 96 * 1024), db_decoded.db_blob_len);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {

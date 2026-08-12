@@ -10,9 +10,15 @@
 // always imports the SDK checkout's module directly. Relative imports
 // inside the core's src/ are real files node resolves itself.
 
+let generatedCoreUrl = null;
+
+export function initialize(data) {
+  generatedCoreUrl = data?.generatedCoreUrl ?? null;
+}
+
 export async function resolve(specifier, context, nextResolve) {
   if (specifier === "@native-sdk/core") {
-    return { shortCircuit: true, url: new URL("../sdk/core.ts", import.meta.url).href };
+    return { shortCircuit: true, url: generatedCoreUrl ?? new URL("../sdk/core.ts", import.meta.url).href };
   }
   if (specifier.startsWith("@native-sdk/core/")) {
     const lib = specifier.slice("@native-sdk/core/".length);

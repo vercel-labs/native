@@ -75,11 +75,11 @@ function diag(id: RuleId, site: string, file: ts.SourceFile, node: ts.Node): Sub
 /// path property, never inferred from which root happened to reach a file:
 /// this is what makes a service->core shared-shape edge legal while a
 /// core->service edge is NS1065.
-export function resolveModuleGraph(entry: string): ModuleGraph {
+export function resolveModuleGraph(entry: string, coreModulePath: string = sdkCoreModulePath): ModuleGraph {
   const entryPath = path.resolve(entry);
   const boundary = path.dirname(entryPath);
   const servicesBoundary = path.join(boundary, "services");
-  const sdkBoundary = path.dirname(sdkCoreModulePath);
+  const sdkBoundary = path.dirname(coreModulePath);
   const diagnostics: SubsetDiagnostic[] = [];
   const files: string[] = [];
   const coreFiles: string[] = [];

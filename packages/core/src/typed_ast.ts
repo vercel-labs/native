@@ -70,7 +70,7 @@ export type Declaration = tsImpl.Declaration;
 /// except `useUnknownInCatchVariables` (see below), where the subset checker
 /// itself is the stricter authority — so the 6-to-7 provider swap changes no
 /// acceptance decision.
-export function subsetCompilerOptions(): tsImpl.CompilerOptions {
+export function subsetCompilerOptions(coreModulePath: string = sdkCoreModulePath): tsImpl.CompilerOptions {
   return {
     strict: true,
     // The one strict-family knob turned OFF: the subset's own checker types
@@ -88,7 +88,7 @@ export function subsetCompilerOptions(): tsImpl.CompilerOptions {
     // their published names. Absolute mappings so entry files anywhere
     // (tmp dirs, workspaces) resolve the same modules.
     paths: {
-      "@native-sdk/core": [sdkCoreModulePath.replace(/\.ts$/, "")],
+      "@native-sdk/core": [coreModulePath.replace(/\.ts$/, "")],
       ...Object.fromEntries(
         [...sdkLibraryModules].map(([name, p]) => [name, [p.replace(/\.ts$/, "")]]),
       ),
@@ -590,6 +590,6 @@ export function lineColumn(file: SourceFile, pos: number): { line: number; colum
 /// valid core never imports those files, so they cannot be discovered from
 /// the entry root. The caller still passes only core files to the subset
 /// checker and integer inference.
-export function createSubsetProgram(entry: string, roots: readonly string[] = [entry]): tsImpl.Program {
-  return tsImpl.createProgram([...new Set([entry, ...roots, bytesTextMethodsDts])], subsetCompilerOptions());
+export function createSubsetProgram(entry: string, roots: readonly string[] = [entry], coreModulePath: string = sdkCoreModulePath): tsImpl.Program {
+  return tsImpl.createProgram([...new Set([entry, ...roots, bytesTextMethodsDts])], subsetCompilerOptions(coreModulePath));
 }

@@ -94,6 +94,14 @@ pub fn main(init: std.process.Init) !void {
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native check [dir] [--strict]");
         try enterAppDir(init.io, verb_args.dir);
         runCheck(allocator, init.io, init.environ_map, flagBool(args, "--strict")) catch |err| return failVerb(err);
+    } else if (std.mem.eql(u8, command, "db")) {
+        tooling.db.run(allocator, init.io, init.environ_map, args[2..]) catch |err| switch (err) {
+            error.InvalidArguments => fail("usage: native db new-migration <name> | status | reset --yes"),
+            error.InvalidMigrationName => fail("migration name must be 1-64 lowercase letters, digits, spaces, hyphens, or underscores (no leading/trailing separator)"),
+            error.MigrationLimitReached => fail("migration version 9999 is already used"),
+            error.ResetNeedsConfirmation => fail("native db reset deletes this app's engine-owned app.db; rerun as `native db reset --yes`"),
+            else => return err,
+        };
     } else if (std.mem.eql(u8, command, "eject")) {
         // `eject component <name>` is dispatched before the plain build
         // eject so `component` is never mistaken for an app directory.
@@ -394,6 +402,7 @@ fn usage() void {
         \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
         \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.zon
+        \\  db new-migration <name> | status | reset --yes manage the relational schema and development database
         \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  eject component <name> [dir]                   write an owned copy of a library composite into src/components/
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
@@ -583,6 +592,9 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     // same teaching UX Zig apps get from `zig build`/`native test`.
     const core_tree = tooling.ts_core.detect(io);
     if (core_tree == .both) return tooling.ts_core.failBothCores();
+    const sqlite_enabled = for (metadata.capabilities) |capability| {
+        if (std.mem.eql(u8, capability, "sqlite")) break true;
+    } else false;
     if (core_tree == .ts) {
         const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
             std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
@@ -594,6 +606,11 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         // missing or version-skewed vs the SDK — one info line, never a
         // check failure.
         tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
+        const sqlite_sdk = if (sqlite_enabled)
+            try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root)
+        else
+            null;
+        defer if (sqlite_sdk) |path| allocator.free(path);
         try tooling.ts_core.checkCore(
             allocator,
             io,
@@ -606,8 +623,20 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
                 .none = persist.restore.none,
                 .err = persist.restore.err,
             } else null,
+            sqlite_sdk,
         );
-        try tooling.ts_core.compilerTypecheckCore(allocator, io, env_map, framework_root);
+        try tooling.ts_core.compilerTypecheckCore(allocator, io, env_map, framework_root, sqlite_sdk);
+    } else if (sqlite_enabled) {
+        // Zig cores use the same SQL files and runtime migration module even
+        // though they call the first-class Effects API rather than generated
+        // TypeScript constructors. Check the chain with real SQLite here too.
+        const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
+            std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+            return error.MissingFramework;
+        };
+        defer allocator.free(framework_root);
+        const generated = try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root);
+        allocator.free(generated);
     }
 
     var markup_files: std.ArrayList([]const u8) = .empty;

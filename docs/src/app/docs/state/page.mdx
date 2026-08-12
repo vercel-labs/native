@@ -4,6 +4,10 @@ import { CodeToggle } from "@/components/code-toggle";
 
 The model stores source-of-truth state only: the raw items, the current filter, the draft text. Everything the view shows that is computable from those — counts, sums, filtered lists, formatted strings — is derived at view time, never stored. This page collects the data-flow patterns that keep a Native SDK app honest; they hold in both core languages, and the samples show each where the expression differs.
 
+## Pick one canonical store
+
+For small in-memory apps, the Model owns the domain data and [model persistence](/docs/persistence) snapshots it. For relational apps, [SQLite](/docs/sqlite) owns the domain data; the Model holds view state plus the row pages most recently delivered by a query. Writes go out as one atomic `Cmd.db.exec`, and reads return as later Msg values—never as a database handle or a synchronous call inside `update`. Derived UI values still come from the Model's current rows, so the rule below does not change.
+
 ## Derive, don't store
 
 A cached derivable must be re-maintained in every `update` arm and goes stale the moment one is missed; a derived function cannot go stale.

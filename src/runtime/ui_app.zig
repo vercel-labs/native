@@ -1407,6 +1407,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (runtime.options.record_store) |binding| {
                 self.effects.bindRecordStore(binding);
             }
+            if (runtime.options.relational_store) |binding| {
+                self.effects.bindRelationalStore(binding);
+            }
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
             self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
@@ -1492,6 +1495,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // `.rejected` and regenerate from the same
                     // deterministic validation, like `.timer` records.
                     .host => try self.effects.feedHostResult(record.key, record.code == 0, record.payload),
+                    .db => try self.effects.feedDbResult(
+                        record.key,
+                        runtime_effects.dbKindFromJournalCode(record.code) orelse return error.ReplayDamagedRecord,
+                        runtime_effects.dbOutcomeFromJournalCode(record.code) orelse return error.ReplayDamagedRecord,
+                        record.payload,
+                    ),
                     .clock => try self.effects.pushReplayClock(record.clock_wall_ms),
                     // `.env` records carry the arm name in `stderr_tail`
                     // and the value in `payload`; the TS adapter's

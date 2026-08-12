@@ -39,6 +39,9 @@ export interface FrontendOptions {
   /// app.zon's persistence restore routes, projected without manifest syntax
   /// so the frontend can validate them against the core's Msg union.
   readonly persistRoutes?: PersistRoutes;
+  /// Generated @native-sdk/core surface carrying declared SQLite query
+  /// constructors. Omitted for non-relational apps and direct checker tests.
+  readonly sdkCorePath?: string;
 }
 
 export interface FrontendResult {
@@ -64,12 +67,12 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   // Module-boundary mistakes (NS1034-NS1037) teach BEFORE the type-checked
   // program is built: a missing file or an escaped src/ boundary would
   // otherwise surface as a raw resolution error.
-  const graph = resolveModuleGraph(entry);
+  const graph = resolveModuleGraph(entry, options.sdkCorePath);
   if (graph.diagnostics.length > 0) {
     return { ok: false, contract: null, servicesContract: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
 
-  const program = createSubsetProgram(entry, graph.files);
+  const program = createSubsetProgram(entry, graph.files, options.sdkCorePath);
   const tast = new TypedAst(program);
   const byPath = new Map(program.getSourceFiles().map((f) => [path.resolve(f.fileName), f]));
   const files: ts.SourceFile[] = [];
@@ -122,6 +125,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     serviceOps,
     options.capabilities ?? [],
     options.persistRoutes,
+    options.sdkCorePath,
   );
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {

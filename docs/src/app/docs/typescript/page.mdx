@@ -348,6 +348,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Persist independent byte records in the engine-owned, capability-gated record store; every result returns through the declared Msg route — see <a href="/docs/record-store">Record Store</a></td>
     </tr>
     <tr>
+      <td><code>Cmd.db.query(sql, params, route)</code> / <code>Cmd.db.exec(statements, route)</code></td>
+      <td>Run read-only relational queries as bounded row pages or commit a statement list atomically through the engine-owned SQLite database — see <a href="/docs/sqlite">Relational SQLite</a></td>
+    </tr>
+    <tr>
       <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
       <td>App-defined host commands by literal name: fire-and-forget, or routed with exactly one result Msg back</td>
     </tr>

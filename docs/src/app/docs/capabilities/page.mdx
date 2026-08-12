@@ -46,6 +46,13 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
       <td>SQLite-backed engine store in the per-app data directory; replay remains offline and the core devhost uses a process-local map</td>
     </tr>
     <tr>
+      <td>Relational SQLite</td>
+      <td><code>Cmd.q&lt;Name&gt;</code> / <code>Cmd.qTx</code> / <code>Sub.q&lt;Name&gt;</code> / raw <code>Cmd.db.query/exec</code> / <code>fx.dbQuery/dbExec/dbSubscribe</code></td>
+      <td>None. Model-core effect only.</td>
+      <td>None. Gated by the <code>sqlite</code> build capability.</td>
+      <td>Checked migrations and named SQL over engine-owned <code>app.db</code>; real in-memory SQLite in check, devhost, and tests; journal-only replay</td>
+    </tr>
+    <tr>
       <td>Native dialogs</td>
       <td><code>runtime.showOpenDialog(...)</code> / <code>showSaveDialog(...)</code> / <code>showMessageDialog(...)</code></td>
       <td><code>native-sdk.dialog.openFile</code> / <code>saveFile</code> / <code>showMessage</code></td>

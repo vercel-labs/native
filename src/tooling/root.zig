@@ -18,6 +18,7 @@ pub const ts_core = @import("ts_core.zig");
 pub const ios = @import("ios.zig");
 pub const android = @import("android.zig");
 pub const xcodeproj = @import("xcodeproj.zig");
+pub const db = @import("db.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

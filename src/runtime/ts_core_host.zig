@@ -432,6 +432,10 @@ pub fn videoKeyForTag(event_tag: u8) u64 {
 /// families' one engine key space without ever colliding on a key.
 pub const pty_key_base: u64 = 0x5453_5054_0000_0000;
 
+/// Engine-key namespace for relational effects ("TSDB"). The DB family has
+/// its own engine table, so these never consume the general request slots.
+pub const db_key_base: u64 = 0x5453_4442_0000_0000;
+
 /// The spawn wire record's "no line routing" tag sentinel (the wire
 /// format's shared constant).
 pub const spawn_no_line_tag: u8 = 0xFF;
@@ -648,6 +652,22 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        const DbEntry = struct {
+            used: bool = false,
+            query: bool = true,
+            live: bool = false,
+            signature: u64 = 0,
+            key_len: usize = 0,
+            key: [max_wire_key_bytes]u8 = undefined,
+            page_tag: u8 = 0,
+            done_tag: u8 = 0,
+            err_tag: u8 = 0,
+
+            fn wireKey(entry: *const DbEntry) []const u8 {
+                return entry.key[0..entry.key_len];
+            }
+        };
+
         var model_root: *const Model = undefined;
         /// The platform caches directory for URL audio sources, set by
         /// the wiring (`TsUiApp`'s `audio_cache_dir`, or `setAudioCacheDir`
@@ -669,6 +689,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
         var audio_captures: [runtime_effects.max_effect_channels]AudioCaptureEntry = @splat(.{});
         var ptys: [runtime_effects.max_effect_ptys]PtyEntry = @splat(.{});
+        var dbs: [runtime_effects.max_db_effects]DbEntry = @splat(.{});
         /// The platform caches directory for URL image sources, the
         /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
         /// `image_cache_dir`): bridge-side derivation of the
@@ -744,6 +765,7 @@ pub fn TsCoreHost(comptime core: type) type {
             channels = @splat(.{});
             audio_captures = @splat(.{});
             ptys = @splat(.{});
+            dbs = @splat(.{});
             clip_write_counter = 0;
             audio_cache_dir_len = 0;
             image_cache_dir_len = 0;
@@ -902,7 +924,8 @@ pub fn TsCoreHost(comptime core: type) type {
             var nows: [max_nows_per_cmd]PendingNow = undefined;
             var now_count: usize = 0;
             runCmd(fx, cmd, &nows, &now_count);
-            reconcileTimers(fx);
+            reconcileSubscriptions(fx);
+            fx.flushDbSubscriptions();
             core.rt.frameReset();
             for (nows[0..now_count]) |pending| {
                 dispatchDepth(fx, msgFromTagNumber(pending.tag, @floatFromInt(pending.ms)), depth + 1);
@@ -1458,6 +1481,70 @@ pub fn TsCoreHost(comptime core: type) type {
                             .on_result = hostResultMsg,
                         });
                     },
+                    // db_query [op][key][page][done][err][sql bytes]
+                    //          [param count u32][tagged params]
+                    0x28 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const page_tag = takeByte(cmd, &at);
+                        const done_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const sql = takeLongBytes(cmd, &at);
+                        const count: usize = @intCast(takeU32(cmd, &at));
+                        var params: [runtime_effects.max_effect_db_parameters]runtime_effects.EffectDbValue = undefined;
+                        var kept: usize = 0;
+                        for (0..count) |_| {
+                            const value = takeDbValue(cmd, &at);
+                            if (kept < params.len) {
+                                params[kept] = value;
+                                kept += 1;
+                            }
+                        }
+                        const index = allocDbEntry(fx, key, true, page_tag, done_tag, err_tag) orelse continue;
+                        fx.dbQuery(.{
+                            .key = db_key_base + index,
+                            .sql = if (count <= params.len) sql else "",
+                            .params = if (count <= params.len) params[0..kept] else &.{},
+                            .on_result = dbResultMsg,
+                        });
+                    },
+                    // db_exec [op][key][ok][err][statement count u32]
+                    //         [statement sql bytes][param count u32][params]...
+                    0x29 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const ok_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const count: usize = @intCast(takeU32(cmd, &at));
+                        var statements: [runtime_effects.max_effect_db_exec_statements]runtime_effects.EffectDbStatement = undefined;
+                        var values: [runtime_effects.max_effect_db_exec_statements * runtime_effects.max_effect_db_parameters]runtime_effects.EffectDbValue = undefined;
+                        var statement_kept: usize = 0;
+                        var value_kept: usize = 0;
+                        var valid = count <= statements.len;
+                        for (0..count) |_| {
+                            const sql = takeLongBytes(cmd, &at);
+                            const param_count: usize = @intCast(takeU32(cmd, &at));
+                            const start = value_kept;
+                            if (param_count > runtime_effects.max_effect_db_parameters) valid = false;
+                            for (0..param_count) |_| {
+                                const value = takeDbValue(cmd, &at);
+                                if (value_kept < values.len) {
+                                    values[value_kept] = value;
+                                    value_kept += 1;
+                                } else {
+                                    valid = false;
+                                }
+                            }
+                            if (statement_kept < statements.len and start + param_count <= value_kept) {
+                                statements[statement_kept] = .{ .sql = sql, .params = values[start .. start + param_count] };
+                                statement_kept += 1;
+                            }
+                        }
+                        const index = allocDbEntry(fx, key, false, 0, ok_tag, err_tag) orelse continue;
+                        fx.dbExec(.{
+                            .key = db_key_base + index,
+                            .statements = if (valid and count == statement_kept) statements[0..statement_kept] else &.{},
+                            .on_result = dbResultMsg,
+                        });
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1471,6 +1558,24 @@ pub fn TsCoreHost(comptime core: type) type {
             const ok_tag = takeByte(cmd, at);
             const err_tag = takeByte(cmd, at);
             return .{ .key = key, .ok_tag = ok_tag, .err_tag = err_tag };
+        }
+
+        fn takeDbValue(cmd: []const u8, at: *usize) runtime_effects.EffectDbValue {
+            return switch (takeByte(cmd, at)) {
+                0 => .null_value,
+                1 => blk: {
+                    const raw = takeBytes(cmd, at, 8);
+                    const number: f64 = @bitCast(std.mem.readInt(u64, raw[0..8], .little));
+                    if (std.math.isFinite(number) and @trunc(number) == number and number >= -9_007_199_254_740_991.0 and number <= 9_007_199_254_740_991.0) {
+                        break :blk .{ .integer = @intFromFloat(number) };
+                    }
+                    break :blk .{ .real = number };
+                },
+                2 => .{ .text = takeLongBytes(cmd, at) },
+                3 => .{ .blob = takeLongBytes(cmd, at) },
+                4 => .{ .integer = if (takeByte(cmd, at) == 0) 0 else 1 },
+                else => @panic("ts core host: unknown SQLite parameter tag - the core and runtime disagree on cmd_format_version"),
+            };
         }
 
         fn fetchMethod(wire: u8) std.http.Method {
@@ -2349,6 +2454,77 @@ pub fn TsCoreHost(comptime core: type) type {
             return msgFromTagPty(entry.event_tag, wire_key, false, event);
         }
 
+        fn allocDbEntry(
+            fx: *Fx,
+            key: []const u8,
+            query: bool,
+            page_tag: u8,
+            done_tag: u8,
+            err_tag: u8,
+        ) ?usize {
+            const index = blk: {
+                if (key.len > 0) {
+                    if (findDb(key)) |existing| {
+                        if (query and dbs[existing].query) break :blk existing;
+                        fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                        return null;
+                    }
+                }
+                break :blk freeDbIndex() orelse {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                    return null;
+                };
+            };
+            const entry = &dbs[index];
+            entry.used = true;
+            entry.query = query;
+            entry.live = false;
+            entry.signature = 0;
+            entry.key_len = key.len;
+            @memcpy(entry.key[0..key.len], key);
+            entry.page_tag = page_tag;
+            entry.done_tag = done_tag;
+            entry.err_tag = err_tag;
+            return index;
+        }
+
+        fn findDb(key: []const u8) ?usize {
+            if (key.len == 0) return null;
+            for (&dbs, 0..) |*entry, index| {
+                if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            }
+            return null;
+        }
+
+        fn freeDbIndex() ?usize {
+            for (&dbs, 0..) |*entry, index| if (!entry.used) return index;
+            return null;
+        }
+
+        fn dbResultMsg(result: runtime_effects.EffectDbResult) Msg {
+            if (result.key < db_key_base) @panic("ts core host: a relational result arrived outside the bridge DB key namespace");
+            const index = result.key - db_key_base;
+            if (index >= dbs.len or !dbs[index].used) @panic("ts core host: a relational result arrived for an untracked command");
+            const entry = &dbs[index];
+            if (result.outcome != .ok) {
+                if (!entry.live) entry.used = false;
+                return msgFromTagBytes(entry.err_tag, @tagName(result.outcome));
+            }
+            return switch (result.kind) {
+                .page => msgFromTagBytes(entry.page_tag, result.bytes),
+                .done => blk: {
+                    if (!entry.query) @panic("ts core host: a query terminal reached an exec route");
+                    if (!entry.live) entry.used = false;
+                    break :blk msgFromTagVoid(entry.done_tag);
+                },
+                .exec => blk: {
+                    if (entry.query) @panic("ts core host: an exec terminal reached a query route");
+                    entry.used = false;
+                    break :blk msgFromTagVoid(entry.done_tag);
+                },
+            };
+        }
+
         /// The wire `cancel` record: first match wins across the four
         /// keyed tables — requests (silent drop), named engine ops
         /// (silent drop: the entry is marked dropped, the engine's
@@ -2379,6 +2555,17 @@ pub fn TsCoreHost(comptime core: type) type {
             if (findDelay(key)) |index| {
                 fx.cancelTimer(delay_key_base + index);
                 delays[index].used = false;
+                return;
+            }
+            if (findDb(key)) |index| {
+                if (dbs[index].query) {
+                    fx.cancelDbQuery(db_key_base + index);
+                    dbs[index].used = false;
+                }
+                // Transactions are already synchronous host work by the time
+                // the next record in a batch is walked. Cancel never hides
+                // their terminal (or makes the bridge forget its route).
+                return;
             }
         }
 
@@ -2565,7 +2752,7 @@ pub fn TsCoreHost(comptime core: type) type {
             return msgFromTagNumber(delays[index].tag, ms);
         }
 
-        // ------------------------------------------ subscription timers
+        // ----------------------------------------------- subscriptions
 
         /// Reconcile the declarative subscription set against the fixed
         /// timer table — the same algorithm as the @native-sdk/core package's
@@ -2573,69 +2760,121 @@ pub fn TsCoreHost(comptime core: type) type {
         /// keys into the first free slot, re-arm on interval change,
         /// re-route on tag change, cancel the missing. Slot order
         /// everywhere, so record/replay walk identical tables.
-        fn reconcileTimers(fx: *Fx) void {
+        fn reconcileSubscriptions(fx: *Fx) void {
             if (comptime !has_subscriptions) return;
             const subs = core.subscriptions(model_root);
-            var seen = [_]bool{false} ** timers.len;
+            var seen_timers = [_]bool{false} ** timers.len;
+            var seen_db = [_]bool{false} ** dbs.len;
             var at: usize = 0;
             while (at < subs.len) {
+                const record_start = at;
                 const op = takeByte(subs, &at);
-                if (op != 0x01) {
-                    @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version");
-                }
-                // timer [op][key_len][key][every_ms f64 LE][msg_tag]
-                const key = takeShortBytes(subs, &at);
-                const every_bits = takeBytes(subs, &at, 8);
-                const every_ms: f64 = @bitCast(std.mem.readInt(u64, every_bits[0..8], .little));
-                const tag = takeByte(subs, &at);
-                if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
-                    // The lower bound also rejects NaN; the upper (one
-                    // year) keeps the engine's ns conversion in range.
-                    @panic("ts core host: Sub.timer interval must be between 1ms and one year");
-                }
-                var slot: ?usize = null;
-                for (&timers, 0..) |*entry, index| {
-                    if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
-                }
-                if (slot) |index| {
-                    seen[index] = true;
-                    const entry = &timers[index];
-                    if (entry.every_ms != every_ms) {
-                        entry.every_ms = every_ms;
-                        // Interval change re-arms: the engine replaces
-                        // the active key in place and the platform timer
-                        // restarts from now.
-                        fx.startTimer(.{
-                            .key = timer_key_base + index,
-                            .interval_ms = intervalMs(every_ms),
-                            .mode = .repeating,
-                            .on_fire = timerFireMsg,
-                        });
-                    }
-                    // A tag-only change re-routes without re-arming.
-                    entry.tag = tag;
-                } else {
-                    const index = freeTimerIndex() orelse
-                        @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
-                    seen[index] = true;
-                    const entry = &timers[index];
-                    entry.used = true;
-                    entry.key_len = key.len;
-                    @memcpy(entry.key[0..key.len], key);
-                    entry.every_ms = every_ms;
-                    entry.tag = tag;
-                    fx.startTimer(.{
-                        .key = timer_key_base + index,
-                        .interval_ms = intervalMs(every_ms),
-                        .mode = .repeating,
-                        .on_fire = timerFireMsg,
-                    });
+                switch (op) {
+                    // timer [op][key_len][key][every_ms f64 LE][msg_tag]
+                    0x01 => {
+                        const key = takeShortBytes(subs, &at);
+                        const every_bits = takeBytes(subs, &at, 8);
+                        const every_ms: f64 = @bitCast(std.mem.readInt(u64, every_bits[0..8], .little));
+                        const tag = takeByte(subs, &at);
+                        if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
+                            @panic("ts core host: Sub.timer interval must be between 1ms and one year");
+                        }
+                        var slot: ?usize = null;
+                        for (&timers, 0..) |*entry, index| {
+                            if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
+                        }
+                        if (slot) |index| {
+                            seen_timers[index] = true;
+                            const entry = &timers[index];
+                            if (entry.every_ms != every_ms) {
+                                entry.every_ms = every_ms;
+                                fx.startTimer(.{
+                                    .key = timer_key_base + index,
+                                    .interval_ms = intervalMs(every_ms),
+                                    .mode = .repeating,
+                                    .on_fire = timerFireMsg,
+                                });
+                            }
+                            entry.tag = tag;
+                        } else {
+                            const index = freeTimerIndex() orelse
+                                @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
+                            seen_timers[index] = true;
+                            const entry = &timers[index];
+                            entry.used = true;
+                            entry.key_len = key.len;
+                            @memcpy(entry.key[0..key.len], key);
+                            entry.every_ms = every_ms;
+                            entry.tag = tag;
+                            fx.startTimer(.{
+                                .key = timer_key_base + index,
+                                .interval_ms = intervalMs(every_ms),
+                                .mode = .repeating,
+                                .on_fire = timerFireMsg,
+                            });
+                        }
+                    },
+                    // live query [op][key][page][done][err][sql bytes]
+                    //            [param count][tagged params]
+                    //            [table count][short table names]
+                    0x02 => {
+                        const key = takeShortBytes(subs, &at);
+                        if (key.len == 0) @panic("ts core host: a live query requires a non-empty subscription key");
+                        const page_tag = takeByte(subs, &at);
+                        const done_tag = takeByte(subs, &at);
+                        const err_tag = takeByte(subs, &at);
+                        const sql = takeLongBytes(subs, &at);
+                        const param_count: usize = @intCast(takeU32(subs, &at));
+                        var params: [runtime_effects.max_effect_db_parameters]runtime_effects.EffectDbValue = undefined;
+                        if (param_count > params.len) @panic("ts core host: a live query carries too many SQL parameters");
+                        for (0..param_count) |index| params[index] = takeDbValue(subs, &at);
+                        const table_count: usize = @intCast(takeU32(subs, &at));
+                        var tables: [runtime_effects.max_effect_db_live_tables][]const u8 = undefined;
+                        if (table_count == 0 or table_count > tables.len) @panic("ts core host: a live query carries an invalid dependency table set");
+                        for (0..table_count) |index| tables[index] = takeShortBytes(subs, &at);
+
+                        const signature = std.hash.Wyhash.hash(0, subs[record_start..at]);
+                        const index = findDb(key) orelse freeDbIndex() orelse
+                            @panic("ts core host: more relational commands and live queries are active than the database slot family can hold");
+                        const entry = &dbs[index];
+                        if (entry.used and !entry.live) @panic("ts core host: a live-query key collides with an in-flight database command");
+                        if (seen_db[index]) @panic("ts core host: duplicate live-query subscription key");
+                        seen_db[index] = true;
+                        if (!entry.used or entry.signature != signature) {
+                            if (entry.used) fx.dbUnsubscribe(db_key_base + index);
+                            entry.* = .{
+                                .used = true,
+                                .query = true,
+                                .live = true,
+                                .signature = signature,
+                                .key_len = key.len,
+                                .page_tag = page_tag,
+                                .done_tag = done_tag,
+                                .err_tag = err_tag,
+                            };
+                            @memcpy(entry.key[0..key.len], key);
+                            fx.dbSubscribe(.{
+                                .key = db_key_base + index,
+                                .sql = sql,
+                                .params = params[0..param_count],
+                                .tables = tables[0..table_count],
+                                .on_result = dbResultMsg,
+                            });
+                        }
+                    },
+                    else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
             for (&timers, 0..) |*entry, index| {
-                if (entry.used and !seen[index]) {
+                if (entry.used and !seen_timers[index]) {
                     entry.used = false;
                     fx.cancelTimer(timer_key_base + index);
+                }
+            }
+            for (&dbs, 0..) |*entry, index| {
+                if (entry.used and entry.live and !seen_db[index]) {
+                    fx.dbUnsubscribe(db_key_base + index);
+                    entry.used = false;
                 }
             }
         }

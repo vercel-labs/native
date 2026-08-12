@@ -135,6 +135,24 @@ test "record-store test harness binds one hermetic in-memory database" {
     try harness.stop(app);
 }
 
+test "relational test harness binds one hermetic in-memory database" {
+    const harness = try core.TestHarness().createWithRelationalStore(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    try std.testing.expect(harness.relational_store != null);
+    try std.testing.expect(harness.runtime.options.relational_store != null);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, counterOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try app_state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expect(app_state.effects.relational_store_binding != null);
+    try harness.stop(app);
+}
+
 test "ui app owns install, dispatch, and rebuild end to end" {
     // The runtime and the app are both large structs; keep them off the
     // test thread's stack.

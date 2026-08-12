@@ -30,13 +30,19 @@ const unprefixedNavSections: NavSection[] = [
       { name: "Where Packages Go", href: "/typescript/packages" },
       { name: "Native UI", href: "/native-ui" },
       { name: "Dynamic Images", href: "/dynamic-images" },
-      { name: "Model Persistence", href: "/persistence" },
-      { name: "Record Store", href: "/record-store" },
       { name: "Terminal", href: "/terminal" },
       { name: "State & Data Flow", href: "/state" },
       { name: "Theming", href: "/theming" },
       { name: "Fonts", href: "/fonts" },
       { name: "Building Components", href: "/building-components" },
+    ],
+  },
+  {
+    title: "Data",
+    items: [
+      { name: "Model Persistence", href: "/persistence" },
+      { name: "Record Store", href: "/record-store" },
+      { name: "Relational SQLite", href: "/sqlite" },
     ],
   },
   {

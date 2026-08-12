@@ -107,6 +107,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.storescan")) return .store_scan;
     if (std.mem.eql(u8, name, "core.storescaninvalid")) return .store_scan_invalid;
     if (std.mem.eql(u8, name, "core.storemany")) return .store_many;
+    if (std.mem.eql(u8, name, "core.dbexec")) return .db_exec;
+    if (std.mem.eql(u8, name, "core.dbquery")) return .db_query;
     return null;
 }
 
@@ -627,6 +629,54 @@ test "every Cmd.store factory emits its bounded v3 record through the external c
     try std.testing.expectEqualStrings("core.store.delete", request.name);
     try fx.feedHostResult(request.key, true, "");
     try h.wake();
+}
+
+test "Cmd.db wire values execute against SQLite and route an encoded page through the external core" {
+    HostStub.reset();
+    var database = try native_sdk.RelationalStore.openMemory(std.testing.allocator);
+    defer database.deinit();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.bindRelationalStore(database.binding());
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+    try h.menu("core.dbexec");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().saved);
+
+    try h.menu("core.dbquery");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 2), Bridge.model().saved);
+    const page = Bridge.model().status;
+    var at: usize = 0;
+    try std.testing.expectEqual(@as(u32, 6), storePayloadU32(page, &at));
+    try std.testing.expectEqual(@as(u32, 1), storePayloadU32(page, &at));
+    for ([_][]const u8{ "id", "label", "score", "body", "enabled", "absent" }) |name| {
+        try std.testing.expectEqualStrings(name, storePayloadField(page, &at));
+    }
+    try std.testing.expectEqual(@as(u8, 1), page[at]);
+    at += 1;
+    try std.testing.expectEqual(@as(i64, 7), std.mem.readInt(i64, page[at..][0..8], .little));
+    at += 8;
+    try std.testing.expectEqual(@as(u8, 3), page[at]);
+    at += 1;
+    try std.testing.expectEqualStrings("café", storePayloadField(page, &at));
+    try std.testing.expectEqual(@as(u8, 2), page[at]);
+    at += 1;
+    try std.testing.expectEqual(@as(f64, 1.5), @as(f64, @bitCast(std.mem.readInt(u64, page[at..][0..8], .little))));
+    at += 8;
+    try std.testing.expectEqual(@as(u8, 4), page[at]);
+    at += 1;
+    try std.testing.expectEqualStrings("ready", storePayloadField(page, &at));
+    try std.testing.expectEqual(@as(u8, 1), page[at]);
+    at += 1;
+    try std.testing.expectEqual(@as(i64, 1), std.mem.readInt(i64, page[at..][0..8], .little));
+    at += 8;
+    try std.testing.expectEqual(@as(u8, 0), page[at]);
+    at += 1;
+    try std.testing.expectEqual(page.len, at);
 }
 
 test "clipboardWrite and clipboardRead ride the platform pasteboard" {
@@ -1547,10 +1597,13 @@ fn recordSession(buffer: *JournalBuffer) !CoreSnapshot {
     removeStore();
     var record_store = try native_sdk.RecordStore.openMemory(std.testing.allocator);
     defer record_store.deinit();
+    var relational_store = try native_sdk.RelationalStore.openMemory(std.testing.allocator);
+    defer relational_store.deinit();
     const h = try Harness.createRecorded(recorder);
     defer h.destroy();
     const fx = &h.app_state.effects;
     fx.bindRecordStore(record_store.binding());
+    fx.bindRelationalStore(relational_store.binding());
 
     try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
 
@@ -1594,6 +1647,13 @@ fn recordSession(buffer: *JournalBuffer) !CoreSnapshot {
     try h.menu("core.storescan");
     try h.wake();
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, Bridge.model().status[0..4], .little));
+    // Relational rows and the transaction terminal are journaled as their
+    // own result family. Replay intentionally binds no SQLite database.
+    try h.menu("core.dbexec");
+    try h.wake();
+    try h.menu("core.dbquery");
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 6), std.mem.readInt(u32, Bridge.model().status[0..4], .little));
     // Restore a human-readable final model value after the scan's framed
     // binary page so the snapshot remains easy to diagnose.
     try h.menu("core.load");
@@ -1621,7 +1681,7 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     try std.testing.expectEqual(@as(f64, 50_000), recorded.stampMs);
     try std.testing.expectEqual(@as(i64, 1), recorded.failures);
     try std.testing.expectEqualStrings("ready", recorded.status[0..recorded.statusLen]);
-    try std.testing.expectEqual(@as(i64, 3), recorded.saved);
+    try std.testing.expectEqual(@as(i64, 5), recorded.saved);
     try std.testing.expectEqual(@as(f64, 450), recorded.firedAt);
 
     // Determinism pin: the same driven session records byte-identical
@@ -1633,8 +1693,9 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     try std.testing.expectEqualDeep(recorded, recorded_again);
     try std.testing.expectEqualSlices(u8, buffer.journalBytes(), second.journalBytes());
 
-    // Replay into a fresh app: journaled `.host`/`.file`/`.clipboard`
-    // results (including SQLite writes, get hit, and scan page) and the journaled clock feed the stub executor; the
+    // Replay into a fresh app: journaled `.host`/`.file`/`.clipboard`/`.db`
+    // results (including record-store writes, get hit, scan page, relational
+    // transaction, and row page) and the journaled clock feed the stub executor; the
     // platform timer events (subscription ticks AND the delay fire)
     // replay from the event log; the host binding is NEVER called.
     // Deleting the store first proves the replayed file ops touch no
@@ -1658,15 +1719,15 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     });
     try std.testing.expect(report.ok());
     // Fed from the journal: the ok and err host answers, the clock
-    // read, the file write and read terminals, and BOTH clipboard
-    // terminals — the read and the fire-and-forget write. The write
+    // read, the file write and read terminals, both clipboard terminals,
+    // and the DB transaction/page/done trio. The clipboard write
     // routes no Msg, but its terminal is executor truth (the
     // pasteboard ran), so it journals and its feed is what retires
     // the replayed request, which parks in the stub executor instead
     // of running. (Timer fires ride the event log.) Nothing touched
     // the stub host — and the deleted store proves nothing touched
     // the disk.
-    try std.testing.expectEqual(@as(u64, 12), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 15), report.effects_fed);
     try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
     try std.testing.expectEqual(@as(usize, 0), HostStub.send_count);
     try std.testing.expectEqualDeep(recorded, CoreSnapshot.take());

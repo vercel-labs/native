@@ -63,6 +63,7 @@ const native_sdk = @import("native_sdk");
 const manifest = @import("app_manifest_zon");
 pub const core = @import("core.zig");
 const services = @import("services.zig");
+const relational_migrations = @import("migrations.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -276,6 +277,7 @@ pub fn main(init: std.process.Init) !void {
             .permissions = app_permissions,
             .navigation = .{ .allowed_origins = allowed_origins },
         },
+        .relational_migrations = &relational_migrations.migrations,
     }, init);
 }
 

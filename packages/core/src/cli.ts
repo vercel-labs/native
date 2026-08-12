@@ -29,6 +29,7 @@ function main(argv: string[]): number {
   let persistOk: string | null = null;
   let persistNone: string | null = null;
   let persistErr: string | null = null;
+  let sdkCorePath: string | null = null;
   const capabilities: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--contract") {
@@ -76,6 +77,12 @@ function main(argv: string[]): number {
         console.error("--persist-err requires a Msg arm name");
         return 2;
       }
+    } else if (args[i] === "--sdk-core") {
+      sdkCorePath = args[++i] ?? null;
+      if (sdkCorePath === null) {
+        console.error("--sdk-core requires a generated core.ts path");
+        return 2;
+      }
     } else if (args[i] === "-o" || args[i] === "--out") {
       console.error(
         "-o named the removed TS-to-Zig emitter (v0.7.0 removed it): TypeScript cores compile through the external core compiler now, and this CLI checks the core and emits its contract sidecar (--contract). Drop the flag.",
@@ -112,6 +119,7 @@ function main(argv: string[]): number {
     persistVersion: persistVersion ?? undefined,
     persistStatePath: persistStatePath ?? undefined,
     persistRoutes,
+    sdkCorePath: sdkCorePath ?? undefined,
   };
   const result = checkFile(entry, options);
   for (const e of result.typeErrors) console.error(e);

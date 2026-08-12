@@ -1,0 +1,58 @@
+<column background="background" padding="24" gap="18">
+  <column gap="5">
+    <text size="display">Relational Notes</text>
+    <text foreground="text_muted" wrap="true">Migrations and named SQL are checked by SQLite at build time. Transactions commit atomically; subscribed rows refresh after matching table writes.</text>
+  </column>
+
+  <row gap="10">
+    <button variant="primary" on-press="seed">Seed relational demo</button>
+    <button variant="outline" on-press="add_note">Add note transaction</button>
+    <spacer grow="1" />
+    <button size="sm" variant="ghost" on-press="folder_one">Inbox</button>
+    <button size="sm" variant="ghost" on-press="folder_two">Archive</button>
+  </row>
+
+  <split grow="1" value="0.58">
+    <panel padding="16" background="surface" radius="lg">
+      <column gap="10">
+        <row cross="center">
+          <text grow="1">Live folder: {folderLabel}</text>
+          <badge variant="secondary">{noteCount}</badge>
+        </row>
+        <separator />
+        <scroll grow="1">
+          <column gap="3">
+            <for each="notes" key="id" as="n">
+              <list-item label="{n.title}">
+                <text grow="1">{n.title}</text>
+                <text size="sm" foreground="text_muted">updated {n.updated_at}</text>
+              </list-item>
+            </for>
+          </column>
+        </scroll>
+      </column>
+    </panel>
+
+    <panel padding="16" background="surface" radius="lg">
+      <column gap="10">
+        <row gap="8" cross="center">
+          <text grow="1">FTS5 live results</text>
+          <button size="sm" variant="ghost" on-press="search_native">native</button>
+          <button size="sm" variant="ghost" on-press="search_sqlite">SQLite</button>
+        </row>
+        <separator />
+        <scroll grow="1">
+          <column gap="3">
+            <for each="matches" key="id" as="m">
+              <list-item label="{m.title}">
+                <text>{m.title}</text>
+              </list-item>
+            </for>
+          </column>
+        </scroll>
+      </column>
+    </panel>
+  </split>
+
+  <status-bar>{status}</status-bar>
+</column>

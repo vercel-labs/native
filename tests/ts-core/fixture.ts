@@ -160,6 +160,8 @@ export type Msg =
   | { readonly kind: "store_delete" }
   | { readonly kind: "store_scan" }
   | { readonly kind: "store_many" }
+  | { readonly kind: "db_exec" }
+  | { readonly kind: "db_query" }
   | { readonly kind: "open_pty" }
   | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number }
   | { readonly kind: "store_scan_invalid" };
@@ -479,6 +481,17 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
         ["fixture/two", model.status],
         ["fixture/café/🚀/next", asciiBytes("page")],
       ], { key: "store", ok: "wrote", err: "failed" })];
+    case "db_exec":
+      return [model, Cmd.db.exec([
+        ["CREATE TABLE relational_fixture(id INTEGER PRIMARY KEY, label TEXT NOT NULL, score REAL, body BLOB, enabled INTEGER NOT NULL, absent TEXT)", []],
+        ["INSERT INTO relational_fixture(id,label,score,body,enabled,absent) VALUES(?,?,?,?,?,?)", [7, "café", 1.5, model.status, true, null]],
+      ], { key: "relational", ok: "wrote", err: "failed" })];
+    case "db_query":
+      return [model, Cmd.db.query(
+        "SELECT id,label,score,body,enabled,absent FROM relational_fixture WHERE id=? AND enabled=?",
+        [7, true],
+        { key: "relational", page: "loaded", done: "wrote", err: "failed" },
+      )];
     case "open_pty":
       return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
     case "pty_evt":
