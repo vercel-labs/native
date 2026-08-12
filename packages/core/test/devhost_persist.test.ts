@@ -89,6 +89,39 @@ test("the devhost cooperatively cancels streams and enforces service deadlines",
   assert.match(run.stdout, /"successes":1,"failures":2,"chunks":1/);
 });
 
+test("the devhost keeps duplicate, unkeyed, and streaming service admission aligned with native", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = path.resolve(packageDir, "..", "..");
+  const run = spawnSync(process.execPath, [
+    path.join(packageDir, "src", "devhost.ts"),
+    path.join(repo, "tests", "ts-services", "ok", "src", "core.ts"),
+    "--script",
+    path.join(repo, "tests", "ts-services", "ok", "devhost_regressions.ndjson"),
+    "--service-package",
+    "escape-string-regexp|5.0.0|705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d",
+  ], { cwd: repo, encoding: "utf8" });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /"successes":5,"failures":2,"chunks":3/);
+});
+
+test("a clean service worker exit fails the request and settles the devhost", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = path.resolve(packageDir, "..", "..");
+  const run = spawnSync(process.execPath, [
+    path.join(packageDir, "src", "devhost.ts"),
+    path.join(repo, "tests", "ts-services", "ok", "src", "core.ts"),
+    "--script",
+    path.join(repo, "tests", "ts-services", "ok", "devhost_exit.ndjson"),
+    "--service-package",
+    "escape-string-regexp|5.0.0|705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d",
+  ], { cwd: repo, encoding: "utf8", timeout: 10_000 });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /service worker exited/);
+  assert.match(run.stdout, /"successes":1,"failures":1,"chunks":0/);
+});
+
 test("a devhost service recording replays without starting services and uses the runtime journal identity", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const repo = path.resolve(packageDir, "..", "..");

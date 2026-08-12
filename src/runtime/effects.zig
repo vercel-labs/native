@@ -5606,6 +5606,13 @@ pub fn Effects(comptime Msg: type) type {
             }
         }
 
+        /// Whether this host binding uses reject-on-duplicate admission for
+        /// keyed requests. Bridges consult this before rewriting their route
+        /// table so a rejection cannot orphan the original completion.
+        pub fn rejectsDuplicateHostRequestKeys(self: *const Self) bool {
+            return self.host_calls != null and self.host_calls.?.reject_duplicate_keys;
+        }
+
         fn acquireHostChannel(context: *anyopaque, key: u64) ?ChannelHandle {
             const self: *Self = @ptrCast(@alignCast(context));
             return self.channelHandle(key);

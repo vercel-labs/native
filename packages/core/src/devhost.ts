@@ -446,7 +446,7 @@ function closeServiceChannel(task: ServiceTask): void {
 }
 
 function serviceKey(task: ServiceTask): string | null {
-  return typeof task.cmd.key === "string" ? task.cmd.key : null;
+  return typeof task.cmd.key === "string" && task.cmd.key.length > 0 ? task.cmd.key : null;
 }
 
 function removeServiceKey(task: ServiceTask): void {
@@ -577,14 +577,17 @@ function makeServiceWorker(): Worker {
     if (!task) return;
     if (!task.cancelled && !task.timedOut) serviceFailure(task, encoder.encode(JSON.stringify({ kind: "service_host", message: "service worker exited" })));
     else if (task.timedOut) serviceFailure(task, encoder.encode(JSON.stringify({ kind: "timeout", message: "service request timed out" })));
-  closeServiceChannel(task);
-  removeServiceKey(task);
-  releaseServiceSlot(task);
+    closeServiceChannel(task);
+    removeServiceKey(task);
+    releaseServiceSlot(task);
     activeService = null;
     startNextService();
   };
   worker.once("error", failed);
-  worker.once("exit", (code) => { if (code !== 0 && worker === serviceWorker) failed(); });
+  // `process.exit(0)` inside an allowed service is still an unexpected host
+  // loss when a request is active. Intentional termination removes these
+  // listeners first.
+  worker.once("exit", () => { if (worker === serviceWorker) failed(); });
   return worker;
 }
 
@@ -609,16 +612,16 @@ function startNextService(): void {
   });
 }
 
-function enqueueService(cmd: Cmdish, operation: ServiceOperationRuntime, request: unknown, channelKey: number | null, channelEvent: string | null): void {
-  const key = typeof cmd.key === "string" ? cmd.key : null;
+function enqueueService(cmd: Cmdish, operation: ServiceOperationRuntime, request: unknown, channelKey: number | null, channelEvent: string | null): boolean {
+  const key = typeof cmd.key === "string" && cmd.key.length > 0 ? cmd.key : null;
   if (key !== null && serviceTasksByKey.has(key)) {
-    dispatch(bytesMsg(cmd.errKind as string, encoder.encode(JSON.stringify({ kind: "duplicate_key", message: `service key ${key} is already live` }))));
-    return;
+    dispatch(bytesMsg(cmd.errKind as string, encoder.encode("rejected")));
+    return false;
   }
   const engineIndex = serviceRequestSlots.findIndex((slot) => slot === null);
   if (engineIndex < 0) {
     dispatch(bytesMsg(cmd.errKind as string, encoder.encode(JSON.stringify({ kind: "service_host", message: "more than 16 service requests are live" }))));
-    return;
+    return false;
   }
   const task: ServiceTask = {
     id: nextServiceId++, cmd, operation, request, channelKey, channelEvent,
@@ -629,7 +632,7 @@ function enqueueService(cmd: Cmdish, operation: ServiceOperationRuntime, request
   serviceRequestSlots[engineIndex] = task;
   if (key !== null) serviceTasksByKey.set(key, task);
   serviceQueue.push(task);
-  startNextService();
+  return true;
 }
 
 function cancelService(key: string): boolean {
@@ -688,10 +691,17 @@ function performCmd(cmd: Cmdish): void {
         if (persistErr) dispatch(bytesMsg(persistErr, encoder.encode("rejected")));
       }
       return;
-    case "channel_open":
-      serviceChannels.set(cmd.key as number, cmd.eventKind as string);
-      say(`cmd channel_open key=${cmd.key} event=${cmd.eventKind}`);
+    case "channel_open": {
+      const channelKey = cmd.key as number;
+      const eventKind = cmd.eventKind as string;
+      if (!Number.isSafeInteger(channelKey) || channelKey < 1 || serviceChannels.has(channelKey)) {
+        dispatch(channelMsg(eventKind, Number.isSafeInteger(channelKey) && channelKey >= 1 ? channelKey : 0, "rejected"));
+        return;
+      }
+      serviceChannels.set(channelKey, eventKind);
+      say(`cmd channel_open key=${channelKey} event=${eventKind}`);
       return;
+    }
     case "channel_close": {
       const channelKey = cmd.key as number;
       const event = serviceChannels.get(channelKey);
@@ -717,7 +727,42 @@ function performCmd(cmd: Cmdish): void {
             ? reader.take(reader.bytes.length - reader.at)
             : decodeServiceValue(operation.request, reader);
         if (reader.at !== reader.bytes.length) throw new Error("trailing service request bytes");
-        enqueueService(cmd, operation, request, channelKey, channelEvent);
+        if (enqueueService(cmd, operation, request, channelKey, channelEvent)) startNextService();
+      } catch (error) {
+        say(`service ${operation.name} err 0.000ms`);
+        dispatch(bytesMsg(cmd.errKind as string, serviceErrorBytes(error)));
+      }
+      return;
+    }
+    case "service_stream_request": {
+      const operation = serviceOperations.get(cmd.name as string);
+      if (!operation || operation.stream === null) break;
+      const eventKind = cmd.eventKind as string;
+      const requestedChannelKey = cmd.channelKey as number;
+      try {
+        const reader = new ServiceReader(cmd.payload as Uint8Array);
+        const payloadChannelKey = reader.f64();
+        const representable = Number.isSafeInteger(requestedChannelKey) && requestedChannelKey >= 1;
+        if (!representable || payloadChannelKey !== requestedChannelKey) {
+          dispatch(channelMsg(eventKind, representable ? requestedChannelKey : 0, "rejected"));
+          dispatch(bytesMsg(cmd.errKind as string, encoder.encode("rejected")));
+          return;
+        }
+        if (serviceChannels.has(requestedChannelKey)) {
+          dispatch(channelMsg(eventKind, requestedChannelKey, "rejected"));
+          dispatch(bytesMsg(cmd.errKind as string, encoder.encode("rejected")));
+          return;
+        }
+        const request = operation.request.kind === "none"
+          ? undefined
+          : operation.request.kind === "bytes"
+            ? reader.take(reader.bytes.length - reader.at)
+            : decodeServiceValue(operation.request, reader);
+        if (reader.at !== reader.bytes.length) throw new Error("trailing service request bytes");
+        if (!enqueueService(cmd, operation, request, requestedChannelKey, eventKind)) return;
+        serviceChannels.set(requestedChannelKey, eventKind);
+        say(`cmd channel_open key=${requestedChannelKey} event=${eventKind}`);
+        startNextService();
       } catch (error) {
         say(`service ${operation.name} err 0.000ms`);
         dispatch(bytesMsg(cmd.errKind as string, serviceErrorBytes(error)));
@@ -911,7 +956,9 @@ function replayServiceEffect(effect: { kind: number; key: bigint; payload: Uint8
     if (effect.channelKind !== 0) serviceChannels.delete(key);
     return;
   }
-  throw new Error(`native dev --core replay does not simulate journal effect kind ${effect.kind}`);
+  throw new Error(
+    `native dev --core replays typed-service host/channel records only; this journal contains effect kind ${effect.kind}. Use native automate replay for full-runtime recordings.`,
+  );
 }
 
 function replaySession(): void {

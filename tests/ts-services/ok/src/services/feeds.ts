@@ -22,6 +22,11 @@ export function fail(): ParseResult {
   return sharedFailure();
 }
 
+export function exitClean(): ParseResult {
+  process.exit(0);
+  return { bytes: new Uint8Array(0), matches: false, facts: 0 };
+}
+
 /** @deadlineMs 75 */
 export function hang(cancel: ServiceCancellation): ParseResult {
   fs.writeFileSync("hang.started", "ready");

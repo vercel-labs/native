@@ -593,7 +593,13 @@ pub fn ServiceHost(comptime Registry: type) type {
         }
 
         fn cancellationPath(self: *Self, request_id: u32) ![]u8 {
-            const root = std.fs.path.dirname(self.executable) orelse ".";
+            const root = if (self.cwd.len > 0) self.cwd else ".";
+            const absolute_root = if (std.fs.path.isAbsolute(root))
+                null
+            else
+                try std.Io.Dir.cwd().realPathFileAlloc(self.io, root, self.allocator);
+            defer if (absolute_root) |path| self.allocator.free(path);
+            const resolved_root = absolute_root orelse root;
             const pid: u32 = switch (builtin.os.tag) {
                 .windows => std.os.windows.GetCurrentProcessId(),
                 .wasi, .freestanding, .emscripten => 0,
@@ -602,7 +608,7 @@ pub fn ServiceHost(comptime Registry: type) type {
             return std.fmt.allocPrint(
                 self.allocator,
                 "{s}{c}.native-service-cancel-{d}-{x}-{d}",
-                .{ root, std.fs.path.sep, pid, @intFromPtr(self), request_id },
+                .{ resolved_root, std.fs.path.sep, pid, @intFromPtr(self), request_id },
             );
         }
     };
@@ -658,6 +664,29 @@ test "service host binding is lazy and shuts down without spawning" {
     try std.testing.expect(bound.poll_fn != null);
     try std.testing.expect(bound.shutdown_fn != null);
     try std.testing.expect(bound.reject_duplicate_keys);
+}
+
+test "service cancellation markers live under the writable service cwd" {
+    const Registry = struct {
+        pub const protocol_version: u8 = 3;
+        pub const contract_fingerprint = [_]u8{0} ** 32;
+        pub const Operation = struct { name: []const u8, index: u16, deadline_ms: ?u32, cancellable: bool, streaming: bool, in_flight: u8 };
+        pub fn indexOf(_: []const u8) ?u16 {
+            return null;
+        }
+        pub fn operationAt(_: u16) ?Operation {
+            return null;
+        }
+    };
+    const Host = ServiceHost(Registry);
+    const writable_root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(writable_root);
+    var host = Host.init(std.testing.allocator, std.testing.io, "read-only-package/app_services", ".", null);
+    const path = try host.cancellationPath(7);
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(std.fs.path.isAbsolute(path));
+    try std.testing.expect(std.mem.startsWith(u8, path, writable_root));
+    try std.testing.expectEqual(std.fs.path.sep, path[writable_root.len]);
 }
 
 test "service environment allowlist exposes authority without SDK internals" {

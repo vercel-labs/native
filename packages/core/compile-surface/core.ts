@@ -289,6 +289,18 @@ export type CmdData =
       readonly typedService: boolean;
       readonly payload: Uint8Array;
     }
+  | {
+      readonly op: "service_stream_request";
+      readonly name: string;
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly typedService: true;
+      readonly channelKey: number;
+      readonly eventKind: string;
+      readonly maxPending: number;
+      readonly payload: Uint8Array;
+    }
   | { readonly op: "cancel"; readonly key: string }
   | {
       readonly op: "read_file";
@@ -578,18 +590,18 @@ export const Cmd = {
     route: { readonly key?: string; readonly ok: string; readonly err: string; readonly event: string },
     maxPending: number,
   ): CmdData {
-    return Cmd.batch([
-      { op: "channel_open", key: channelKey, eventKind: route.event, maxPending },
-      {
-        op: "request",
-        name,
-        key: route.key ?? "",
-        okKind: route.ok,
-        errKind: route.err,
-        typedService: true,
-        payload: serviceConcat([serviceF64Bytes(channelKey), payload]),
-      },
-    ]);
+    return {
+      op: "service_stream_request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      channelKey,
+      eventKind: route.event,
+      maxPending,
+      payload: serviceConcat([serviceF64Bytes(channelKey), payload]),
+    };
   },
 
   cancel(key: string): CmdData {

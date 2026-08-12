@@ -233,6 +233,17 @@ export type Cmd<M extends Msgish> = {
     readonly typedService: boolean;
     readonly payload: Uint8Array;
 } | {
+    readonly op: "service_stream_request";
+    readonly name: string;
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly typedService: true;
+    readonly channelKey: number;
+    readonly eventKind: string;
+    readonly maxPending: number;
+    readonly payload: Uint8Array;
+} | {
     readonly op: "cancel";
     readonly key: string;
 } | {

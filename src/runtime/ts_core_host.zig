@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 3) onto the real effect engine
+//! emits (`cmd_format_version` 4) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -1191,7 +1191,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
                         const event_tag = takeByte(cmd, &at);
                         const max_pending = takeByte(cmd, &at);
-                        issueChannelOpen(fx, key_value, event_tag, max_pending);
+                        _ = issueChannelOpen(fx, key_value, event_tag, max_pending);
                     },
                     // channel_close [op][key f64 LE]
                     0x16 => {
@@ -1398,6 +1398,23 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // dock_presence [op][visible u8]
                     0x22 => fx.setDockPresence(takeByte(cmd, &at) != 0),
+                    // service_stream_request [op][channel_key f64 LE]
+                    //                        [event_tag][max_pending]
+                    //                        [name_len][name][key_len][key]
+                    //                        [ok_tag][err_tag]
+                    //                        [payload_len u32 LE][payload]
+                    0x23 => {
+                        const channel_bits = takeBytes(cmd, &at, 8);
+                        const channel_value: f64 = @bitCast(std.mem.readInt(u64, channel_bits[0..8], .little));
+                        const event_tag = takeByte(cmd, &at);
+                        const max_pending = takeByte(cmd, &at);
+                        const name = takeShortBytes(cmd, &at);
+                        const key = takeShortBytes(cmd, &at);
+                        const ok_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const payload = takeLongBytes(cmd, &at);
+                        issueServiceStreamRequest(fx, name, key, ok_tag, err_tag, channel_value, event_tag, max_pending, payload);
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1988,22 +2005,22 @@ pub fn TsCoreHost(comptime core: type) type {
             key_value: f64,
             event_tag: u8,
             max_pending: u8,
-        ) void {
+        ) bool {
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
             if (!representable) {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
-                return;
+                return false;
             }
             const key: u64 = @intFromFloat(key_value);
             if (findChannel(key) != null) {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return;
+                return false;
             }
             const index = freeChannelIndex() orelse {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return;
+                return false;
             };
             const entry = &channels[index];
             entry.used = true;
@@ -2014,6 +2031,11 @@ pub fn TsCoreHost(comptime core: type) type {
                 .on_event = channelEventMsg,
                 .max_pending = max_pending,
             });
+            // A non-null lookup means the engine accepted the occupancy in
+            // both live execution and replay (whose accepted handle is inert).
+            // Validation and capacity refusals stage their rejection without
+            // leaving an open slot.
+            return fx.channelHandle(key) != null;
         }
 
         fn findChannel(key: u64) ?usize {
@@ -2329,12 +2351,18 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         }
 
-        /// Issue (or replace) a routed request. Keyed requests reuse
-        /// their live table entry — re-routing the tags in place while
-        /// the engine replaces the in-flight call under the same engine
-        /// key. Unkeyed requests (`key.len == 0`) each take a fresh
-        /// entry: nothing can replace or cancel them.
+        /// Issue (or replace) a routed request. Raw keyed requests reuse their
+        /// live table entry when the bound host supports replacement. Typed
+        /// services and reject-on-duplicate host bindings refuse before
+        /// touching the original entry, so its eventual terminal still owns
+        /// the route and table slot it started with. Unkeyed requests
+        /// (`key.len == 0`) each take a fresh entry: nothing can replace or
+        /// cancel them.
         fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, typed_service: bool, payload: []const u8) void {
+            if (key.len > 0 and findRequest(key) != null and (typed_service or fx.rejectsDuplicateHostRequestKeys())) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
             const index = blk: {
                 if (key.len > 0) {
                     if (findRequest(key)) |existing| break :blk existing;
@@ -2365,6 +2393,59 @@ pub fn TsCoreHost(comptime core: type) type {
                 .payload = payload,
                 .on_result = hostResultMsg,
             });
+        }
+
+        /// Streaming services are one admission, not a channel-open/request
+        /// batch. A duplicate route key or an already-open channel rejects
+        /// before either table changes; otherwise the ordinary channel and
+        /// request issuers retain their journal/replay behavior. An engine-side
+        /// channel refusal is followed by the service err arm's matching
+        /// rejection without starting the service transport.
+        fn issueServiceStreamRequest(
+            fx: *Fx,
+            name: []const u8,
+            key: []const u8,
+            ok_tag: u8,
+            err_tag: u8,
+            channel_value: f64,
+            event_tag: u8,
+            max_pending: u8,
+            payload: []const u8,
+        ) void {
+            if (key.len > 0 and findRequest(key) != null) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            // Fail the existing request-table bound before opening a channel;
+            // an admission failure must not leave an orphaned stream.
+            if (freeRequestIndex() == null) {
+                @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
+            }
+
+            const channel_key = exactEngineKey(channel_value);
+            if (channel_key) |value| {
+                // `findChannel` covers every TS bridge occupancy, including a
+                // rejected terminal waiting to drain. `channelHandle` also
+                // sees an open embedder-owned channel and replay's parked
+                // occupancy. Never let this service acquire either one.
+                if (findChannel(value) != null or fx.channelHandle(value) != null) {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = value, .kind = .rejected }));
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                }
+            }
+
+            // Validation/table refusals generated by the bridge are final for
+            // this combined command, so no service request may follow them.
+            if (!issueChannelOpen(fx, channel_value, event_tag, max_pending)) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            issueRequest(fx, name, key, ok_tag, err_tag, true, payload);
+        }
+
+        fn stageRequestRejected(fx: *Fx, err_tag: u8) void {
+            fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
         }
 
         fn findRequest(key: []const u8) ?usize {

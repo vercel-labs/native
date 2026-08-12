@@ -55,6 +55,9 @@ fn command(name: []const u8) ?core.Msg {
     if (std.mem.eql(u8, name, "service.stream")) return .stream;
     if (std.mem.eql(u8, name, "service.stream-hang")) return .stream_hang;
     if (std.mem.eql(u8, name, "service.cancel-stream")) return .cancel_stream;
+    if (std.mem.eql(u8, name, "service.duplicate-parse")) return .duplicate_parse;
+    if (std.mem.eql(u8, name, "service.unkeyed-parse")) return .unkeyed_parse;
+    if (std.mem.eql(u8, name, "service.duplicate-stream")) return .duplicate_stream;
     return null;
 }
 
@@ -190,6 +193,13 @@ const Harness = struct {
         try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 1), Bridge.model().successes);
         try std.testing.expect(!Bridge.model().failed);
     }
+
+    fn settleCounts(self: *Harness, successes: i64, failures: i64) !void {
+        while (Bridge.model().successes < successes or Bridge.model().failures < failures) {
+            try self.waitPending();
+            try self.wake();
+        }
+    }
 };
 
 fn killChild(id: std.process.Child.Id) void {
@@ -251,6 +261,36 @@ test "ordinary TypeScript service success and kind-tagged throw route through Ms
     try std.testing.expect(Bridge.model().failed);
     try std.testing.expect(std.mem.indexOf(u8, Bridge.model().bytes, "\"kind\":\"fixture_failure\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, Bridge.model().bytes, "\"message\":\"requested failure\"") != null);
+}
+
+test "duplicate typed service keys reject without disturbing the original request" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.duplicate-parse");
+    try h.settleCounts(2, 1);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().failures), 1), Bridge.model().failures);
+}
+
+test "unkeyed typed service requests each receive an independent slot" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.unkeyed-parse");
+    try h.settleCounts(3, 0);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().successes), 3), Bridge.model().successes);
+}
+
+test "duplicate streaming channel admission rejects the newcomer without hijacking the original" {
+    const h = try Harness.create(null);
+    defer h.destroy();
+    try h.settleBoot();
+
+    try h.menu("service.duplicate-stream");
+    try h.settleCounts(2, 1);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chunks), 3), Bridge.model().chunks);
 }
 
 test "kill during a request fails it and the next request starts a fresh host" {
