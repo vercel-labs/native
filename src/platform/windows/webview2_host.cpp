@@ -519,6 +519,11 @@ struct NativeView {
      * the presenter can reject a patch and request a resync. */
     bool gpu_force_full_repaint_pending = false;
     uint64_t gpu_last_emit_ns = 0;
+    /* The pacing interval the pending emission was scheduled against:
+     * kGpuOccludedHeartbeatNs while parked, the frame interval otherwise.
+     * Reveal paths supersede only a parked deadline (see the WM_SIZE
+     * handler); re-arming a grid-paced one just pushes the frame out. */
+    uint64_t gpu_emit_pace_ns = 0;
     uint64_t gpu_frame_index = 0;
     double gpu_emitted_width = 0;
     double gpu_emitted_height = 0;
@@ -3113,6 +3118,10 @@ static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
     /* Nearest-millisecond rounding preserves a 240 Hz grid as a 4 ms wait;
      * ceiling it to 5 ms would impose an artificial 200 Hz cap. */
     const DWORD delay_ms = static_cast<DWORD>((delay_ns + 500000ull) / 1000000ull);
+    /* Remember which cadence this deadline was placed on, so a reveal can
+     * tell a parked heartbeat emission (worth superseding) from one already
+     * due on the frame grid (worth leaving alone). */
+    view.gpu_emit_pace_ns = pace_ns;
     /* The generation fences a re-arm against the timer already in flight:
      * a callback that fires after cancellation posts a stale generation the
      * UI thread drops, so a superseded deadline can never emit a frame. */
@@ -6000,12 +6009,24 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                  * one-shot timer. SetTimer with the same id REPLACES the
                  * pending timer, so re-arming at the frame-grid delay
                  * (the last emit is at least a heartbeat old, so that
-                 * delay computes to zero) is a clean supersede. */
+                 * delay computes to zero) is a clean supersede.
+                 *
+                 * Only a PARKED deadline is worth superseding. WM_SIZE also
+                 * arrives on every step of a live resize drag, and re-arming
+                 * a grid-paced emission there discards a frame that was
+                 * already due and starts its wait over — so a drag whose
+                 * steps outpace the frame interval keeps resetting the
+                 * deadline just before it fires, and most emissions never
+                 * happen at all. */
                 if (wparam != SIZE_MINIMIZED) {
                     for (auto &view_entry : host->native_views) {
                         NativeView &surface = view_entry.second;
                         if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
                         if (GetAncestor(surface.hwnd, GA_ROOT) != hwnd) continue;
+                        /* Only a PARKED deadline is worth superseding. One
+                         * already due on the frame grid would just be pushed
+                         * further out by the re-arm. */
+                        if (surface.gpu_emit_pace_ns <= gpuSurfaceFrameIntervalNs(surface)) continue;
                         cancelGpuSurfaceFrameEmission(surface);
                         gpuSurfaceScheduleFrameEmission(host, surface);
                     }
