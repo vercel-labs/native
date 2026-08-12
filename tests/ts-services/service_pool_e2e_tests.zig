@@ -360,6 +360,54 @@ test "in-process stream chunks are live mid-operation and cancel closes the stre
     try std.testing.expectEqual(@as(u64, 0), h.transport.poisonedCount());
 }
 
+test "a streaming completion claimed at the grace boundary still drains" {
+    const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 1 });
+    defer d.destroy();
+    d.pool.setRequestTimeoutMs(25);
+
+    var barrier: native_sdk.service_pool.TestCompletionBarrier = .{};
+    d.pool.setCompletionBarrierForTesting(&barrier);
+
+    const Channels = struct {
+        fn acquire(context: *anyopaque, key: u64) ?native_sdk.ChannelHandle {
+            _ = context;
+            _ = key;
+            // A dead handle is sufficient here: the regression concerns the
+            // relay's final drain, not delivery into Effects.
+            return .{};
+        }
+    };
+    (d.binding.bind_channels_fn orelse unreachable)(d.binding.context, .{
+        .context = d,
+        .acquire_fn = Channels.acquire,
+    });
+
+    var payload_buffer: [64]u8 = undefined;
+    std.mem.writeInt(u64, payload_buffer[0..8], @bitCast(@as(f64, 1)), .little);
+    const request_payload = encodeParseRequest(payload_buffer[8..], "feed");
+    d.request("feeds.streamPark", 81, payload_buffer[0 .. 8 + request_payload.len]);
+
+    const claim_deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .raw = std.Io.Duration.fromSeconds(2),
+        .clock = .awake,
+    });
+    barrier.claimed.waitTimeout(std.testing.io, .{ .deadline = claim_deadline }) catch return error.TestTimedOut;
+
+    // Hold `.completing` past the grace deadline. The supervisor's poison
+    // CAS must lose, then retain the stream in its polling path instead of
+    // repeatedly continuing above it.
+    try sleepMs(native_sdk.service_pool.cooperative_cancel_grace_ms + 50);
+    barrier.release.set(std.testing.io);
+
+    try d.awaitCompletionsWithin(1, 2_000);
+    const timed = d.takeCompletions();
+    defer DirectPool(ServiceCarrier).freeCompletions(timed);
+    try std.testing.expectEqual(@as(u64, 81), timed[0].key);
+    try std.testing.expect(!timed[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, timed[0].bytes, "\"kind\":\"timeout\"") != null);
+    try std.testing.expectEqual(@as(u64, 0), d.pool.poisonedCount());
+}
+
 test "in-process deadlines include time spent queued behind another operation" {
     // One worker reproduces the child carrier's serialization exactly: the
     // probe's deadline burns while it queues behind the blocker.

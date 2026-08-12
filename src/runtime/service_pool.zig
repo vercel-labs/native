@@ -79,6 +79,15 @@ pub const PoolOptions = struct {
     max_workers: ?usize = null,
 };
 
+/// Test-only synchronization at the completion ownership handoff. Production
+/// pool layouts contain no pointer to this barrier (`builtin.is_test` gates
+/// the field); the end-to-end suite uses it to make grace-boundary races
+/// deterministic instead of depending on scheduler timing.
+pub const TestCompletionBarrier = struct {
+    claimed: std.Io.Event = .unset,
+    release: std.Io.Event = .unset,
+};
+
 pub fn ServicePool(comptime Registry: type) type {
     return struct {
         const Self = @This();
@@ -192,6 +201,7 @@ pub fn ServicePool(comptime Registry: type) type {
         waking: usize = 0,
         waking_condition: std.Io.Condition = .init,
         poisoned_total: u64 = 0,
+        test_completion_barrier: if (builtin.is_test) ?*TestCompletionBarrier else void = if (builtin.is_test) null else {},
 
         pub fn init(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8, options: PoolOptions) Self {
             return .{ .allocator = allocator, .io = io, .cwd = cwd, .options = options };
@@ -219,6 +229,14 @@ pub fn ServicePool(comptime Registry: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             self.request_timeout_ms = timeout_ms;
+        }
+
+        /// Pause after a dispatch claims `.completing`, before its final stream
+        /// drain. Tests install this before the first request; it is unavailable
+        /// in production builds and adds no field to their pool layout.
+        pub fn setCompletionBarrierForTesting(self: *Self, barrier: *TestCompletionBarrier) void {
+            if (comptime !builtin.is_test) @compileError("completion barriers are test-only");
+            self.test_completion_barrier = barrier;
         }
 
         /// Diagnostic visibility: whether any pool thread was ever started.
@@ -756,6 +774,12 @@ pub fn ServicePool(comptime Registry: type) type {
                 worker.returned_flag.store(true, .release);
                 return;
             }
+            if (comptime builtin.is_test) {
+                if (self.test_completion_barrier) |barrier| {
+                    barrier.claimed.set(self.io);
+                    barrier.release.waitUncancelable(self.io);
+                }
+            }
 
             var completion: ?Result = null;
             if (work.answer) {
@@ -967,7 +991,8 @@ pub fn ServicePool(comptime Registry: type) type {
                         if (active.grace_deadline) |grace| {
                             if (std.Io.Clock.Timestamp.compare(now, .gte, grace) and !active.retired) {
                                 // The token was ignored through the grace:
-                                // abandon this instance.
+                                // abandon this instance only while dispatch
+                                // still owns `.running`.
                                 if (self.poisonWorkerLocked(worker, .running)) {
                                     if (active.timed_out and active.answer and !active.cancelled) {
                                         if (self.allocator.dupe(u8, timeout_error)) |copy| {
@@ -977,10 +1002,17 @@ pub fn ServicePool(comptime Registry: type) type {
                                     }
                                     active.retired = true;
                                     any_abandoned = true;
+                                    continue;
                                 }
-                                continue;
+                                // Completion (or the trap sink) claimed the
+                                // request first. It owns teardown now; fall
+                                // through so a completing stream is still
+                                // tailed and can finish its final-drain wait.
+                                // Its owner signals the supervisor again when
+                                // finishing/retirement changes state.
+                            } else if (!active.retired) {
+                                next_deadline = earlier(next_deadline, grace);
                             }
-                            if (!active.retired) next_deadline = earlier(next_deadline, grace);
                         } else if (!active.cancel_published) {
                             if (std.Io.Clock.Timestamp.compare(now, .gte, active.deadline)) {
                                 active.timed_out = true;
