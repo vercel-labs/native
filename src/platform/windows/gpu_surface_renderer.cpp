@@ -1413,12 +1413,37 @@ private:
         image_bitmaps_.erase(found);
     }
 
+    /* One device context, shared by every surface on the renderer. It
+     * carries no per-surface state of its own: each render and each paint
+     * sets its target and DPI before drawing (`beginOn`). */
+    ID2D1DeviceContext *ctx() const { return renderer_->d2dContext(); }
+
+    /* Point the shared context at one of this surface's bitmaps, with
+     * this surface's DPI, and open a draw. Every BeginDraw in this file
+     * goes through here so the target can never be whatever the previous
+     * surface left bound. */
+    void beginOn(ID2D1Bitmap1 *target) {
+        ctx()->SetTarget(target);
+        ctx()->SetDpi(static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
+        ctx()->BeginDraw();
+        ctx()->SetTransform(D2D1::Matrix3x2F::Identity());
+    }
+
+    /* Close the draw and unbind. Unbinding matters: a bound target holds
+     * a reference, and `ResizeBuffers` fails while any reference to a
+     * back buffer is outstanding. */
+    HRESULT endOn() {
+        const HRESULT result = ctx()->EndDraw();
+        ctx()->SetTarget(nullptr);
+        return result;
+    }
+
     void releaseDeviceResources(bool drop_retained) {
         releaseImageBitmaps();
         releaseCom(blur_snapshot_);
+        releaseCom(readback_bitmap_);
         releaseCom(backing_bitmap_);
-        releaseCom(backing_target_);
-        releaseCom(window_target_);
+        releaseSwapChain();
         content_valid_ = false;
         if (drop_retained) {
             retained_valid_ = false;
@@ -1427,27 +1452,83 @@ private:
         }
     }
 
-    bool ensureWindowTarget() {
-        if (window_target_) return true;
-        RECT client = {};
-        if (!hwnd_ || !GetClientRect(hwnd_, &client)) return false;
-        const UINT width = static_cast<UINT>(std::max<LONG>(1, client.right - client.left));
-        const UINT height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
-        const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_HARDWARE,
+    void releaseSwapChain() {
+        /* Order matters: the D2D bitmap holds the back buffer, and the
+         * swap chain cannot be released cleanly underneath it. */
+        if (ctx()) ctx()->SetTarget(nullptr);
+        releaseCom(swap_bitmap_);
+        releaseCom(swap_chain_);
+        swap_width_ = 0;
+        swap_height_ = 0;
+    }
+
+    /* FLIP_SEQUENTIAL, not FLIP_DISCARD: the renderer's incremental path
+     * repaints only damaged regions, so undamaged pixels must survive
+     * into the next frame. DISCARD would silently corrupt patch frames.
+     * SCALING_NONE keeps Windows from stretching stale content while a
+     * drag outruns the buffer resize. */
+    bool ensureSwapChain(UINT width, UINT height) {
+        if (swap_chain_ && swap_width_ == width && swap_height_ == height) return true;
+        if (swap_chain_) return resizeSwapChain(width, height);
+        if (!hwnd_ || !renderer_->dxgiFactory() || !renderer_->d3dDevice()) return false;
+
+        DXGI_SWAP_CHAIN_DESC1 desc = {};
+        desc.Width = width;
+        desc.Height = height;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.Scaling = DXGI_SCALING_NONE;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        /* Top-level layered windows are refused long before this
+         * renderer, so the surface is always opaque. */
+        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        if (FAILED(renderer_->dxgiFactory()->CreateSwapChainForHwnd(
+                renderer_->d3dDevice(), hwnd_, &desc, nullptr, nullptr, &swap_chain_)) || !swap_chain_) {
+            releaseSwapChain();
+            return false;
+        }
+        /* The host owns Alt+Enter; DXGI's own handler would fight it. */
+        renderer_->dxgiFactory()->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
+        swap_width_ = width;
+        swap_height_ = height;
+        return ensureSwapBitmap();
+    }
+
+    bool resizeSwapChain(UINT width, UINT height) {
+        /* Every reference to the back buffer must be gone first. */
+        ctx()->SetTarget(nullptr);
+        releaseCom(swap_bitmap_);
+        if (FAILED(swap_chain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0))) {
+            releaseSwapChain();
+            return false;
+        }
+        swap_width_ = width;
+        swap_height_ = height;
+        return ensureSwapBitmap();
+    }
+
+    bool ensureSwapBitmap() {
+        if (swap_bitmap_) return true;
+        IDXGISurface *surface = nullptr;
+        if (FAILED(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&surface))) || !surface) {
+            releaseCom(surface);
+            return false;
+        }
+        const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-            static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_),
-            D2D1_RENDER_TARGET_USAGE_NONE,
-            D2D1_FEATURE_LEVEL_DEFAULT);
-        const D2D1_HWND_RENDER_TARGET_PROPERTIES hwnd_properties = D2D1::HwndRenderTargetProperties(
-            hwnd_, D2D1::SizeU(width, height), D2D1_PRESENT_OPTIONS_NONE);
-        return SUCCEEDED(renderer_->d2dFactory()->CreateHwndRenderTarget(properties, hwnd_properties, &window_target_));
+            static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
+        const HRESULT result = ctx()->CreateBitmapFromDxgiSurface(surface, &properties, &swap_bitmap_);
+        releaseCom(surface);
+        return SUCCEEDED(result) && swap_bitmap_;
     }
 
     bool ensureTargets(double surface_width, double surface_height, double scale, uint32_t pixel_width, uint32_t pixel_height) {
         const bool profiling = gpuProfileActive();
         const GpuProfileSpan profile_span(profiling, &profile_targets_ns_);
-        const bool dimensions_changed = backing_target_ &&
+        const bool dimensions_changed = backing_bitmap_ &&
             (pixel_width_ != pixel_width || pixel_height_ != pixel_height || scale_ != scale ||
              surface_width_ != surface_width || surface_height_ != surface_height);
         if (profiling) {
@@ -1455,10 +1536,12 @@ private:
             profile_flushed_bitmaps_ = dimensions_changed ? image_bitmaps_.size() : 0;
         }
         if (dimensions_changed) {
+            /* Phase 2 keeps this teardown exactly as the blt-model path
+             * had it, so the presentation swap can be measured on its
+             * own. Phase 3 is what removes the image-cache flush. */
             releaseImageBitmaps();
             releaseCom(blur_snapshot_);
             releaseCom(backing_bitmap_);
-            releaseCom(backing_target_);
             content_valid_ = false;
         }
         scale_ = scale;
@@ -1467,27 +1550,24 @@ private:
         pixel_width_ = pixel_width;
         pixel_height_ = pixel_height;
 
-        if (window_target_) window_target_->SetDpi(static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
-        if (!ensureWindowTarget()) return false;
-        if (backing_target_) return true;
+        if (!renderer_->d2dContext()) return false;
+        if (backing_bitmap_) return true;
 
-        const D2D1_SIZE_F desired = D2D1::SizeF(static_cast<FLOAT>(surface_width_), static_cast<FLOAT>(surface_height_));
-        const D2D1_SIZE_U pixels = D2D1::SizeU(pixel_width_, pixel_height_);
-        const D2D1_PIXEL_FORMAT format = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
-        HRESULT result = window_target_->CreateCompatibleRenderTarget(
-            &desired, &pixels, &format, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_GDI_COMPATIBLE, &backing_target_);
-        if (SUCCEEDED(result) && backing_target_) {
-            backing_target_->SetDpi(static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
-        }
-        return SUCCEEDED(result) && backing_target_;
+        const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
+        const HRESULT result = ctx()->CreateBitmap(
+            D2D1::SizeU(pixel_width_, pixel_height_), nullptr, 0, properties, &backing_bitmap_);
+        return SUCCEEDED(result) && backing_bitmap_;
     }
 
     bool makeBrush(const Paint &paint, float opacity, ID2D1Brush **brush) {
-        if (!brush || !backing_target_) return false;
+        if (!brush || !backing_bitmap_) return false;
         *brush = nullptr;
         if (paint.kind == Paint::Kind::color) {
             ID2D1SolidColorBrush *solid = nullptr;
-            if (FAILED(backing_target_->CreateSolidColorBrush(d2dColor(paint.color, opacity), &solid))) return false;
+            if (FAILED(ctx()->CreateSolidColorBrush(d2dColor(paint.color, opacity), &solid))) return false;
             *brush = solid;
             return true;
         }
@@ -1502,11 +1582,11 @@ private:
         }
         ID2D1GradientStopCollection *collection = nullptr;
         ID2D1LinearGradientBrush *gradient = nullptr;
-        HRESULT result = backing_target_->CreateGradientStopCollection(
+        HRESULT result = ctx()->CreateGradientStopCollection(
             stops.data(), static_cast<UINT32>(stops.size()), D2D1_GAMMA_2_2,
             D2D1_EXTEND_MODE_CLAMP, &collection);
         if (SUCCEEDED(result)) {
-            result = backing_target_->CreateLinearGradientBrush(
+            result = ctx()->CreateLinearGradientBrush(
                 D2D1::LinearGradientBrushProperties(
                     D2D1::Point2F(paint.start.x, paint.start.y),
                     D2D1::Point2F(paint.end.x, paint.end.y)), collection, &gradient);
@@ -1557,7 +1637,7 @@ private:
                 releaseCom(brush);
                 return false;
             }
-            backing_target_->DrawLine(
+            ctx()->DrawLine(
                 D2D1::Point2F(command.shape.from.x, command.shape.from.y),
                 D2D1::Point2F(command.shape.to.x, command.shape.to.y),
                 brush, stroke_width, command.cap == 1 ? round_stroke_ : butt_stroke_);
@@ -1573,9 +1653,9 @@ private:
             ID2D1StrokeStyle *stroke_style = command.shape.kind == Shape::Kind::stroke_rect
                 ? rect_stroke_
                 : (command.cap == 1 ? round_stroke_ : butt_stroke_);
-            backing_target_->DrawGeometry(geometry, brush, stroke_width, stroke_style);
+            ctx()->DrawGeometry(geometry, brush, stroke_width, stroke_style);
         } else {
-            backing_target_->FillGeometry(geometry, brush);
+            ctx()->FillGeometry(geometry, brush);
         }
         releaseCom(geometry);
         releaseCom(brush);
@@ -1583,7 +1663,7 @@ private:
     }
 
     bool ensureImageBitmap(uint64_t id, ID2D1Bitmap **bitmap) {
-        if (!bitmap || !backing_target_) return false;
+        if (!bitmap || !backing_bitmap_) return false;
         *bitmap = nullptr;
         auto resource_found = image_cache_.find(id);
         if (resource_found == image_cache_.end() || !resource_found->second) return true;
@@ -1602,7 +1682,7 @@ private:
          * live image because `ensureTargets` dropped the whole map. */
         const bool profiling = gpuProfileActive();
         const uint64_t upload_begin_ns = profiling ? gpuClockNs() : 0;
-        HRESULT result = backing_target_->CreateBitmap(
+        HRESULT result = ctx()->CreateBitmap(
             D2D1::SizeU(resource->width, resource->height), resource->bgra.data(),
             resource->width * 4, properties, &cached.bitmap);
         if (profiling) {
@@ -1656,7 +1736,7 @@ private:
             std::max(command.image.radius.bottom_right, command.image.radius.bottom_left));
         if (max_radius > 0) {
             if (!makeRoundedGeometry(renderer_->d2dFactory(), requested, command.image.radius, &mask) ||
-                FAILED(backing_target_->CreateLayer(nullptr, &layer))) {
+                FAILED(ctx()->CreateLayer(nullptr, &layer))) {
                 releaseCom(mask);
                 releaseCom(layer);
                 return false;
@@ -1666,19 +1746,19 @@ private:
             parameters.geometricMask = mask;
             parameters.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
             parameters.opacity = 1.0f;
-            backing_target_->PushLayer(parameters, layer);
+            ctx()->PushLayer(parameters, layer);
         } else if (command.image.fit == 2) {
             /* Cover expands one destination axis past the requested frame.
              * A zero-radius image still has a rectangular destination mask;
              * without this clip the expanded bitmap paints over siblings. */
-            backing_target_->PushAxisAlignedClip(d2dRect(requested), D2D1_ANTIALIAS_MODE_ALIASED);
+            ctx()->PushAxisAlignedClip(d2dRect(requested), D2D1_ANTIALIAS_MODE_ALIASED);
         }
-        backing_target_->DrawBitmap(bitmap, d2dRect(destination),
+        ctx()->DrawBitmap(bitmap, d2dRect(destination),
             clamp01(command.opacity * command.image.opacity),
             command.image.sampling == 0 ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
             d2dRect(source));
-        if (layer) backing_target_->PopLayer();
-        else if (command.image.fit == 2) backing_target_->PopAxisAlignedClip();
+        if (layer) ctx()->PopLayer();
+        else if (command.image.fit == 2) ctx()->PopAxisAlignedClip();
         releaseCom(layer);
         releaseCom(mask);
         return true;
@@ -1818,7 +1898,7 @@ private:
         IDWriteTextFormat *format = nullptr;
         ID2D1SolidColorBrush *brush = nullptr;
         if (!createTextFormat(text, &format) ||
-            FAILED(backing_target_->CreateSolidColorBrush(d2dColor(text.color, command.opacity), &brush))) {
+            FAILED(ctx()->CreateSolidColorBrush(d2dColor(text.color, command.opacity), &brush))) {
             releaseCom(brush);
             releaseCom(format);
             return false;
@@ -1835,7 +1915,7 @@ private:
             UINT32 actual = 0;
             if (SUCCEEDED(result)) result = layout->GetLineMetrics(&metrics, 1, &actual);
             if (SUCCEEDED(result) && actual == 1) {
-                backing_target_->DrawTextLayout(D2D1::Point2F(x, baseline - metrics.baseline), layout, brush,
+                ctx()->DrawTextLayout(D2D1::Point2F(x, baseline - metrics.baseline), layout, brush,
                     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             }
             releaseCom(layout);
@@ -1867,7 +1947,7 @@ private:
                 glyph_run.glyphIndices = &glyph_index;
                 glyph_run.glyphAdvances = &glyph_advance;
                 glyph_run.glyphOffsets = &glyph_offset;
-                backing_target_->DrawGlyphRun(
+                ctx()->DrawGlyphRun(
                     D2D1::Point2F(glyph.x, glyph.baseline), &glyph_run, brush, DWRITE_MEASURING_MODE_NATURAL);
             }
             if (result) {
@@ -1916,7 +1996,7 @@ private:
                 IDWriteTextLayout *layout = nullptr;
                 result = createTextLayout(value, format, width, height, &layout);
                 if (result) {
-                    backing_target_->DrawTextLayout(
+                    ctx()->DrawTextLayout(
                         D2D1::Point2F(text.origin.x, text.origin.y - text.size), layout, brush,
                         D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
                 }
@@ -1956,12 +2036,12 @@ private:
             Color layer_color = effect.color;
             layer_color.a *= static_cast<float>(index + 1) / weight_sum;
             if (!makeRoundedGeometry(renderer_->d2dFactory(), rect, radius, &geometry) ||
-                FAILED(backing_target_->CreateSolidColorBrush(d2dColor(layer_color, command.opacity), &brush))) {
+                FAILED(ctx()->CreateSolidColorBrush(d2dColor(layer_color, command.opacity), &brush))) {
                 releaseCom(brush);
                 releaseCom(geometry);
                 return false;
             }
-            backing_target_->FillGeometry(geometry, brush);
+            ctx()->FillGeometry(geometry, brush);
             releaseCom(brush);
             releaseCom(geometry);
         }
@@ -1970,11 +2050,11 @@ private:
 
     bool ensureBlurSnapshot() {
         if (blur_snapshot_) return true;
-        if (!backing_target_ || pixel_width_ == 0 || pixel_height_ == 0) return false;
+        if (!backing_bitmap_ || pixel_width_ == 0 || pixel_height_ == 0) return false;
         const D2D1_BITMAP_PROPERTIES properties = D2D1::BitmapProperties(
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
             static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
-        return SUCCEEDED(backing_target_->CreateBitmap(
+        return SUCCEEDED(ctx()->CreateBitmap(
             D2D1::SizeU(pixel_width_, pixel_height_), nullptr, 0, properties, &blur_snapshot_)) && blur_snapshot_;
     }
 
@@ -1995,13 +2075,15 @@ private:
 
     bool resumeAndDrawBlur(const Command &command, Rect target) {
         auto resume = [&] {
-            backing_target_->BeginDraw();
-            backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
+            ctx()->BeginDraw();
+            ctx()->SetTransform(D2D1::Matrix3x2F::Identity());
         };
 
-        releaseCom(backing_bitmap_);
-        if (FAILED(backing_target_->GetBitmap(&backing_bitmap_)) || !backing_bitmap_ ||
-            !ensureBlurSnapshot() || FAILED(blur_snapshot_->CopyFromBitmap(nullptr, backing_bitmap_, nullptr))) {
+        /* The backing surface is now the context's bound target rather
+         * than something to fetch back out of it, so the backdrop copy
+         * reads it directly. */
+        if (!backing_bitmap_ || !ensureBlurSnapshot() ||
+            FAILED(blur_snapshot_->CopyFromBitmap(nullptr, backing_bitmap_, nullptr))) {
             resume();
             return false;
         }
@@ -2022,7 +2104,7 @@ private:
             DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
         ID2D1BitmapRenderTarget *temporary = nullptr;
         ID2D1Bitmap *blurred = nullptr;
-        HRESULT result = backing_target_->CreateCompatibleRenderTarget(
+        HRESULT result = ctx()->CreateCompatibleRenderTarget(
             &desired, &pixels, &format, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, &temporary);
         if (FAILED(result) || !temporary) {
             releaseCom(temporary);
@@ -2072,10 +2154,10 @@ private:
 
         resume();
         if (SUCCEEDED(result) && blurred) {
-            backing_target_->PushAxisAlignedClip(d2dRect(target), D2D1_ANTIALIAS_MODE_ALIASED);
-            backing_target_->DrawBitmap(blurred, d2dRect(target), opacity,
+            ctx()->PushAxisAlignedClip(d2dRect(target), D2D1_ANTIALIAS_MODE_ALIASED);
+            ctx()->DrawBitmap(blurred, d2dRect(target), opacity,
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
-            backing_target_->PopAxisAlignedClip();
+            ctx()->PopAxisAlignedClip();
         }
         releaseCom(sample_brush);
         releaseCom(blurred);
@@ -2091,9 +2173,9 @@ private:
                  * patch must cost no more than any other culled command. */
                 const Rect target = blurTarget(*command, outer_clip);
                 if (empty(target) || command->effect.blur <= 0 || command->opacity <= 0) continue;
-                const HRESULT segment = backing_target_->EndDraw();
+                const HRESULT segment = ctx()->EndDraw();
                 if (FAILED(segment)) {
-                    backing_target_->BeginDraw();
+                    ctx()->BeginDraw();
                     return false;
                 }
                 if (!resumeAndDrawBlur(*command, target)) return false;
@@ -2106,12 +2188,12 @@ private:
 
     bool drawCommand(const Command &command, const Rect *outer_clip) {
         if (outer_clip && !intersects(command.bounds, *outer_clip)) return true;
-        backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
-        if (outer_clip) backing_target_->PushAxisAlignedClip(d2dRect(*outer_clip), D2D1_ANTIALIAS_MODE_ALIASED);
-        if (command.has_clip) backing_target_->PushAxisAlignedClip(d2dRect(command.clip), D2D1_ANTIALIAS_MODE_ALIASED);
+        ctx()->SetTransform(D2D1::Matrix3x2F::Identity());
+        if (outer_clip) ctx()->PushAxisAlignedClip(d2dRect(*outer_clip), D2D1_ANTIALIAS_MODE_ALIASED);
+        if (command.has_clip) ctx()->PushAxisAlignedClip(d2dRect(command.clip), D2D1_ANTIALIAS_MODE_ALIASED);
         if (command.has_transform) {
             const Affine &value = command.transform;
-            backing_target_->SetTransform(D2D1::Matrix3x2F(value.a, value.b, value.c, value.d, value.tx, value.ty));
+            ctx()->SetTransform(D2D1::Matrix3x2F(value.a, value.b, value.c, value.d, value.tx, value.ty));
         }
         bool ok = false;
         switch (command.kind) {
@@ -2134,9 +2216,9 @@ private:
                 ok = false;
                 break;
         }
-        backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
-        if (command.has_clip) backing_target_->PopAxisAlignedClip();
-        if (outer_clip) backing_target_->PopAxisAlignedClip();
+        ctx()->SetTransform(D2D1::Matrix3x2F::Identity());
+        if (command.has_clip) ctx()->PopAxisAlignedClip();
+        if (outer_clip) ctx()->PopAxisAlignedClip();
         return ok;
     }
 
@@ -2187,30 +2269,29 @@ private:
 
     bool renderCommands(const std::vector<const Command *> &commands, const DecodedPacket &packet, Color clear, bool full_surface) {
         const GpuProfileSpan profile_span(gpuProfileActive(), &profile_render_ns_);
-        backing_target_->BeginDraw();
-        backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
+        beginOn(backing_bitmap_);
         bool ok = true;
         if (full_surface) {
-            backing_target_->Clear(d2dColor(clear));
+            ctx()->Clear(d2dColor(clear));
             ok = drawCommandList(commands, nullptr);
         } else if (packet.has_scissor) {
             std::vector<Rect> regions = packet.dirty_rects;
             if (regions.empty()) regions.push_back(packet.scissor);
             ID2D1SolidColorBrush *clear_brush = nullptr;
-            if (FAILED(backing_target_->CreateSolidColorBrush(d2dColor(clear), &clear_brush))) ok = false;
+            if (FAILED(ctx()->CreateSolidColorBrush(d2dColor(clear), &clear_brush))) ok = false;
             for (const Rect &source_region : regions) {
                 if (!ok) break;
                 Rect region = intersection(normalized(source_region), normalized(packet.scissor));
                 region = intersection(region, Rect{0, 0, static_cast<float>(surface_width_), static_cast<float>(surface_height_)});
                 if (empty(region)) continue;
-                backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
-                backing_target_->PushAxisAlignedClip(d2dRect(region), D2D1_ANTIALIAS_MODE_ALIASED);
+                ctx()->SetTransform(D2D1::Matrix3x2F::Identity());
+                ctx()->PushAxisAlignedClip(d2dRect(region), D2D1_ANTIALIAS_MODE_ALIASED);
                 /* Normal gpu_surface windows are opaque; source-over is
                  * therefore byte-equivalent to copy-clear here. Alpha
                  * top-level windows intentionally use the pixel path. */
-                backing_target_->FillRectangle(d2dRect(region), clear_brush);
-                backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
-                backing_target_->PopAxisAlignedClip();
+                ctx()->FillRectangle(d2dRect(region), clear_brush);
+                ctx()->SetTransform(D2D1::Matrix3x2F::Identity());
+                ctx()->PopAxisAlignedClip();
                 if (!drawCommandList(commands, &region)) { ok = false; break; }
             }
             releaseCom(clear_brush);
@@ -2219,26 +2300,36 @@ private:
              * supplied command list without clearing retained pixels. */
             ok = drawCommandList(commands, nullptr);
         }
-        const HRESULT end = backing_target_->EndDraw();
+        const HRESULT end = endOn();
         if (!ok) return false;
         if (FAILED(end)) {
             releaseDeviceResources(true);
             return false;
         }
-        releaseCom(backing_bitmap_);
-        if (FAILED(backing_target_->GetBitmap(&backing_bitmap_)) || !backing_bitmap_) {
-            releaseDeviceResources(true);
-            return false;
-        }
+        /* No GetBitmap round trip any more: `backing_bitmap_` is the
+         * target that was just drawn into, and it outlives this call. */
         content_valid_ = true;
         return true;
     }
 
     std::shared_ptr<GpuRendererImpl> renderer_;
     HWND hwnd_ = nullptr;
-    ID2D1HwndRenderTarget *window_target_ = nullptr;
-    ID2D1BitmapRenderTarget *backing_target_ = nullptr;
-    ID2D1Bitmap *backing_bitmap_ = nullptr;
+    /* The retained content surface. Device-owned (not target-owned as the
+     * old CreateCompatibleRenderTarget bitmap was), which is what lets the
+     * image cache outlive a resize in the next phase. */
+    ID2D1Bitmap1 *backing_bitmap_ = nullptr;
+    /* Presentation: the flip-model swap chain and a D2D view of its back
+     * buffer. CANNOT_DRAW because nothing ever samples from it -- it is
+     * written once per paint and handed to the compositor. */
+    IDXGISwapChain1 *swap_chain_ = nullptr;
+    ID2D1Bitmap1 *swap_bitmap_ = nullptr;
+    UINT swap_width_ = 0;
+    UINT swap_height_ = 0;
+    /* 1x1 CPU-readable staging bitmap for `readColorAt`. Replaces the
+     * GDI-interop read, which required the backing surface to be
+     * GDI_COMPATIBLE -- a constraint a device-context target cannot
+     * carry. See the comment there. */
+    ID2D1Bitmap1 *readback_bitmap_ = nullptr;
     ID2D1Bitmap *blur_snapshot_ = nullptr;
     ID2D1StrokeStyle *rect_stroke_ = nullptr;
     ID2D1StrokeStyle *butt_stroke_ = nullptr;
@@ -2267,6 +2358,10 @@ private:
     uint64_t profile_image_bytes_ = 0;
     size_t profile_flushed_bitmaps_ = 0;
     uint32_t profile_image_uploads_ = 0;
+    /* Present's own cost, split out of the paint span: with sync
+     * interval 0 and a two-deep flip queue this is where the UI thread
+     * waits for a free back buffer, and that wait is not copy work. */
+    uint64_t profile_swap_present_ns_ = 0;
     bool profile_target_rebuild_ = false;
 };
 
@@ -2478,99 +2573,164 @@ bool GpuSurfaceImpl::paint(const RECT *paint_rects, size_t paint_rect_count) {
      * bitmap yet, and an empty update region. Both report ok=1, so without
      * these a reducer averages them in and understates the copy. */
     const bool had_content = content_valid_ && backing_bitmap_ != nullptr;
+    profile_swap_present_ns_ = 0;
     const uint64_t begin_ns = gpuClockNs();
     const bool ok = paintRects(paint_rects, paint_rect_count);
     const uint64_t blit_ns = gpuClockNs() - begin_ns;
     GpuProfileLog::shared().line(
-        "paint seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu",
+        "paint seq=%llu ok=%d content=%d pw=%u ph=%u rects=%llu blit_us=%llu present_us=%llu",
         static_cast<unsigned long long>(profile_sequence_),
         ok ? 1 : 0,
         had_content ? 1 : 0,
         pixel_width_,
         pixel_height_,
         static_cast<unsigned long long>(paint_rect_count),
-        static_cast<unsigned long long>(gpuProfileMicros(blit_ns)));
+        static_cast<unsigned long long>(gpuProfileMicros(blit_ns)),
+        static_cast<unsigned long long>(gpuProfileMicros(profile_swap_present_ns_)));
     return ok;
 }
 
 bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count) {
     if (!content_valid_ || !backing_bitmap_) return true;
     if (paint_rect_count > 0 && paint_rects == nullptr) return false;
-    if (!ensureWindowTarget()) return false;
     RECT client = {};
-    if (!GetClientRect(hwnd_, &client)) return false;
+    if (!hwnd_ || !GetClientRect(hwnd_, &client)) return false;
     const UINT client_width = static_cast<UINT>(std::max<LONG>(1, client.right - client.left));
     const UINT client_height = static_cast<UINT>(std::max<LONG>(1, client.bottom - client.top));
-    const D2D1_SIZE_U current = window_target_->GetPixelSize();
-    if ((current.width != client_width || current.height != client_height) &&
-        FAILED(window_target_->Resize(D2D1::SizeU(client_width, client_height)))) {
+    if (!ensureSwapChain(client_width, client_height)) {
         releaseDeviceResources(true);
         return false;
     }
-    window_target_->SetDpi(static_cast<FLOAT>(96.0 * scale_), static_cast<FLOAT>(96.0 * scale_));
+
+    /* Phase 2 keeps `WM_PAINT` as the presentation trigger (the plan's
+     * option (a)): the host still invalidates and Windows still decides
+     * when to paint, and this call now ends in Present instead of a blt
+     * through the DWM redirection surface. Moving presentation into
+     * `present()` -- option (b) -- is a separate, deliberate change.
+     *
+     * The copy is FULL SURFACE, and the paint rects deliberately do not
+     * clip it. Under the blt model they could: the redirection surface
+     * persisted, so untouched pixels were last frame's. A flip-model back
+     * buffer does not persist -- with two buffers, the one being drawn
+     * holds the frame from TWO presents ago -- so a clipped copy leaves a
+     * stale alternating image outside the damage. Copying the whole
+     * retained surface is what makes the undamaged region correct, which
+     * is also the precondition `Present1` states for dirty rects.
+     *
+     * `CopyFromBitmap` would be the cheaper primitive but is not
+     * available here: it requires identical D2D pixel formats, and the
+     * backing surface is PREMULTIPLIED while a flip-model HWND swap
+     * chain's D2D view must be ALPHA_MODE_IGNORE. It returns E_INVALIDARG
+     * on that pair. Aligning the backing surface to IGNORE would fix the
+     * copy but changes the blend semantics every layer and opacity group
+     * in the display list renders under, which is not a trade to make for
+     * a presentation change. So: DrawBitmap, at 1:1 with nearest
+     * sampling, which costs one filtered-free full-surface pass. */
+    const D2D1_SIZE_U backing_pixels = backing_bitmap_->GetPixelSize();
+    const D2D1_SIZE_U swap_pixels = swap_bitmap_->GetPixelSize();
+    const bool exact = backing_pixels.width == swap_pixels.width && backing_pixels.height == swap_pixels.height;
     const float logical_client_width = static_cast<float>(client_width / scale_);
     const float logical_client_height = static_cast<float>(client_height / scale_);
-    window_target_->BeginDraw();
-    window_target_->SetTransform(D2D1::Matrix3x2F::Identity());
-    for (size_t index = 0; index < paint_rect_count; ++index) {
-        const RECT &paint_rect = paint_rects[index];
-        const Rect clip = {
-            static_cast<float>(paint_rect.left / scale_),
-            static_cast<float>(paint_rect.top / scale_),
-            static_cast<float>((paint_rect.right - paint_rect.left) / scale_),
-            static_cast<float>((paint_rect.bottom - paint_rect.top) / scale_),
-        };
-        if (empty(clip)) continue;
-        window_target_->PushAxisAlignedClip(d2dRect(clip), D2D1_ANTIALIAS_MODE_ALIASED);
-        window_target_->DrawBitmap(backing_bitmap_,
-            D2D1::RectF(0, 0, logical_client_width, logical_client_height), 1.0f,
-            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
-        window_target_->PopAxisAlignedClip();
+    beginOn(swap_bitmap_);
+    ctx()->DrawBitmap(backing_bitmap_,
+        D2D1::RectF(0, 0, logical_client_width, logical_client_height), 1.0f,
+        /* Sizes disagree only in the window between a resize step and the
+         * packet that re-renders at the new size; scale rather than
+         * refuse, so a drag never shows a hole. */
+        exact ? D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR : D2D1_INTERPOLATION_MODE_LINEAR,
+        nullptr, nullptr);
+    const HRESULT drawn = endOn();
+    if (drawn == D2DERR_RECREATE_TARGET || FAILED(drawn)) {
+        if (gpuProfileActive()) {
+            GpuProfileLog::shared().line("paint-fail stage=copy hr=0x%08x bw=%u bh=%u sw=%u sh=%u",
+                static_cast<unsigned>(drawn), backing_pixels.width, backing_pixels.height,
+                swap_pixels.width, swap_pixels.height);
+        }
+        releaseDeviceResources(true);
+        return false;
     }
-    const HRESULT result = window_target_->EndDraw();
-    if (result == D2DERR_RECREATE_TARGET || FAILED(result)) {
+
+    /* Sync interval 0: the host already paces frames against the
+     * monitor's refresh, and blocking the UI thread inside Present would
+     * put that pacing behind DXGI's. */
+    const uint64_t present_begin_ns = gpuProfileActive() ? gpuClockNs() : 0;
+    const HRESULT presented = swap_chain_->Present(0, 0);
+    if (gpuProfileActive()) profile_swap_present_ns_ = gpuClockNs() - present_begin_ns;
+    if (presented == DXGI_STATUS_OCCLUDED) {
+        /* Ground truth that the window is hidden. Not a failure, and
+         * deliberately not wired into the existing occluded-pacing
+         * heuristics -- that interacts with frame scheduling and is a
+         * separate change. */
+        return true;
+    }
+    if (FAILED(presented)) {
         releaseDeviceResources(true);
         return false;
     }
     return true;
 }
 
+/* Hidden-titlebar caption sampling, and its only caller.
+ *
+ * This used to run through `ID2D1GdiInteropRenderTarget::GetDC` +
+ * `GetPixel`, which is why the backing surface carried
+ * `D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_GDI_COMPATIBLE`. A
+ * device-context target cannot carry that flag, so the read is now a
+ * D2D1.1 CPU-readable staging bitmap: copy the one pixel, map it, read
+ * BGRA. Same single-pixel synchronization point, no GDI, and the
+ * GDI_COMPATIBLE constraint is gone from the whole renderer.
+ *
+ * (The migration plan scheduled this as Phase 5. It cannot be deferred:
+ * the flag it removes lives on the `CreateCompatibleRenderTarget` call
+ * that Phase 2 deletes.) */
 bool GpuSurfaceImpl::readColorAt(double logical_x, double logical_y, uint32_t *color) {
-    if (!color || !content_valid_ || !backing_target_ || !backing_bitmap_ || !(scale_ > 0) ||
+    if (!color || !content_valid_ || !backing_bitmap_ || !(scale_ > 0) ||
         !std::isfinite(logical_x) || !std::isfinite(logical_y)) return false;
     const double pixel_x_value = std::floor(logical_x * scale_);
     const double pixel_y_value = std::floor(logical_y * scale_);
     if (pixel_x_value < 0 || pixel_y_value < 0 ||
         pixel_x_value >= pixel_width_ || pixel_y_value >= pixel_height_) return false;
 
-    ID2D1GdiInteropRenderTarget *interop = nullptr;
-    HRESULT result = backing_target_->QueryInterface(
-        __uuidof(ID2D1GdiInteropRenderTarget), reinterpret_cast<void **>(&interop));
-    if (FAILED(result) || !interop) {
-        releaseCom(interop);
-        return false;
+    if (!readback_bitmap_) {
+        const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (FAILED(ctx()->CreateBitmap(D2D1::SizeU(1, 1), nullptr, 0, properties, &readback_bitmap_)) ||
+            !readback_bitmap_) {
+            releaseCom(readback_bitmap_);
+            return false;
+        }
     }
 
-    /* The backing target alone is GDI-compatible. COPY synchronizes its
-     * retained GPU bitmap into the returned DC, and GetPixel reads exactly
-     * one device pixel. Hidden-titlebar caption sampling is the sole caller,
-     * so ordinary packet frames never pay this synchronization cost. */
-    backing_target_->BeginDraw();
-    HDC dc = nullptr;
-    result = interop->GetDC(D2D1_DC_INITIALIZE_MODE_COPY, &dc);
-    COLORREF sampled = CLR_INVALID;
-    HRESULT released = S_OK;
-    if (SUCCEEDED(result) && dc) {
-        sampled = GetPixel(dc, static_cast<int>(pixel_x_value), static_cast<int>(pixel_y_value));
-        released = interop->ReleaseDC(nullptr);
+    const D2D1_POINT_2U destination = D2D1::Point2U(0, 0);
+    const D2D1_RECT_U source = D2D1::RectU(
+        static_cast<UINT32>(pixel_x_value), static_cast<UINT32>(pixel_y_value),
+        static_cast<UINT32>(pixel_x_value) + 1, static_cast<UINT32>(pixel_y_value) + 1);
+    if (FAILED(readback_bitmap_->CopyFromBitmap(&destination, backing_bitmap_, &source))) return false;
+
+    D2D1_MAPPED_RECT mapped = {};
+    const HRESULT map_result = readback_bitmap_->Map(D2D1_MAP_OPTIONS_READ, &mapped);
+    if (gpuProfileActive()) {
+        /* The caller silently falls back to the retained-command colour
+         * estimate when this returns false, so without a line here a
+         * broken readback looks exactly like a working one. */
+        GpuProfileLog::shared().line("readback seq=%llu hr=0x%08x x=%d y=%d",
+            static_cast<unsigned long long>(profile_sequence_), static_cast<unsigned>(map_result),
+            static_cast<int>(pixel_x_value), static_cast<int>(pixel_y_value));
     }
-    const HRESULT ended = backing_target_->EndDraw();
-    releaseCom(interop);
-    if (FAILED(result) || FAILED(released) || FAILED(ended) || sampled == CLR_INVALID) return false;
+    if (FAILED(map_result) || !mapped.bits) return false;
+    const uint8_t blue = mapped.bits[0];
+    const uint8_t green = mapped.bits[1];
+    const uint8_t red = mapped.bits[2];
+    const HRESULT unmapped = readback_bitmap_->Unmap();
+    if (FAILED(unmapped)) return false;
+    /* The caller wants an opaque caption colour; the backing surface is
+     * opaque by construction, so the source alpha carries no information
+     * and premultiplication is a no-op. */
     *color = 0xff000000u |
-        (static_cast<uint32_t>(GetRValue(sampled)) << 16) |
-        (static_cast<uint32_t>(GetGValue(sampled)) << 8) |
-        static_cast<uint32_t>(GetBValue(sampled));
+        (static_cast<uint32_t>(red) << 16) |
+        (static_cast<uint32_t>(green) << 8) |
+        static_cast<uint32_t>(blue);
     return true;
 }
 

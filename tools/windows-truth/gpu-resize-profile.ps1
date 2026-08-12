@@ -196,6 +196,8 @@ function Parse-Profile([string]$path) {
                 Seq = [uint64]$fields["seq"]; Ok = [int]$fields["ok"]
                 Pw = [int]$fields["pw"]; Ph = [int]$fields["ph"]
                 Rects = [int]$fields["rects"]; BlitUs = [double]$fields["blit_us"]
+                # Present's share of blit_us (flip model only; 0 before it).
+                PresentUs = if ($fields.ContainsKey("present_us")) { [double]$fields["present_us"] } else { 0 }
                 # Absent in logs captured before the field existed; treat
                 # those as real blits rather than silently dropping them.
                 Content = if ($fields.ContainsKey("content")) { [int]$fields["content"] } else { 1 }
@@ -334,6 +336,9 @@ if (Test-Path $logPath) {
     $rebuildBlitPerStep = if ($rebuilds.Count -gt 0) {
         [Math]::Round((($rebuildPaints | Measure-Object -Property BlitUs -Sum).Sum) / $rebuilds.Count / 1000.0, 3)
     } else { 0 }
+    $rebuildPresentPerStep = if ($rebuilds.Count -gt 0) {
+        [Math]::Round((($rebuildPaints | Measure-Object -Property PresentUs -Sum).Sum) / $rebuilds.Count / 1000.0, 3)
+    } else { 0 }
 
     # The Phase 0 deliverable: cost of ONE resize step, split by stage.
     $result.ResizeStepMs = [pscustomobject]@{
@@ -355,6 +360,8 @@ if (Test-Path $logPath) {
         # accepted set, and dividing by those would understate the cost a
         # resize step actually pays.
         BlitPerStep = $rebuildBlitPerStep
+        # How much of BlitPerStep is Present itself rather than the copy.
+        SwapPresentPerStep = $rebuildPresentPerStep
         TexturesPerStep = if ($rebuilds.Count -gt 0) { [Math]::Round((($rebuilds | Measure-Object -Property ImagesN -Sum).Sum) / $rebuilds.Count, 2) } else { 0 }
         KibPerStep      = if ($rebuilds.Count -gt 0) { [Math]::Round((($rebuilds | Measure-Object -Property ImageKib -Sum).Sum) / $rebuilds.Count, 1) } else { 0 }
     }
