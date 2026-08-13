@@ -9,6 +9,9 @@
 // pairings follow the pinned compiler's build matrix: same-triple compiles run
 // natively; Linux and Windows GNU targets cross-compile from any desktop host
 // over the compiler's zig-cc lane; macOS targets need a macOS build host.
+// Mobile targets (aarch64 iOS, iOS simulator, and Android) are archive-only:
+// --out-archive is admitted (iOS from a macOS host, Android from any desktop
+// host with an NDK), --out-exe refuses with the in-process pointer.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -21,7 +24,7 @@ function parseArgs(argv) {
     const key = argv[i];
     const value = argv[i + 1];
     if (!key?.startsWith("--") || value === undefined) {
-      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> (--out-exe <file> | --out-archive <file>) --host-platform <arch-os-abi> --target-platform <arch-os-abi> [--zig-exe <path>] (--compiler <cmd> | --compiler-js <main.js>)");
+      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> (--out-exe <file> | --out-archive <file>) --host-platform <arch-os-abi> --target-platform <arch-os-abi> [--zig-exe <path>] [--android-ndk <dir>] (--compiler <cmd> | --compiler-js <main.js>)");
       process.exit(2);
     }
     args[key.slice(2)] = value;
@@ -60,13 +63,45 @@ const hostAbi = platformAbi(args["host-platform"]);
 const targetOs = platformOs(args["target-platform"]);
 const targetArch = platformArch(args["target-platform"]);
 const targetAbi = platformAbi(args["target-platform"]);
+// The two mobile families, from the build graph's Zig triple spelling:
+// `aarch64-ios[-simulator]` and `aarch64-linux-android`. The pinned compiler
+// admits exactly aarch64 for both, library archives only.
+const iosTarget = targetOs === "ios";
+const androidTarget = targetOs === "linux" && targetAbi === "android";
+const mobileTarget = iosTarget || androidTarget;
+// The canonical SCRIPTC_TARGET spelling for a mobile compile: the compiler
+// names iOS targets with the vendor (`aarch64-apple-ios[-simulator]`) and
+// Android with the Zig triple itself.
+const scriptcTarget = iosTarget
+  ? `aarch64-apple-ios${targetAbi === "simulator" ? "-simulator" : ""}`
+  : args["target-platform"];
 // Zig names a native Windows host with the GNU ABI by default, while a user
 // may explicitly target MSVC on that same machine. That remains native
 // compiler work; an exact native GNU triple does too.
 const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch === targetArch &&
   (targetAbi === hostAbi || targetAbi === "msvc");
 const cross = args["target-platform"] !== args["host-platform"] && !nativeWindows;
-if (cross) {
+if (mobileTarget) {
+  // Mobile services are archive-only: there is no child process to spawn on
+  // iOS or Android, so the plain-scriptc executable lane refuses here.
+  if (args["out-exe"]) {
+    console.error(
+      `TypeScript services for ${args["target-platform"]} build library archives only: mobile apps cannot spawn a sibling service process. ` +
+      "Use the in-process carrier (--out-archive) — the mobile default.",
+    );
+    process.exit(2);
+  }
+  const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
+  const admitted = desktopHost && targetArch === "aarch64" && (!iosTarget || hostOs === "macos");
+  if (!admitted) {
+    console.error(
+      iosTarget && hostOs !== "macos"
+        ? `TypeScript services for an iOS target (${args["target-platform"]}) compile on a macOS build host only — the Apple SDK sysroot and Mach-O localization live there — but this build host is ${args["host-platform"]}. Build iOS service apps on a Mac.`
+        : `TypeScript services compile for the mobile targets the pinned compiler covers — aarch64 iOS/iOS-simulator (macOS host) and aarch64 Android — but this build pairs host ${args["host-platform"]} with target ${args["target-platform"]}.`,
+    );
+    process.exit(2);
+  }
+} else if (cross) {
   const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
   const admitted = desktopHost &&
     (targetOs === "linux" ||
@@ -86,24 +121,25 @@ if (cross) {
 
 // Runtime localization is narrower than executable cross-compilation. The
 // in-process archive's object merger supports native Linux through host
-// binutils, cross-ELF for x86_64/aarch64, COFF for x86_64, and Mach-O on a
-// macOS host. Keep this preflight in lockstep with ScriptC 0.0.29's
-// compileLibrary guard so `in_process` refusals teach before compiler work.
+// binutils, cross-ELF for x86_64/aarch64 (Android included), COFF for
+// x86_64, and Mach-O — iOS device and simulator included — on a macOS host.
+// Keep this preflight in lockstep with ScriptC 0.0.29's compileLibrary guard
+// so `in_process` refusals teach before compiler work.
 if (args["out-archive"]) {
   const archiveSupported =
     (targetOs === "linux" && (!cross || ["x86_64", "aarch64"].includes(targetArch))) ||
     (targetOs === "windows" && targetArch === "x86_64" && (!cross || targetAbi === "gnu")) ||
-    (targetOs === "macos" && hostOs === "macos");
+    ((targetOs === "macos" || iosTarget) && hostOs === "macos");
   if (!archiveSupported) {
     console.error(
       `TypeScript in-process services cannot build a runtime-localized archive for ${args["target-platform"]} from ${args["host-platform"]}. ` +
-      "The pinned compiler supports native Linux, cross-Linux x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU, and macOS targets on a macOS host. " +
-      "Use the child carrier (the default), or choose a supported in-process target.",
+      "The pinned compiler supports native Linux, cross-Linux x86_64/aarch64 (Android included), native Windows x86_64, cross-Windows x86_64 GNU, and macOS/iOS targets on a macOS host. " +
+      "Use the child carrier (the desktop default), or choose a supported in-process target.",
     );
     process.exit(2);
   }
 }
-for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "compiler-js", "zig-exe"]) {
+for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "compiler-js", "zig-exe", "android-ndk"]) {
   if (args[key]) args[key] = path.resolve(args[key]);
 }
 const argv0 = args.compiler
@@ -111,17 +147,21 @@ const argv0 = args.compiler
   : [process.execPath, args["compiler-js"]];
 
 // Cross compiles hand the compiler its zig-cc lane: the target triple as
-// SCRIPTC_TARGET, and (when the build graph supplied its own zig) that
-// zig's directory at the front of PATH so the lane never depends on an
-// ambient install. Native compiles keep the process environment untouched.
+// SCRIPTC_TARGET (the compiler's own mobile spellings for iOS/Android), and
+// (when the build graph supplied its own zig) that zig's directory at the
+// front of PATH so the lane never depends on an ambient install. An Android
+// build threads the NDK location the same way (--android-ndk becomes
+// ANDROID_NDK_ROOT for the compiler's sysroot discovery). Native compiles
+// keep the process environment untouched.
 const compileEnv = cross
   ? {
       ...process.env,
       SCRIPTC_CC: "zigcc",
-      SCRIPTC_TARGET: args["target-platform"],
+      SCRIPTC_TARGET: scriptcTarget,
       ...(args["zig-exe"]
         ? { PATH: `${path.dirname(args["zig-exe"])}${path.delimiter}${process.env.PATH ?? ""}` }
         : {}),
+      ...(args["android-ndk"] && androidTarget ? { ANDROID_NDK_ROOT: args["android-ndk"] } : {}),
     }
   : process.env;
 

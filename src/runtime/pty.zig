@@ -924,7 +924,9 @@ const f_dupfd_cloexec: c_int = switch (builtin.os.tag) {
 fn errnoValue() c_int {
     return switch (builtin.os.tag) {
         .macos => c.__error().*,
-        .linux => c.__errno_location().*,
+        // Bionic spells the errno accessor `__errno`; glibc and musl agree
+        // on `__errno_location`.
+        .linux => if (comptime builtin.abi.isAndroid()) c.__errno().* else c.__errno_location().*,
         else => 0,
     };
 }
@@ -962,7 +964,8 @@ const c = struct {
     extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
     extern "c" fn poll(fds: [*]Pollfd, nfds: c_uint, timeout: c_int) c_int;
     extern "c" fn __error() *c_int; // Darwin errno
-    extern "c" fn __errno_location() *c_int; // Linux errno
+    extern "c" fn __errno_location() *c_int; // Linux errno (glibc/musl)
+    extern "c" fn __errno() *c_int; // Bionic errno
 };
 
 /// A nudge pipe for the io thread: [read end, write end]. BOTH ends are

@@ -14,6 +14,10 @@
 //!   `canvas_label` must be `mobile-surface` (use `mobile_shell_scene` /
 //!   `mobile_gpu_surface_label` for the canonical single-surface scene).
 //! - optional `pub const features: native_sdk.UiAppFeatures`
+//! - optional `pub fn serviceDataRoot([]const u8) void` /
+//!   `pub fn serviceTeardown() void` — the generated TypeScript mobile
+//!   wiring's hooks: the host hands `setDataRoot`'s directory to the
+//!   in-process service pool and tears the pool down on destroy.
 //!
 //! The host owns a `NullPlatform` runtime (M1: no real surface — M2 adds
 //! presentation) and pumps the `UiApp` loop from the shim's frame callback:
@@ -266,6 +270,11 @@ pub fn UiAppHostWithStorageAndCredentials(
             // its heap-owned registrations (registered canvas font
             // bytes) before the host storage goes.
             self.embedded.deinit();
+            // An AppDef owning module-level service state (the generated
+            // TypeScript mobile wiring's in-process pool) tears it down
+            // after the effects channel is gone; the pool's own shutdown
+            // already ran through the binding.
+            if (comptime @hasDecl(AppDef, "serviceTeardown")) AppDef.serviceTeardown();
             if (comptime record_store_enabled) {
                 if (self.record_store_open) self.record_store.deinit();
             }
@@ -303,9 +312,15 @@ pub fn UiAppHostWithStorageAndCredentials(
         /// Install the OS-owned app-data directory before start. iOS passes
         /// Library/Application Support and Android passes files/, exactly the
         /// `.data` directories resolved by `app_dirs` on those platforms.
+        /// An AppDef declaring `serviceDataRoot` (the generated TypeScript
+        /// mobile wiring) receives the directory too — the in-process
+        /// service pool keeps its cooperative-cancellation markers and
+        /// stream relays there, and cores reading `NATIVE_SDK_APP_DATA_DIR`
+        /// through `envMsgs` get this value.
         pub fn setDataRoot(self: *Self, data_root: []const u8) !void {
             if (self.started) return error.AppAlreadyStarted;
             if (data_root.len == 0 or data_root.len > max_mobile_asset_root_bytes) return error.InvalidStoreDataDir;
+            if (comptime @hasDecl(AppDef, "serviceDataRoot")) AppDef.serviceDataRoot(data_root);
             const platform_value = app_dirs.currentPlatform();
             if (builtin.is_test and platform_value != .ios and platform_value != .android) {
                 for (&self.file_root_storage, 0..) |*storage, index| {

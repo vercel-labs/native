@@ -668,6 +668,70 @@ test("the service compile lane refuses a pairing outside the compiler's build ma
   }
 });
 
+test("the service compile lane refuses executables for mobile targets and threads the NDK into Android archives", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-mobile-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, "service_profile.json"), "{}\n");
+    fs.writeFileSync(path.join(stage, "service_inproc_main.ts"), "export {};\n");
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    const ndk = path.join(root, "ndk");
+    fs.mkdirSync(ndk);
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+
+    // No child process exists on mobile: the executable lane refuses with
+    // the in-process pointer before any compiler work.
+    const exeResult = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-exe", path.join(root, "service-host"),
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "aarch64-linux-android",
+      "--compiler", process.execPath,
+    ], { encoding: "utf8" });
+    assert.notEqual(exeResult.status, 0);
+    assert.match(exeResult.stderr, /library archives only/);
+    assert.match(exeResult.stderr, /in-process carrier/);
+
+    // The archive lane is admitted, keeps the compiler's own Android
+    // spelling, and threads --android-ndk as ANDROID_NDK_ROOT.
+    const compiler = path.join(root, "compiler.mjs");
+    fs.writeFileSync(compiler, `
+import fs from "node:fs";
+if (process.argv.includes("-v")) { console.log("0.0.29"); process.exit(0); }
+if (process.env.SCRIPTC_CC !== "zigcc") { console.error("mobile compile missing SCRIPTC_CC=zigcc"); process.exit(9); }
+if (process.env.SCRIPTC_TARGET !== "aarch64-linux-android") { console.error("mobile compile got SCRIPTC_TARGET=" + process.env.SCRIPTC_TARGET); process.exit(9); }
+if (!process.env.ANDROID_NDK_ROOT) { console.error("mobile compile missing ANDROID_NDK_ROOT"); process.exit(9); }
+const output = process.argv[process.argv.indexOf("-o") + 1];
+fs.writeFileSync(output + ".lib.a", "android service archive bytes");
+`);
+    const archive = path.join(root, "libservices.a");
+    const env = { ...process.env };
+    delete env.SCRIPTC_CC;
+    delete env.SCRIPTC_TARGET;
+    delete env.ANDROID_NDK_ROOT;
+    const archiveResult = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-archive", archive,
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "aarch64-linux-android",
+      "--android-ndk", ndk,
+      "--compiler-js", compiler,
+    ], { encoding: "utf8", env });
+    assert.equal(archiveResult.status, 0, `${archiveResult.stdout}${archiveResult.stderr}`);
+    assert.equal(fs.readFileSync(archive, "utf8"), "android service archive bytes");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the service compile lane refuses cross-target Windows MSVC before compiler work", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-msvc-cross-"));
   try {
@@ -755,7 +819,7 @@ test("the service archive lane refuses architectures outside the localized-objec
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /cannot build a runtime-localized archive/);
       assert.match(result.stderr, new RegExp(target));
-      assert.match(result.stderr, /cross-Linux x86_64\/aarch64, native Windows x86_64, cross-Windows x86_64 GNU/);
+      assert.match(result.stderr, /cross-Linux x86_64\/aarch64 \(Android included\), native Windows x86_64, cross-Windows x86_64 GNU/);
       assert.match(result.stderr, /Use the child carrier/);
     }
   } finally {

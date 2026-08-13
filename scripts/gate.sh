@@ -84,6 +84,13 @@
 # with NATIVE_SDK_CROSS=1 in either tier — it needs those machines —
 # and skipped otherwise.
 #
+# mobile-e2e — the mobile execution lane (scripts/mobile-e2e.sh): builds
+# the TS mobile battery and app fixtures for aarch64-ios-simulator and
+# aarch64-linux-android, then executes the battery on a booted iPhone
+# simulator (xcrun simctl) and a headless arm64 emulator (adb). Opt-in
+# with NATIVE_SDK_MOBILE=1 in either tier — it needs Xcode's simulator
+# runtime and the Android SDK/NDK — and skipped otherwise.
+#
 # Deliberately NOT `set -e`: every step runs even after a failure so the
 # summary shows the whole picture; the exit code is non-zero if any step
 # failed. Step output streams through; each step is timed.
@@ -249,6 +256,14 @@ run_cross_e2e_step() { # the opt-in cross-target execution lane
   fi
 }
 
+run_mobile_e2e_step() { # the opt-in mobile execution lane
+  if [ "${NATIVE_SDK_MOBILE:-}" = "1" ]; then
+    run_step "mobile-e2e" scripts/mobile-e2e.sh
+  else
+    skip_step "mobile-e2e" "opt-in: set NATIVE_SDK_MOBILE=1 (needs Xcode's simulator runtime and the Android SDK/NDK)"
+  fi
+}
+
 # The Chromium (CEF) host, src/platform/macos/cef_host.mm, is only compiled
 # by Chromium-engine app builds — never by `zig build test`/`validate` — so
 # without this step an edit that keeps it merely grep-identical to the
@@ -342,6 +357,7 @@ if [ "$tier" = "fast" ]; then
   fi
 
   run_cross_e2e_step
+  run_mobile_e2e_step
 else # full
   run_step "zig-test" zig build test
   run_step "zig-validate" zig build validate
@@ -400,6 +416,7 @@ else # full
   fi
 
   run_cross_e2e_step
+  run_mobile_e2e_step
 fi
 
 # ---- summary --------------------------------------------------------------

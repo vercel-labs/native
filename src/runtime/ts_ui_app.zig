@@ -288,6 +288,20 @@ pub fn TsUiApp(comptime core: type) type {
             return App.init(backing, Host.model().*, stamped);
         }
 
+        /// Mobile counterpart of `init`/`create`: the embed host
+        /// (`native_sdk.embed.UiAppHost`) owns App construction, so this
+        /// resolves the adapter's stamped options and applies the core
+        /// options — the boot model commits here, and the generated mobile
+        /// wiring's `initModel` reads `Host.model()` afterwards. The embed
+        /// host then drives the same stamped `init_fx`/`update_fx` seams
+        /// the desktop wiring gets.
+        pub fn mobileOptions(core_options: CoreOptions, options: Options) Options {
+            const stamped = stampOptions(options);
+            Host.boot();
+            applyCoreOptions(core_options);
+            return stamped;
+        }
+
         /// Heap counterpart of `init`, mirroring `UiApp.create`: the app
         /// struct (and any real model) is multi-MB, so construct it in
         /// place on the heap — the shape generated wiring and `main`

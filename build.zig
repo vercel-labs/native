@@ -198,7 +198,13 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addIncludePath(b.path("third_party/sqlite"));
     desktop_mod.addCSourceFile(.{
         .file = b.path("third_party/sqlite/sqlite3.c"),
-        .flags = sqliteCompileFlags(),
+        // Mobile -Dtargets (the mobile e2e battery) compile the
+        // amalgamation against the platform SDK/NDK sysroot; desktop
+        // targets keep Zig's ordinary libc discovery.
+        .flags = if (target.result.os.tag == .ios or target.result.abi.isAndroid())
+            @import("build/app.zig").sqliteCFlags(b, target)
+        else
+            sqliteCompileFlags(),
     });
     desktop_mod.link_libc = true;
     const desktop_tests = testArtifact(b, desktop_mod);
@@ -664,6 +670,14 @@ pub fn build(b: *std.Build) void {
         if (ts_core_artifacts.services_pool) |pool_tests| {
             cross_e2e_step.dependOn(&b.addInstallArtifact(pool_tests, .{ .dest_dir = e2e_dir }).step);
         }
+        // The mobile execution battery staging: one static library the
+        // platform toolchain (xcrun clang / NDK clang) links around a tiny
+        // harness for execution on the simulator or emulator. Registered
+        // only for a mobile -Dtarget; scripts/mobile-e2e.sh is the driver.
+        if (ts_core_artifacts.mobile_battery) |battery| {
+            const mobile_e2e_step = b.step("stage-mobile-e2e", "Install the TS mobile e2e battery archive under <prefix>/e2e (pair with -Dtarget=aarch64-ios-simulator or aarch64-linux-android and -p; see scripts/mobile-e2e.sh)");
+            mobile_e2e_step.dependOn(&b.addInstallFileWithDir(battery, .{ .custom = "e2e" }, "libts-mobile-e2e.a").step);
+        }
         // The corpus contract artifacts an external core toolchain
         // consumes: per fixture, the frontend-emitted contract sidecar
         // (after projection), the generated entry module, and the
@@ -787,10 +801,16 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build.zig", .pattern = "if (!app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;" },
         .{ .path = "build/app.zig", .pattern = "scriptcPlatformTriple(b, target),\n        // Keep the core and service archives on the same cross compiler" },
         .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe," },
-        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--host-platform\", host_platform, \"--target-platform\", app_build.scriptcPlatformTriple(b, target), \"--zig-exe\", b.graph.zig_exe });\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
-        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe,\n    });\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
+        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--host-platform\", host_platform, \"--target-platform\", app_build.scriptcPlatformTriple(b, target), \"--zig-exe\", b.graph.zig_exe });\n    app_build.addScriptcAndroidNdk(b, compile, target);\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
+        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe,\n    });\n    app_build.addScriptcAndroidNdk(b, compile, target);\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
         .{ .path = "build.zig", .pattern = "abi_laws_mod.addObjectFile(markup_fixture.archive);\n    addScriptcArchiveSystemLibs(abi_laws_mod, target);" },
-        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "SCRIPTC_TARGET: args[\"target-platform\"]" },
+        // Both drivers map the build graph's Zig triple onto the compiler's
+        // own mobile spellings and thread the NDK like --zig-exe.
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "SCRIPTC_TARGET: scriptcTarget" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "SCRIPTC_TARGET: scriptcTarget" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "ANDROID_NDK_ROOT: args[\"android-ndk\"]" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "ANDROID_NDK_ROOT: args[\"android-ndk\"]" },
+        .{ .path = "build/app.zig", .pattern = ".ios => host.os.tag == .macos and target.result.cpu.arch == .aarch64" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
         .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
@@ -3027,6 +3047,13 @@ const TsCoreE2eArtifacts = struct {
     /// cancellation/deadlines, trap isolation, streaming, replay). Null when
     /// the target cannot carry the archive (cross or non-desktop builds).
     services_pool: ?*std.Build.Step.Compile,
+    /// The mobile execution battery: the pool fixture's core and service
+    /// archives linked into one static library exporting `nsme_run`, so
+    /// the platform toolchain links a runnable harness for the simulator
+    /// or emulator (scripts/mobile-e2e.sh). Present only for a mobile
+    /// -Dtarget; the Android archive is flattened to plain objects (Zig's
+    /// ELF static-library emission nests archive inputs).
+    mobile_battery: ?std.Build.LazyPath,
     /// The service-host carrier benchmark: a bytes-echo service compiled
     /// through the same lane, driven directly through the production
     /// carrier bindings of BOTH carriers (cold start, round-trip latency,
@@ -3283,6 +3310,46 @@ fn tsCoreE2eArtifact(
         break :pool pool_mod;
     } else null;
 
+    // The mobile execution battery: a static library over the same pool
+    // fixture, linked into a runnable harness by the platform toolchain —
+    // the same link pattern embedding apps use for the embed library. The
+    // Android objects are PIC like the embed library's (the harness there
+    // is a bionic executable; a future .so embedding needs it regardless).
+    const battery_target_is_mobile = target.result.os.tag == .ios or target.result.abi.isAndroid();
+    const mobile_battery: ?std.Build.LazyPath = if (battery_target_is_mobile and service_host_fixture.archive != null) battery: {
+        const battery_mod = b.createModule(.{
+            .root_source_file = b.path("tests/ts-services/mobile_e2e_battery.zig"),
+            .target = target,
+            .optimize = optimize,
+            .pic = if (target.result.abi.isAndroid()) true else null,
+        });
+        battery_mod.addImport("native_sdk", desktop_mod);
+        battery_mod.addImport("ts_services_core", services_fixture.module);
+        battery_mod.addImport("ts_services_registry", service_host_fixture.registry);
+        battery_mod.link_libc = true;
+        battery_mod.addObjectFile(service_host_fixture.archive.?);
+        const battery_lib = b.addLibrary(.{
+            .linkage = .static,
+            .name = "ts-mobile-e2e",
+            .root_module = battery_mod,
+            .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+        });
+        if (target.result.abi.isAndroid()) {
+            // Flatten the nested TypeScript archives (Zig's ELF static-lib
+            // emission stores .a inputs as members) so the NDK link consumes
+            // plain objects — the same normalization the app lane applies.
+            const merge = b.addSystemCommand(&.{node});
+            merge.addFileArg(b.path("packages/core/scripts/merge_static_archives.mjs"));
+            merge.addArgs(&.{ "--zig", b.graph.zig_exe, "--format", "gnu" });
+            merge.addArg("--out");
+            const merged = merge.addOutputFileArg("libts-mobile-e2e.a");
+            merge.addArg("--in");
+            merge.addFileArg(battery_lib.getEmittedBin());
+            break :battery merged;
+        }
+        break :battery battery_lib.getEmittedBin();
+    } else null;
+
     // Service-host carrier benchmark: the same production service lane
     // (frontend contract -> corewire host/registry -> exact-pinned
     // plain-scriptc executable) over a bytes-echo operation that returns
@@ -3406,6 +3473,7 @@ fn tsCoreE2eArtifact(
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
         .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
+        .mobile_battery = mobile_battery,
         .service_host_bench = service_bench_exe,
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
@@ -3511,15 +3579,24 @@ fn externalServiceFixture(
     compile.addFileArg(b.path("packages/core/package.json"));
     compile.addArg("--contract");
     compile.addFileArg(contract);
-    compile.addArg("--out-exe");
-    const suffix = if (target.result.os.tag == .windows) ".exe" else "";
-    const executable = compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
+    // Mobile targets are archive-only (no child process exists there): the
+    // driver refuses --out-exe, so the child-carrier batteries get a stub
+    // path they never execute for those targets.
+    const mobile_target = target.result.os.tag == .ios or target.result.abi.isAndroid();
+    const executable: std.Build.LazyPath = if (mobile_target)
+        b.addWriteFiles().add(b.fmt("{s}-unavailable-on-mobile", .{name}), "")
+    else exe: {
+        compile.addArg("--out-exe");
+        const suffix = if (target.result.os.tag == .windows) ".exe" else "";
+        break :exe compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
+    };
     const archive: ?std.Build.LazyPath = if (emit_archive) archive: {
         compile.addArg("--out-archive");
         break :archive compile.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
     } else null;
     const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
     compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", app_build.scriptcPlatformTriple(b, target), "--zig-exe", b.graph.zig_exe });
+    app_build.addScriptcAndroidNdk(b, compile, target);
     addScriptcGlibcFloorTeaching(b, target, &compile.step);
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
@@ -3764,6 +3841,7 @@ fn externalCoreFixtureModule(
         "--zig-exe",
         b.graph.zig_exe,
     });
+    app_build.addScriptcAndroidNdk(b, compile, target);
     addScriptcGlibcFloorTeaching(b, target, &compile.step);
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         // The development override: point at any toolchain command; the

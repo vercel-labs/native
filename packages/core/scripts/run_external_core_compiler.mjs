@@ -13,7 +13,8 @@
 //     --out-archive <file>
 //     --out-sidecar <file>
 //     [--host-platform <arch-os-abi> --target-platform <arch-os-abi>
-//      --zig-exe <path>] (--compiler <cmd> | --compiler-js <main.js>)
+//      --zig-exe <path>] [--android-ndk <dir>]
+//     (--compiler <cmd> | --compiler-js <main.js>)
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -51,7 +52,7 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv);
 // Every path argument resolves against the INVOCATION's cwd up front:
 // the compile itself runs from a scratch directory.
-for (const key of ["stage", "manifest", "frontend-sidecar", "out-archive", "out-sidecar", "compiler-js", "zig-exe"]) {
+for (const key of ["stage", "manifest", "frontend-sidecar", "out-archive", "out-sidecar", "compiler-js", "zig-exe", "android-ndk"]) {
   if (key in args) args[key] = path.resolve(args[key]);
 }
 // --compiler is a COMMAND: a bare executable path (possibly containing
@@ -78,13 +79,37 @@ const hostAbi = (hostParts[2] ?? "").split(".")[0];
 const targetArch = targetParts[0] ?? "";
 const targetOs = (targetParts[1] ?? "").split(".")[0];
 const targetAbi = (targetParts[2] ?? "").split(".")[0];
+// The two mobile families, from the build graph's Zig triple spelling:
+// `aarch64-ios[-simulator]` and `aarch64-linux-android`. The pinned compiler
+// admits exactly aarch64 for both — library archives, which is the only
+// output this driver produces.
+const iosTarget = targetOs === "ios";
+const androidTarget = targetOs === "linux" && targetAbi === "android";
+const mobileTarget = iosTarget || androidTarget;
+// The canonical SCRIPTC_TARGET spelling for a mobile compile: the compiler
+// names iOS targets with the vendor (`aarch64-apple-ios[-simulator]`) and
+// Android with the Zig triple itself.
+const scriptcTarget = iosTarget
+  ? `aarch64-apple-ios${targetAbi === "simulator" ? "-simulator" : ""}`
+  : args["target-platform"];
 // A Windows host's Zig triple defaults to GNU, but an explicit same-arch MSVC
 // target still compiles through native clang and the installed Windows SDK.
 const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch === targetArch &&
   (targetAbi === hostAbi || targetAbi === "msvc");
 const cross = args["host-platform"] !== undefined &&
   args["target-platform"] !== args["host-platform"] && !nativeWindows;
-if (cross) {
+if (mobileTarget) {
+  const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
+  const admitted = desktopHost && targetArch === "aarch64" && (!iosTarget || hostOs === "macos");
+  if (!admitted) {
+    console.error(
+      iosTarget && hostOs !== "macos"
+        ? `TypeScript cores for an iOS target (${args["target-platform"]}) compile on a macOS build host only — the Apple SDK sysroot and Mach-O localization live there — but this build host is ${args["host-platform"]}. Build iOS apps on a Mac.`
+        : `TypeScript cores compile for the mobile targets the pinned compiler covers — aarch64 iOS/iOS-simulator (macOS host) and aarch64 Android — but this build pairs host ${args["host-platform"]} with target ${args["target-platform"]}.`,
+    );
+    process.exit(2);
+  }
+} else if (cross) {
   const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
   const admitted = desktopHost &&
     (targetOs === "linux" ||
@@ -101,14 +126,19 @@ if (cross) {
     process.exit(2);
   }
 }
+// Cross compiles ride the compiler's zig-cc lane: SCRIPTC_TARGET carries the
+// compiler's own mobile spellings for iOS/Android, --zig-exe's directory
+// fronts PATH, and an Android build threads the NDK location the same way
+// (--android-ndk becomes ANDROID_NDK_ROOT for the sysroot discovery).
 const compileEnv = cross
   ? {
       ...process.env,
       SCRIPTC_CC: "zigcc",
-      SCRIPTC_TARGET: args["target-platform"],
+      SCRIPTC_TARGET: scriptcTarget,
       ...(args["zig-exe"]
         ? { PATH: `${path.dirname(args["zig-exe"])}${path.delimiter}${process.env.PATH ?? ""}` }
         : {}),
+      ...(args["android-ndk"] && androidTarget ? { ANDROID_NDK_ROOT: args["android-ndk"] } : {}),
     }
   : process.env;
 
