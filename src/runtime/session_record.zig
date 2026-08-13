@@ -241,6 +241,16 @@ pub const SessionRecorder = struct {
                 journaled.credentials_secret_len = record.payload.len;
             }
         }
+        if (record.kind == .file and record.file_event == .chunk and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a streamed file chunk needs the session blob store, and none is bound - wire SessionRecorder.blob_sink");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| return self.fail(@errorName(err));
+            journaled.file_blob_hash = hash;
+            journaled.file_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
         if (record.kind == .image and record.payload.len > 0) {
             const blob_sink = self.blob_sink orelse {
                 return self.fail("an image effect result needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
@@ -456,6 +466,34 @@ test "recorder moves model restore snapshots into the session blob store" {
     var scratch: [64]u8 = undefined;
     const restored = try blobs.read(effect.persist_blob_hash, &scratch);
     try testing.expectEqualStrings("canonical model", restored);
+}
+
+test "recorder moves streamed file chunks into the session blob store" {
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "file-stream" });
+    recorder.recordEffect(.{
+        .kind = .file,
+        .key = 91,
+        .payload = "streamed bytes",
+        .file_op = .read_stream,
+        .file_event = .chunk,
+        .file_outcome = .ok,
+        .file_total = 14,
+    });
+    recorder.finish();
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expectEqual(@as(u64, 14), effect.file_blob_len);
+    var scratch: [32]u8 = undefined;
+    try testing.expectEqualStrings("streamed bytes", try blobs.read(effect.file_blob_hash, &scratch));
 }
 
 test "recorder redacts credential bytes from journal and blob storage" {

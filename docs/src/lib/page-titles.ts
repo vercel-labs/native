@@ -16,6 +16,7 @@ export const PAGE_TITLES: Record<string, string> = {
   persistence: "Model Persistence",
   "record-store": "Record Store",
   sqlite: "Relational SQLite",
+  files: "Files & Streaming",
   terminal: "Terminal",
   state: "State & Data Flow",
   theming: "Theming",

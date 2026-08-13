@@ -261,6 +261,12 @@ Edits refuse rather than guess: a widget authored in Zig, a file that changed on
 
 `zig build test-writeback-smoke` (macOS) drives the whole loop against the kanban example: query provenance, flip the button label through the verb, assert the repaint, verify the byte-exact diff, and flip it back.
 
+## Session recording and blob growth
+
+`NATIVE_SDK_SESSION_RECORD=/path/session.journal` records platform events and effect results; `NATIVE_SDK_SESSION_REPLAY` replays that journal without touching the original network, process, database, or file. Large effect payloads—including every streamed file-read chunk—live content-addressed under the sibling `blobs/` directory, and the journal stores each hash and length. Keep the journal and `blobs/` together when copying a recording.
+
+The blob store deduplicates identical chunks but is intentionally unbounded today: there is no automatic size quota or garbage collector. Long recordings and repeated large imports can therefore grow the directory substantially. Treat a recording as one disposable artifact, monitor its directory size in long automation runs, and delete the journal plus its sibling `blobs/` directory when it is no longer needed. A future GC must reason over every retained journal before removing an unreferenced content address; Tier 5 does not guess at that retention policy.
+
 ## Custom directory
 
 Pass a custom path to `automation.Server.init()`:

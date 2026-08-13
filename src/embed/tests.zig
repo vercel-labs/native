@@ -1044,6 +1044,7 @@ const MobileCredentialHost = ui_host.UiAppHostWithStorageAndCredentials(
     &.{},
     true,
     true,
+    false,
     "dev.native-sdk.mobile-credentials",
 );
 const MobileCredentialApi = c_api.MobileCApi(MobileCredentialHost);
@@ -1210,6 +1211,10 @@ test "mobile store capability requires and binds the OS app-data root before sta
     try std.testing.expectEqual(@as(c_int, 1), MobileStoreApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
     try std.testing.expect(self.record_store_open);
     try std.testing.expect(self.embedded.runtime.options.record_store != null);
+    try std.testing.expectEqual(@as(usize, 6), self.embedded.runtime.options.file_access.?.roots.len);
+    for (self.embedded.runtime.options.file_access.?.roots) |root| {
+        try std.testing.expectEqualStrings(path, root);
+    }
 
     MobileStoreApi.native_sdk_app_start(app);
     try std.testing.expectEqualStrings("", std.mem.span(MobileStoreApi.native_sdk_app_last_error_name(app)));

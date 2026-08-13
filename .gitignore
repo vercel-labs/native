@@ -42,6 +42,7 @@ docs/tsconfig.tsbuildinfo
 
 # Dev-tool dependency trees (installed per package, never committed)
 packages/core/node_modules/
+.pnpm-store/
 
 # The CLI-materialized editor copy of @native-sdk/core inside the TS example
 # apps (node_modules is editor surface, never source — the same entry the

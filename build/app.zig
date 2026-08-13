@@ -910,6 +910,8 @@ pub const MobileLibOptions = struct {
     credentials_capability: bool = false,
     /// Grant those effects access to the registered OS credential service.
     credentials_permission: bool = false,
+    /// Grant raw file effects access outside the OS-owned app data root.
+    filesystem_permission: bool = false,
     /// Stable app identity used as the Keychain/Keystore service namespace.
     credentials_service: []const u8 = "dev.native_sdk.app",
 };
@@ -954,6 +956,7 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         mobile_options.addOption(bool, "relational_capability", options.relational_capability);
         mobile_options.addOption(bool, "credentials_capability", options.credentials_capability);
         mobile_options.addOption(bool, "credentials_permission", options.credentials_permission);
+        mobile_options.addOption(bool, "filesystem_permission", options.filesystem_permission);
         mobile_options.addOption([]const u8, "credentials_service", options.credentials_service);
         exports_mod.addImport("mobile_build_options", mobile_options.createModule());
         const migration_path = options.relational_migrations orelse dep.path("src/app_runner/no_migrations.zig");
@@ -1104,6 +1107,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .relational_migrations = relational_migrations,
             .credentials_capability = app_config.credentials_capability,
             .credentials_permission = app_config.credentials_permission,
+            .filesystem_permission = app_config.filesystem_permission,
             .credentials_service = app_config.app_id,
         });
     }
@@ -2042,6 +2046,7 @@ const AppManifestBuildConfig = struct {
     relational_capability: bool = false,
     credentials_capability: bool = false,
     credentials_permission: bool = false,
+    filesystem_permission: bool = false,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
@@ -2135,6 +2140,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         .credentials_capability = hasManifestCapability(raw.capabilities, "credentials"),
         .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
+        .filesystem_permission = hasManifestPermission(raw.permissions, "filesystem"),
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };

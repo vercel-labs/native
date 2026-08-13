@@ -136,6 +136,23 @@ export interface WriteRoute<M extends Msgish> {
     readonly ok: EmptyKind<M>;
     readonly err: BytesKind<M>;
 }
+export interface FileReadStreamRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly chunk: BytesKind<M>;
+    readonly done: TimestampKind<M>;
+    readonly err: BytesKind<M>;
+}
+export interface FileStatArm {
+    readonly exists: boolean;
+    readonly size: number;
+    readonly mtimeMs: number;
+}
+export type FileStatKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof FileStatArm] ? [keyof FileStatArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & FileStatArm ? M["kind"] : never : never : never : never;
+export interface FileStatRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly ok: FileStatKind<M>;
+    readonly err: BytesKind<M>;
+}
 export interface StoreScanOptions {
     readonly limit?: number;
     readonly after?: string | Uint8Array;
@@ -284,6 +301,43 @@ export type Cmd<M extends Msgish> = {
     readonly errKind: string;
     readonly path: Uint8Array;
     readonly bytes: Uint8Array;
+} | {
+    readonly op: "append_file";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly path: Uint8Array;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "stat_file";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly path: Uint8Array;
+} | {
+    readonly op: "read_file_stream";
+    readonly key: string;
+    readonly chunkKind: string;
+    readonly doneKind: string;
+    readonly errKind: string;
+    readonly path: Uint8Array;
+} | {
+    readonly op: "write_file_stream";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly path: Uint8Array;
+} | {
+    readonly op: "write_file_chunk";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "write_file_close";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
 } | {
     readonly op: "store_set";
     readonly key: string;
@@ -500,6 +554,12 @@ export declare const Cmd: {
     cancel(key: string): Cmd<never>;
     readFile<M extends Msgish>(path: Uint8Array, route: RequestRoute<M>): Cmd<M>;
     writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+    appendFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+    statFile<M extends Msgish>(path: Uint8Array, route: FileStatRoute<M>): Cmd<M>;
+    readFileStream<M extends Msgish>(path: Uint8Array, route: FileReadStreamRoute<M>): Cmd<M>;
+    writeFileStream<M extends Msgish>(key: string, path: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+    writeFileChunk<M extends Msgish>(key: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+    writeFileClose<M extends Msgish>(key: string, route: WriteRoute<M>): Cmd<M>;
     store: {
         set<M extends Msgish>(storeKey: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
         get<M extends Msgish>(storeKey: string, route: RequestRoute<M>): Cmd<M>;

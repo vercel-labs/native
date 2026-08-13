@@ -460,6 +460,12 @@ export const rules = {
     fix: "Use `Cmd.credentials.set`, `Cmd.credentials.get`, or `Cmd.credentials.delete` instead of spelling `core.credentials.*` through `Cmd.request`.",
     why: "The typed factories own the bounded credential record encoding; reserving their wire namespace keeps arbitrary request bytes from being mistaken for secrets or keys.",
   },
+  NS1074: {
+    id: "NS1074",
+    title: "external file paths require filesystem permission",
+    fix: "Add `\"filesystem\"` to app.zon's `permissions`, or keep raw file effects under a path delivered from `NATIVE_SDK_APP_DATA_DIR`.",
+    why: "The runtime canonicalizes raw paths and refuses access outside this app's data/config/cache/state/logs/temp roots unless the manifest grants filesystem access; catching literal external paths at check time avoids shipping a guaranteed rejection.",
+  },
   NS1420: {
     id: "NS1420",
     title: "declare stable SQL in src/queries.sql",

@@ -205,10 +205,10 @@ pub const Msg = union(enum) {
     /// chrome/appearance/effect channels — never bound in markup, so the
     /// dead-state lint must not ask for an on-* event.
     pub const view_unbound = .{
-        "select_folder_at", "next_note",     "prev_note", "delete_note",
-        "copy_note",        "open_rename_folder", "dismiss",
-        "system_scheme",    "chrome_changed", "refresh_tick",
-        "save_tick",        "store_done",    "clipboard_done",
+        "select_folder_at", "next_note",          "prev_note", "delete_note",
+        "copy_note",        "open_rename_folder", "dismiss",   "system_scheme",
+        "chrome_changed",   "refresh_tick",       "save_tick", "store_done",
+        "clipboard_done",
     };
 };
 
@@ -284,13 +284,12 @@ pub const Model = struct {
     /// keeps `native check`'s dead-state lint quiet without weakening it
     /// for real drift.
     pub const view_unbound = .{
-        "folders",        "folder_count",  "notes",           "note_count",
-        "next_folder_id", "next_note_id",  "selected_folder",
-        "search_buffer",  "dialog",        "folder_field",
-        "dialog_folder",  "store_path_storage", "store_path_len",
-        "store_write_inflight", "save_pending", "system_scheme",
-        "clock",          "now_ms",        "status_storage",  "status_len",
-        "liveNoteCount",  "deletedNoteCount", "searching",    "status",
+        "folders",        "folder_count",         "notes",           "note_count",
+        "next_folder_id", "next_note_id",         "selected_folder", "search_buffer",
+        "dialog",         "folder_field",         "dialog_folder",   "store_path_storage",
+        "store_path_len", "store_write_inflight", "save_pending",    "system_scheme",
+        "clock",          "now_ms",               "status_storage",  "status_len",
+        "liveNoteCount",  "deletedNoteCount",     "searching",       "status",
         "storePath",      "hovered_note",
     };
 
@@ -1061,6 +1060,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     else => model.setStatus("Save failed: {s}", .{@tagName(result.outcome)}),
                 }
             },
+            else => model.setStatus("Unexpected file operation: {s}", .{@tagName(result.op)}),
         },
         .clipboard_done => |result| {
             if (result.op != .write) return;

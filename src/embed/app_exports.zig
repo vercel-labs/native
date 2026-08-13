@@ -16,6 +16,7 @@ comptime {
         &relational_migrations.migrations,
         mobile_build_options.credentials_capability,
         mobile_build_options.credentials_permission,
+        mobile_build_options.filesystem_permission,
         mobile_build_options.credentials_service,
     ));
 }

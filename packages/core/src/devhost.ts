@@ -1792,6 +1792,24 @@ function performCmd(cmd: Cmdish): void {
     case "db_exec":
       performDbCmd(cmd);
       return;
+    case "read_file":
+    case "write_file":
+    case "append_file":
+    case "stat_file":
+    case "read_file_stream":
+    case "write_file_stream":
+    case "write_file_chunk":
+    case "write_file_close": {
+      // The logic-only host deliberately performs no ambient filesystem IO;
+      // it still names the runtime policy so dev transcripts cannot imply
+      // these commands bypass the manifest gate.
+      const details = Object.entries(cmd)
+        .filter(([k]) => k !== "op")
+        .map(([k, v]) => `${k}=${JSON.stringify(jsonable(v))}`)
+        .join(" ");
+      say(`cmd ${cmd.op} ${details}`.trimEnd() + " (not performed by the virtual host; runtime requires filesystem permission outside app dirs)");
+      return;
+    }
     case "show_notification": {
       const details = Object.entries(cmd)
         .filter(([k]) => k !== "op")

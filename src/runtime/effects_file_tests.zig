@@ -437,6 +437,250 @@ test "real executor cuts over-bound reads with outcome truncated" {
     );
 }
 
+test "append and stat are bounded one-shot file effects" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/log/events.log", .{tmp.sub_path[0..]});
+    fx.appendFile(.{ .key = 1, .path = path, .bytes = "one", .on_result = Fx.fileMsg(.result) });
+    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    fx.appendFile(.{ .key = 2, .path = path, .bytes = "-two", .on_result = Fx.fileMsg(.result) });
+    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    fx.statFile(.{ .key = 3, .path = path, .on_result = Fx.fileMsg(.result) });
+    var stat_result: ?effects_mod.EffectFileResult = null;
+    while (stat_result == null) {
+        if (fx.takeMsg()) |msg| stat_result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(stat_result.?.exists);
+    try std.testing.expectEqual(@as(u64, 7), stat_result.?.total);
+    const bytes = try tmp.dir.readFileAlloc(io, "log/events.log", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("one-two", bytes);
+}
+
+test "streaming file round-trip has no total-size cliff and finalizes atomically" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/export.bin", .{tmp.sub_path[0..]});
+    const chunk = try std.testing.allocator.alloc(u8, effects_mod.effect_file_stream_chunk_bytes);
+    defer std.testing.allocator.free(chunk);
+    for (chunk, 0..) |*byte, index| byte.* = @truncate(index);
+
+    fx.writeFileStream(.{ .key = 44, .path = path, .on_result = Fx.fileMsg(.result) });
+    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    for (0..5) |_| {
+        fx.writeFileChunk(.{ .key = 44, .bytes = chunk, .on_result = Fx.fileMsg(.result) });
+        while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    fx.writeFileClose(.{ .key = 44, .on_result = Fx.fileMsg(.result) });
+    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+
+    fx.readFileStream(.{ .key = 45, .path = path, .on_result = Fx.fileMsg(.result) });
+    var chunks: usize = 0;
+    var total: u64 = 0;
+    while (true) {
+        const msg = fx.takeMsg() orelse {
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+            continue;
+        };
+        if (msg.result.event == .chunk) chunks += 1 else {
+            try std.testing.expectEqual(effects_mod.EffectFileEvent.done, msg.result.event);
+            total = msg.result.total;
+            break;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 5), chunks);
+    try std.testing.expectEqual(@as(u64, chunk.len * 5), total);
+}
+
+test "an unclosed write stream never exposes a partial destination" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "export.bin", .data = "previous generation" });
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/export.bin", .{tmp.sub_path[0..]});
+
+    var fx = Fx.init(std.testing.allocator);
+    fx.writeFileStream(.{ .key = 54, .path = path, .on_result = Fx.fileMsg(.result) });
+    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    fx.writeFileChunk(.{ .key = 54, .bytes = "partial replacement", .on_result = Fx.fileMsg(.result) });
+    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    fx.deinit();
+
+    const visible = try tmp.dir.readFileAlloc(io, "export.bin", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(visible);
+    try std.testing.expectEqualStrings("previous generation", visible);
+}
+
+test "stream sinks reject duplicate and out-of-order operations loudly" {
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.writeFileStream(.{ .key = 9, .path = "out.bin", .on_result = Fx.fileMsg(.result) });
+    fx.writeFileStream(.{ .key = 9, .path = "other.bin", .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, fx.takeMsg().?.result.outcome);
+    try fx.acknowledgeFakeFileStreamOpen(9);
+    try fx.feedFileResultDetailed(.{ .key = 9, .op = .write_stream_open, .outcome = .ok });
+    _ = fx.takeMsg().?;
+    fx.writeFileChunk(.{ .key = 9, .bytes = "one", .on_result = Fx.fileMsg(.result) });
+    fx.writeFileChunk(.{ .key = 9, .bytes = "two", .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.out_of_order, fx.takeMsg().?.result.outcome);
+}
+
+test "read streams replace and cancel silently while sinks cancel loudly" {
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.readFileStream(.{ .key = 20, .path = "first.bin", .on_result = Fx.fileMsg(.result) });
+    fx.readFileStream(.{ .key = 20, .path = "replacement.bin", .on_result = Fx.fileMsg(.result) });
+    try fx.feedFileResultDetailed(.{ .key = 20, .op = .read_stream, .event = .chunk, .outcome = .ok, .bytes = "replacement", .total = 11 });
+    try std.testing.expectEqualStrings("replacement", fx.takeMsg().?.result.bytes);
+    fx.cancel(20);
+    try std.testing.expectEqual(@as(?TestMsg, null), fx.takeMsg());
+    try std.testing.expectError(error.EffectNotFound, fx.feedFileResultDetailed(.{ .key = 20, .op = .read_stream, .event = .done, .outcome = .ok, .total = 11 }));
+
+    fx.writeFileStream(.{ .key = 21, .path = "sink.bin", .on_result = Fx.fileMsg(.result) });
+    fx.cancel(21);
+    const cancelled = fx.takeMsg().?.result;
+    try std.testing.expectEqual(effects_mod.EffectFileOp.write_stream_open, cancelled.op);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.cancelled, cancelled.outcome);
+}
+
+test "disk capacity errors are closed and enum-named across whole and streaming writes" {
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.failNextFileOperationForTest(error.NoSpaceLeft);
+    fx.writeFile(.{ .key = 31, .path = "whole.bin", .bytes = "x", .on_result = Fx.fileMsg(.result) });
+    var result = fx.takeMsg().?.result;
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.disk_full, result.outcome);
+    try std.testing.expectEqualStrings("disk_full", @tagName(result.outcome));
+
+    fx.failNextFileOperationForTest(error.DiskQuota);
+    fx.writeFileStream(.{ .key = 32, .path = "stream.bin", .on_result = Fx.fileMsg(.result) });
+    result = fx.takeMsg().?.result;
+    try std.testing.expectEqual(effects_mod.EffectFileOp.write_stream_open, result.op);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.disk_full, result.outcome);
+
+    fx.writeFileStream(.{ .key = 33, .path = "stream-chunk.bin", .on_result = Fx.fileMsg(.result) });
+    try fx.acknowledgeFakeFileStreamOpen(33);
+    try fx.feedFileResultDetailed(.{ .key = 33, .op = .write_stream_open, .outcome = .ok });
+    _ = fx.takeMsg().?;
+    fx.failNextFileOperationForTest(error.NoSpaceLeft);
+    fx.writeFileChunk(.{ .key = 33, .bytes = "chunk", .on_result = Fx.fileMsg(.result) });
+    result = fx.takeMsg().?.result;
+    try std.testing.expectEqual(effects_mod.EffectFileOp.write_stream_chunk, result.op);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.disk_full, result.outcome);
+}
+
+test "file access gating covers whole, append, stat, and stream verbs without consuming slots" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "app-data");
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    var root_buffer: [256]u8 = undefined;
+    var inside_buffer: [256]u8 = undefined;
+    var outside_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}/app-data", .{tmp.sub_path[0..]});
+    const inside = try std.fmt.bufPrint(&inside_buffer, "{s}/owned.bin", .{root});
+    const outside = try std.fmt.bufPrint(&outside_buffer, ".zig-cache/tmp/{s}/outside.bin", .{tmp.sub_path[0..]});
+    fx.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = true });
+
+    fx.writeFile(.{ .key = 1, .path = inside, .bytes = "ok", .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    fx.cancel(1);
+    _ = fx.takeMsg().?;
+
+    fx.readFile(.{ .key = 2, .path = outside, .on_result = Fx.fileMsg(.result) });
+    fx.writeFile(.{ .key = 3, .path = outside, .bytes = "x", .on_result = Fx.fileMsg(.result) });
+    fx.appendFile(.{ .key = 4, .path = outside, .bytes = "x", .on_result = Fx.fileMsg(.result) });
+    fx.statFile(.{ .key = 5, .path = outside, .on_result = Fx.fileMsg(.result) });
+    fx.readFileStream(.{ .key = 6, .path = outside, .on_result = Fx.fileMsg(.result) });
+    fx.writeFileStream(.{ .key = 7, .path = outside, .on_result = Fx.fileMsg(.result) });
+    const refused_ops = [_]effects_mod.EffectFileOp{ .read, .write, .append, .stat, .read_stream, .write_stream_open };
+    for (refused_ops) |expected_op| {
+        const refused = fx.takeMsg().?.result;
+        try std.testing.expectEqual(expected_op, refused.op);
+        try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, refused.outcome);
+        try std.testing.expectEqualStrings("rejected", @tagName(refused.outcome));
+    }
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+
+    var granted = Fx.init(std.testing.allocator);
+    defer granted.deinit();
+    granted.executor = .fake;
+    granted.bindFileAccess(.{ .roots = &.{}, .permitted = true, .enforce = true });
+    granted.statFile(.{ .key = 8, .path = outside, .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(@as(usize, 1), granted.pendingFileCount());
+    granted.readFile(.{ .key = 9, .path = inside, .on_result = Fx.fileMsg(.result) });
+    granted.readFileStream(.{ .key = 10, .path = inside, .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(@as(usize, 2), granted.pendingFileCount());
+
+    // Full matrix: both whole-file and stream families are admitted inside
+    // app roots regardless of the grant, and outside only with the grant.
+    var inside_ungranted = Fx.init(std.testing.allocator);
+    defer inside_ungranted.deinit();
+    inside_ungranted.executor = .fake;
+    inside_ungranted.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = true });
+    inside_ungranted.readFile(.{ .key = 40, .path = inside, .on_result = Fx.fileMsg(.result) });
+    inside_ungranted.readFileStream(.{ .key = 41, .path = inside, .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(@as(usize, 1), inside_ungranted.pendingFileCount());
+    try inside_ungranted.feedFileResultDetailed(.{ .key = 41, .op = .read_stream, .event = .done, .outcome = .ok });
+    _ = inside_ungranted.takeMsg().?;
+
+    granted.readFileStream(.{ .key = 42, .path = outside, .on_result = Fx.fileMsg(.result) });
+    try granted.feedFileResultDetailed(.{ .key = 42, .op = .read_stream, .event = .done, .outcome = .ok });
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, granted.takeMsg().?.result.outcome);
+
+    var warn_only = Fx.init(std.testing.allocator);
+    defer warn_only.deinit();
+    warn_only.executor = .fake;
+    warn_only.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = false });
+    warn_only.statFile(.{ .key = 43, .path = outside, .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(@as(usize, 1), warn_only.pendingFileCount());
+}
+
+test "runtime binding defaults support one warn-only release before enforcement" {
+    const binding_warn: effects_mod.FileAccessBinding = .{ .roots = &.{}, .permitted = false, .enforce = false };
+    const binding_enforce: effects_mod.FileAccessBinding = .{ .roots = &.{}, .permitted = false, .enforce = true };
+    try std.testing.expectEqual(
+        @import("file_access.zig").Decision.warn,
+        @import("file_access.zig").decide(std.testing.allocator, std.testing.io, binding_warn, ".zig-cache/outside-file"),
+    );
+    try std.testing.expectEqual(
+        @import("file_access.zig").Decision.reject,
+        @import("file_access.zig").decide(std.testing.allocator, std.testing.io, binding_enforce, ".zig-cache/outside-file"),
+    );
+}
+
 // --------------------------------------------------- bounded teardown
 
 /// Create a FIFO at `path` (POSIX-only; callers gate on the platform).

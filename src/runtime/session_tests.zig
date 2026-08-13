@@ -1448,6 +1448,8 @@ const ImageSessionModel = struct {
     exits: u32 = 0,
     exits_rejected: u32 = 0,
     files: u32 = 0,
+    stream_bytes: u64 = 0,
+    stream_done: bool = false,
     /// Armed by `.arm_fetch_chain` / `.arm_file_chain`: the NEXT
     /// terminal of that family answers by reissuing the SAME key from
     /// inside its own update (one-shot) — the poll/reload idiom whose
@@ -1475,6 +1477,7 @@ const ImageSessionMsg = union(enum) {
     fetch_cover,
     spawn_cover,
     read_note,
+    stream_note,
     line: effects_mod.EffectLine,
     image: effects_mod.EffectImageResult,
     response: effects_mod.EffectResponse,
@@ -1519,6 +1522,7 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
         // A file read on its own key (26 — never colliding with the
         // image/fetch/spawn probes above).
         .read_note => fx.readFile(.{ .key = 26, .path = "notes/session.txt", .on_result = ImageSessionApp.Effects.fileMsg(.file) }),
+        .stream_note => fx.readFileStream(.{ .key = 27, .path = "notes/large.bin", .on_result = ImageSessionApp.Effects.fileMsg(.file) }),
         // Aimed at the cover's id: against a running load this marks
         // it cancelled; against a staged start-failure rejection (no
         // slot exists) it is a no-op and the rejection stands.
@@ -1547,6 +1551,10 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
         },
         .file => |result| {
             model.files += 1;
+            if (result.op == .read_stream) {
+                if (result.event == .chunk) model.stream_bytes += result.bytes.len;
+                if (result.event == .done) model.stream_done = true;
+            }
             // The armed reload idiom, the fetch chain's file twin.
             if (model.chain_next_file and result.key == 26) {
                 model.chain_next_file = false;
@@ -1590,6 +1598,7 @@ fn imageSessionView(ui: *ImageSessionApp.Ui, model: *const ImageSessionModel) Im
         ui.text(.{}, ui.fmt("{d} lines, {d} before image", .{ model.lines_seen, model.lines_before_image })),
         ui.text(.{}, ui.fmt("{d}/{d} responses, {d}/{d} exits rejected", .{ model.responses_rejected, model.responses, model.exits_rejected, model.exits })),
         ui.text(.{}, ui.fmt("{d} files", .{model.files})),
+        ui.text(.{}, ui.fmt("stream {d} done {}", .{ model.stream_bytes, model.stream_done })),
     });
 }
 
@@ -1604,6 +1613,7 @@ fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.fetch-chain")) return .arm_fetch_chain;
     if (std.mem.eql(u8, name, "image.file-chain")) return .arm_file_chain;
     if (std.mem.eql(u8, name, "image.read-note")) return .read_note;
+    if (std.mem.eql(u8, name, "image.stream-note")) return .stream_note;
     if (std.mem.eql(u8, name, "image.cancel")) return .cancel_cover;
     if (std.mem.eql(u8, name, "image.chatty")) return .start_chatty;
     if (std.mem.eql(u8, name, "image.fetch-cover")) return .fetch_cover;
@@ -2520,6 +2530,77 @@ test "a same-key retry from a fetch or file terminal handler is accepted live an
     try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
     try std.testing.expectEqualDeep(recorded.model, app_state.model);
     try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+test "a multi-megabyte file stream records through blobs and replays byte-identically" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "file-stream-session", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.stream-note", .window_id = 1 } });
+    const stream_key: u64 = 27;
+    const chunk = try gpa.alloc(u8, effects_mod.effect_file_stream_chunk_bytes);
+    defer gpa.free(chunk);
+    var total: u64 = 0;
+    for (0..5) |chunk_index| {
+        for (chunk, 0..) |*byte, index| byte.* = @truncate(index + chunk_index * 17);
+        total += chunk.len;
+        try app_state.effects.feedFileResultDetailed(.{ .key = stream_key, .op = .read_stream, .event = .chunk, .outcome = .ok, .bytes = chunk, .total = total });
+        try harness.runtime.dispatchPlatformEvent(app, .wake);
+    }
+    try std.testing.expect(total > effects_mod.max_effect_file_bytes);
+    try app_state.effects.feedFileResultDetailed(.{ .key = stream_key, .op = .read_stream, .event = .done, .outcome = .ok, .total = total });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    try std.testing.expectEqual(@as(usize, 5), store.count);
+    const recorded_model = app_state.model;
+    const recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+
+    const replay_harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer replay_harness.destroy(gpa);
+    replay_harness.null_platform.gpu_surfaces = true;
+    const replay_app = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(replay_app);
+    replay_app.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer replay_app.deinit();
+    const report = try session_replay.replaySession(&replay_harness.runtime, replay_app.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(u64, 6), report.effects_fed);
+    try std.testing.expectEqualDeep(recorded_model, replay_app.model);
+    try std.testing.expectEqual(recorded_fingerprint, replay_harness.runtime.sessionStateFingerprint());
 }
 
 /// Record the queue-saturation reference session: a chatty spawn and

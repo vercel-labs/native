@@ -159,6 +159,42 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(result.warnings.some((d) => d.id === "NS1071"), false);
 });
 
+test("NS1074 catches certainly-external literal file paths without filesystem permission", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "stat"; readonly exists: boolean; readonly size: number; readonly mtimeMs: number }
+  | { readonly kind: "done"; readonly total: number }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: asciiBytes("x") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.readFile(asciiBytes("/tmp/input"), { ok: "loaded", err: "failed" }),
+      Cmd.writeFile(asciiBytes("../output"), model.bytes, { ok: "wrote", err: "failed" }),
+      Cmd.appendFile(asciiBytes("logs/local"), model.bytes, { ok: "wrote", err: "failed" }),
+      Cmd.statFile(asciiBytes("C:\\\\Users\\\\outside"), { ok: "stat", err: "failed" }),
+      Cmd.readFileStream(asciiBytes("safe/import"), { chunk: "loaded", done: "done", err: "failed" }),
+      Cmd.writeFileStream("sink", asciiBytes("/tmp/export"), { ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "stat":
+    case "done":
+    case "failed": return model;
+  }
+}
+`;
+  const denied = check(source);
+  assert.equal(denied.diagnostics.filter((d) => d.id === "NS1074").length, 4);
+  const granted = check(source, { permissions: ["filesystem"] });
+  assert.equal(granted.diagnostics.some((d) => d.id === "NS1074"), false);
+});
+
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {
   const source = `
 import { Cmd } from "@native-sdk/core";

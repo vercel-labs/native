@@ -280,6 +280,14 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Write a whole file (parents created, replaced whole); <code>ok</code> carries no payload — a successful write has nothing to report</td>
     </tr>
     <tr>
+      <td><code>Cmd.appendFile</code> / <code>Cmd.statFile</code></td>
+      <td>Append one bounded payload, or inspect <code>&#123; exists, size, mtimeMs &#125;</code> before choosing how to read a file</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.readFileStream</code> / <code>Cmd.writeFileStream</code> + <code>writeFileChunk</code>/<code>writeFileClose</code></td>
+      <td>Read 256-KiB chunks without a total-size cliff, or build an atomic export one acknowledged chunk at a time — see <a href="/docs/files">Files &amp; Streaming</a></td>
+    </tr>
+    <tr>
       <td><code>Cmd.fetch(spec, &#123; key?, ok, err &#125;)</code></td>
       <td>A buffered HTTP(S) exchange; <code>ok</code> carries <code>&#123; status, body &#125;</code> (a 404 is still <code>ok</code> — a delivered response), <code>err</code> the transport reason</td>
     </tr>
@@ -362,11 +370,11 @@ The runtime interprets the command after the model commits and dispatches any re
   </tbody>
 </table>
 
-Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for raw host results and errors, a generated service result record, one number field for timer fires and a streaming fetch's terminal status, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed engine effect — buffered named engine ops, `Cmd.delay`, a raw `Cmd.request` to an embedder host command — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it with no message. Live `Cmd.spawn`, streaming-fetch, and service keys (buffered or streaming) reject a duplicate (`err` gets `rejected`) so two calls can never splice into one result or stream; cancel first if you mean to supersede — cancelling a buffered service request produces no message, while cancelling a live stream routes `cancelled` to `err`. A streaming fetch whose line is cut or dropped also ends with `err: truncated`, never a misleading successful status. Every routed `err` arm receives a machine-readable reason.
+Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for raw host results and errors, a generated service result record, one number field for timer fires and stream totals, no fields for write acknowledgments, and one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Buffered engine effects and streamed file reads replace a live same-key predecessor and cancel silently. Live `Cmd.spawn`, streaming-fetch, streaming-service, and streamed write-sink keys reject duplicates so two producers cannot splice; cancelling those is loud through `err: cancelled`. A streaming fetch whose line is cut or dropped also ends with `err: truncated`, never a misleading successful status. Every routed `err` arm receives a machine-readable reason.
 
 Platform state stays on the same effect boundary. `Cmd.openExternalUrl(url)` enforces [`security.navigation.external_links`](/docs/security#external-links) before entering the browser; `Cmd.revealPath(path)` uses the desktop file manager. Credential operations take byte `service` and `account` identifiers plus the standard `{ key?, ok, err }` route: set/delete return empty bytes on `ok`, get returns the secret, and a missing item routes `not_found`. `Cmd.formatLocalTime(timestampMs, "date" | "time" | "datetime", route)` returns localized UTF-8 bytes using the current host locale and time zone. That formatting is deliberately a Cmd—not a pure helper—so session recording captures the observed text and replay never re-reads ambient locale or timezone state.
 
-Durable in-memory state uses `Cmd.persist()`: declare the `persist` capability, configure the boot routes and schema version, then return the command beside the committed model. The engine owns canonical serialization, trailing-edge coalescing, atomic app-data placement, backup recovery, migration, and journal/replay. See [Model Persistence](/docs/persistence) for the complete setup. `Cmd.readFile` and `Cmd.writeFile` remain for user-visible files, exports, and blobs; when using them, request the framework-provided app-data directory through `envMsgs` instead of depending on process cwd.
+Durable in-memory state uses `Cmd.persist()`: declare the `persist` capability, configure the boot routes and schema version, then return the command beside the committed model. The engine owns canonical serialization, trailing-edge coalescing, atomic app-data placement, backup recovery, migration, and journal/replay. See [Model Persistence](/docs/persistence) for the complete setup. Raw file commands remain for user-visible files, exports, and blobs; [Files & Streaming](/docs/files) covers their bounds, atomic sink protocol, replay, and `filesystem` permission gate.
 
 Independent byte records use `Cmd.store`: declare the `store` capability, then route set/get/delete/scan/setMany results back to Msg arms. The engine owns the app-data path, SQLite schema, atomic batches, pagination, and replay boundary. See [Record Store](/docs/record-store).
 

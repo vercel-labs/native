@@ -143,6 +143,16 @@ export interface WriteRoute<M extends Msgish> {
   readonly err: M["kind"];
 }
 
+export interface FileReadStreamRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly chunk: M["kind"];
+  readonly done: M["kind"];
+  readonly err: M["kind"];
+}
+
+export interface FileStatArm { readonly exists: boolean; readonly size: number; readonly mtimeMs: number; }
+export interface FileStatRoute<M extends Msgish> { readonly key?: string; readonly ok: M["kind"]; readonly err: M["kind"]; }
+
 export interface StoreScanOptions {
   readonly limit?: number;
   readonly after?: string | Uint8Array;
@@ -355,6 +365,12 @@ export type CmdData =
       readonly path: Uint8Array;
       readonly bytes: Uint8Array;
     }
+  | { readonly op: "append_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "stat_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
+  | { readonly op: "read_file_stream"; readonly key: string; readonly chunkKind: string; readonly doneKind: string; readonly errKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_stream"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_chunk"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly bytes: Uint8Array }
+  | { readonly op: "write_file_close"; readonly key: string; readonly okKind: string; readonly errKind: string }
   | {
       readonly op: "store_set";
       readonly key: string;
@@ -699,6 +715,24 @@ export const Cmd = {
 
   writeFile(path: Uint8Array, bytes: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
     return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+  appendFile(path: Uint8Array, bytes: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "append_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+  statFile(path: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "stat_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+  readFileStream(path: Uint8Array, route: { readonly key?: string; readonly chunk: string; readonly done: string; readonly err: string }): CmdData {
+    return { op: "read_file_stream", key: route.key ?? "", chunkKind: route.chunk, doneKind: route.done, errKind: route.err, path };
+  },
+  writeFileStream(key: string, path: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "write_file_stream", key, okKind: route.ok, errKind: route.err, path };
+  },
+  writeFileChunk(key: string, bytes: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "write_file_chunk", key, okKind: route.ok, errKind: route.err, bytes };
+  },
+  writeFileClose(key: string, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "write_file_close", key, okKind: route.ok, errKind: route.err };
   },
 
   store: {

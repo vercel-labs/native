@@ -2337,6 +2337,8 @@ fn runnerZig() []const u8 {
     \\    shortcuts: ?[]const native_sdk.Shortcut = null,
     \\    record_store: ?native_sdk.RecordStoreBinding = null,
     \\    relational_store: ?native_sdk.RelationalStoreBinding = null,
+    \\    file_access: ?native_sdk.FileAccessBinding = null,
+    \\    file_access_enforce: bool = true,
     \\    relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
@@ -2732,6 +2734,24 @@ fn runnerZig() []const u8 {
     \\    var record_store_value: RecordStoreType = undefined;
     \\    var record_store_open = false;
     \\    var resolved_options = options;
+    \\    var file_root_buffers: [6][1024]u8 = undefined;
+    \\    var file_roots: [6][]const u8 = undefined;
+    \\    const resolved_file_dirs = native_sdk.app_dirs.resolve(
+    \\        .{ .name = options.bundle_id },
+    \\        native_sdk.app_dirs.currentPlatform(),
+    \\        native_sdk.debug.envFromMap(init.environ_map),
+    \\        native_sdk.app_dirs.Buffers.fromArray(1024, &file_root_buffers),
+    \\    ) catch null;
+    \\    var file_root_count: usize = 0;
+    \\    if (resolved_file_dirs) |dirs| {
+    \\        file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+    \\        file_root_count = file_roots.len;
+    \\    }
+    \\    resolved_options.file_access = .{
+    \\        .roots = file_roots[0..file_root_count],
+    \\        .permitted = native_sdk.security.hasPermission(options.security.permissions, native_sdk.security.permission_filesystem),
+    \\        .enforce = options.file_access_enforce,
+    \\    };
     \\    if (comptime manifestDeclaresStore()) {
     \\        var data_dir_buffer: [512]u8 = undefined;
     \\        const app_data_dir = native_sdk.app_dirs.resolveOne(
@@ -2835,6 +2855,7 @@ fn runnerZig() []const u8 {
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
     \\        .relational_store = options.relational_store,
+    \\        .file_access = options.file_access,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2891,6 +2912,7 @@ fn runnerZig() []const u8 {
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
     \\        .relational_store = options.relational_store,
+    \\        .file_access = options.file_access,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -2947,6 +2969,7 @@ fn runnerZig() []const u8 {
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
     \\        .relational_store = options.relational_store,
+    \\        .file_access = options.file_access,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -3003,6 +3026,7 @@ fn runnerZig() []const u8 {
     \\        .window_state_store = store,
     \\        .record_store = options.record_store,
     \\        .relational_store = options.relational_store,
+    \\        .file_access = options.file_access,
     \\        .environ = init.minimal.environ,
     \\    });
     \\
@@ -4082,6 +4106,10 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "relational_store: ?native_sdk.RelationalStoreBinding = null") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDeclaresSqlite()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".relational_store = options.relational_store") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "file_access: ?native_sdk.FileAccessBinding = null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "file_access_enforce: bool = true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "native_sdk.app_dirs.Buffers.fromArray") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".file_access = options.file_access") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "resolvedShortcuts") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "const manifest_windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn appInfo(self: RunOptions, buffers: *StateBuffers)") != null);

@@ -52,6 +52,7 @@ const max_status_bytes: usize = 192;
 const app_permissions = [_][]const u8{
     native_sdk.security.permission_command,
     native_sdk.security.permission_dialog,
+    native_sdk.security.permission_filesystem,
     native_sdk.security.permission_view,
 };
 const shell_views = [_]native_sdk.ShellView{

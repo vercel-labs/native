@@ -4,3 +4,4 @@ next-env.d.ts
 .next-gate/
 .next-agent/
 .next-check/
+.next-final/

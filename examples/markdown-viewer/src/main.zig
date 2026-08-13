@@ -74,6 +74,7 @@ pub const link_key: u64 = 5;
 
 const app_permissions = [_][]const u8{
     native_sdk.security.permission_command,
+    native_sdk.security.permission_filesystem,
     native_sdk.security.permission_network,
     native_sdk.security.permission_view,
 };
@@ -662,6 +663,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 },
                 else => model.setNote("Save failed: {s}", .{@tagName(result.outcome)}),
             },
+            else => model.setNote("Unexpected file operation: {s}", .{@tagName(result.op)}),
         },
         .recent_done => |result| {
             if (result.op == .read and result.outcome == .ok) model.restoreRecent(result.bytes);

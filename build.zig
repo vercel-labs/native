@@ -149,6 +149,31 @@ pub fn build(b: *std.Build) void {
     desktop_mod.link_libc = true;
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
+    // Tier-5 crash battery: a child uses the public streamed sink, signals
+    // after a chunk is durable only in the atomic temporary, then the parent
+    // kills it and verifies the destination still names the old generation.
+    const file_crash_helper_mod = module(b, target, optimize, "src/runtime/file_effect_crash_helper.zig");
+    file_crash_helper_mod.addImport("native_sdk", desktop_mod);
+    const file_crash_helper = b.addExecutable(.{ .name = "file-effect-crash-helper", .root_module = file_crash_helper_mod });
+    const file_crash_tests_mod = module(b, target, optimize, "src/runtime/file_effect_crash_tests.zig");
+    file_crash_tests_mod.addImport("native_sdk", desktop_mod);
+    const file_crash_options = b.addOptions();
+    file_crash_options.addOptionPath("helper_executable", file_crash_helper.getEmittedBin());
+    file_crash_tests_mod.addOptions("file_crash_options", file_crash_options);
+    const file_crash_tests = testArtifact(b, file_crash_tests_mod);
+    const file_crash_run = b.addRunArtifact(file_crash_tests);
+    const file_crash_step = b.step("test-file-effect-crash", "Kill a streamed writer before close and verify atomic destination visibility");
+    file_crash_step.dependOn(&file_crash_run.step);
+    const tier5_tests = filteredTestArtifact(b, desktop_mod, "storage-tier-5-tests", &.{
+        "runtime.effects_file_tests.test",
+        "runtime.file_access.test",
+        "runtime.session_record.test.recorder moves streamed file chunks",
+        "runtime.session_tests.test.a multi-megabyte file stream",
+    });
+    const tier5_run = b.addRunArtifact(tier5_tests);
+    const tier5_step = b.step("test-storage-tier-5", "Run file streaming, bounds, replay/blob, gating, and crash-atomicity batteries");
+    tier5_step.dependOn(&tier5_run.step);
+    tier5_step.dependOn(&file_crash_run.step);
 
     // SQLite is capability-shed from ordinary app artifacts. Its focused
     // engine/store suite gets a dedicated module that explicitly compiles the
@@ -508,6 +533,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
+    test_step.dependOn(&file_crash_run.step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
@@ -3549,6 +3575,7 @@ fn externalCoreFixtureModule(
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
     if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (spec.credentials_capability) check.addArgs(&.{ "--capability", "credentials", "--permission", "credentials" });
+    if (std.mem.eql(u8, spec.entry, "tests/ts-core/fixture.ts")) check.addArgs(&.{ "--permission", "filesystem" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{

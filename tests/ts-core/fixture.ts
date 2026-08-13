@@ -95,6 +95,8 @@ export interface Model {
   readonly rejectSeq: number;
   readonly chanRejectAt: number;
   readonly imgRejectAt: number;
+  readonly fileTotal: number;
+  readonly fileExists: boolean;
 }
 
 export type Msg =
@@ -109,6 +111,16 @@ export type Msg =
   | { readonly kind: "stamped"; readonly at: number }
   | { readonly kind: "save" }
   | { readonly kind: "load" }
+  | { readonly kind: "file_stat"; readonly exists: boolean; readonly size: number; readonly mtimeMs: number }
+  | { readonly kind: "stat_file" }
+  | { readonly kind: "append_file" }
+  | { readonly kind: "stream_read" }
+  | { readonly kind: "stream_open" }
+  | { readonly kind: "stream_chunk" }
+  | { readonly kind: "stream_close" }
+  | { readonly kind: "stream_out_of_order" }
+  | { readonly kind: "stream_piece"; readonly bytes: Uint8Array }
+  | { readonly kind: "stream_done"; readonly total: number }
   | { readonly kind: "wrote" }
   | { readonly kind: "get" }
   | { readonly kind: "fetched"; readonly status: number; readonly body: Uint8Array }
@@ -217,6 +229,8 @@ export function initialModel(): [Model, Cmd<Msg>] {
       rejectSeq: 0,
       chanRejectAt: -1,
       imgRejectAt: -1,
+      fileTotal: 0,
+      fileExists: false,
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -248,6 +262,29 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, Cmd.writeFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
     case "load":
       return [model, Cmd.readFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), { key: "file", ok: "loaded", err: "failed" })];
+    case "file_stat":
+      return [{ ...model, fileTotal: msg.size, fileExists: msg.exists }, Cmd.none];
+    case "stat_file":
+      return [model, Cmd.statFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), { key: "file", ok: "file_stat", err: "failed" })];
+    case "append_file":
+      return [model, Cmd.appendFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
+    case "stream_open":
+      return [model, Cmd.writeFileStream("file-stream", asciiBytes(".zig-cache/tmp/ts-core-tier5/stream.bin"), { ok: "wrote", err: "failed" })];
+    case "stream_chunk":
+      return [model, Cmd.writeFileChunk("file-stream", model.status, { ok: "wrote", err: "failed" })];
+    case "stream_close":
+      return [model, Cmd.writeFileClose("file-stream", { ok: "wrote", err: "failed" })];
+    case "stream_out_of_order":
+      return [model, Cmd.batch([
+        Cmd.writeFileChunk("file-stream", model.status, { ok: "wrote", err: "failed" }),
+        Cmd.writeFileChunk("file-stream", model.status, { ok: "wrote", err: "failed" }),
+      ])];
+    case "stream_read":
+      return [model, Cmd.readFileStream(asciiBytes(".zig-cache/tmp/ts-core-tier5/stream.bin"), { key: "read-stream", chunk: "stream_piece", done: "stream_done", err: "failed" })];
+    case "stream_piece":
+      return [{ ...model, status: msg.bytes }, Cmd.none];
+    case "stream_done":
+      return [{ ...model, fileTotal: msg.total }, Cmd.none];
     case "wrote":
       return [{ ...model, saved: (model.saved < 9007199254740991 ? model.saved + 1 : 9007199254740991) }, Cmd.none];
     case "get":

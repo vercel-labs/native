@@ -2510,6 +2510,28 @@ export class SubsetChecker {
         }
       }
 
+      // NS1074 — best-effort literal-path lint for the runtime filesystem
+      // gate. App-dir paths normally arrive as bytes from envMsgs and remain
+      // dynamic here; a literal absolute path or a lexical parent escape is
+      // certainly external and should name the missing permission now.
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ["readFile", "writeFile", "appendFile", "statFile", "readFileStream", "writeFileStream"].includes(node.expression.name.text) &&
+        ts.isIdentifier(node.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression) &&
+        !this.permissions.has("filesystem")
+      ) {
+        const pathArg = node.expression.name.text === "writeFileStream" ? node.arguments[1] : node.arguments[0];
+        if (pathArg && ts.isCallExpression(pathArg) && ["asciiBytes", "utf8Bytes"].includes(this.sdkRootFunctionName(pathArg.expression) ?? "")) {
+          const literal = pathArg.arguments[0];
+          if (literal && ts.isStringLiteral(literal) && (/^(?:\/|[A-Za-z]:[\\/])/.test(literal.text) || literal.text.split(/[\\/]+/).includes(".."))) {
+            this.report("NS1074", `\`Cmd.${node.expression.name.text}\` uses a literal path outside the app-directory exemption without the \`filesystem\` permission.`, pathArg);
+          }
+        }
+      }
+
       // NS1069 — the nested record-store factories remain capability-bound;
       // recognizing the SDK Cmd symbol (rather than its spelling alone) keeps
       // local objects named Cmd out of this cross-file contract check.

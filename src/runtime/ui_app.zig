@@ -1417,6 +1417,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .permitted = runtime.options.credentials_enabled and
                     security.hasPermission(runtime.options.security.permissions, security.permission_credentials),
             });
+            if (runtime.options.file_access) |binding| {
+                self.effects.bindFileAccess(binding);
+            } else if (!builtin.is_test and !self.effects.replayArmed()) {
+                // Fail closed for custom/older runners that omit the new path
+                // policy. Replay is exempt: the journal is the whole world and
+                // fake file requests must park without consulting live paths.
+                self.effects.bindFileAccess(.{
+                    .roots = &.{},
+                    .permitted = security.hasPermission(runtime.options.security.permissions, security.permission_filesystem),
+                    .enforce = true,
+                });
+            }
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
             self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
@@ -1492,7 +1504,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         record.truncated,
                         record.dropped,
                     ),
-                    .file => try self.effects.feedFileResult(record.key, record.file_outcome, record.payload),
+                    .file => try self.effects.feedFileResultDetailed(.{
+                        .key = record.key,
+                        .op = record.file_op,
+                        .event = record.file_event,
+                        .outcome = record.file_outcome,
+                        .bytes = record.payload,
+                        .total = record.file_total,
+                        .mtime_ms = record.file_mtime_ms,
+                        .exists = record.file_exists,
+                    }),
                     .clipboard => try self.effects.feedClipboardResult(record.key, record.clipboard_outcome, record.payload),
                     // `.host` records ride the route in `code` (0 ok / 1
                     // err); rejections never reach here — they carry

@@ -681,7 +681,7 @@ Streaming responses (`.response = .stream`) frame the body into `on_line` Msgs a
 
 Stream rules: each body line is one `on_line` Msg (same payload type and copy rule as spawn lines; `max_line_bytes` mirrors the spawn override with the same 256 KiB ceiling); the terminal `on_response` Msg carries the real HTTP status with an empty body; `fx.cancel(key)` mid-stream stops the lines and delivers exactly one `.cancelled` terminal; the whole-exchange `timeout_ms` covers the stream's full lifetime, so raise it for long-running commands; lines dropped on a full queue that no later line reported ride the terminal's `response.dropped_before`. In the fake executor, `feedLine` feeds a stream fetch's lines and `feedResponse(key, status, "")` delivers its terminal.
 
-`fx.writeFile` / `fx.readFile` are TEA-friendly file persistence — session snapshots, app state — without smuggling an `Io` handle from `main` into `update`. Same discipline as spawn and fetch: bounded, key-based (shared key space and 16 slots), exactly one terminal Msg with an explicit outcome:
+`fx.writeFile` / `fx.readFile` are TEA-friendly raw file effects for user-visible files, exports, and blobs — app state belongs in the engine-owned storage tiers. Same discipline as spawn and fetch: bounded, key-based, and explicit outcomes:
 
 ```zig
 pub const Msg = union(enum) {
@@ -708,8 +708,10 @@ pub const Msg = union(enum) {
 
 File rules:
 
-- `result.outcome` is explicit: `.ok` (a read's whole content in `result.bytes`; a write fully on disk), `.not_found` (reads only — writes create the path, parent directories included), `.io_failed` (permissions, path is a directory, disk), `.truncated` (the file exceeds the 1 MiB `max_effect_file_bytes`; `result.bytes` is the first bound bytes — its own outcome, not a flag, because a cut JSON snapshot must not parse as whole), `.rejected` (never ran: slots busy, duplicate key, empty/over-long path, write bytes over the bound — an over-bound WRITE is rejected outright since a partial write would corrupt the file), `.cancelled`.
+- `result.outcome` is explicit: `.ok`, `.not_found`, `.io_failed`, `.truncated`, `.rejected`, `.cancelled`, `.sink_missing`, `.out_of_order`, or `.disk_full`.
 - Writes replace the file whole; `writeFile` bytes are copied at call time so the caller's buffer is immediately reusable. Reads deliver drain-scratch bytes — copy what the model keeps.
+- `appendFile` appends one payload up to 1 MiB; `statFile` returns existence, size, and mtime. `readFileStream` emits 256-KiB chunks then `.done(total)`. `writeFileStream` opens an atomic sink; acknowledge each `writeFileChunk` before sending the next, then `writeFileClose` syncs and atomically installs the destination. Streaming owns four slots separate from the general sixteen.
+- Raw paths under this app's resolved data/config/cache/state/logs/temp roots need no grant. Every external path requires the `filesystem` permission. The runtime resolves existing parents and symlinks before checking, so an in-root symlink pointing out is external.
 - In the fake executor: `pendingFileAt(0)` records `key`/`op`/`path`/`bytes` for assertions; `feedFileResult(key, .ok, "{...}")` answers a read (over-bound content is cut and rewritten to `.truncated`, mirroring the real reader), `feedFileResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed.
 
 `fx.credentialsSet` / `fx.credentialsGet` / `fx.credentialsDelete` are the only place authentication tokens, passwords, and similar app secrets belong. Declare both `.capabilities = .{ "credentials" }` and `.permissions = .{ "credentials" }` in `app.zon`; the stable app id is the OS keychain service namespace, while the supplied key is its account. Never copy a fetched secret into Model: consume the drain-scratch `result.bytes` immediately while constructing the next effect, so persistence, state fingerprints, and diagnostics cannot capture it.

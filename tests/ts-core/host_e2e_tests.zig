@@ -65,6 +65,13 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.note")) return .note;
     if (std.mem.eql(u8, name, "core.save")) return .save;
     if (std.mem.eql(u8, name, "core.load")) return .load;
+    if (std.mem.eql(u8, name, "core.filestat")) return .stat_file;
+    if (std.mem.eql(u8, name, "core.fileappend")) return .append_file;
+    if (std.mem.eql(u8, name, "core.streamopen")) return .stream_open;
+    if (std.mem.eql(u8, name, "core.streamchunk")) return .stream_chunk;
+    if (std.mem.eql(u8, name, "core.streamclose")) return .stream_close;
+    if (std.mem.eql(u8, name, "core.streamooo")) return .stream_out_of_order;
+    if (std.mem.eql(u8, name, "core.streamread")) return .stream_read;
     if (std.mem.eql(u8, name, "core.get")) return .get;
     if (std.mem.eql(u8, name, "core.stream")) return .stream;
     if (std.mem.eql(u8, name, "core.cancelstream")) return .cancel_stream;
@@ -120,9 +127,15 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
 /// tests so every run starts from an absent store.
 const store_path = ".zig-cache/tmp/ts-core-e2e/store.bin";
 const store_dir = ".zig-cache/tmp/ts-core-e2e";
+const tier5_dir = ".zig-cache/tmp/ts-core-tier5";
+const tier5_append_path = ".zig-cache/tmp/ts-core-tier5/append.bin";
 
 fn removeStore() void {
     std.Io.Dir.cwd().deleteTree(std.testing.io, store_dir) catch {};
+}
+
+fn removeTier5Files() void {
+    std.Io.Dir.cwd().deleteTree(std.testing.io, tier5_dir) catch {};
 }
 
 fn e2eOptions() App.Options {
@@ -261,6 +274,15 @@ const Harness = struct {
             .size = native_sdk.geometry.SizeF.init(400, 300),
         });
         errdefer self.harness.destroy(std.testing.allocator);
+        self.harness.runtime.options.security.permissions = &.{
+            native_sdk.security.permission_credentials,
+            native_sdk.security.permission_filesystem,
+        };
+        self.harness.runtime.options.file_access = .{
+            .roots = &.{},
+            .permitted = true,
+            .enforce = true,
+        };
         self.harness.null_platform.gpu_surfaces = true;
         self.harness.runtime.options.session_recorder = recorder;
         self.app_state = try std.testing.allocator.create(App);
@@ -567,6 +589,60 @@ test "writeFile and readFile round-trip real disk through the compiled core" {
     try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
     try std.testing.expectEqualStrings("not_found", Bridge.model().lastErr);
     try std.testing.expectEqualStrings("ready", Bridge.model().status);
+}
+
+test "compiled stat, append, and file-stream verbs route through the runtime" {
+    const io = std.testing.io;
+    HostStub.reset();
+    removeTier5Files();
+    defer removeTier5Files();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "chunk-bytes");
+    try h.wake();
+
+    try h.menu("core.streamopen");
+    try h.waitPending();
+    try h.wake();
+    // Two chunks in one command batch: the second refuses out_of_order at
+    // its own command-stream position without stealing the first chunk's
+    // route tags. The accepted first chunk still lands and is acknowledged.
+    const saved_before_chunk = Bridge.model().saved;
+    try h.menu("core.streamooo");
+    try h.wake();
+    try std.testing.expectEqualStrings("out_of_order", Bridge.model().lastErr);
+    if (Bridge.model().saved == saved_before_chunk) {
+        try h.waitPending();
+        try h.wake();
+    }
+    try h.menu("core.streamclose");
+    try h.waitPending();
+    try h.wake();
+
+    try h.menu("core.streamread");
+    while (true) {
+        try h.waitPending();
+        try h.wake();
+        if (Bridge.model().fileTotal == "chunk-bytes".len) break;
+    }
+    try std.testing.expectEqualStrings("chunk-bytes", Bridge.model().status);
+    try std.testing.expectEqual(@as(f64, "chunk-bytes".len), Bridge.model().fileTotal);
+
+    try std.Io.Dir.cwd().createDirPath(io, tier5_dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tier5_append_path, .data = "chunk-bytes" });
+    try h.menu("core.fileappend");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.filestat");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expect(Bridge.model().fileExists);
+    try std.testing.expectEqual(@as(f64, "chunk-bytes".len * 2), Bridge.model().fileTotal);
+    const appended = try std.Io.Dir.cwd().readFileAlloc(io, tier5_append_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(appended);
+    try std.testing.expectEqualStrings("chunk-byteschunk-bytes", appended);
 }
 
 test "every Cmd.store factory emits its bounded v3 record through the external core" {

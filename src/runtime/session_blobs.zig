@@ -39,7 +39,10 @@ pub const hash_len: usize = runtime_effects.effect_image_blob_hash_len;
 
 /// The largest payload one blob may hold — the largest journaled effect
 /// payload that goes out of line (an image load's encoded source).
-pub const max_blob_bytes: usize = @max(runtime_effects.max_effect_image_bytes, runtime_effects.max_effect_persist_snapshot_bytes);
+pub const max_blob_bytes: usize = @max(
+    runtime_effects.effect_file_stream_chunk_bytes,
+    @max(runtime_effects.max_effect_image_bytes, runtime_effects.max_effect_persist_snapshot_bytes),
+);
 
 pub const BlobHash = [hash_len]u8;
 

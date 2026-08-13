@@ -500,6 +500,12 @@ pub const Options = struct {
     /// checked separately; both gates must be open before core effects may
     /// reach the platform keychain.
     credentials_enabled: bool = false,
+    /// Raw-file policy resolved by the app runner. Six app-owned roots are
+    /// allowed without a grant; `filesystem` opens arbitrary paths.
+    /// Standard runners install the six resolved app-owned roots here. If a
+    /// custom runner omits the binding, UiApp fails closed with no exempt roots
+    /// while still honoring an explicit `filesystem` permission.
+    file_access: ?runtime_effects.FileAccessBinding = null,
     js_window_api: bool = false,
     /// Whether this build ships the embedded web layer. The app runner
     /// sets it from the build graph's app.zon inference (declare-to-use:

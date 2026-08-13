@@ -10,7 +10,7 @@
 // return path (NS1017) — they never live in the Model, in a Msg, in a local,
 // or in a helper.
 //
-// The v3 command set:
+// The v4 command set:
 //
 //   Cmd.none                     no effects (what a bare `return model` means)
 //   Cmd.persist()                ask the host to persist the committed model
@@ -32,10 +32,11 @@
 //                                re-issuing a live key replaces it, and
 //                                Cmd.cancel(key) drops it.
 //   Cmd.cancel(key)              drop the in-flight keyed effect — request,
-//                                readFile/writeFile/fetch/clipboardRead, or
+//                                readFile/writeFile/readFileStream/fetch/
+//                                clipboardRead, or
 //                                delay — SILENTLY (no terminal arm dispatch).
 //                                Aimed at a live spawn, streaming fetch, or
-//                                streaming service it
+//                                streaming service or write-file sink it
 //                                stays LOUD: the err arm runs with
 //                                "cancelled" — ending a stream is observable
 //   Cmd.batch([a, b, ...])       several commands from one dispatch
@@ -53,6 +54,11 @@
 //                                whole-file write (parents created, replaced
 //                                whole); ok arm carries NOTHING (an arm with
 //                                no payload fields), err arm the reason bytes
+//   Cmd.appendFile / statFile    bounded append and size/mtime/existence probe
+//   Cmd.readFileStream           256-KiB chunks, then done(total) or err
+//   Cmd.writeFileStream / writeFileChunk / writeFileClose
+//                                atomic streamed sink; chunks are acknowledged
+//                                in order and close installs the destination
 //   Cmd.fetch({ url, method?, headers?, body?, timeoutMs? }, { key?, ok, err })
 //                                buffered HTTP(S) exchange; ok arm carries a
 //                                two-field record — one number field (the real
@@ -255,10 +261,12 @@
 // The keyed-effect discipline is ONE rule: a keyed effect REPLACES its live
 // predecessor (the superseded effect's result is dropped — no message), and
 // Cmd.cancel drops it silently. That holds for request, readFile, writeFile,
-// buffered fetch, clipboardRead, and delay alike. Live spawn and streaming-
-// fetch keys are the exceptions: a duplicate REJECTS the new stream (err arm
-// "rejected") so results from two sources are never spliced together. Cancel
-// either stream first; its err arm runs with "cancelled".
+// readFileStream, buffered fetch, clipboardRead, and delay alike. A reissued
+// readFileStream key retires the old read silently and starts the replacement.
+// Live spawn, streaming-fetch, streaming-service, and write-file SINK keys are
+// the exceptions: a duplicate REJECTS the new stream/sink so two producers are
+// never spliced. Cancelling a sink is loud (`err: cancelled`) because a
+// half-written export is observable; cancelling a read stream is silent.
 //
 // `Sub` is the recurring-effects surface: an app may export
 // `subscriptions(model): Sub<Msg>` returning declarative descriptors the
@@ -850,6 +858,36 @@ export interface WriteRoute<M extends Msgish> {
   readonly err: BytesKind<M>;
 }
 
+/// Streaming read routing: zero or more 256-KiB `chunk` messages, then one
+/// `done` carrying the total byte count, or one `err` carrying a closed file
+/// outcome.
+export interface FileReadStreamRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly chunk: BytesKind<M>;
+  readonly done: TimestampKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+export interface FileStatArm {
+  readonly exists: boolean;
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+
+export type FileStatKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof FileStatArm]
+    ? [keyof FileStatArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & FileStatArm ? M["kind"] : never
+      : never
+    : never
+  : never;
+
+export interface FileStatRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: FileStatKind<M>;
+  readonly err: BytesKind<M>;
+}
+
 /// Pagination controls for `Cmd.store.scan`. `limit` defaults to 100 and is
 /// bounded at 256. `after` is the opaque key cursor returned by the previous
 /// page; omit it for the first page.
@@ -1098,6 +1136,49 @@ export type Cmd<M extends Msgish> =
       readonly errKind: string;
       readonly path: Uint8Array;
       readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "append_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "stat_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "read_file_stream";
+      readonly key: string;
+      readonly chunkKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "write_file_stream";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "write_file_chunk";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "write_file_close";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
     }
   | {
       readonly op: "store_set";
@@ -1511,7 +1592,7 @@ export const Cmd = {
 
   /// Drop the in-flight keyed effect — request, named engine op, or delay —
   /// with this key, if any, SILENTLY (neither routing arm is dispatched for
-  /// it). Live spawn, streaming-fetch, and streaming-service operations are the exceptions:
+  /// it). Live spawn, streaming-fetch, streaming-service, and write-file-sink operations are the exceptions:
   /// cancel ends the stream and its err arm runs with "cancelled".
   cancel(key: string): Cmd<never> {
     return { op: "cancel", key };
@@ -1529,6 +1610,30 @@ export const Cmd = {
   /// no payload — or the `err` arm with the reason bytes.
   writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
     return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+
+  appendFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "append_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+
+  statFile<M extends Msgish>(path: Uint8Array, route: FileStatRoute<M>): Cmd<M> {
+    return { op: "stat_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+
+  readFileStream<M extends Msgish>(path: Uint8Array, route: FileReadStreamRoute<M>): Cmd<M> {
+    return { op: "read_file_stream", key: route.key ?? "", chunkKind: route.chunk, doneKind: route.done, errKind: route.err, path };
+  },
+
+  writeFileStream<M extends Msgish>(key: string, path: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "write_file_stream", key, okKind: route.ok, errKind: route.err, path };
+  },
+
+  writeFileChunk<M extends Msgish>(key: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "write_file_chunk", key, okKind: route.ok, errKind: route.err, bytes };
+  },
+
+  writeFileClose<M extends Msgish>(key: string, route: WriteRoute<M>): Cmd<M> {
+    return { op: "write_file_close", key, okKind: route.ok, errKind: route.err };
   },
 
   /// Capability-gated, engine-owned per-record storage. Keys are UTF-8 text

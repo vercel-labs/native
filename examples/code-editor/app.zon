@@ -5,7 +5,7 @@
     .description = "Choose a folder and edit its source files in a native two-pane window.",
     .version = "0.1.0",
     .platforms = .{"macos"},
-    .permissions = .{ "view", "command", "dialog" },
+    .permissions = .{ "view", "command", "dialog", "filesystem" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
     .shortcuts = .{
         .{ .id = "save-file", .key = "s", .modifiers = .{ "primary" } },

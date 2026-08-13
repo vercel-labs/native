@@ -44,6 +44,7 @@ const unprefixedNavSections: NavSection[] = [
       { name: "Model Persistence", href: "/persistence" },
       { name: "Record Store", href: "/record-store" },
       { name: "Relational SQLite", href: "/sqlite" },
+      { name: "Files & Streaming", href: "/files" },
     ],
   },
   {

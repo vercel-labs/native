@@ -29,6 +29,12 @@ pub const Op = union(enum) {
     cancel: struct { key: []const u8 },
     read_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
     write_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8, bytes: []const u8 },
+    append_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8, bytes: []const u8 },
+    stat_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
+    read_file_stream: struct { key: []const u8, chunk_tag: u8, done_tag: u8, err_tag: u8, path: []const u8 },
+    write_file_stream: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
+    write_file_chunk: struct { key: []const u8, ok_tag: u8, err_tag: u8, bytes: []const u8 },
+    write_file_close: struct { key: []const u8, ok_tag: u8, err_tag: u8 },
     fetch: Fetch,
     fetch_stream: FetchStream,
     clip_write: struct { bytes: []const u8 },
@@ -545,6 +551,34 @@ pub const CmdIter = struct {
                     _ = longBytes(b, &off);
                 }
                 break :blk .{ .store_set_many = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .scope = scope, .count = count, .entry_bytes = b[entries_start..off] } };
+            },
+            0x2B => blk: {
+                const head = routedHead(b, &off);
+                break :blk .{ .append_file = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .path = longBytes(b, &off), .bytes = longBytes(b, &off) } };
+            },
+            0x2C => blk: {
+                const head = routedHead(b, &off);
+                break :blk .{ .stat_file = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .path = longBytes(b, &off) } };
+            },
+            0x2D => blk: {
+                const key = shortBytes(b, &off);
+                const chunk_tag = b[off];
+                const done_tag = b[off + 1];
+                const err_tag = b[off + 2];
+                off += 3;
+                break :blk .{ .read_file_stream = .{ .key = key, .chunk_tag = chunk_tag, .done_tag = done_tag, .err_tag = err_tag, .path = longBytes(b, &off) } };
+            },
+            0x2E => blk: {
+                const head = routedHead(b, &off);
+                break :blk .{ .write_file_stream = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .path = longBytes(b, &off) } };
+            },
+            0x2F => blk: {
+                const head = routedHead(b, &off);
+                break :blk .{ .write_file_chunk = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .bytes = longBytes(b, &off) } };
+            },
+            0x30 => blk: {
+                const head = routedHead(b, &off);
+                break :blk .{ .write_file_close = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err } };
             },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };

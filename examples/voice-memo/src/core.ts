@@ -191,7 +191,8 @@ function pushedLevel(levels: readonly number[], level: number): readonly number[
 }
 
 // PCM16 mono -> a canonical little-endian RIFF/WAVE file. The recording
-// limit keeps the result below Cmd.writeFile's 1 MiB payload ceiling.
+// This sample still buffers one bounded memo in Model for immediate playback;
+// longer recordings should stream chunks directly to an atomic file sink.
 function buildWav(chunks: readonly PcmChunk[], dataBytes: number): Uint8Array {
   const out = new Uint8Array(44 + dataBytes);
   const riffSize = 36 + dataBytes;

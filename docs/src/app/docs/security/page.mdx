@@ -39,7 +39,7 @@ Every app declares `permissions` and `capabilities` in `app.zon` — the runtime
     </tr>
     <tr>
       <td><code>filesystem</code></td>
-      <td>File system access from bridge commands</td>
+      <td>Raw file effects and bridge commands outside this app's resolved data/config/cache/state/logs/temp roots; symlinks are resolved before the runtime check</td>
     </tr>
     <tr>
       <td><code>clipboard</code></td>

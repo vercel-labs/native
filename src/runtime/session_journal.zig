@@ -1034,7 +1034,11 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u16, record.status);
     try cursor.writeEnum(record.fetch_outcome);
     try cursor.writeEnum(record.file_op);
+    try cursor.writeEnum(record.file_event);
     try cursor.writeEnum(record.file_outcome);
+    try cursor.writeInt(u64, record.file_total);
+    try cursor.writeInt(i64, record.file_mtime_ms);
+    try cursor.writeBool(record.file_exists);
     try cursor.writeEnum(record.clipboard_op);
     try cursor.writeEnum(record.clipboard_outcome);
     try cursor.writeInt(u64, record.timer_timestamp_ns);
@@ -1045,6 +1049,8 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u64, record.audio_duration_ms);
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
+    try cursor.writeBytes(&record.file_blob_hash);
+    try cursor.writeInt(u64, record.file_blob_len);
     try cursor.writeBytes(&record.audio_bands);
     // v7: image terminals — outcome, decoded dimensions, and the blob
     // store content address of the journaled source bytes.
@@ -1120,7 +1126,11 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .status = try cursor.readInt(u16),
         .fetch_outcome = try cursor.readEnum(runtime_effects.EffectFetchOutcome),
         .file_op = try cursor.readEnum(runtime_effects.EffectFileOp),
+        .file_event = try cursor.readEnum(runtime_effects.EffectFileEvent),
         .file_outcome = try cursor.readEnum(runtime_effects.EffectFileOutcome),
+        .file_total = try cursor.readInt(u64),
+        .file_mtime_ms = try cursor.readInt(i64),
+        .file_exists = try cursor.readBool(),
         .clipboard_op = try cursor.readEnum(runtime_effects.EffectClipboardOp),
         .clipboard_outcome = try cursor.readEnum(runtime_effects.EffectClipboardOutcome),
         .timer_timestamp_ns = try cursor.readInt(u64),
@@ -1132,6 +1142,8 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_playing = try cursor.readBool(),
         .audio_buffering = try cursor.readBool(),
     };
+    @memcpy(&record.file_blob_hash, try cursor.readBytes(record.file_blob_hash.len));
+    record.file_blob_len = try cursor.readInt(u64);
     @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
     // v7: image terminals.
     record.image_outcome = try cursor.readEnum(runtime_effects.EffectImageOutcome);

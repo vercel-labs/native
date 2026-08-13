@@ -5,7 +5,7 @@
     .description = "A native markdown reader with GPU-rendered text.",
     .version = "0.1.0",
     .platforms = .{"macos"},
-    .permissions = .{ "view", "command", "network" },
+    .permissions = .{ "view", "command", "network", "filesystem" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
     .shell = .{
         .windows = .{

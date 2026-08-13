@@ -61,6 +61,10 @@ pub const RunOptions = struct {
     record_store: ?native_sdk.RecordStoreBinding = null,
     relational_store: ?native_sdk.RelationalStoreBinding = null,
     credentials_enabled: bool = false,
+    file_access: ?native_sdk.FileAccessBinding = null,
+    /// Migration/testing switch. Shipping defaults to the final enforced
+    /// posture; set false for the preceding warn-only behavior.
+    file_access_enforce: bool = true,
     relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
 
     fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
@@ -508,6 +512,27 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     var record_store_open = false;
     var resolved_options = options;
     resolved_options.credentials_enabled = manifestDeclaresCredentials();
+    var file_root_buffers: [6][1024]u8 = undefined;
+    var file_roots: [6][]const u8 = undefined;
+    const resolved_file_dirs = native_sdk.app_dirs.resolve(
+        .{ .name = options.bundle_id },
+        native_sdk.app_dirs.currentPlatform(),
+        native_sdk.debug.envFromMap(init.environ_map),
+        native_sdk.app_dirs.Buffers.fromArray(1024, &file_root_buffers),
+    ) catch null;
+    var file_root_count: usize = 0;
+    if (resolved_file_dirs) |dirs| {
+        file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+        file_root_count = file_roots.len;
+    }
+    // Fail closed if app-dir resolution is unavailable: a filesystem grant
+    // still opens arbitrary paths, while an ungranted app gets no accidental
+    // unrestricted fallback merely because HOME/XDG data was malformed.
+    resolved_options.file_access = .{
+        .roots = file_roots[0..file_root_count],
+        .permitted = native_sdk.security.hasPermission(options.security.permissions, native_sdk.security.permission_filesystem),
+        .enforce = options.file_access_enforce,
+    };
     if (comptime manifestDeclaresStore()) {
         var data_dir_buffer: [512]u8 = undefined;
         const app_data_dir = native_sdk.app_dirs.resolveOne(
@@ -616,6 +641,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .record_store = options.record_store,
         .relational_store = options.relational_store,
         .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -683,6 +709,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .record_store = options.record_store,
         .relational_store = options.relational_store,
         .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -747,6 +774,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .record_store = options.record_store,
         .relational_store = options.relational_store,
         .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -810,6 +838,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .record_store = options.record_store,
         .relational_store = options.relational_store,
         .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });

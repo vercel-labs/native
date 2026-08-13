@@ -436,6 +436,9 @@ pub const pty_key_base: u64 = 0x5453_5054_0000_0000;
 /// its own engine table, so these never consume the general request slots.
 pub const db_key_base: u64 = 0x5453_4442_0000_0000;
 
+/// Dedicated raw-file stream key namespace ("TSFS").
+pub const file_stream_key_base: u64 = 0x5453_4653_0000_0000;
+
 /// The spawn wire record's "no line routing" tag sentinel (the wire
 /// format's shared constant).
 pub const spawn_no_line_tag: u8 = 0xFF;
@@ -574,6 +577,21 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        const FileStreamEntry = struct {
+            used: bool = false,
+            sink: bool = false,
+            busy: bool = false,
+            key_len: usize = 0,
+            key: [max_wire_key_bytes]u8 = undefined,
+            chunk_tag: u8 = 0,
+            done_tag: u8 = 0,
+            err_tag: u8 = 0,
+            cancelling: bool = false,
+            fn wireKey(entry: *const FileStreamEntry) []const u8 {
+                return entry.key[0..entry.key_len];
+            }
+        };
+
         /// The single audio stream entry (one player is the whole
         /// engine surface). Non-retiring: audio_ctl `stop` closes it, a
         /// new audio_play re-keys and re-routes it in place.
@@ -694,6 +712,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var effects_table: [runtime_effects.max_effects]EffectEntry = @splat(.{});
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
         var streams: [runtime_effects.max_effects]StreamEntry = @splat(.{});
+        var file_streams: [runtime_effects.max_effect_file_streams]FileStreamEntry = @splat(.{});
         var audio_entry: AudioEntry = .{};
         var video_entry: VideoEntry = .{};
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
@@ -1037,6 +1056,37 @@ pub fn TsCoreHost(comptime core: type) type {
                             .on_result = fileResultMsg,
                         });
                     },
+                    // append/stat and streaming raw-file effects.
+                    0x2B => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const file_path = takeLongBytes(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        fx.appendFile(.{ .key = effect_key_base + allocEffectEntry(fx, head), .path = file_path, .bytes = bytes, .on_result = fileResultMsg });
+                    },
+                    0x2C => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const file_path = takeLongBytes(cmd, &at);
+                        fx.statFile(.{ .key = effect_key_base + allocEffectEntry(fx, head), .path = file_path, .on_result = fileResultMsg });
+                    },
+                    0x2D => {
+                        const key = takeShortBytes(cmd, &at);
+                        const chunk_tag = takeByte(cmd, &at);
+                        const done_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const file_path = takeLongBytes(cmd, &at);
+                        issueReadFileStream(fx, key, chunk_tag, done_tag, err_tag, file_path);
+                    },
+                    0x2E => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const file_path = takeLongBytes(cmd, &at);
+                        issueWriteFileStream(fx, head, file_path);
+                    },
+                    0x2F => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        issueWriteFileChunk(fx, head, bytes);
+                    },
+                    0x30 => issueWriteFileClose(fx, takeRoutedHead(cmd, &at)),
                     // fetch [op][key_len][key][ok][err][method u8][timeout u32 LE]
                     //       [url_len u32 LE][url][header_count u8]
                     //       ([name_len u8][name][value_len u32 LE][value])*
@@ -1831,6 +1881,119 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
+        fn findFileStream(key: []const u8) ?usize {
+            for (&file_streams, 0..) |*entry, index| {
+                if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            }
+            return null;
+        }
+
+        fn freeFileStreamIndex() ?usize {
+            for (&file_streams, 0..) |*entry, index| if (!entry.used) return index;
+            return null;
+        }
+
+        fn issueReadFileStream(fx: *Fx, key: []const u8, chunk_tag: u8, done_tag: u8, err_tag: u8, path: []const u8) void {
+            const index = if (key.len > 0 and findFileStream(key) != null) replace: {
+                const existing = findFileStream(key).?;
+                if (file_streams[existing].sink) {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                    return;
+                }
+                // The engine retires the old read generation silently when
+                // this same engine key is reissued. Reuse the bridge slot so
+                // the replacement's tags become authoritative atomically.
+                break :replace existing;
+            } else freeFileStreamIndex() orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                return;
+            };
+            const entry = &file_streams[index];
+            entry.* = .{ .used = true, .key_len = key.len, .chunk_tag = chunk_tag, .done_tag = done_tag, .err_tag = err_tag };
+            @memcpy(entry.key[0..key.len], key);
+            fx.readFileStream(.{ .key = file_stream_key_base + index, .path = path, .on_result = fileStreamResultMsg });
+        }
+
+        fn issueWriteFileStream(fx: *Fx, head: RoutedHead, path: []const u8) void {
+            if (head.key.len == 0 or findFileStream(head.key) != null) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return;
+            }
+            const index = freeFileStreamIndex() orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return;
+            };
+            const entry = &file_streams[index];
+            entry.* = .{ .used = true, .sink = true, .busy = true, .key_len = head.key.len, .done_tag = head.ok_tag, .err_tag = head.err_tag };
+            @memcpy(entry.key[0..head.key.len], head.key);
+            fx.writeFileStream(.{ .key = file_stream_key_base + index, .path = path, .on_result = fileStreamResultMsg });
+        }
+
+        fn issueWriteFileChunk(fx: *Fx, head: RoutedHead, bytes: []const u8) void {
+            const index = findFileStream(head.key) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
+                return;
+            };
+            if (!file_streams[index].sink) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
+                return;
+            }
+            if (file_streams[index].busy) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "out_of_order"));
+                return;
+            }
+            file_streams[index].busy = true;
+            file_streams[index].done_tag = head.ok_tag;
+            file_streams[index].err_tag = head.err_tag;
+            fx.writeFileChunk(.{ .key = file_stream_key_base + index, .bytes = bytes, .on_result = fileStreamResultMsg });
+        }
+
+        fn issueWriteFileClose(fx: *Fx, head: RoutedHead) void {
+            const index = findFileStream(head.key) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
+                return;
+            };
+            if (!file_streams[index].sink) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
+                return;
+            }
+            if (file_streams[index].busy) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "out_of_order"));
+                return;
+            }
+            file_streams[index].busy = true;
+            file_streams[index].done_tag = head.ok_tag;
+            file_streams[index].err_tag = head.err_tag;
+            fx.writeFileClose(.{ .key = file_stream_key_base + index, .on_result = fileStreamResultMsg });
+        }
+
+        fn fileStreamResultMsg(result: runtime_effects.EffectFileResult) Msg {
+            if (result.key < file_stream_key_base) @panic("ts core host: file stream result outside its namespace");
+            const index = result.key - file_stream_key_base;
+            if (index >= file_streams.len or !file_streams[index].used) @panic("ts core host: untracked file stream result");
+            const entry = &file_streams[index];
+            if (entry.cancelling and result.outcome == .cancelled) {
+                entry.used = false;
+                return msgFromTagBytes(entry.err_tag, "cancelled");
+            }
+            if (result.op == .read_stream and result.event == .chunk and result.outcome == .ok) return msgFromTagBytes(entry.chunk_tag, result.bytes);
+            if (result.op == .read_stream and result.event == .done and result.outcome == .ok) {
+                entry.used = false;
+                return msgFromTagNumber(entry.done_tag, @floatFromInt(result.total));
+            }
+            if (result.outcome == .ok) {
+                entry.busy = false;
+                if (result.op == .write_stream_close) entry.used = false;
+                return msgFromTagVoid(entry.done_tag);
+            }
+            if (result.op == .write_stream_chunk and (result.outcome == .rejected or result.outcome == .out_of_order)) {
+                entry.busy = false;
+                return msgFromTagBytes(entry.err_tag, @tagName(result.outcome));
+            }
+            entry.used = false;
+            return msgFromTagBytes(entry.err_tag, @tagName(result.outcome));
+        }
+
         /// The stream entry an engine spawn/fetch result names — looked up
         /// WITHOUT retiring (lines flow through it repeatedly; only the
         /// terminal retires it).
@@ -2610,6 +2773,17 @@ pub fn TsCoreHost(comptime core: type) type {
                 fx.cancel(spawn_key_base + index);
                 return;
             }
+            if (findFileStream(key)) |index| {
+                if (!file_streams[index].sink) {
+                    // Read streams are file-style: cancel is silent and the
+                    // bridge entry retires immediately. Sinks remain loud.
+                    file_streams[index].used = false;
+                } else {
+                    file_streams[index].cancelling = true;
+                }
+                fx.cancel(file_stream_key_base + index);
+                return;
+            }
             if (findDelay(key)) |index| {
                 fx.cancelTimer(delay_key_base + index);
                 delays[index].used = false;
@@ -2950,9 +3124,33 @@ pub fn TsCoreHost(comptime core: type) type {
             if (tags.dropped) return swallowedMsg(tags.err_tag);
             if (result.outcome == .ok) {
                 if (result.op == .read) return msgFromTagBytes(tags.ok_tag, result.bytes);
+                if (result.op == .stat) return msgFromTagFileStat(tags.ok_tag, result);
                 return msgFromTagVoid(tags.ok_tag);
             }
             return msgFromTagBytes(tags.err_tag, @tagName(result.outcome));
+        }
+
+        fn msgFromTagFileStat(tag: u8, result: runtime_effects.EffectFileResult) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    const info = @typeInfo(arm.type);
+                    if (comptime info == .@"struct" and info.@"struct".fields.len == 3) {
+                        var payload: arm.type = undefined;
+                        inline for (info.@"struct".fields) |field| {
+                            if (comptime std.mem.eql(u8, field.name, "exists") and field.type == bool) {
+                                @field(payload, field.name) = result.exists;
+                            } else if (comptime std.mem.eql(u8, field.name, "size") and (field.type == i64 or field.type == u64 or field.type == f64)) {
+                                @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(result.total) else @intCast(result.total);
+                            } else if (comptime std.mem.eql(u8, field.name, "mtimeMs") and (field.type == i64 or field.type == u64 or field.type == f64)) {
+                                @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(result.mtime_ms) else @intCast(result.mtime_ms);
+                            } else @panic("ts core host: stat_file ok arm has the wrong fields");
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: stat_file ok arm must be { exists, size, mtimeMs }");
+                }
+            }
+            @panic("ts core host: stat_file ok tag is outside Msg");
         }
 
         /// `ResponseMsgFn` for fetch: an `.ok` un-truncated response
