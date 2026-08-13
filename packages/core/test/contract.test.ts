@@ -201,6 +201,26 @@ export function statusItem(model: Model): StatusItemState {
   assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
 });
 
+test("statusItems is projected as a launcher-bound descriptor slice", () => {
+  const doc = contractOf(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { spend: number; }
+export type Msg = { kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  const helpers = doc.model_helpers as { name: string; returns: unknown }[];
+  assert.deepEqual(helpers.map((helper) => helper.name), ["statusItems"]);
+  assert.deepEqual(helpers[0].returns, { kind: "slice", elem: { kind: "value", name: "StatusItemDescriptor" } });
+  assert.deepEqual(doc.model_unbound, ["statusItems"]);
+  const structs = (doc.types as { structs: { name: string }[] }).structs.map((record) => record.name);
+  assert.ok(structs.includes("StatusItemDescriptor"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemMenuItem"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemPresentation"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
+});
+
 test("Cmd.fetch accepts a line-stream route with bytes and status arms", () => {
   const doc = contractOf(`
 import { Cmd, asciiBytes } from "@native-sdk/core";

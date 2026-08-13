@@ -763,6 +763,21 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+@interface NativeSdkStatusItemEntry : NSObject
+@property(nonatomic, assign) uint32_t identifier;
+@property(nonatomic, strong) NSStatusItem *item;
+@property(nonatomic, strong) NSImage *baseImage;
+@property(nonatomic, strong) NSMenu *menu;
+@property(nonatomic, strong) NSString *presentationTitle;
+@property(nonatomic, assign) double presentationWidth;
+@property(nonatomic, assign) int presentationTone;
+@property(nonatomic, assign) double presentationIconOpacity;
+@property(nonatomic, assign) BOOL presentationMonospaced;
+@property(nonatomic, strong) NSString *activationCommand;
+@property(nonatomic, strong) NSString *alternateActivationCommand;
+@property(nonatomic, strong) NSString *openCommand;
+@end
+
 @interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSMenuDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
@@ -986,16 +1001,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) id willTerminateObserver;
 @property(nonatomic, strong) dispatch_source_t sigtermSource;
 @property(nonatomic, strong) NSArray<NativeSdkShortcut *> *shortcuts;
-@property(nonatomic, strong) NSStatusItem *statusItem;
-@property(nonatomic, strong) NSImage *statusItemBaseImage;
-@property(nonatomic, strong) NSMenu *statusMenu;
-@property(nonatomic, assign) double statusPresentationWidth;
-@property(nonatomic, assign) int statusPresentationTone;
-@property(nonatomic, assign) double statusPresentationIconOpacity;
-@property(nonatomic, assign) BOOL statusPresentationMonospaced;
-@property(nonatomic, strong) NSString *statusActivationCommand;
-@property(nonatomic, strong) NSString *statusAlternateActivationCommand;
-@property(nonatomic, strong) NSString *statusOpenCommand;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkStatusItemEntry *> *statusItems;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
@@ -1068,7 +1074,9 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (NSMenuItem *)commandMenuItem:(NSString *)title command:(NSString *)command key:(NSString *)key modifiers:(uint32_t)modifiers enabled:(BOOL)enabled checked:(BOOL)checked;
 - (void)menuCommandItemClicked:(NSMenuItem *)menuItem;
 - (void)menuWillOpen:(NSMenu *)menu;
-- (void)emitStatusCommand:(NSString *)command;
+- (NativeSdkStatusItemEntry *)statusEntryForId:(uint32_t)identifier;
+- (NativeSdkStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu;
+- (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId;
 - (void)statusItemActivated:(id)sender;
 - (uint64_t)activeCommandWindowId;
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount;
@@ -7336,6 +7344,9 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 @implementation NativeSdkShortcut
 @end
 
+@implementation NativeSdkStatusItemEntry
+@end
+
 /* ------------------------------------------------------- audio capture
  * Both native sources feed this one converter/quiescence target. AVAudioEngine
  * and ScreenCaptureKit normally hand us planar float PCM; the converter also
@@ -7704,6 +7715,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.nativeViewExplicitTextKeys = [[NSMutableSet alloc] init];
     self.bridgeEnabledChildWebViewKeys = [[NSMutableSet alloc] init];
     self.appTimers = [[NSMutableDictionary alloc] init];
+    self.statusItems = [[NSMutableDictionary alloc] init];
     self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
     self.allowedExternalURLs = @[];
     self.externalLinkAction = 0;
@@ -9608,8 +9620,9 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 }
 
 - (void)menuWillOpen:(NSMenu *)menu {
-    if (!self.statusItem || menu != self.statusMenu) return;
-    [self emitStatusCommand:self.statusOpenCommand];
+    NativeSdkStatusItemEntry *entry = [self statusEntryForMenu:menu];
+    if (!entry) return;
+    [self emitStatusCommand:entry.openCommand statusItemId:entry.identifier];
 }
 
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount {
@@ -11916,29 +11929,44 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
 
 - (void)trayMenuItemClicked:(NSMenuItem *)menuItem {
     if (self.trayCallback) {
-        self.trayCallback(self.trayContext, (uint32_t)menuItem.tag);
+        uint64_t packed = (uint64_t)(NSUInteger)menuItem.tag;
+        self.trayCallback(self.trayContext, (uint32_t)(packed >> 32), (uint32_t)packed);
     }
 }
 
-- (void)emitStatusCommand:(NSString *)command {
+- (NativeSdkStatusItemEntry *)statusEntryForId:(uint32_t)identifier {
+    return self.statusItems[@(identifier)];
+}
+
+- (NativeSdkStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu {
+    for (NativeSdkStatusItemEntry *entry in self.statusItems.allValues) {
+        if (entry.menu == menu) return entry;
+    }
+    return nil;
+}
+
+- (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId {
     if (command.length == 0) return;
     const char *bytes = command.UTF8String;
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND,
         .window_id = [self activeCommandWindowId],
+        .status_item_id = statusItemId,
         .command_name = bytes,
         .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
     }];
 }
 
 - (void)statusItemActivated:(id)sender {
-    (void)sender;
-    if ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0 && self.statusAlternateActivationCommand.length > 0) {
-        [self emitStatusCommand:self.statusAlternateActivationCommand];
+    NSStatusBarButton *button = [sender isKindOfClass:[NSStatusBarButton class]] ? sender : nil;
+    NativeSdkStatusItemEntry *entry = button ? [self statusEntryForId:(uint32_t)button.tag] : nil;
+    if (!entry) return;
+    if ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0 && entry.alternateActivationCommand.length > 0) {
+        [self emitStatusCommand:entry.alternateActivationCommand statusItemId:entry.identifier];
         return;
     }
-    [self emitStatusCommand:self.statusActivationCommand];
-    if (self.statusMenu) [self.statusItem popUpStatusItemMenu:self.statusMenu];
+    [self emitStatusCommand:entry.activationCommand statusItemId:entry.identifier];
+    if (entry.menu) [entry.item popUpStatusItemMenu:entry.menu];
 }
 
 @end
@@ -13028,20 +13056,21 @@ static NSImage *NativeSdkTrayImageWithOpacity(NSImage *source, double opacity) {
     return image;
 }
 
-static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
-    if (!object.statusItem) return;
-    object.statusPresentationWidth = width;
-    object.statusPresentationTone = tone;
-    object.statusPresentationIconOpacity = iconOpacity;
-    object.statusPresentationMonospaced = monospaced;
+static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NativeSdkStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
+    if (!entry.item) return;
+    entry.presentationTitle = requestedTitle ?: @"";
+    entry.presentationWidth = width;
+    entry.presentationTone = tone;
+    entry.presentationIconOpacity = iconOpacity;
+    entry.presentationMonospaced = monospaced;
     NSString *title = requestedTitle ?: @"";
-    if (!object.statusItemBaseImage && title.length == 0) {
+    if (!entry.baseImage && title.length == 0) {
         title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
     }
     NSFont *font = monospaced
         ? ([NSFont fontWithName:@"Geist Mono" size:11] ?: [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular])
         : [NSFont systemFontOfSize:11];
-    NSStatusBarButton *button = object.statusItem.button;
+    NSStatusBarButton *button = entry.item.button;
     if (tone == 0) {
         button.title = title;
         button.font = font;
@@ -13054,43 +13083,63 @@ static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NSString
         }];
         button.contentTintColor = color;
     }
-    button.image = NativeSdkTrayImageWithOpacity(object.statusItemBaseImage, iconOpacity);
-    object.statusItem.length = width > 0 ? width : (requestedTitle.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength);
+    button.image = NativeSdkTrayImageWithOpacity(entry.baseImage, iconOpacity);
+    entry.item.length = width > 0 ? width : (requestedTitle.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength);
 }
 
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+static void NativeSdkApplyTrayShell(NativeSdkAppKitHost *object, NativeSdkStatusItemEntry *entry, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, int visible, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+    entry.baseImage = nil;
+    if (icon_path && icon_path_len > 0) {
+        NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
+        NSImage *image = [[NSImage alloc] initWithContentsOfFile:NativeSdkResolvedAssetFilePath(path)];
+        if (image) {
+            image.template = YES;
+            image.size = NSMakeSize(18, 18);
+            entry.baseImage = image;
+        }
+    }
+    entry.item.button.toolTip = tooltip && tooltip_len > 0 ? ([[NSString alloc] initWithBytes:tooltip length:tooltip_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    entry.activationCommand = activation_command ? ([[NSString alloc] initWithBytes:activation_command length:activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    entry.alternateActivationCommand = alternate_activation_command ? ([[NSString alloc] initWithBytes:alternate_activation_command length:alternate_activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    entry.openCommand = open_command ? ([[NSString alloc] initWithBytes:open_command length:open_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    NSStatusBarButton *button = entry.item.button;
+    button.tag = (NSInteger)entry.identifier;
+    button.target = object;
+    button.action = (entry.activationCommand.length > 0 || entry.alternateActivationCommand.length > 0) ? @selector(statusItemActivated:) : NULL;
+    if (button.action) [button sendActionOn:NSEventMaskLeftMouseUp];
+    entry.item.visible = visible != 0;
+}
+
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
-        if (object.statusItem) {
-            [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
+        NSNumber *key = @(status_item_id);
+        NativeSdkStatusItemEntry *entry = object.statusItems[key];
+        if (entry) {
+            [[NSStatusBar systemStatusBar] removeStatusItem:entry.item];
+        } else {
+            entry = [[NativeSdkStatusItemEntry alloc] init];
+            entry.identifier = status_item_id;
+            object.statusItems[key] = entry;
         }
-        object.statusMenu = nil;
+        entry.menu = nil;
         BOOL hasTitle = title != NULL && title_len > 0;
-        object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
-        object.statusItemBaseImage = nil;
-
-        if (icon_path && icon_path_len > 0) {
-            NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
-            NSImage *image = [[NSImage alloc] initWithContentsOfFile:NativeSdkResolvedAssetFilePath(path)];
-            if (image) {
-                image.template = YES;
-                image.size = NSMakeSize(18, 18);
-                object.statusItemBaseImage = image;
-            }
-        }
+        entry.item = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
         NSString *titleString = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        if (tooltip && tooltip_len > 0) {
-            object.statusItem.button.toolTip = [[NSString alloc] initWithBytes:tooltip length:tooltip_len encoding:NSUTF8StringEncoding];
-        }
-        object.statusActivationCommand = activation_command ? ([[NSString alloc] initWithBytes:activation_command length:activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        object.statusAlternateActivationCommand = alternate_activation_command ? ([[NSString alloc] initWithBytes:alternate_activation_command length:alternate_activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        object.statusOpenCommand = open_command ? ([[NSString alloc] initWithBytes:open_command length:open_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        if (object.statusActivationCommand.length > 0 || object.statusAlternateActivationCommand.length > 0) {
-            object.statusItem.button.target = object;
-            object.statusItem.button.action = @selector(statusItemActivated:);
-            [object.statusItem.button sendActionOn:NSEventMaskLeftMouseUp];
-        }
-        NativeSdkApplyTrayPresentation(object, titleString, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
+        NativeSdkApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0);
+    }
+}
+
+void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, int visible, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
+        NativeSdkApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
+        NativeSdkApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced);
+        if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = entry.menu;
+        else entry.item.menu = nil;
     }
 }
 
@@ -13183,7 +13232,7 @@ static NSView *NativeSdkTrayHeroView(NSString *headline, NSString *quota) {
     return view;
 }
 
-static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32_t *itemIds, NSArray<NSString *> *labels, NSArray<NSString *> *states, NSArray<NSNumber *> *enabled, NSArray<NSString *> *keys, NSArray<NSNumber *> *modifiers) {
+static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, uint32_t statusItemId, const uint32_t *itemIds, NSArray<NSString *> *labels, NSArray<NSString *> *states, NSArray<NSNumber *> *enabled, NSArray<NSString *> *keys, NSArray<NSNumber *> *modifiers) {
     NSStackView *row = [[NSStackView alloc] initWithFrame:NSMakeRect(0, 0, 320, 32)];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.alignment = NSLayoutAttributeCenterY;
@@ -13209,7 +13258,7 @@ static NSView *NativeSdkTrayAgentsView(NativeSdkAppKitHost *object, const uint32
         label.translatesAutoresizingMaskIntoConstraints = NO;
         label.accessibilityElement = NO;
         NSButton *button = [NSButton buttonWithTitle:@"" target:object action:@selector(trayMenuItemClicked:)];
-        button.tag = itemIds[index];
+        button.tag = (NSInteger)(((uint64_t)statusItemId << 32) | itemIds[index]);
         button.bordered = NO;
         button.transparent = YES;
         button.enabled = enabled[index].boolValue;
@@ -13307,14 +13356,15 @@ static NSView *NativeSdkTrayReadoutView(NSString *label, NSString *value, BOOL i
     return row;
 }
 
-void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
+void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t status_item_id, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
-        if (!object.statusItem) return;
-        NSMenu *menu = object.statusMenu;
+        NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
+        NSMenu *menu = entry.menu;
         if (menu == nil) {
             menu = [[NSMenu alloc] initWithTitle:@""];
-            object.statusMenu = menu;
+            entry.menu = menu;
         } else {
             [menu removeAllItems];
         }
@@ -13329,7 +13379,7 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
                                                           action:@selector(trayMenuItemClicked:)
                                                    keyEquivalent:@""];
-            item.tag = (NSInteger)item_ids[i];
+            item.tag = (NSInteger)(((uint64_t)status_item_id << 32) | item_ids[i]);
             item.target = object;
             item.enabled = enabled_flags[i] != 0;
             if (keys[i] && key_lens[i] > 0) {
@@ -13370,7 +13420,7 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
                 // NSMenu consume it before the button can dispatch its id.
                 item.keyEquivalent = @"";
                 item.keyEquivalentModifierMask = 0;
-                item.view = NativeSdkTrayAgentsView(object, agentIds, agentLabels, agentStates, agentEnabled, agentKeys, agentModifiers);
+                item.view = NativeSdkTrayAgentsView(object, status_item_id, agentIds, agentLabels, agentStates, agentEnabled, agentKeys, agentModifiers);
                 [menu addItem:item];
                 continue;
             }
@@ -13396,44 +13446,47 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             for (NSView *row in readoutRows) [row.widthAnchor constraintEqualToConstant:widest].active = YES;
         }
         menu.delegate = object;
-        if (object.statusActivationCommand.length == 0 && object.statusAlternateActivationCommand.length == 0) {
-            object.statusItem.menu = menu;
+        if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) {
+            entry.item.menu = menu;
         }
     }
 }
 
-void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const char *title, size_t title_len) {
+void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
-        if (!object.statusItem) return;
+        NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
         NSString *value = title && title_len > 0 ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
         NativeSdkApplyTrayPresentation(
             object,
+            entry,
             value,
-            object.statusPresentationWidth,
-            object.statusPresentationTone,
-            object.statusPresentationIconOpacity,
-            object.statusPresentationMonospaced
+            entry.presentationWidth,
+            entry.presentationTone,
+            entry.presentationIconOpacity,
+            entry.presentationMonospaced
         );
     }
 }
 
-void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
+        NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
         NSString *value = title ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        NativeSdkApplyTrayPresentation(object, value, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0);
     }
 }
 
-void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host) {
+void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
-    if (object.statusItem) {
-        [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
-        object.statusItem = nil;
-        object.statusItemBaseImage = nil;
-        object.statusMenu = nil;
-    }
+    NSNumber *key = @(status_item_id);
+    NativeSdkStatusItemEntry *entry = object.statusItems[key];
+    if (!entry) return;
+    [[NSStatusBar systemStatusBar] removeStatusItem:entry.item];
+    [object.statusItems removeObjectForKey:key];
 }
 
 void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_callback_t callback, void *context) {

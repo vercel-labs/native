@@ -77,6 +77,13 @@
 # Set NATIVE_SDK_SKIP_BENCH_CHECK=1 to skip it on a box that is too busy
 # even for the generous budgets.
 #
+# cross-e2e — the cross-target execution lane (scripts/cross-e2e.sh):
+# cross-builds the TS-core/service batteries and app fixtures for
+# x86_64-windows-gnu and x86_64-linux-musl, then executes the batteries
+# on the Windows box (ssh windows-dev) and in a Linux container. Opt-in
+# with NATIVE_SDK_CROSS=1 in either tier — it needs those machines —
+# and skipped otherwise.
+#
 # Deliberately NOT `set -e`: every step runs even after a failure so the
 # summary shows the whole picture; the exit code is non-zero if any step
 # failed. Step output streams through; each step is timed.
@@ -234,6 +241,14 @@ run_bench_check_step() { # runs (or explains skipping) the render-benchmark ratc
   fi
 }
 
+run_cross_e2e_step() { # the opt-in cross-target execution lane
+  if [ "${NATIVE_SDK_CROSS:-}" = "1" ]; then
+    run_step "cross-e2e" scripts/cross-e2e.sh
+  else
+    skip_step "cross-e2e" "opt-in: set NATIVE_SDK_CROSS=1 (needs the windows-dev box and Docker)"
+  fi
+}
+
 # The Chromium (CEF) host, src/platform/macos/cef_host.mm, is only compiled
 # by Chromium-engine app builds — never by `zig build test`/`validate` — so
 # without this step an edit that keeps it merely grep-identical to the
@@ -325,6 +340,8 @@ if [ "$tier" = "fast" ]; then
   else
     skip_step "docs-check" "docs/ unchanged vs $base_ref"
   fi
+
+  run_cross_e2e_step
 else # full
   run_step "zig-test" zig build test
   run_step "zig-validate" zig build validate
@@ -381,6 +398,8 @@ else # full
   else
     skip_step "docs-check" "docs/ unchanged vs $base_ref (pass --all to force)"
   fi
+
+  run_cross_e2e_step
 fi
 
 # ---- summary --------------------------------------------------------------

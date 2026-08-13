@@ -252,6 +252,10 @@ pub const max_credential_account_bytes: usize = 256;
 /// Every host accepts this whole range; none silently truncates it.
 pub const max_credential_secret_bytes: usize = 5 * 512;
 pub const max_local_time_text_bytes: usize = 512;
+/// A desktop app may own a small bounded set of independent status items.
+/// macOS implements the whole set; hosts whose tray API is singular accept
+/// only `primary_status_item_id` and reject additional identifiers.
+pub const max_status_items: usize = 8;
 pub const max_tray_items: usize = 32;
 pub const max_tray_icon_path_bytes: usize = 4096;
 pub const max_tray_title_bytes: usize = 64;
@@ -1397,6 +1401,8 @@ pub const LocalTimeStyle = enum(u8) {
     datetime,
 };
 
+pub const StatusItemId = u32;
+pub const primary_status_item_id: StatusItemId = 1;
 pub const TrayItemId = u32;
 
 /// Visual emphasis for the menu-bar button's live presentation. Hosts
@@ -1426,6 +1432,9 @@ pub const TrayOptions = struct {
     /// `NSStatusItem` menu-bar extras render it directly in the menu bar).
     title: []const u8 = "",
     tooltip: []const u8 = "",
+    /// Whether the native item occupies the menu bar/tray. False preserves
+    /// its native identity so making it visible again does not reshuffle it.
+    visible: bool = true,
     items: []const TrayMenuItem = &.{},
     presentation: TrayPresentation = .{},
     /// Ordinary click, Option-click, and menu-open hooks. Each command
@@ -1434,6 +1443,29 @@ pub const TrayOptions = struct {
     alternate_activation_command: []const u8 = "",
     open_command: []const u8 = "",
 };
+
+/// The independently live shell fields of a status item. Presentation and
+/// menu have their own patch seams so changing this state never rebuilds a
+/// menu and changing a menu never recreates the native item.
+pub const TrayShell = struct {
+    icon_path: []const u8 = "",
+    tooltip: []const u8 = "",
+    visible: bool = true,
+    activation_command: []const u8 = "",
+    alternate_activation_command: []const u8 = "",
+    open_command: []const u8 = "",
+};
+
+pub fn trayShell(options: TrayOptions) TrayShell {
+    return .{
+        .icon_path = options.icon_path,
+        .tooltip = options.tooltip,
+        .visible = options.visible,
+        .activation_command = options.activation_command,
+        .alternate_activation_command = options.alternate_activation_command,
+        .open_command = options.open_command,
+    };
+}
 
 /// Semantic status-menu rows. `command` is the ordinary actionable row;
 /// the others let a capable host render readouts without presenting them
@@ -1477,6 +1509,14 @@ pub const MenuCommandEvent = struct {
 pub const TrayCommandEvent = struct {
     name: []const u8,
     window_id: WindowId = 1,
+    status_item_id: StatusItemId = primary_status_item_id,
+};
+
+/// A selected row is namespaced by its owning status item. Row ids only
+/// need to be unique inside one menu.
+pub const TrayActionEvent = struct {
+    status_item_id: StatusItemId = primary_status_item_id,
+    item_id: TrayItemId,
 };
 
 /// Timer ids at or above this value are reserved for the framework's own
@@ -2420,7 +2460,7 @@ pub const Event = union(enum) {
     window_focused: WindowId,
     view_focused: ViewFocusEvent,
     bridge_message: BridgeMessage,
-    tray_action: TrayItemId,
+    tray_action: TrayActionEvent,
     shortcut: ShortcutEvent,
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
@@ -2613,11 +2653,12 @@ pub const PlatformServices = struct {
     reveal_path_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
     add_recent_document_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
     clear_recent_documents_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
-    create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
-    update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
-    update_tray_title_fn: ?*const fn (context: ?*anyopaque, title: []const u8) anyerror!void = null,
-    update_tray_presentation_fn: ?*const fn (context: ?*anyopaque, presentation: TrayPresentation) anyerror!void = null,
-    remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    create_tray_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, options: TrayOptions) anyerror!void = null,
+    update_tray_shell_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, shell: TrayShell) anyerror!void = null,
+    update_tray_menu_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, items: []const TrayMenuItem) anyerror!void = null,
+    update_tray_title_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, title: []const u8) anyerror!void = null,
+    update_tray_presentation_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, presentation: TrayPresentation) anyerror!void = null,
+    remove_tray_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
@@ -3181,36 +3222,63 @@ pub const PlatformServices = struct {
         return clear_fn(self.context);
     }
 
-    pub fn createTray(self: PlatformServices, options: TrayOptions) anyerror!void {
+    pub fn createStatusItem(self: PlatformServices, status_item_id: StatusItemId, options: TrayOptions) anyerror!void {
         const tray_fn = self.create_tray_fn orelse return error.UnsupportedService;
-        return tray_fn(self.context, options);
+        return tray_fn(self.context, status_item_id, options);
     }
 
-    pub fn updateTrayMenu(self: PlatformServices, items: []const TrayMenuItem) anyerror!void {
+    pub fn updateStatusItemShell(self: PlatformServices, status_item_id: StatusItemId, shell: TrayShell) anyerror!void {
+        const update_fn = self.update_tray_shell_fn orelse return error.UnsupportedService;
+        return update_fn(self.context, status_item_id, shell);
+    }
+
+    pub fn updateStatusItemMenu(self: PlatformServices, status_item_id: StatusItemId, items: []const TrayMenuItem) anyerror!void {
         const update_fn = self.update_tray_menu_fn orelse return error.UnsupportedService;
-        return update_fn(self.context, items);
+        return update_fn(self.context, status_item_id, items);
     }
 
     /// Retitle the live status-bar button without re-creating the item
     /// (re-creating flickers and can reshuffle the macOS menu bar). Added
     /// for model-driven tray state (e.g. an open-count badge in the
     /// title).
-    pub fn updateTrayTitle(self: PlatformServices, title: []const u8) anyerror!void {
+    pub fn updateStatusItemTitle(self: PlatformServices, status_item_id: StatusItemId, title: []const u8) anyerror!void {
         const title_fn = self.update_tray_title_fn orelse return error.UnsupportedService;
-        return title_fn(self.context, title);
+        return title_fn(self.context, status_item_id, title);
     }
 
     /// Patch all live menu-bar presentation fields without recreating the
     /// native item. A host that only implements title updates still gets a
     /// correct title and intentionally degrades the richer styling.
+    pub fn updateStatusItemPresentation(self: PlatformServices, status_item_id: StatusItemId, presentation: TrayPresentation) anyerror!void {
+        if (self.update_tray_presentation_fn) |update_fn| return update_fn(self.context, status_item_id, presentation);
+        return self.updateStatusItemTitle(status_item_id, presentation.title);
+    }
+
+    pub fn removeStatusItem(self: PlatformServices, status_item_id: StatusItemId) anyerror!void {
+        const remove_fn = self.remove_tray_fn orelse return error.UnsupportedService;
+        return remove_fn(self.context, status_item_id);
+    }
+
+    // Backward-compatible singular tray surface. The reserved primary id is
+    // the exact item older apps have always addressed implicitly.
+    pub fn createTray(self: PlatformServices, options: TrayOptions) anyerror!void {
+        return self.createStatusItem(primary_status_item_id, options);
+    }
+
+    pub fn updateTrayMenu(self: PlatformServices, items: []const TrayMenuItem) anyerror!void {
+        return self.updateStatusItemMenu(primary_status_item_id, items);
+    }
+
+    pub fn updateTrayTitle(self: PlatformServices, title: []const u8) anyerror!void {
+        return self.updateStatusItemTitle(primary_status_item_id, title);
+    }
+
     pub fn updateTrayPresentation(self: PlatformServices, presentation: TrayPresentation) anyerror!void {
-        if (self.update_tray_presentation_fn) |update_fn| return update_fn(self.context, presentation);
-        return self.updateTrayTitle(presentation.title);
+        return self.updateStatusItemPresentation(primary_status_item_id, presentation);
     }
 
     pub fn removeTray(self: PlatformServices) anyerror!void {
-        const remove_fn = self.remove_tray_fn orelse return error.UnsupportedService;
-        return remove_fn(self.context);
+        return self.removeStatusItem(primary_status_item_id);
     }
 
     pub fn configureSecurityPolicy(self: PlatformServices, policy: security.Policy) anyerror!void {

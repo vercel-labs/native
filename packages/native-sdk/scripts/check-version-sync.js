@@ -10,7 +10,7 @@
 // repository rename that only updates the main package fails the publish.
 // CI runs this before publish so a half-bumped release cannot ship.
 
-import { readdirSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -140,8 +140,14 @@ if (coreLock.version !== expectedVersion || coreLock.packages?.['']?.version !==
   console.error(`Version mismatch: packages/core/package-lock.json=${coreLock.version}/${coreLock.packages?.['']?.version}, expected ${expectedVersion}`);
   errors++;
 }
-for (const example of ['examples/kanban', 'examples/soundboard-ts', 'examples/system-monitor-ts']) {
-  const exampleJson = JSON.parse(readFileSync(join(repoRoot, ...example.split('/'), 'package.json'), 'utf-8'));
+const examplesDir = join(repoRoot, 'examples');
+for (const entry of readdirSync(examplesDir, { withFileTypes: true })) {
+  if (!entry.isDirectory()) continue;
+  const examplePath = join(examplesDir, entry.name, 'package.json');
+  if (!existsSync(examplePath)) continue;
+  const exampleJson = JSON.parse(readFileSync(examplePath, 'utf-8'));
+  if (!exampleJson.dependencies?.['@native-sdk/core']) continue;
+  const example = `examples/${entry.name}`;
   const pin = exampleJson.dependencies?.['@native-sdk/core'];
   if (pin !== expectedVersion) {
     console.error(`Version mismatch: ${example}/package.json pins @native-sdk/core ${pin}, expected ${expectedVersion}`);

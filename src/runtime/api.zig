@@ -27,6 +27,7 @@ pub const CommandEvent = struct {
     source: CommandSource = .runtime,
     window_id: platform.WindowId = 0,
     view_label: []const u8 = "",
+    status_item_id: platform.StatusItemId = 0,
     tray_item_id: platform.TrayItemId = 0,
 };
 

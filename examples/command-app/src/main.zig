@@ -241,7 +241,7 @@ test "command app routes toolbar menu tray shortcut and bridge commands" {
         .window_id = 1,
     } });
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
-    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .tray_action = 1 });
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .tray_action = .{ .item_id = 1 } });
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .shortcut = .{
         .id = command_id,
         .key = "s",

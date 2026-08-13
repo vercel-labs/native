@@ -505,6 +505,7 @@ export class SubsetChecker {
     this.checkMigrationHook();
     this.checkThemePackHelper();
     this.checkStatusItemHelper();
+    this.checkStatusItemsHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -988,7 +989,120 @@ export class SubsetChecker {
     if (!valid) {
       this.report(
         "NS1033",
-        "`statusItem` must return the exact canonical `StatusItemState` record (presentation, install-time shell fields, and rich menu rows); import it from `@native-sdk/core/events`.",
+        "`statusItem` must return the exact canonical `StatusItemState` record (live presentation, shell fields, and rich menu rows); import it from `@native-sdk/core/events`.",
+        decl.type,
+      );
+    }
+  }
+
+  private checkStatusItemsHelper(): void {
+    let decl: ts.FunctionDeclaration | null = null;
+    for (const stmt of this.entry.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === "statusItems" && hasExportModifier(stmt)) {
+        decl = stmt;
+        break;
+      }
+    }
+    if (decl === null) {
+      for (const binding of exportListBindings(this.tast, this.entry)) {
+        if (
+          binding.exportedName === "statusItems" &&
+          binding.target !== null &&
+          binding.target !== undefined &&
+          ts.isFunctionDeclaration(binding.target) &&
+          binding.target.getSourceFile() === this.entry
+        ) {
+          decl = binding.target;
+          break;
+        }
+      }
+    }
+    if (decl === null) return;
+    if (this.table.modelHelperDecls().some((candidate) => candidate.name === "statusItem")) {
+      this.report("NS1033", "Export either `statusItem` or `statusItems`, not both.", decl.name ?? decl);
+    }
+    const helper = this.table.modelHelperDecls().find(
+      (candidate) => candidate.name === "statusItems" && candidate.decl === decl,
+    );
+    if (helper === undefined || decl.type === undefined) {
+      this.report(
+        "NS1033",
+        "`statusItems` must be a single-Model-parameter helper with an explicit return type.",
+        decl.name ?? decl,
+      );
+      return;
+    }
+    const returns = this.table.resolveTypeNode(decl.type);
+    const descriptorType = returns.k === "slice" && returns.elem.k === "struct" ? returns.elem : null;
+    const descriptor = descriptorType === null ? undefined : this.table.structs.get(descriptorType.name);
+    const names = descriptor?.fields.map((field) => field.tsName).sort() ?? [];
+    const field = (name: string) => descriptor?.fields.find((candidate) => candidate.tsName === name);
+    const id = field("id");
+    const visible = field("visible");
+    const byteFields = ["iconPath", "tooltip", "activationCommand", "alternateActivationCommand", "openCommand"].map(field);
+    const presentationField = field("presentation");
+    const presentationType = presentationField?.type.k === "struct" ? presentationField.type : null;
+    const presentation = presentationType === null ? undefined : this.table.structs.get(presentationType.name);
+    const presentationNames = presentation?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const presentationFieldNamed = (name: string) => presentation?.fields.find((candidate) => candidate.tsName === name);
+    const title = presentationFieldNamed("title");
+    const width = presentationFieldNamed("width");
+    const tone = presentationFieldNamed("tone");
+    const iconOpacity = presentationFieldNamed("iconOpacity");
+    const monospaced = presentationFieldNamed("monospaced");
+    const items = field("items");
+    const itemType = items?.type.k === "slice" && items.type.elem.k === "struct" ? items.type.elem : null;
+    const item = itemType === null ? undefined : this.table.structs.get(itemType.name);
+    const itemNames = item?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const itemField = (name: string) => item?.fields.find((candidate) => candidate.tsName === name);
+    const itemId = itemField("id");
+    const label = itemField("label");
+    const command = itemField("command");
+    const separator = itemField("separator");
+    const enabled = itemField("enabled");
+    const detail = itemField("detail");
+    const role = itemField("role");
+    const key = itemField("key");
+    const modifiersField = itemField("modifiers");
+    const modifiersType = modifiersField?.type.k === "struct" ? modifiersField.type : null;
+    const modifiers = modifiersType === null ? undefined : this.table.structs.get(modifiersType.name);
+    const modifierNames = modifiers?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const numericId = id !== undefined && ["number", "i64", "f64", "numAlias"].includes(id.type.k);
+    const numericItemId = itemId !== undefined && ["number", "i64", "f64", "numAlias"].includes(itemId.type.k);
+    const numericWidth = width !== undefined && ["number", "i64", "f64", "numAlias"].includes(width.type.k);
+    const numericOpacity = iconOpacity !== undefined && ["number", "i64", "f64", "numAlias"].includes(iconOpacity.type.k);
+    const enumMembersAre = (candidate: typeof tone, expected: readonly string[]): boolean => {
+      if (candidate?.type.k !== "enum") return false;
+      const found = this.table.enums.get(candidate.type.name)?.members.slice().sort() ?? [];
+      return found.join(",") === expected.slice().sort().join(",");
+    };
+    const boolModifierFields = modifiers !== undefined && modifiers.fields.every((candidate) => candidate.type.k === "bool");
+    const valid =
+      names.join(",") === "activationCommand,alternateActivationCommand,iconPath,id,items,openCommand,presentation,tooltip,visible" &&
+      numericId &&
+      visible?.type.k === "bool" &&
+      byteFields.every((candidate) => candidate?.type.k === "bytes") &&
+      presentationNames.join(",") === "iconOpacity,monospaced,title,tone,width" &&
+      title?.type.k === "bytes" &&
+      numericWidth &&
+      enumMembersAre(tone, ["normal", "warning", "critical"]) &&
+      numericOpacity &&
+      monospaced?.type.k === "bool" &&
+      itemNames.join(",") === "command,detail,enabled,id,key,label,modifiers,role,separator" &&
+      numericItemId &&
+      label?.type.k === "bytes" &&
+      command?.type.k === "bytes" &&
+      separator?.type.k === "bool" &&
+      enabled?.type.k === "bool" &&
+      detail?.type.k === "bytes" &&
+      enumMembersAre(role, ["command", "info", "header", "hero", "agent", "context"]) &&
+      key?.type.k === "bytes" &&
+      modifierNames.join(",") === "command,control,option,primary,shift" &&
+      boolModifierFields;
+    if (!valid) {
+      this.report(
+        "NS1033",
+        "`statusItems` must return `readonly StatusItemDescriptor[]`; import StatusItemDescriptor from `@native-sdk/core/events`.",
         decl.type,
       );
     }
@@ -1425,7 +1539,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem", "statusItems",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

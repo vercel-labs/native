@@ -43,6 +43,60 @@ pub const MobileLibOptions = @import("build/app.zig").MobileLibOptions;
 pub const addMobileLib = @import("build/app.zig").addMobileLib;
 const mobile_export_symbol_names = @import("build/app.zig").mobile_export_symbol_names;
 
+test "service archive support matches ScriptC localized object formats" {
+    const app_build = @import("build/app.zig");
+    const host = @import("builtin").target;
+    const resolved = struct {
+        fn target(os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch, abi: std.Target.Abi) std.Build.ResolvedTarget {
+            var result = host;
+            result.os.tag = os;
+            result.cpu.arch = arch;
+            result.abi = abi;
+            return .{
+                .query = .{ .os_tag = os, .cpu_arch = arch, .abi = abi },
+                .result = result,
+            };
+        }
+    }.target;
+
+    var macos_host = host;
+    macos_host.os.tag = .macos;
+    macos_host.cpu.arch = .aarch64;
+    macos_host.abi = .none;
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.windows, .x86_64, .gnu)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.windows, .x86_64, .msvc)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.windows, .aarch64, .gnu)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .x86_64, .musl)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .aarch64, .musl)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.linux, .riscv64, .musl)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.macos, .x86_64, .none)));
+
+    var linux_host = host;
+    linux_host.os.tag = .linux;
+    linux_host.cpu.arch = .riscv64;
+    linux_host.abi = .musl;
+    try std.testing.expect(app_build.serviceArchiveSupported(linux_host, .{ .query = .{}, .result = linux_host }));
+    try std.testing.expect(!app_build.serviceArchiveSupported(linux_host, resolved(.macos, .aarch64, .none)));
+
+    var gnu_linux_host = host;
+    gnu_linux_host.os.tag = .linux;
+    gnu_linux_host.cpu.arch = .x86_64;
+    gnu_linux_host.abi = .gnu;
+    const explicit_same_triple_gnu = resolved(.linux, .x86_64, .gnu);
+    try std.testing.expect(!app_build.scriptcTargetIsCross(gnu_linux_host, explicit_same_triple_gnu));
+    try std.testing.expect(app_build.linuxGlibcSpellingHitsDefaultFloor(explicit_same_triple_gnu));
+    try std.testing.expect(!app_build.linuxGlibcSpellingHitsDefaultFloor(.{ .query = .{}, .result = gnu_linux_host }));
+
+    var windows_host = host;
+    windows_host.os.tag = .windows;
+    windows_host.cpu.arch = .x86_64;
+    windows_host.abi = .gnu;
+    const native_windows_msvc = resolved(.windows, .x86_64, .msvc);
+    try std.testing.expect(!app_build.scriptcTargetIsCross(windows_host, native_windows_msvc));
+    try std.testing.expect(app_build.scriptcCompileSupported(windows_host, native_windows_msvc));
+    try std.testing.expect(app_build.serviceArchiveSupported(windows_host, native_windows_msvc));
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const host_target = b.graph.host;
@@ -298,6 +352,7 @@ pub fn build(b: *std.Build) void {
     // where the failure reads as the graded app's, not the tooling's.
     const evals_cmdview_mod = module(b, target, optimize, "evals/harness-lib/cmdview.zig");
     const evals_cmdview_tests = testArtifact(b, evals_cmdview_mod);
+    const build_graph_tests = testArtifact(b, module(b, host_target, optimize, "build.zig"));
 
     // `native version` names the commit the binary was built from, so
     // binary/framework skew ("your native binary may be stale") is a
@@ -522,6 +577,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_dirs_tests).step);
@@ -595,6 +651,19 @@ pub fn build(b: *std.Build) void {
         const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suite over the markup fixture's archive (requires node and `npm ci` in packages/core)");
         abi_laws_step.dependOn(&abi_laws_run.step);
         test_step.dependOn(&abi_laws_run.step);
+        // The cross-execution battery staging: the host-fixture and
+        // markup batteries (update/snapshot/effects and the markup view
+        // over genuinely compiled cores) plus, where the target admits
+        // the in-process archive, the service pool battery, installed
+        // under <prefix>/e2e for execution on the target machine. Pair
+        // with -Dtarget and -p; scripts/cross-e2e.sh is the driver.
+        const cross_e2e_step = b.step("stage-cross-e2e", "Install the TS-core e2e batteries under <prefix>/e2e for execution on the build target (pair with -Dtarget and -p; see scripts/cross-e2e.sh)");
+        const e2e_dir: std.Build.Step.InstallArtifact.Options.Dir = .{ .override = .{ .custom = "e2e" } };
+        cross_e2e_step.dependOn(&b.addInstallArtifact(ts_core_artifacts.host, .{ .dest_dir = e2e_dir }).step);
+        cross_e2e_step.dependOn(&b.addInstallArtifact(ts_core_artifacts.markup, .{ .dest_dir = e2e_dir }).step);
+        if (ts_core_artifacts.services_pool) |pool_tests| {
+            cross_e2e_step.dependOn(&b.addInstallArtifact(pool_tests, .{ .dest_dir = e2e_dir }).step);
+        }
         // The corpus contract artifacts an external core toolchain
         // consumes: per fixture, the frontend-emitted contract sidecar
         // (after projection), the generated entry module, and the
@@ -709,6 +778,19 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-pin-cache-inputs", "Verify both TypeScript service build graphs invalidate frontend contracts when the exact scriptc pin changes", &.{
         .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
         .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
+        .{ .path = "build/app.zig", .pattern = ".linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64" },
+        .{ .path = "build/app.zig", .pattern = ".windows => !cross or target.result.abi == .gnu" },
+        .{ .path = "build/app.zig", .pattern = ".windows => target.result.cpu.arch == .x86_64" },
+        .{ .path = "build/app.zig", .pattern = "if (linuxGlibcSpellingHitsDefaultFloor(target)) {" },
+        .{ .path = "build.zig", .pattern = "if (!app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;" },
+        .{ .path = "build/app.zig", .pattern = "scriptcPlatformTriple(b, target),\n        // Keep the core and service archives on the same cross compiler" },
+        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe," },
+        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--host-platform\", host_platform, \"--target-platform\", app_build.scriptcPlatformTriple(b, target), \"--zig-exe\", b.graph.zig_exe });\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
+        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe,\n    });\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
+        .{ .path = "build.zig", .pattern = "abi_laws_mod.addObjectFile(markup_fixture.archive);\n    addScriptcArchiveSystemLibs(abi_laws_mod, target);" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "SCRIPTC_TARGET: args[\"target-platform\"]" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
         .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
@@ -3000,16 +3082,17 @@ fn tsCoreE2eArtifact(
 
     // corewire (the contract-sidecar mirror/facade/profile generator),
     // compiled for the build host: the fixture compiles and the
-    // conformance shims all run it.
+    // conformance shims all run it, including under a cross -Dtarget
+    // (the batteries compile for the target; this tool never does).
     const corewire_mod = b.createModule(.{
         .root_source_file = b.path("tools/corewire/main.zig"),
-        .target = target,
+        .target = b.graph.host,
         .optimize = optimize,
     });
     const corewire_exe = b.addExecutable(.{
         .name = "corewire",
         .root_module = corewire_mod,
-        .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+        .use_llvm = @import("build/app.zig").useLlvmWorkaround(b.graph.host),
     });
 
     // Each fixture core compiles through the external core compiler at
@@ -3196,6 +3279,7 @@ fn tsCoreE2eArtifact(
         pool_mod.addImport("ts_services_registry", service_host_fixture.registry);
         pool_mod.link_libc = true;
         pool_mod.addObjectFile(service_archive);
+        addScriptcArchiveSystemLibs(pool_mod, target);
         break :pool pool_mod;
     } else null;
 
@@ -3233,6 +3317,7 @@ fn tsCoreE2eArtifact(
         // service as a linked archive, driven through ServicePool.
         service_bench_mod.link_libc = true;
         service_bench_mod.addObjectFile(bench_archive);
+        addScriptcArchiveSystemLibs(service_bench_mod, target);
     }
     const service_bench_exe = b.addExecutable(.{
         .name = "bench-service-host",
@@ -3308,6 +3393,7 @@ fn tsCoreE2eArtifact(
     abi_laws_mod.addImport("core_abi", module(b, target, optimize, "tools/corewire/core_abi.zig"));
     abi_laws_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, markup_fixture.sidecar));
     abi_laws_mod.addObjectFile(markup_fixture.archive);
+    addScriptcArchiveSystemLibs(abi_laws_mod, target);
 
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
@@ -3327,12 +3413,40 @@ fn tsCoreE2eArtifact(
     };
 }
 
+/// System import libraries scriptc's compiled-archive runtime reaches on
+/// Windows targets — core and service archives alike (Winsock, adapter
+/// enumeration, and crypto-backed randomness). No-op elsewhere; the
+/// archives' other dependencies are libc's. The app lane's twin is the
+/// Windows platform block in build/app.zig.
+fn addScriptcArchiveSystemLibs(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) return;
+    mod.linkSystemLibrary("ws2_32", .{});
+    mod.linkSystemLibrary("iphlpapi", .{});
+    mod.linkSystemLibrary("advapi32", .{});
+}
+
+/// Attach ScriptC's explicit-Linux-target glibc-floor teaching to an actual
+/// compile step. A target can match the host triple and still need the teaching
+/// because Zig's explicitly spelled `-gnu` target uses its default glibc floor.
+/// The root graph constructs fixture lanes even for unrelated selections such
+/// as the release pipeline's cross-compiled `zig build cli`; making the
+/// teaching a dependency preserves those CLI-only builds while still refusing
+/// the unsupported target before a selected ScriptC compile does any work.
+fn addScriptcGlibcFloorTeaching(b: *std.Build, target: std.Build.ResolvedTarget, step: *std.Build.Step) void {
+    const app_build = @import("build/app.zig");
+    if (!app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;
+    step.dependOn(&b.addFail(app_build.scriptcLinuxGlibcSpellingTeaching(b, target)).step);
+}
+
 const ExternalServiceFixture = struct {
     executable: std.Build.LazyPath,
     /// The in-process carrier's library archive (thread-instanced,
-    /// runtime-localized), compiled from the same staged tree. Host-native
-    /// darwin/linux builds only; null elsewhere (runtime localization
-    /// refuses cross targets, and the pool is a desktop host-native carrier).
+    /// runtime-localized), compiled from the same staged tree. Present
+    /// wherever the pinned compiler's localized-archive matrix covers the
+    /// pairing (native Linux, cross-Linux x86_64/aarch64, Windows x86_64,
+    /// or macOS from a macOS host — see build/app.zig
+    /// serviceArchiveSupported); null elsewhere, and for explicitly spelled
+    /// linux-gnu targets below the glibc 2.36 runtime floor.
     archive: ?std.Build.LazyPath,
     registry: *std.Build.Module,
 };
@@ -3341,8 +3455,9 @@ const ExternalServiceFixture = struct {
 /// service sidecar -> corewire host/registry -> ordinary source stage (plus
 /// the pinned compiler's tagged-throw compatibility lowering) -> exact pinned
 /// scriptc outputs (the child executable, plus the in-process library archive
-/// on host-native darwin/linux). No author source is re-read for dispatch
-/// facts after the sidecar emission.
+/// wherever the compiler's localized-archive matrix covers the host/target
+/// pairing). No author source is re-read for dispatch facts after the sidecar
+/// emission.
 fn externalServiceFixture(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -3353,9 +3468,8 @@ fn externalServiceFixture(
     contract: std.Build.LazyPath,
     name: []const u8,
 ) ExternalServiceFixture {
-    const emit_archive = target.result.os.tag == b.graph.host.result.os.tag and
-        target.result.cpu.arch == b.graph.host.result.cpu.arch and
-        (target.result.os.tag == .macos or target.result.os.tag == .linux);
+    const app_build = @import("build/app.zig");
+    const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target);
     const project = b.addRunArtifact(corewire_exe);
     project.addArg("--services-sidecar");
     project.addFileArg(contract);
@@ -3398,14 +3512,15 @@ fn externalServiceFixture(
     compile.addArg("--contract");
     compile.addFileArg(contract);
     compile.addArg("--out-exe");
-    const suffix = if (b.graph.host.result.os.tag == .windows) ".exe" else "";
+    const suffix = if (target.result.os.tag == .windows) ".exe" else "";
     const executable = compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
     const archive: ?std.Build.LazyPath = if (emit_archive) archive: {
         compile.addArg("--out-archive");
         break :archive compile.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
     } else null;
     const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
-    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", host_platform });
+    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", app_build.scriptcPlatformTriple(b, target), "--zig-exe", b.graph.zig_exe });
+    addScriptcGlibcFloorTeaching(b, target, &compile.step);
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
@@ -3545,6 +3660,7 @@ fn externalCoreFixtureModule(
     corewire_exe: *std.Build.Step.Compile,
     spec: ExternalCoreFixtureSpec,
 ) ExternalCoreFixture {
+    const app_build = @import("build/app.zig");
     // The frontend, in check-only mode: the subset checker gates the
     // compile, and the contract sidecar states the build-root-relative
     // entry spelling. The frontend reads its own sources, the SDK
@@ -3640,6 +3756,15 @@ fn externalCoreFixtureModule(
     const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{spec.name}));
     compile.addArg("--out-sidecar");
     const compiled_sidecar = compile.addOutputFileArg("core.contract.json");
+    compile.addArgs(&.{
+        "--host-platform",
+        b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+        "--target-platform",
+        app_build.scriptcPlatformTriple(b, target),
+        "--zig-exe",
+        b.graph.zig_exe,
+    });
+    addScriptcGlibcFloorTeaching(b, target, &compile.step);
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         // The development override: point at any toolchain command; the
         // driver still refuses a release other than the SDK's pin.
@@ -3668,6 +3793,7 @@ fn externalCoreFixtureModule(
     });
     mod.link_libc = true;
     mod.addObjectFile(archive);
+    addScriptcArchiveSystemLibs(mod, target);
     return .{
         .module = mod,
         .contract = contract,

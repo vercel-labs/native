@@ -146,8 +146,8 @@ The runtime watches the command queue and processes these actions:
       <td>Dispatch a shortcut command event for the main window</td>
     </tr>
     <tr>
-      <td><code>tray-action &lt;item-id&gt;</code></td>
-      <td>Select a status-item dropdown row (ids from the snapshot's <code>tray-item #id</code> lines)</td>
+      <td><code>tray-action &lt;item-id&gt;</code> or <code>tray-action &lt;status-item-id&gt; &lt;item-id&gt;</code></td>
+      <td>Select a status-item dropdown row. The one-id form targets primary status item <code>#1</code>; multiple-item snapshots print <code>tray #id</code> headers</td>
     </tr>
     <tr>
       <td><code>focus &lt;view-label&gt;</code></td>

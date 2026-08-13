@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "description": "The Native SDK: the complete toolkit for building native desktop applications — declarative markup, native rendering, WebView surfaces, and OS capabilities",
   "type": "module",
   "bin": {
@@ -32,17 +32,17 @@
   ],
   "dependencies": {
     "@typescript/old": "npm:typescript@6.0.3",
-    "scriptc": "0.0.27"
+    "scriptc": "0.0.28"
   },
   "optionalDependencies": {
-    "@native-sdk/cli-darwin-arm64": "0.8.4",
-    "@native-sdk/cli-darwin-x64": "0.8.4",
-    "@native-sdk/cli-linux-arm64-gnu": "0.8.4",
-    "@native-sdk/cli-linux-arm64-musl": "0.8.4",
-    "@native-sdk/cli-linux-x64-gnu": "0.8.4",
-    "@native-sdk/cli-linux-x64-musl": "0.8.4",
-    "@native-sdk/cli-win32-arm64": "0.8.4",
-    "@native-sdk/cli-win32-x64": "0.8.4"
+    "@native-sdk/cli-darwin-arm64": "0.9.0",
+    "@native-sdk/cli-darwin-x64": "0.9.0",
+    "@native-sdk/cli-linux-arm64-gnu": "0.9.0",
+    "@native-sdk/cli-linux-arm64-musl": "0.9.0",
+    "@native-sdk/cli-linux-x64-gnu": "0.9.0",
+    "@native-sdk/cli-linux-x64-musl": "0.9.0",
+    "@native-sdk/cli-win32-arm64": "0.9.0",
+    "@native-sdk/cli-win32-x64": "0.9.0"
   },
   "repository": {
     "type": "git",
@@ -50,7 +50,7 @@
   },
   "homepage": "https://native-sdk.dev",
   "scripts": {
-    "version": "npm run version:sync && git add ../../tools/native-sdk/main.zig ../../packages/core/package.json ../../packages/core/package-lock.json ../../examples/kanban/package.json ../../examples/soundboard-ts/package.json ../../examples/system-monitor-ts/package.json npm/*/package.json package.json",
+    "version": "npm run version:sync && git add ../../tools/native-sdk/main.zig ../../packages/core/package.json ../../packages/core/package-lock.json ../../examples/*/package.json npm/*/package.json package.json",
     "version:sync": "node scripts/sync-version.js",
     "version:check": "node scripts/check-version-sync.js",
     "scripts:check": "node --check bin/native.js && node --check scripts/copy-native.js && node --check scripts/copy-framework.js && node --check scripts/sync-version.js && node --check scripts/check-version-sync.js && node --check scripts/check-framework-sync.js && node --check scripts/check-runtime-types.js && node scripts/copy-framework.js && node scripts/check-framework-sync.js && node scripts/check-runtime-types.js",

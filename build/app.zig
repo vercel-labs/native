@@ -112,12 +112,116 @@ const TsCoreStage = struct {
 };
 
 /// Which carrier runs src/services/ operations. Auto preserves the isolated,
-/// single-instance child carrier; host-native macOS/Linux apps can explicitly
-/// opt into the parallel in-process pool. `.service_carrier` in app.zon and
-/// the `-Dservice-carrier` flag state the choice.
+/// single-instance child carrier; apps can explicitly opt into the parallel
+/// in-process pool wherever the pinned service compiler can build the
+/// runtime-localized service archive for the target (see
+/// serviceArchiveSupported). `.service_carrier` in app.zon and the
+/// `-Dservice-carrier` flag state the choice.
 const ServiceCarrierOption = enum { auto, in_process, child };
 
 const ServiceCarrier = enum { none, child, in_process };
+
+/// Whether the pinned compiler can build TypeScript archives/executables for
+/// this host/target pairing. Native desktop targets use their host toolchain,
+/// including native Windows/MSVC. Cross-Windows builds use Zig's bundled GNU
+/// sysroot; an MSVC cross target has no CRT headers or libraries to compile
+/// the ScriptC runtime against.
+pub fn scriptcCompileSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    const desktop_host = switch (host.os.tag) {
+        .macos, .linux, .windows => true,
+        else => false,
+    };
+    if (!desktop_host) return false;
+    const cross = scriptcTargetIsCross(host, target);
+    return switch (target.result.os.tag) {
+        .linux => true,
+        .windows => !cross or target.result.abi == .gnu,
+        .macos => host.os.tag == .macos,
+        else => false,
+    };
+}
+
+/// Whether the pinned service compiler can build the in-process carrier's
+/// archive (runtime-localized, thread-instanced) on this build host for
+/// this target. Its object localizers are deliberately architecture-aware:
+/// native Linux uses host binutils, cross-ELF accepts x86_64/aarch64, COFF
+/// accepts x86_64 (GNU when cross-compiled; the host ABI when native), and
+/// Mach-O needs a macOS host (Apple linking rides the host toolchain's SDK).
+pub fn serviceArchiveSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    if (!scriptcCompileSupported(host, target)) return false;
+    const cross = scriptcTargetIsCross(host, target);
+    return switch (target.result.os.tag) {
+        .linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64,
+        .windows => target.result.cpu.arch == .x86_64,
+        .macos => host.os.tag == .macos,
+        else => false,
+    };
+}
+
+/// Whether a Linux target's spelling lands on Zig's default glibc floor,
+/// which predates `arc4random_buf` — a symbol the compiled service
+/// runtime references, so the link fails late and opaquely without the
+/// configure-time teaching. A native target (no `-Dtarget` os) resolves
+/// the system's own glibc and is exempt; an explicitly spelled `-gnu`
+/// target needs a stated glibc of 2.36 or later (or `-musl`, whose libc
+/// always has the symbol).
+pub fn linuxGlibcSpellingHitsDefaultFloor(target: std.Build.ResolvedTarget) bool {
+    if (target.result.os.tag != .linux or !target.result.abi.isGnu()) return false;
+    if (target.query.os_tag == null) return false;
+    const glibc = target.query.glibc_version orelse return true;
+    return glibc.order(.{ .major = 2, .minor = 36, .patch = 0 }) == .lt;
+}
+
+/// Whether ScriptC needs its zig-cc target lane rather than the native host
+/// compiler. Keep this identical to the driver scripts' platform-triple
+/// comparison: a stated glibc version makes an otherwise same-triple Linux
+/// target cross because that floor must reach Zig's `-target` argument.
+pub fn scriptcTargetIsCross(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    if (target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch) return true;
+    // Zig's Windows host triple defaults to GNU even when native clang uses
+    // the installed Windows toolchain. A same-architecture MSVC target is
+    // therefore still native compiler work. Preserve an exact native GNU
+    // triple too; every other ABI change needs the zig-cc cross lane.
+    if (target.result.os.tag == .windows) {
+        return target.result.abi != host.abi and target.result.abi != .msvc;
+    }
+    return target.result.abi != host.abi or target.query.glibc_version != null;
+}
+
+/// The glibc-floor teaching for explicitly targeted ScriptC builds. Both the
+/// core archive and either service carrier carry the compiled TypeScript
+/// runtime, so all of them hit the same missing symbol. This is independent of
+/// whether the target triple happens to match the build host.
+pub fn scriptcLinuxGlibcSpellingTeaching(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    return b.fmt(
+        "\nTypeScript target {t}-linux-gnu uses Zig's default glibc floor, which" ++
+            " predates arc4random_buf — a symbol the compiled runtime needs (glibc" ++
+            " 2.36+).\nSpell the target as \"{t}-linux-gnu.2.36\" (or later), or" ++
+            " \"{t}-linux-musl\".\n",
+        .{ target.result.cpu.arch, target.result.cpu.arch, target.result.cpu.arch },
+    );
+}
+
+pub fn panicScriptcLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
+    @panic(scriptcLinuxGlibcSpellingTeaching(b, target));
+}
+
+pub fn panicUnsupportedScriptcTarget(b: *std.Build, host: std.Target, target: std.Build.ResolvedTarget) noreturn {
+    if (target.result.os.tag == .windows and scriptcTargetIsCross(host, target) and target.result.abi != .gnu) {
+        @panic(b.fmt(
+            "\nTypeScript cross-target Windows builds require the GNU ABI: Zig supplies" ++
+                " that target's CRT and system libraries, while an MSVC target needs a native" ++
+                " Windows toolchain.\nBuild {t}-windows-msvc on a matching Windows host, or" ++
+                " cross-compile as \"{t}-windows-gnu\".\n",
+            .{ target.result.cpu.arch, target.result.cpu.arch },
+        ));
+    }
+    @panic(
+        "\nTypeScript desktop builds support native host targets, Linux and Windows GNU" ++
+            " cross targets from macOS/Linux/Windows, and macOS targets from macOS." ++
+            "\nChoose a supported target/host pairing.\n",
+    );
+}
 
 fn resolveServiceCarrier(
     choice: ServiceCarrierOption,
@@ -127,19 +231,32 @@ fn resolveServiceCarrier(
 ) ServiceCarrier {
     if (!has_services) return .none;
     const host = b.graph.host.result;
-    const supported = target.result.os.tag == host.os.tag and
-        target.result.cpu.arch == host.cpu.arch and
-        (target.result.os.tag == .macos or target.result.os.tag == .linux);
-    return switch (choice) {
-        .auto => .child,
+    const supported = serviceArchiveSupported(host, target);
+    const carrier: ServiceCarrier = switch (choice) {
+        .auto, .child => .child,
         .in_process => if (supported) .in_process else @panic(
-            "\nservice_carrier = \"in_process\" requires a host-native macOS or Linux build:" ++
-                " the service archive compiles with runtime localization, which is host-native" ++
-                " on those platforms only.\nUse \"child\" (or drop the setting — auto selects" ++
-                " the child carrier) for this target.\n",
+            "\nservice_carrier = \"in_process\" requires a target the pinned service compiler" ++
+                " can produce a runtime-localized archive for: native Linux, cross-Linux" ++
+                " x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU," ++
+                " or macOS from a macOS build host." ++
+                "\nUse \"child\" (or drop the setting — auto selects the child carrier)" ++
+                " for this target.\n",
         ),
-        .child => .child,
     };
+    return carrier;
+}
+
+/// The `arch-os-abi` platform spelling every ScriptC compile lane receives.
+/// A stated glibc version rides the abi (`gnu.2.36`) so the compiler's
+/// cross lane builds at the spelled floor rather than the default one.
+pub fn scriptcPlatformTriple(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    const triple = b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi });
+    if (target.result.os.tag != .linux or !target.result.abi.isGnu()) return triple;
+    const glibc = target.query.glibc_version orelse return triple;
+    return if (glibc.patch == 0)
+        b.fmt("{s}.{d}.{d}", .{ triple, glibc.major, glibc.minor })
+    else
+        b.fmt("{s}.{d}.{d}.{d}", .{ triple, glibc.major, glibc.minor, glibc.patch });
 }
 
 fn parseServiceCarrierOption(raw: []const u8) ServiceCarrierOption {
@@ -458,6 +575,16 @@ fn tsCoreStage(
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
+    if (!scriptcCompileSupported(b.graph.host.result, target)) {
+        panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
+    }
+    // Every TypeScript app compiles its core archive for the target. Any
+    // explicitly spelled Linux GNU target without a sufficient glibc version
+    // lands on Zig's too-old default floor, even when its triple matches the
+    // build host; reject it before either compile lane reaches the linker.
+    if (linuxGlibcSpellingHitsDefaultFloor(target)) {
+        panicScriptcLinuxGlibcSpelling(b, target);
+    }
     const service_carrier = resolveServiceCarrier(service_carrier_choice, has_services, b, target);
 
     // Relational schema analysis runs the real SQLite parser in memory before
@@ -590,7 +717,7 @@ fn tsCoreStage(
 
         // Ordinary service TypeScript is staged without core-subset rewrites.
         // The one service-boundary lowering turns NS1067's `{ kind, message }`
-        // throw into the tagged Error shape scriptc 0.0.27 can catch from an
+        // throw into the tagged Error shape scriptc 0.0.28 can catch from an
         // imported op; no deterministic profile fences participate here.
         const service_stage_run = b.addSystemCommand(&.{node});
         service_stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_services.mjs"));
@@ -636,7 +763,12 @@ fn tsCoreStage(
             "--host-platform",
             b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
             "--target-platform",
-            b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi }),
+            scriptcPlatformTriple(b, target),
+            // Cross service compiles run the pinned compiler's zig-cc
+            // lane; hand over this build's own zig so the lane never
+            // depends on a PATH zig (native compiles ignore it).
+            "--zig-exe",
+            b.graph.zig_exe,
         });
         if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
             service_compile.addArgs(&.{ "--compiler", override });
@@ -684,6 +816,16 @@ fn tsCoreStage(
     const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{symbol_name}));
     compile.addArg("--out-sidecar");
     const compiled_sidecar = compile.addOutputFileArg("core.contract.json");
+    compile.addArgs(&.{
+        "--host-platform",
+        b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+        "--target-platform",
+        scriptcPlatformTriple(b, target),
+        // Keep the core and service archives on the same cross compiler and
+        // target. Native compiles ignore the supplied Zig path.
+        "--zig-exe",
+        b.graph.zig_exe,
+    });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         // The development override: point at any toolchain command; the
         // driver still refuses a release other than the SDK's pin.
@@ -1935,9 +2077,12 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("oleacc", .{});
         app_mod.linkSystemLibrary("shell32", .{});
         // TypeScript cores link ScriptC's host runtime, whose network-interface
-        // helpers use GetAdaptersAddresses and Winsock address conversion.
+        // helpers use GetAdaptersAddresses and Winsock address conversion; the
+        // in-process service archive shares the same runtime and additionally
+        // reaches advapi32 (crypto-backed randomness).
         app_mod.linkSystemLibrary("iphlpapi", .{});
         app_mod.linkSystemLibrary("ws2_32", .{});
+        app_mod.linkSystemLibrary("advapi32", .{});
         // The audio backend: Media Foundation (session + source resolver
         // + streaming audio renderer) and WinHTTP (the cache fill).
         app_mod.linkSystemLibrary("mf", .{});

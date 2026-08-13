@@ -32,7 +32,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .widgets = &.{},
                     .diagnostics = automationDiagnostics(self),
                     .frame_profile = automationFrameProfile(self),
-                    .tray = automationTray(self),
+                    .trays = automationTrays(self),
                     .audio = automationAudio(self),
                     .video = automationVideo(self),
                     .errors = self.dispatchErrors(),
@@ -66,7 +66,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .widgets = self.automation_widgets[0..widget_count],
                 .diagnostics = automationDiagnostics(self),
                 .frame_profile = automationFrameProfile(self),
-                .tray = automationTray(self),
+                .trays = automationTrays(self),
                 .audio = automationAudio(self),
                 .video = automationVideo(self),
                 .errors = self.dispatchErrors(),
@@ -79,30 +79,38 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             };
         }
 
-        /// The live tray as the runtime last applied it: title +
-        /// dropdown rows, or null when no status item exists. The menu
-        /// bar is outside every window capture, so the snapshot is the
-        /// only automation-visible evidence of the model-driven tray.
-        fn automationTray(self: *Runtime) ?automation.snapshot.Tray {
-            if (!self.tray_created) return null;
-            const count = @min(self.tray_item_count, self.automation_tray_items.len);
-            for (self.tray_items[0..count], 0..) |item, index| {
-                self.automation_tray_items[index] = .{
-                    .id = item.id,
-                    .label = item.label,
-                    .command = item.command,
-                    .separator = item.separator,
-                    .enabled = item.enabled,
-                    .detail = item.detail,
-                    .role = item.role,
-                    .key = item.key,
-                    .modifiers = item.modifiers,
+        /// Every live status item as the runtime last applied it. Menu
+        /// bar contents live outside window captures, so identifiers
+        /// are explicit in both snapshots and automation commands.
+        fn automationTrays(self: *Runtime) []const automation.snapshot.Tray {
+            var tray_count: usize = 0;
+            var item_offset: usize = 0;
+            for (self.status_items) |status_item| {
+                if (!status_item.active or tray_count >= self.automation_trays.len) continue;
+                const count = @min(status_item.item_count, self.automation_tray_items.len - item_offset);
+                for (status_item.items[0..count], 0..) |item, index| {
+                    self.automation_tray_items[item_offset + index] = .{
+                        .id = item.id,
+                        .label = item.label,
+                        .command = item.command,
+                        .separator = item.separator,
+                        .enabled = item.enabled,
+                        .detail = item.detail,
+                        .role = item.role,
+                        .key = item.key,
+                        .modifiers = item.modifiers,
+                    };
+                }
+                self.automation_trays[tray_count] = .{
+                    .id = status_item.id,
+                    .visible = status_item.visible,
+                    .title = status_item.title,
+                    .items = self.automation_tray_items[item_offset .. item_offset + count],
                 };
+                tray_count += 1;
+                item_offset += count;
             }
-            return .{
-                .title = self.tray_title,
-                .items = self.automation_tray_items[0..count],
-            };
+            return self.automation_trays[0..tray_count];
         }
 
         /// Live audio playback as the ui-app layer last mirrored it

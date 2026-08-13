@@ -130,6 +130,21 @@ pub fn validateTrayOptions(options: platform.TrayOptions) !void {
     try validateTrayMenuItems(options.items);
 }
 
+pub fn validateStatusItemId(status_item_id: platform.StatusItemId) !void {
+    if (status_item_id == 0) return error.InvalidTrayOptions;
+}
+
+pub fn validateTrayShell(shell: platform.TrayShell) !void {
+    try validateTrayField(shell.icon_path, platform.max_tray_icon_path_bytes);
+    try validateTrayField(shell.tooltip, platform.max_tray_tooltip_bytes);
+    try validateTrayField(shell.activation_command, platform.max_tray_item_command_bytes);
+    try validateTrayField(shell.alternate_activation_command, platform.max_tray_item_command_bytes);
+    try validateTrayField(shell.open_command, platform.max_tray_item_command_bytes);
+    if (shell.activation_command.len > 0) try validateCommandName(shell.activation_command);
+    if (shell.alternate_activation_command.len > 0) try validateCommandName(shell.alternate_activation_command);
+    if (shell.open_command.len > 0) try validateCommandName(shell.open_command);
+}
+
 pub fn validateTrayTitle(title: []const u8) !void {
     try validateTrayField(title, platform.max_tray_title_bytes);
 }

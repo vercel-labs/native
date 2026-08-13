@@ -123,17 +123,22 @@ On macOS, `title` renders the tray as a menu-bar extra: a titled `NSStatusItem` 
 
 Use the runtime methods from app code:
 
+- `runtime.createStatusItem(id, options)` -- create a status item under a stable non-zero id
+- `runtime.updateStatusItemShell(id, shell)` -- update icon, tooltip, visibility, and activation/open commands in place
+- `runtime.updateStatusItemMenu(id, items)` -- update one menu without recreating its status item
+- `runtime.updateStatusItemPresentation(id, presentation)` -- update one live title and visual presentation
+- `runtime.removeStatusItem(id)` -- remove only the identified item
 - `runtime.createTray(options)` -- create or replace the tray icon
 - `runtime.updateTrayMenu(items)` -- update menu items without recreating the tray
 - `runtime.updateTrayTitle(title)` -- update only the live tray title
 - `runtime.updateTrayPresentation(presentation)` -- update the live title and visual presentation
 - `runtime.removeTray()` -- remove the tray icon
 
-The lower-level `PlatformServices.createTray`, `updateTrayMenu`, `updateTrayTitle`, `updateTrayPresentation`, and `removeTray` hooks are available for platform adapters. `Runtime` validates tray options before dispatch: non-separator menu items need a label, command-backed items need a unique non-zero `id`, and menus are capped at 32 items.
+The singular `*Tray` methods are compatibility wrappers for reserved status-item id `1`. The lower-level `PlatformServices` surface exposes the same keyed methods for platform adapters. `Runtime` supports at most eight simultaneous status items and validates every menu independently: non-separator rows need a label, command-backed rows need a unique non-zero row `id`, and each menu is capped at 32 rows.
 
 ## TypeScript: model-derived status items
 
-In a TypeScript app, export `statusItem(model)` from `src/core.ts`. The generated launcher installs it from the committed boot model and re-runs it after every model update. Presentation and menu are hashed independently, so changing the title, width, tone, icon opacity, or number style does not rebuild the dropdown or recreate the native status item.
+In a TypeScript app, export `statusItem(model)` from `src/core.ts`. The generated launcher installs it from the committed boot model and re-runs it after every model update. Shell, presentation, and menu are hashed independently, so changing the icon, tooltip, click hooks, title, width, tone, icon opacity, number style, or rows patches only that channel and never recreates the native status item.
 
 ```ts:src/core.ts
 import { asciiBytes, utf8Bytes } from "@native-sdk/core";
@@ -162,7 +167,9 @@ export function statusItem(model: Model): StatusItemState {
 }
 ```
 
-`iconPath`, `tooltip`, `activationCommand`, `alternateActivationCommand`, and `openCommand` are captured when the item installs. A normal click emits `activationCommand` and opens the menu; an Option-click emits `alternateActivationCommand` without opening it. Every menu open emits `openCommand`, which is useful for an on-demand refresh while the background cadence stays slow. These lifecycle hooks dispatch with `source = .tray`; empty commands disable them.
+`iconPath`, `tooltip`, `activationCommand`, `alternateActivationCommand`, and `openCommand` update live alongside presentation and rows. A normal click emits `activationCommand` and opens the menu; an Option-click emits `alternateActivationCommand` without opening it. Every menu open emits `openCommand`, which is useful for an on-demand refresh while the background cadence stays slow. These lifecycle hooks dispatch with `source = .tray`; empty commands disable them.
+
+For multiple independent items, export `statusItems(model): readonly StatusItemDescriptor[]` instead. Each descriptor has the same shell, presentation, and row fields plus a stable non-zero `id` and live `visible` flag. Presence creates, absence removes, and changed fields patch only that identifier; menus update without replacing their `NSStatusItem`. Export either `statusItem` or `statusItems`, not both. This is the Vercel-shaped split: one spend indicator can appear or disappear while a separate control-menu item persists.
 
 Rows use the exact `StatusItemMenuItem` record. `role` is `command`, `info`, `header`, `hero`, `agent`, or `context`; capable macOS hosts render the readout roles as native rich content while simpler hosts degrade them to text. `detail` carries secondary readout content, and `key` plus the five explicit `modifiers` fields declares a menu equivalent. Actionable rows need unique non-zero ids; separators conventionally use id 0 and empty byte fields. The menu may contain at most 32 rows. Map every row/click/open command to an ordinary message with `commandMsg(name): Msg | null`; no Zig `status_item_fn` glue is needed.
 
@@ -170,7 +177,7 @@ Use `utf8Bytes` for titles, labels, tooltips, and details; it preserves characte
 
 ## Handling tray actions
 
-When a user clicks a tray menu item, the runtime dispatches a `CommandEvent` with source `.tray` and the native `tray_item_id`. Prefer command-backed items when the item represents a known app action:
+When a user clicks a tray menu item, the runtime dispatches a `CommandEvent` with source `.tray`, the native `status_item_id`, and that menu's `tray_item_id`. Row ids only need to be unique within their own menu. Prefer command-backed items when the item represents a known app action:
 
 ```zig
 try runtime.createTray(.{
@@ -227,7 +234,7 @@ macOS (`NSStatusItem`) is the proven host; platforms without a status-bar servic
 
 ## Model-driven title and menu in Zig-core apps
 
-For a live menu-bar extra — an open-count badge in the title, the latest items in the dropdown — add `UiApp.Options.status_item_fn`. It is consulted on install and after every rebuild, and the runtime re-applies only what actually changed: a presentation-only change patches the live status button (no flicker, no menu rebuild), while a menu change updates the dropdown. The static `status_item` can provide install-time icon, tooltip, activation, alternate-activation, and open commands.
+For a live menu-bar extra — an open-count badge in the title, the latest items in the dropdown — add `UiApp.Options.status_item_fn`. It is consulted on install and after every rebuild, and the runtime re-applies only what actually changed: shell, presentation, and menu changes patch independently without flicker or native-item recreation. The static `status_item` provides defaults for icon, tooltip, activation, alternate-activation, and open commands; the callback may update those fields live too.
 
 ```zig
 fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusItemState {
@@ -244,6 +251,8 @@ fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusIt
 ```
 
 Selections dispatch each item's `command` through `on_command` with source `.tray`, the same shape as window menus. Platforms without a tray-title seam keep the menu updates and log the missing title support once.
+
+For multiple Zig-core items, use `UiApp.Options.status_items_fn`, returning up to eight `App.StatusItemDescriptor` values from `App.StatusItemsScratch`. Descriptor presence creates/removes by `id`; `visible` hides without removing; shell, presentation, and menu hashes reconcile independently. It is mutually exclusive with the singular `status_item` / `status_item_fn` pair.
 
 ## The menu-bar app lifecycle
 

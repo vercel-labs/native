@@ -323,7 +323,7 @@ Two carriers run the same operations behind the same routes, keys, deadlines, ca
     <tr>
       <td><code>in_process</code></td>
       <td>Compiled into the app binary; a small thread pool, one isolated module instance per thread</td>
-      <td>Explicit opt-in on host-native macOS and Linux builds</td>
+      <td>Explicit opt-in: native Linux, cross-Linux x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU, or macOS built on macOS</td>
     </tr>
   </tbody>
 </table>
@@ -336,7 +336,7 @@ Shared guarantees:
 - **Verified pairing.** The child's startup handshake checks the protocol version and a fingerprint of the generated operation/type/package registry; the in-process carrier checks the same fingerprint against the linked archive. A mismatch rejects before any operation dispatches.
 - **Supervision.** Same-key requests run strictly FIFO. The in-process pool runs different keys in parallel across its instances; the child runs everything on one worker. A cancellation or deadline publishes the cooperative token and grants a short grace: an operation that returns inside it keeps its instance (or process) warm. Past the grace, the child is killed and respawns on the next request; the in-process carrier abandons the instance's thread, routes the failure, and adds a fresh instance to the pool. An abandoned dispatch keeps its key reserved until it physically stops, so a same-key replacement cannot overlap its side effects (and can itself expire while waiting). A detected trap poisons only the instance it fired in (`kind: "service_trap"`); other instances keep answering. Every failure produces a routed result: a dead transport `kind: "service_host"`, an expired deadline `kind: "timeout"`.
 - **Replay.** Terminal results and stream events are journaled like every other effect. Replaying a recorded session parks each request and feeds the recorded result; neither carrier starts anything.
-- **Scope.** Services are desktop-only today and build for the build host: a cross-target build of a service-bearing app fails with a teaching. Operations are synchronous.
+- **Scope.** Services are desktop-only today. Child executables follow the pinned compiler's broad matrix: same-platform builds, Linux and Windows GNU targets cross-compiled from a macOS/Linux/Windows host, and macOS targets built on macOS. A Windows MSVC target builds natively on a matching Windows host; cross-Windows uses GNU because Zig supplies that target's CRT and system libraries. In-process archives use the compiler's narrower object-localization matrix: native Linux, cross-Linux x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU, or macOS built on macOS. A pairing outside the relevant matrix fails with a teaching, as does any explicitly spelled Linux `-gnu` target without a glibc version — even when it matches the build host, Zig's target uses its default floor. The service runtime needs glibc 2.36+ or musl, so explicit Linux targets are spelled `x86_64-linux-gnu.2.36` (or later) or `x86_64-linux-musl`. Operations are synchronous.
 
 In-process specifics:
 

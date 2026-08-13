@@ -473,6 +473,8 @@ export interface NativeSdkCommandEvent {
   source: NativeSdkCommandSource;
   windowId: number;
   viewLabel: string;
+  /** Native status-item id for tray-sourced commands, otherwise 0. */
+  statusItemId: number;
   /** Native tray item id for tray-sourced commands, otherwise 0. */
   trayItemId: number;
 }

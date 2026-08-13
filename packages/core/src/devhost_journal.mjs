@@ -3,8 +3,8 @@ import fs from "node:fs";
 // Kept in lockstep with `zig build print-pins`; the Node test suite checks
 // both values so a runtime wire change cannot silently strand dev-host
 // recordings.
-export const journalFormatFingerprint = 0x0fd53566253aae9bn;
-export const automationProtocolFingerprint = 0x096c8aa4730c11ecn;
+export const journalFormatFingerprint = 0xa04fc349185092f3n;
+export const automationProtocolFingerprint = 0x59d66f39803fd602n;
 
 const requestKeyBase = 0x5453525100000000n;
 const textEncoder = new TextEncoder();

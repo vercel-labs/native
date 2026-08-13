@@ -40,15 +40,16 @@
 //!
 //! Everything else on `UiApp.Options` is the wiring's, unchanged: view
 //! or markup, scene, `on_command` maps command ids through the core's
-//! `commandMsg`, `tokens_fn`/`windows_fn`/`status_item_fn` derive from
+//! `commandMsg`, `tokens_fn`/`windows_fn`/status-item callbacks derive from
 //! the committed model. One model-helper convention joins that wiring:
 //! an exported `themePack(model): "house" | "geist"` helper selects the
 //! stock pack live through `theme_fn`, without taking ownership of the
 //! system appearance axes. An exported
-//! `statusItem(model): StatusItemState` helper similarly owns the complete
-//! menu-bar item through `status_item_fn`: install-time icon/tooltip/click
-//! hooks plus the live presentation and menu. In hand wiring, empty
-//! install-time fields inherit the static `status_item` options. The two
+//! `statusItem(model): StatusItemState` helper similarly owns one complete
+//! menu-bar item through `status_item_fn`; `statusItems(model)` owns a keyed
+//! collection through `status_items_fn`. Both keep shell, presentation, and
+//! menu live. In hand wiring, empty singular shell fields inherit the static
+//! `status_item` options. The two
 //! seams the core owns — `update_fx` and
 //! `init_fx` — are stamped by this adapter and must be left null.
 //!
@@ -365,15 +366,25 @@ pub fn TsUiApp(comptime core: type) type {
             }
             // A statusItem helper is the TS app's model-derived shell
             // declaration. UiApp installs it on the first frame and
-            // independently patches presentation/menu after each
-            // committed rebuild; empty install fields inherit custom
-            // static status_item options in hand wiring.
+            // independently patches shell/presentation/menu after each
+            // committed rebuild; empty fields inherit custom static
+            // status_item options in hand wiring.
             if (comptime @hasDecl(Model, "statusItem")) {
                 if (options.status_item_fn != null) {
                     @panic("TsUiApp wires status_item_fn from the core's statusItem helper - remove the wiring's status_item_fn");
                 }
                 comptime validateStatusItemHelper();
                 stamped.status_item_fn = statusItemAdapter;
+            }
+            if (comptime @hasDecl(Model, "statusItems")) {
+                if (comptime @hasDecl(Model, "statusItem")) {
+                    @compileError("TsUiApp: export either statusItem or statusItems, not both");
+                }
+                if (options.status_items_fn != null or options.status_item != null or options.status_item_fn != null) {
+                    @panic("TsUiApp wires status_items_fn from the core's statusItems helper - remove singular/custom status-item wiring");
+                }
+                comptime validateStatusItemsHelper();
+                stamped.status_items_fn = statusItemsAdapter;
             }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
@@ -504,6 +515,62 @@ pub fn TsUiApp(comptime core: type) type {
             return statusItemState(state, scratch.items[0..state.items.len]);
         }
 
+        fn statusItemsAdapter(model: *const Model, scratch: *App.StatusItemsScratch) []const App.StatusItemDescriptor {
+            const params = @typeInfo(@TypeOf(Model.statusItems)).@"fn".params;
+            const raw_states = if (comptime params.len == 1)
+                model.statusItems()
+            else
+                model.statusItems(core.rt.frameAllocator());
+            if (raw_states.len > scratch.status_items.len) {
+                scratch.status_items[0] = .{ .id = 0 };
+                return scratch.status_items[0..1];
+            }
+            for (raw_states, 0..) |raw_state, status_index| {
+                const state = if (comptime @typeInfo(@TypeOf(raw_state)) == .pointer) raw_state.* else raw_state;
+                const row_start = status_index * platform.max_tray_items;
+                const row_storage = scratch.items[row_start .. row_start + platform.max_tray_items];
+                if (state.items.len > row_storage.len) {
+                    row_storage[0] = .{ .id = 0, .label = "status item has more than 32 rows", .command = "status-item-overflow" };
+                    scratch.status_items[status_index] = .{
+                        .id = statusItemId(state.id),
+                        .visible = state.visible,
+                        .state = statusItemState(state, row_storage[0..1]),
+                    };
+                    continue;
+                }
+                for (state.items, 0..) |raw_item, item_index| {
+                    const item = if (comptime @typeInfo(@TypeOf(raw_item)) == .pointer) raw_item.* else raw_item;
+                    row_storage[item_index] = statusItemMenuItem(item);
+                }
+                scratch.status_items[status_index] = .{
+                    .id = statusItemId(state.id),
+                    .visible = state.visible,
+                    .state = statusItemState(state, row_storage[0..state.items.len]),
+                };
+            }
+            return scratch.status_items[0..raw_states.len];
+        }
+
+        fn statusItemMenuItem(item: anytype) platform.TrayMenuItem {
+            return .{
+                .id = statusItemId(item.id),
+                .label = item.label,
+                .command = item.command,
+                .separator = item.separator,
+                .enabled = item.enabled,
+                .detail = item.detail,
+                .role = statusItemRole(item.role),
+                .key = item.key,
+                .modifiers = .{
+                    .primary = item.modifiers.primary,
+                    .command = item.modifiers.command,
+                    .control = item.modifiers.control,
+                    .option = item.modifiers.option,
+                    .shift = item.modifiers.shift,
+                },
+            };
+        }
+
         fn statusItemState(state: anytype, items: []const platform.TrayMenuItem) App.StatusItemState {
             const presentation = if (comptime @typeInfo(@TypeOf(state.presentation)) == .pointer) state.presentation.* else state.presentation;
             return .{
@@ -632,6 +699,75 @@ pub fn TsUiApp(comptime core: type) type {
                 !@hasField(Modifiers, "control") or !@hasField(Modifiers, "option") or !@hasField(Modifiers, "shift") or
                 @FieldType(Modifiers, "primary") != bool or @FieldType(Modifiers, "command") != bool or
                 @FieldType(Modifiers, "control") != bool or @FieldType(Modifiers, "option") != bool or @FieldType(Modifiers, "shift") != bool)
+            {
+                @compileError(teaching);
+            }
+        }
+
+        fn validateStatusItemsHelper() void {
+            const teaching = "TsUiApp: statusItems must be exported from core.ts as statusItems(model: Model): readonly StatusItemDescriptor[]; import StatusItemDescriptor from @native-sdk/core/events";
+            const helper_info = @typeInfo(@TypeOf(Model.statusItems));
+            if (helper_info != .@"fn") @compileError(teaching);
+            const function = helper_info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type == null or function.params[0].type.? != *const Model) {
+                @compileError(teaching);
+            }
+            if (function.params.len == 2) {
+                if (function.params[1].type == null or function.params[1].type.? != std.mem.Allocator or
+                    !@hasDecl(core, "rt") or !@hasDecl(core.rt, "frameAllocator"))
+                {
+                    @compileError(teaching);
+                }
+            }
+            const Return = function.return_type orelse @compileError(teaching);
+            const return_info = @typeInfo(Return);
+            if (return_info != .pointer or return_info.pointer.size != .slice or !return_info.pointer.is_const) @compileError(teaching);
+            const State = statusItemRecordType(return_info.pointer.child, teaching);
+            const info = @typeInfo(State).@"struct";
+            if (info.fields.len != 9 or !@hasField(State, "id") or !@hasField(State, "visible") or
+                !@hasField(State, "iconPath") or !@hasField(State, "tooltip") or !@hasField(State, "activationCommand") or
+                !@hasField(State, "alternateActivationCommand") or !@hasField(State, "openCommand") or
+                !@hasField(State, "presentation") or !@hasField(State, "items") or
+                !statusItemNumericType(@FieldType(State, "id")) or @FieldType(State, "visible") != bool or
+                @FieldType(State, "iconPath") != []const u8 or @FieldType(State, "tooltip") != []const u8 or
+                @FieldType(State, "activationCommand") != []const u8 or @FieldType(State, "alternateActivationCommand") != []const u8 or
+                @FieldType(State, "openCommand") != []const u8)
+            {
+                @compileError(teaching);
+            }
+            const Presentation = statusItemRecordType(@FieldType(State, "presentation"), teaching);
+            const presentation_info = @typeInfo(Presentation).@"struct";
+            if (presentation_info.fields.len != 5 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
+                !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced") or
+                @FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
+                !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
+                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool)
+            {
+                @compileError(teaching);
+            }
+            const items_info = @typeInfo(@FieldType(State, "items"));
+            if (items_info != .pointer or items_info.pointer.size != .slice or !items_info.pointer.is_const) @compileError(teaching);
+            const Item = statusItemRecordType(items_info.pointer.child, teaching);
+            const item_info = @typeInfo(Item).@"struct";
+            if (item_info.fields.len != 9 or !@hasField(Item, "id") or !@hasField(Item, "label") or
+                !@hasField(Item, "command") or !@hasField(Item, "separator") or !@hasField(Item, "enabled") or
+                !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or
+                !@hasField(Item, "modifiers") or !statusItemNumericType(@FieldType(Item, "id")) or
+                @FieldType(Item, "label") != []const u8 or @FieldType(Item, "command") != []const u8 or
+                @FieldType(Item, "separator") != bool or @FieldType(Item, "enabled") != bool or
+                @FieldType(Item, "detail") != []const u8 or
+                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context" }) or
+                @FieldType(Item, "key") != []const u8)
+            {
+                @compileError(teaching);
+            }
+            const Modifiers = statusItemRecordType(@FieldType(Item, "modifiers"), teaching);
+            const modifiers_info = @typeInfo(Modifiers).@"struct";
+            if (modifiers_info.fields.len != 5 or !@hasField(Modifiers, "primary") or !@hasField(Modifiers, "command") or
+                !@hasField(Modifiers, "control") or !@hasField(Modifiers, "option") or !@hasField(Modifiers, "shift") or
+                @FieldType(Modifiers, "primary") != bool or @FieldType(Modifiers, "command") != bool or
+                @FieldType(Modifiers, "control") != bool or @FieldType(Modifiers, "option") != bool or
+                @FieldType(Modifiers, "shift") != bool)
             {
                 @compileError(teaching);
             }
@@ -1129,4 +1265,91 @@ pub fn TsUiApp(comptime core: type) type {
             }
         }
     };
+}
+
+const StatusItemsAdapterTestCore = struct {
+    const Tone = enum { normal, warning, critical };
+    const Role = enum { command, info, header, hero, agent, context };
+    const Modifiers = struct {
+        primary: bool,
+        command: bool,
+        control: bool,
+        option: bool,
+        shift: bool,
+    };
+    const Presentation = struct {
+        title: []const u8,
+        width: f64,
+        tone: Tone,
+        iconOpacity: f64,
+        monospaced: bool,
+    };
+    const Item = struct {
+        id: f64,
+        label: []const u8,
+        command: []const u8,
+        separator: bool,
+        enabled: bool,
+        detail: []const u8,
+        role: Role,
+        key: []const u8,
+        modifiers: Modifiers,
+    };
+    const Descriptor = struct {
+        id: f64,
+        visible: bool,
+        iconPath: []const u8,
+        tooltip: []const u8,
+        activationCommand: []const u8,
+        alternateActivationCommand: []const u8,
+        openCommand: []const u8,
+        presentation: Presentation,
+        items: []const Item,
+    };
+
+    const rows = [_]Item{.{
+        .id = 3,
+        .label = "Refresh",
+        .command = "spend.refresh",
+        .separator = false,
+        .enabled = true,
+        .detail = "$7",
+        .role = .command,
+        .key = "r",
+        .modifiers = .{ .primary = true, .command = false, .control = false, .option = false, .shift = false },
+    }};
+    const descriptors = [_]Descriptor{.{
+        .id = 7,
+        .visible = false,
+        .iconPath = "spend.png",
+        .tooltip = "Vercel spend",
+        .activationCommand = "spend.open",
+        .alternateActivationCommand = "",
+        .openCommand = "spend.refresh",
+        .presentation = .{ .title = "$7", .width = 52, .tone = .warning, .iconOpacity = 0.75, .monospaced = true },
+        .items = &rows,
+    }};
+
+    pub const Msg = union(enum) { noop };
+    pub const Model = struct {
+        pub fn statusItems(_: *const Model) []const Descriptor {
+            return &descriptors;
+        }
+    };
+};
+
+test "TypeScript statusItems adapter validates and projects canonical descriptors" {
+    const Adapter = TsUiApp(StatusItemsAdapterTestCore);
+    comptime Adapter.validateStatusItemsHelper();
+    var model = StatusItemsAdapterTestCore.Model{};
+    var scratch = Adapter.App.StatusItemsScratch{};
+    const descriptors = Adapter.statusItemsAdapter(&model, &scratch);
+    try std.testing.expectEqual(@as(usize, 1), descriptors.len);
+    try std.testing.expectEqual(@as(platform.StatusItemId, 7), descriptors[0].id);
+    try std.testing.expect(!descriptors[0].visible);
+    try std.testing.expectEqualStrings("$7", descriptors[0].state.presentation.title);
+    try std.testing.expectEqualStrings("spend.png", descriptors[0].state.icon_path);
+    try std.testing.expectEqual(@as(usize, 1), descriptors[0].state.items.len);
+    try std.testing.expectEqual(@as(platform.TrayItemId, 3), descriptors[0].state.items[0].id);
+    try std.testing.expect(descriptors[0].state.items[0].modifiers.primary);
 }

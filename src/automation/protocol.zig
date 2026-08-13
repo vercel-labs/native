@@ -51,7 +51,11 @@ pub const fingerprint: u64 = layout_fingerprint.hash(layoutDescription(semantic_
 /// enum). Declared-shape changes — new verbs, renamed actions, budget
 /// or naming changes — need NO action here: the fingerprint moves on
 /// its own.
-pub const semantic_epoch: u32 = 1;
+/// Epoch 2: status-item snapshots gained stable item identifiers and
+/// visibility, and `tray-action` gained the explicit
+/// `<status-item-id> <menu-item-id>` form (the old one-id primary-item
+/// shorthand remains valid).
+pub const semantic_epoch: u32 = 2;
 
 /// The canonical description the protocol fingerprint hashes: the
 /// command vocabulary (the `Action` enum, reflected — names and values,

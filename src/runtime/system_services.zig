@@ -26,6 +26,7 @@ const validateRevealPath = validation.validateRevealPath;
 const validateSaveDialogOptions = validation.validateSaveDialogOptions;
 const validateTrayMenuItems = validation.validateTrayMenuItems;
 const validateTrayOptions = validation.validateTrayOptions;
+const validateTrayShell = validation.validateTrayShell;
 const validateTrayTitle = validation.validateTrayTitle;
 
 pub fn RuntimeSystemServices(comptime Runtime: type) type {
@@ -136,56 +137,111 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return self.options.platform.services.formatLocalTime(timestamp_ms, style, buffer);
         }
 
-        pub fn createTray(self: *Runtime, options: platform.TrayOptions) anyerror!void {
+        pub fn createStatusItem(self: *Runtime, status_item_id: platform.StatusItemId, options: platform.TrayOptions) anyerror!void {
+            try validation.validateStatusItemId(status_item_id);
             try validateTrayOptions(options);
-            try self.options.platform.services.createTray(options);
-            try storeTrayItems(self, options.items);
+            const status_item = try statusItemSlot(self, status_item_id);
+            const was_active = status_item.active;
+            try self.options.platform.services.createStatusItem(status_item_id, options);
+            try storeTrayItems(status_item, options.items);
             const title = if (options.presentation.title.len > 0) options.presentation.title else options.title;
-            self.tray_title = try copyInto(&self.tray_title_storage, title);
-            self.tray_created = true;
+            status_item.title = try copyInto(&status_item.title_storage, title);
+            status_item.id = status_item_id;
+            status_item.active = true;
+            status_item.visible = options.visible;
+            if (!was_active) self.status_item_count += 1;
+        }
+
+        pub fn createTray(self: *Runtime, options: platform.TrayOptions) anyerror!void {
+            return self.createStatusItem(platform.primary_status_item_id, options);
+        }
+
+        pub fn updateStatusItemShell(self: *Runtime, status_item_id: platform.StatusItemId, shell: platform.TrayShell) anyerror!void {
+            try validation.validateStatusItemId(status_item_id);
+            try validateTrayShell(shell);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemShell(status_item_id, shell);
+            status_item.visible = shell.visible;
+        }
+
+        pub fn updateStatusItemMenu(self: *Runtime, status_item_id: platform.StatusItemId, items: []const platform.TrayMenuItem) anyerror!void {
+            try validation.validateStatusItemId(status_item_id);
+            try validateTrayMenuItems(items);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemMenu(status_item_id, items);
+            try storeTrayItems(status_item, items);
         }
 
         pub fn updateTrayMenu(self: *Runtime, items: []const platform.TrayMenuItem) anyerror!void {
-            try validateTrayMenuItems(items);
-            try self.options.platform.services.updateTrayMenu(items);
-            try storeTrayItems(self, items);
+            return self.updateStatusItemMenu(platform.primary_status_item_id, items);
         }
 
         /// Retitle the live status-bar button without re-creating the
         /// status item (a model-driven badge like "3 open" in the menu
         /// bar rides this seam). Platforms without the
         /// title seam report `UnsupportedService`; the menu keeps working.
-        pub fn updateTrayTitle(self: *Runtime, title: []const u8) anyerror!void {
+        pub fn updateStatusItemTitle(self: *Runtime, status_item_id: platform.StatusItemId, title: []const u8) anyerror!void {
+            try validation.validateStatusItemId(status_item_id);
             try validateTrayTitle(title);
-            try self.options.platform.services.updateTrayTitle(title);
-            self.tray_title = try copyInto(&self.tray_title_storage, title);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemTitle(status_item_id, title);
+            status_item.title = try copyInto(&status_item.title_storage, title);
+        }
+
+        pub fn updateTrayTitle(self: *Runtime, title: []const u8) anyerror!void {
+            return self.updateStatusItemTitle(platform.primary_status_item_id, title);
+        }
+
+        pub fn updateStatusItemPresentation(self: *Runtime, status_item_id: platform.StatusItemId, presentation: platform.TrayPresentation) anyerror!void {
+            try validation.validateStatusItemId(status_item_id);
+            try validation.validateTrayPresentation(presentation);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemPresentation(status_item_id, presentation);
+            status_item.title = try copyInto(&status_item.title_storage, presentation.title);
         }
 
         pub fn updateTrayPresentation(self: *Runtime, presentation: platform.TrayPresentation) anyerror!void {
-            try validation.validateTrayPresentation(presentation);
-            try self.options.platform.services.updateTrayPresentation(presentation);
-            self.tray_title = try copyInto(&self.tray_title_storage, presentation.title);
+            return self.updateStatusItemPresentation(platform.primary_status_item_id, presentation);
+        }
+
+        pub fn removeStatusItem(self: *Runtime, status_item_id: platform.StatusItemId) anyerror!void {
+            try validation.validateStatusItemId(status_item_id);
+            const status_item = findStatusItem(self, status_item_id) orelse return;
+            try self.options.platform.services.removeStatusItem(status_item_id);
+            status_item.* = .{};
+            self.status_item_count -= 1;
         }
 
         pub fn removeTray(self: *Runtime) anyerror!void {
-            try self.options.platform.services.removeTray();
-            self.tray_item_count = 0;
-            self.tray_created = false;
-            self.tray_title = "";
+            return self.removeStatusItem(platform.primary_status_item_id);
         }
 
-        pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {
-            for (self.tray_items[0..self.tray_item_count]) |item| {
+        pub fn statusItemExists(self: *const Runtime, status_item_id: platform.StatusItemId) bool {
+            return findStatusItemConst(self, status_item_id) != null;
+        }
+
+        pub fn statusItemMenuItemExists(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
+            const status_item = findStatusItemConst(self, status_item_id) orelse return false;
+            for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id) return true;
             }
             return false;
         }
 
-        pub fn trayCommandNameForItem(self: *const Runtime, item_id: platform.TrayItemId) []const u8 {
-            for (self.tray_items[0..self.tray_item_count]) |item| {
+        pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {
+            return self.statusItemMenuItemExists(platform.primary_status_item_id, item_id);
+        }
+
+        pub fn statusItemCommandNameForItem(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) []const u8 {
+            const status_item = findStatusItemConst(self, status_item_id) orelse return "tray.action";
+            for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id and item.command.len > 0) return item.command;
             }
             return "tray.action";
+        }
+
+        pub fn trayCommandNameForItem(self: *const Runtime, item_id: platform.TrayItemId) []const u8 {
+            return self.statusItemCommandNameForItem(platform.primary_status_item_id, item_id);
         }
 
         pub fn supportsFeatureFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
@@ -398,20 +454,43 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
     };
 }
 
-fn storeTrayItems(self: anytype, items: []const platform.TrayMenuItem) !void {
-    self.tray_item_count = 0;
+fn storeTrayItems(status_item: anytype, items: []const platform.TrayMenuItem) !void {
+    status_item.item_count = 0;
     for (items, 0..) |item, index| {
-        self.tray_items[index].id = item.id;
-        self.tray_items[index].command = try copyInto(&self.tray_items[index].command_storage, item.command);
-        self.tray_items[index].label = try copyInto(&self.tray_items[index].label_storage, item.label);
-        self.tray_items[index].detail = try copyInto(&self.tray_items[index].detail_storage, item.detail);
-        self.tray_items[index].separator = item.separator;
-        self.tray_items[index].enabled = item.enabled;
-        self.tray_items[index].role = item.role;
-        self.tray_items[index].key = try copyInto(&self.tray_items[index].key_storage, item.key);
-        self.tray_items[index].modifiers = item.modifiers;
+        status_item.items[index].id = item.id;
+        status_item.items[index].command = try copyInto(&status_item.items[index].command_storage, item.command);
+        status_item.items[index].label = try copyInto(&status_item.items[index].label_storage, item.label);
+        status_item.items[index].detail = try copyInto(&status_item.items[index].detail_storage, item.detail);
+        status_item.items[index].separator = item.separator;
+        status_item.items[index].enabled = item.enabled;
+        status_item.items[index].role = item.role;
+        status_item.items[index].key = try copyInto(&status_item.items[index].key_storage, item.key);
+        status_item.items[index].modifiers = item.modifiers;
     }
-    self.tray_item_count = items.len;
+    status_item.item_count = items.len;
+}
+
+fn findStatusItem(self: anytype, status_item_id: platform.StatusItemId) ?@TypeOf(&self.status_items[0]) {
+    for (&self.status_items) |*status_item| {
+        if (status_item.active and status_item.id == status_item_id) return status_item;
+    }
+    return null;
+}
+
+fn findStatusItemConst(self: anytype, status_item_id: platform.StatusItemId) ?@TypeOf(&self.status_items[0]) {
+    for (&self.status_items) |*status_item| {
+        if (status_item.active and status_item.id == status_item_id) return status_item;
+    }
+    return null;
+}
+
+fn statusItemSlot(self: anytype, status_item_id: platform.StatusItemId) !@TypeOf(&self.status_items[0]) {
+    if (findStatusItem(self, status_item_id)) |status_item| return status_item;
+    if (self.status_item_count >= self.status_items.len) return error.InvalidTrayOptions;
+    for (&self.status_items) |*status_item| {
+        if (!status_item.active) return status_item;
+    }
+    return error.InvalidTrayOptions;
 }
 
 fn validateExternalUrl(self: anytype, url: []const u8) !void {

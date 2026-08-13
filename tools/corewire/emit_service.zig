@@ -860,7 +860,7 @@ test "service projection derives host dispatch and registry from one contract" {
     const contract: service.Contract = .{
         .format = 3,
         .protocol_version = 3,
-        .compiler_version = "0.0.27",
+        .compiler_version = "0.0.28",
         .deterministic = false,
         .packages = &.{},
         .types = .{ .records = &.{}, .enums = &.{}, .unions = &.{} },
@@ -901,7 +901,7 @@ test "service projection derives host dispatch and registry from one contract" {
     try std.testing.expect(std.mem.indexOf(u8, registry, ".name = \"feeds.parse\", .index = 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, "0 => true") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, "copyServiceBytes(bytes)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, registry, "pub const compiler_version = \"0.0.27\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, registry, "pub const compiler_version = \"0.0.28\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, registry, "pub const contract_fingerprint = [_]u8{") != null);
 
     const client = try emitClient(std.testing.allocator, contract);

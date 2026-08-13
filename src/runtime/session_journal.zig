@@ -585,9 +585,10 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u64, message.window_id);
             try cursor.writeStr(message.webview_label);
         },
-        .tray_action => |item_id| {
+        .tray_action => |action| {
             try cursor.writeEnum(EventTag.tray_action);
-            try cursor.writeInt(u32, item_id);
+            try cursor.writeInt(u32, action.status_item_id);
+            try cursor.writeInt(u32, action.item_id);
         },
         .shortcut => |shortcut| {
             try cursor.writeEnum(EventTag.shortcut);
@@ -611,6 +612,7 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeEnum(EventTag.tray_command);
             try cursor.writeStr(command.name);
             try cursor.writeInt(u64, command.window_id);
+            try cursor.writeInt(u32, command.status_item_id);
         },
         .timer => |timer| {
             try cursor.writeEnum(EventTag.timer);
@@ -809,7 +811,10 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
                 .webview_label = webview_label,
             } };
         },
-        .tray_action => .{ .tray_action = try cursor.readInt(u32) },
+        .tray_action => .{ .tray_action = .{
+            .status_item_id = try cursor.readInt(u32),
+            .item_id = try cursor.readInt(u32),
+        } },
         .shortcut => blk: {
             const id = try cursor.readStr();
             const key = try cursor.readStr();
@@ -842,6 +847,7 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             break :blk .{ .tray_command = .{
                 .name = name,
                 .window_id = try cursor.readInt(u64),
+                .status_item_id = try cursor.readInt(u32),
             } };
         },
         .timer => blk: {
@@ -1650,8 +1656,9 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqual(@as(platform.WindowId, 3), decoded.tray_command.window_id);
     }
     {
-        const decoded = try roundTripEvent(.{ .tray_action = 9 });
-        try testing.expectEqual(@as(platform.TrayItemId, 9), decoded.tray_action);
+        const decoded = try roundTripEvent(.{ .tray_action = .{ .status_item_id = 3, .item_id = 9 } });
+        try testing.expectEqual(@as(platform.StatusItemId, 3), decoded.tray_action.status_item_id);
+        try testing.expectEqual(@as(platform.TrayItemId, 9), decoded.tray_action.item_id);
     }
     {
         const decoded = try roundTripEvent(.{ .window_focused = 4 });

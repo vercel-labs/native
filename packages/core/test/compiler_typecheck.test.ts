@@ -53,7 +53,7 @@ test("an npm package outside the static tier fails check with the compiler note 
       name: "dynamic-only", version: "1.0.0", type: "module", types: "index.d.ts", exports: "./index.js",
     }));
     fs.writeFileSync(path.join(vendor, "index.d.ts"), "export default function probe(value: string): string;\n");
-    // randomFillSync is typed but has no static lowering in scriptc 0.0.27.
+    // randomFillSync is typed but has no static lowering in scriptc 0.0.28.
     // The package itself remains marked "static" in coverage, so this pins
     // Native SDK's stricter requirement that the total be 100%.
     fs.writeFileSync(path.join(vendor, "index.js"), [
