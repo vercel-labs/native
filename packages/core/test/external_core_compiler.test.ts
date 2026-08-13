@@ -93,6 +93,72 @@ test("the external core compile lane refuses cross-target Windows MSVC before co
   }
 });
 
+test("the external core compile lane refuses a macOS target from a non-macOS host", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-macos-cross-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    const manifest = path.join(root, "package.json");
+    fs.writeFileSync(manifest, JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    const frontendSidecar = path.join(root, "frontend.contract.json");
+    fs.writeFileSync(frontendSidecar, JSON.stringify({
+      model_fingerprint: "0123456789abcdef",
+      has_migrate: false,
+    }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--name", "fixture_core",
+      "--manifest", manifest,
+      "--frontend-sidecar", frontendSidecar,
+      "--out-archive", path.join(root, "libfixture_core.a"),
+      "--out-sidecar", path.join(root, "compiled.contract.json"),
+      "--host-platform", "x86_64-linux-gnu",
+      "--target-platform", "aarch64-macos-none",
+      "--compiler", process.execPath,
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /macOS build host only/);
+    assert.doesNotMatch(result.stderr, /external core compiler did not report a version/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the external core compile lane refuses pairings outside the compiler's matrix", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-matrix-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    const manifest = path.join(root, "package.json");
+    fs.writeFileSync(manifest, JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    const frontendSidecar = path.join(root, "frontend.contract.json");
+    fs.writeFileSync(frontendSidecar, JSON.stringify({
+      model_fingerprint: "0123456789abcdef",
+      has_migrate: false,
+    }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--name", "fixture_core",
+      "--manifest", manifest,
+      "--frontend-sidecar", frontendSidecar,
+      "--out-archive", path.join(root, "libfixture_core.a"),
+      "--out-sidecar", path.join(root, "compiled.contract.json"),
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "aarch64-ios-none",
+      "--compiler", process.execPath,
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /desktop targets the pinned compiler covers/);
+    assert.doesNotMatch(result.stderr, /external core compiler did not report a version/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the external core compile lane preserves native Windows MSVC", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-msvc-native-"));
   try {

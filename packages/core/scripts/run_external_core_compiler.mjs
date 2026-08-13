@@ -66,6 +66,10 @@ const argv0 = args.compiler
 // zig-cc lane as the service archive that links beside it; otherwise a cross
 // build mixes a host-format core archive with target-format Zig and service
 // objects. Standalone host-only callers may omit both platform arguments.
+// The pairing matrix is the pinned compiler's build matrix, shared with
+// run_external_service_compiler.mjs: same-triple compiles run the native
+// lane; Linux and Windows GNU targets cross-compile from any desktop host;
+// macOS targets need a macOS build host.
 const hostParts = args["host-platform"]?.split("-") ?? [];
 const targetParts = args["target-platform"]?.split("-") ?? [];
 const hostArch = hostParts[0] ?? "";
@@ -81,9 +85,18 @@ const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch
 const cross = args["host-platform"] !== undefined &&
   args["target-platform"] !== args["host-platform"] && !nativeWindows;
 if (cross) {
-  if (targetOs === "windows" && targetAbi !== "gnu") {
+  const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
+  const admitted = desktopHost &&
+    (targetOs === "linux" ||
+      (targetOs === "windows" && targetAbi === "gnu") ||
+      (targetOs === "macos" && hostOs === "macos"));
+  if (!admitted) {
     console.error(
-      `TypeScript cores for a cross-target Windows build (${args["target-platform"]}) require the GNU ABI: Zig supplies that target's CRT and system libraries, while an MSVC target needs a native Windows toolchain. Build ${targetArch}-windows-msvc on a matching Windows host, or cross-compile as "${targetArch}-windows-gnu".`,
+      targetOs === "windows" && targetAbi !== "gnu"
+        ? `TypeScript cores for a cross-target Windows build (${args["target-platform"]}) require the GNU ABI: Zig supplies that target's CRT and system libraries, while an MSVC target needs a native Windows toolchain. Build ${targetArch}-windows-msvc on a matching Windows host, or cross-compile as "${targetArch}-windows-gnu".`
+        : targetOs === "macos"
+        ? `TypeScript cores for a macOS target (${args["target-platform"]}) compile on a macOS build host only — Apple linking needs the host toolchain's SDK — but this build host is ${args["host-platform"]}. Build macOS apps on a Mac.`
+        : `TypeScript cores compile for desktop targets the pinned compiler covers — Linux and Windows GNU from a macOS/Linux/Windows build host, macOS from a macOS host — but this build pairs host ${args["host-platform"]} with target ${args["target-platform"]}.`,
     );
     process.exit(2);
   }

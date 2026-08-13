@@ -625,6 +625,19 @@ pub fn build(b: *std.Build) void {
         const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suite over the markup fixture's archive (requires node and `npm ci` in packages/core)");
         abi_laws_step.dependOn(&abi_laws_run.step);
         test_step.dependOn(&abi_laws_run.step);
+        // The cross-execution battery staging: the host-fixture and
+        // markup batteries (update/snapshot/effects and the markup view
+        // over genuinely compiled cores) plus, where the target admits
+        // the in-process archive, the service pool battery, installed
+        // under <prefix>/e2e for execution on the target machine. Pair
+        // with -Dtarget and -p; scripts/cross-e2e.sh is the driver.
+        const cross_e2e_step = b.step("stage-cross-e2e", "Install the TS-core e2e batteries under <prefix>/e2e for execution on the build target (pair with -Dtarget and -p; see scripts/cross-e2e.sh)");
+        const e2e_dir: std.Build.Step.InstallArtifact.Options.Dir = .{ .override = .{ .custom = "e2e" } };
+        cross_e2e_step.dependOn(&b.addInstallArtifact(ts_core_artifacts.host, .{ .dest_dir = e2e_dir }).step);
+        cross_e2e_step.dependOn(&b.addInstallArtifact(ts_core_artifacts.markup, .{ .dest_dir = e2e_dir }).step);
+        if (ts_core_artifacts.services_pool) |pool_tests| {
+            cross_e2e_step.dependOn(&b.addInstallArtifact(pool_tests, .{ .dest_dir = e2e_dir }).step);
+        }
         // The corpus contract artifacts an external core toolchain
         // consumes: per fixture, the frontend-emitted contract sidecar
         // (after projection), the generated entry module, and the
@@ -3043,16 +3056,17 @@ fn tsCoreE2eArtifact(
 
     // corewire (the contract-sidecar mirror/facade/profile generator),
     // compiled for the build host: the fixture compiles and the
-    // conformance shims all run it.
+    // conformance shims all run it, including under a cross -Dtarget
+    // (the batteries compile for the target; this tool never does).
     const corewire_mod = b.createModule(.{
         .root_source_file = b.path("tools/corewire/main.zig"),
-        .target = target,
+        .target = b.graph.host,
         .optimize = optimize,
     });
     const corewire_exe = b.addExecutable(.{
         .name = "corewire",
         .root_module = corewire_mod,
-        .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+        .use_llvm = @import("build/app.zig").useLlvmWorkaround(b.graph.host),
     });
 
     // Each fixture core compiles through the external core compiler at

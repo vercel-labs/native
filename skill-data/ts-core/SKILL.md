@@ -540,6 +540,10 @@ var app = Adapter.init(allocator, .{ .audio_cache_dir = resolved_cache_dir }, .{
 - One live app per core module per process: two apps over the SAME core would share one committed root — and a process carries ONE compiled core (the archive owns a fixed-prefix C ABI symbol set).
 - Record/replay, the automation verbs, and screenshot fingerprints work unchanged — the adapter rides the standard UiApp dispatch path.
 
+## Build targets
+
+Builds compile the whole app — the core archive, service executables or in-process archives, and the runner — for one stated target; the default is the build host, and `-Dtarget` selects a cross desktop target on the pinned compiler's matrix: Linux and Windows GNU targets from any macOS/Linux/Windows host, macOS targets from a macOS host. Windows MSVC builds natively on a matching Windows host (cross-Windows is GNU: Zig supplies that target's CRT and system libraries), and an explicitly spelled Linux `-gnu` target must state its glibc (`x86_64-linux-gnu.2.36` or later, or `-musl`) because the compiled runtime needs glibc 2.36+. Executable naming and packaging follow the target OS. TypeScript cores stay desktop-only: mobile targets keep Zig and markup cores and teach at configure time.
+
 ## Checking your work
 
 Scaffolded apps carry an editor surface (`package.json`, `tsconfig.json`, and a CLI-managed `node_modules/@native-sdk/core` copy, npm-managed after the package is published): it exists so stock tsc/editors resolve `@native-sdk/core`, it is NEVER build truth (every `native` verb works with node_modules deleted; check/dev/build re-materialize it), and it is not a language marker — tree detection still keys on `src/core.ts` alone. Do not hand-edit or vendor files under `node_modules/`.
