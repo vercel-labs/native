@@ -12,12 +12,14 @@
 //! view. Shell command events can map into messages through `on_command`.
 //!
 //! Secondary windows are model-declared: `Options.windows_fn` returns the
-//! window descriptors that should exist right now (presence IS
-//! visibility), `Options.window_view` builds each declared window's
+//! window descriptors that should exist right now (presence IS liveness;
+//! a `.hide` close policy may temporarily hide one),
+//! `Options.window_view` builds each declared window's
 //! canvas tree, the runtime reconciles declared against live windows
 //! after every rebuild, input from any window dispatches Msgs with its
-//! window identity, and a user close dispatches the descriptor's
-//! `on_close` Msg — the dismissal precedent, applied to windows.
+//! window identity, and a `.quit` user close dispatches the descriptor's
+//! `on_close` Msg while `.hide` retains it — the platform close-policy
+//! contract applied to model-declared windows.
 //!
 //! Markup apps choose an engine per build: `Options.markup` runs the
 //! runtime parser/interpreter (dev, hot reload), while
@@ -325,14 +327,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// A model-declared secondary window (`Options.windows_fn`):
         /// settings, about, inspectors. Identity is `label`; PRESENCE in
-        /// the returned slice is visibility — the runtime reconciles the
+        /// the returned slice is liveness — the runtime reconciles the
         /// declared set against live windows after every rebuild,
         /// creating the missing and closing the no-longer-declared.
-        /// There is deliberately no `visible` flag: the platform window
-        /// channel is create/focus/close with no hide, so a
-        /// hidden-but-open descriptor would lie about what exists. The
-        /// model bool that `windows_fn` consults IS the visibility
-        /// channel, exactly like a dismissible surface's open flag.
+        /// There is deliberately no `visible` flag: transient visibility
+        /// is host state, changed through `hideWindow`/`showWindow` or a
+        /// `.hide` close policy. Stop declaring the window to close it and
+        /// release its retained views.
         pub const WindowDescriptor = struct {
             /// Window label: the stable identity across rebuilds, and
             /// the label automation snapshots print for the window.
@@ -380,8 +381,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// False leaves the window resizable but disables the green
             /// fullscreen affordance and fullscreen command.
             allows_fullscreen: bool = true,
+            /// What the USER'S close affordance does. `.quit` (the
+            /// default) really closes the window; `.hide` retains its
+            /// native identity and views for a later `showWindow`. Fixed
+            /// at create like the titlebar. Unsupported hosts refuse
+            /// `.hide` rather than strand an unreachable hidden window.
+            close_policy: app_manifest.WindowClosePolicy = .quit,
             /// Msg dispatched when the USER closes the window (never for
-            /// a reconcile close the model itself initiated). The
+            /// a `.hide` policy hide or a reconcile close the model itself
+            /// initiated). The
             /// dismissal precedent: the window is already gone as an
             /// optimistic echo; the model clears its open flag in
             /// `update` — or keeps declaring the window and the next
@@ -772,11 +780,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// `status_item_fn` shape applied to the window set, so a
             /// settings window is `if (model.settings_open)` declaring a
             /// descriptor, opened by a Msg and closed by one. Requires
-            /// `window_view`. A user close dispatches the descriptor's
-            /// `on_close` Msg (the dismissal precedent: the engine
-            /// already closed it; the model's next declared set is
-            /// truth). Reconcile failures degrade to logged warnings —
-            /// a failed create never takes the render loop down.
+            /// `window_view`. A `.quit` user close dispatches the
+            /// descriptor's `on_close` Msg (the dismissal precedent: the
+            /// engine already closed it; the model's next declared set is
+            /// truth); `.hide` retains the declared window and dispatches
+            /// no close Msg. Reconcile failures degrade to logged warnings
+            /// — a failed create never takes the render loop down.
             windows_fn: ?*const fn (model: *const ModelT, scratch: *WindowsScratch) []const WindowDescriptor = null,
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
@@ -2793,6 +2802,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .allows_fullscreen = descriptor.allows_fullscreen,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,
+                .close_policy = descriptor.close_policy,
                 // Deterministic reopen: the descriptor is the geometry
                 // channel, not a persisted frame store.
                 .restore_state = false,

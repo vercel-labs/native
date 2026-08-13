@@ -876,7 +876,7 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 
 ## Secondary windows in Zig cores: model-declared (`windows_fn` + `window_view`)
 
-Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is visibility — no `visible` flag; the platform window channel has no hide); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model.
+Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is liveness); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring the window to really close it and release its retained views.
 
 ```zig
 fn windows(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
@@ -898,7 +898,7 @@ fn windowView(ui: *App.Ui, model: *const Model, window_label: []const u8) App.Ui
 
 Rules that matter:
 - **Every canvas label must be unique across the app** (main + declared windows); input routes back by it, and automation verbs (`widget-click <canvas-label> <id>`, `screenshot`) address any window's canvas the same way.
-- **A user close dispatches `on_close`** (the dismissal precedent): the window is already gone as the optimistic echo; clear the open flag in `update` — or keep declaring the window and the next rebuild brings it back (source wins). A close the model itself initiated never echoes a Msg.
+- **Close policy**: `WindowDescriptor.close_policy` is `.quit` by default; a user close really closes and dispatches `on_close` (the dismissal precedent), so clear the open flag in `update` — or keep declaring the window and the next rebuild brings it back (source wins). `.hide` keeps the same window, slot, and views alive, dispatches no `on_close`, and `showWindow(label)` reveals it. A close the model itself initiated never echoes a Msg. Existing platform safeguards still apply: unsupported hosts refuse `.hide` rather than strand an unreachable window.
 - **Budget**: at most `UiApp.max_ui_windows` (4) declared windows; excess warns and is ignored. Every dispatched Msg rebuilds every open window's view.
 - **Present-before-show**: canvas windows (any `gpu_surface` view — startup, scene, and declared windows alike) are created ordered-out and become visible only after their first canvas frame presents, so opening one never flashes blank. Automatic (`WindowOptions.show = .on_first_present`, derived from the views); webview windows show immediately. The null platform records `window_show`, `window_visible`, and present/shown sequence numbers for ordering assertions; `NATIVE_SDK_WINDOW_TIMING=1` logs create→show latency on macOS.
 - **Markup binds ONE window's content** — there is no `window` element in the closed grammar. A markup-authored secondary window is a `canvas.CompiledMarkupView` whose `build` `window_view` calls for that label.

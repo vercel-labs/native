@@ -669,6 +669,7 @@ test "a padded secondary drag header keeps its layout (no double reservation)" {
 
 const VerbModel = struct {
     settings_open: bool = true,
+    close_policy: app_manifest.WindowClosePolicy = .quit,
 };
 
 const VerbMsg = union(enum) {
@@ -709,6 +710,7 @@ fn verbWindows(model: *const VerbModel, scratch: *VerbApp.WindowsScratch) []cons
             .title = "Settings",
             .width = 320,
             .height = 240,
+            .close_policy = model.close_policy,
             .on_close = .settings_closed,
         };
         count += 1;
@@ -837,6 +839,7 @@ test "the .hide close then showWindow round-trip: tray Open brings the hidden wi
         .window_view = verbWindowView,
     });
     defer app_state.destroy();
+    app_state.model.close_policy = .hide;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -853,17 +856,32 @@ test "the .hide close then showWindow round-trip: tray Open brings the hidden wi
         if (std.mem.eql(u8, info.label, settings_window_label)) settings_id = info.id;
     }
     try std.testing.expect(settings_id != 0);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = settings_id,
+        .label = settings_canvas_label,
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    _ = try harness.runtime.canvasWidgetLayout(settings_id, settings_canvas_label);
 
-    // Give the live window the .hide policy at the platform (the seam a
-    // manifest declaration rides) and close it as the user: hidden, not
-    // gone.
-    for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |window, index| {
-        if (window.id == settings_id) harness.null_platform.window_close_policy[index] = .hide;
-    }
+    // The model-declared descriptor's policy reached the REAL platform
+    // create seam. Closing as the user hides the window instead of
+    // tearing down its slot, views, or model declaration.
+    try std.testing.expectEqual(support.platform.WindowClosePolicy.hide, harness.null_platform.closePolicyForWindow(settings_id).?);
     const hide_event = harness.null_platform.userCloseWindow(settings_id).?;
     try harness.runtime.dispatchPlatformEvent(app, hide_event);
+    try std.testing.expect(app_state.model.settings_open);
+    try std.testing.expectEqual(@as(usize, 1), app_state.window_slot_count);
+    // The canvas tree and view stay installed under the same identity.
+    _ = try harness.runtime.canvasWidgetLayout(settings_id, settings_canvas_label);
     for (harness.runtime.listWindows(&buffer)) |info| {
-        if (info.id == settings_id) try std.testing.expect(info.hidden);
+        if (info.id == settings_id) {
+            try std.testing.expect(info.open);
+            try std.testing.expect(info.hidden);
+        }
     }
 
     // The tray "Open" consequence: the model returns the show verb, the
@@ -880,6 +898,42 @@ test "the .hide close then showWindow round-trip: tray Open brings the hidden wi
             try std.testing.expect(window.focused);
         }
     }
+}
+
+test "a model-declared .hide window is refused on a host that cannot bring it back" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_hide_on_close = false;
+    const app_state = try VerbApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-hide-unsupported",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update_fx = verbUpdate,
+        .view = verbView,
+        .windows_fn = verbWindows,
+        .window_view = verbWindowView,
+    });
+    defer app_state.destroy();
+    app_state.model.close_policy = .hide;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // UiApp creation failures degrade to a warning, so the observable
+    // contract is that no unreachable window or retained slot exists.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        try std.testing.expect(!std.mem.eql(u8, info.label, settings_window_label));
+    }
+    try std.testing.expectEqual(@as(usize, 0), app_state.window_slot_count);
 }
 
 // ------------------------------------- close_policy (.quit | .hide)
