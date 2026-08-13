@@ -2678,7 +2678,6 @@ const FileStreamWorkerContext = struct {
     fn path(ctx: *const FileStreamWorkerContext) []const u8 {
         return ctx.path_storage[0..ctx.path_len];
     }
-
 };
 
 /// Map a fetch-side error onto the delivered failure taxonomy. The
@@ -7149,7 +7148,7 @@ pub fn Effects(comptime Msg: type) type {
                 .on_result = options.on_result,
                 .chunk_pending = true,
             };
-            @memcpy(slot.path_storage[0 .. if (access.parent != null) access.basename.len else access.path.len], if (access.parent != null) access.basename else access.path);
+            @memcpy(slot.path_storage[0..if (access.parent != null) access.basename.len else access.path.len], if (access.parent != null) access.basename else access.path);
             slot.path_len = if (access.parent != null) access.basename.len else access.path.len;
             slot.parent = access.parent;
             access.parent = null;
@@ -7159,6 +7158,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.worker_ctx = ctx;
             slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
                 slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
                 destroyFileStreamContext(ctx, io);
                 return self.failFileStreamOpen(index, .rejected);
             };
@@ -7193,6 +7193,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.worker_ctx = ctx;
             slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
                 slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
                 destroyFileStreamContext(ctx, io);
                 return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .rejected }, options.on_result, slot.generation, false);
             };
@@ -7221,6 +7222,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.worker_ctx = ctx;
             slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
                 slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
                 destroyFileStreamContext(ctx, io);
                 return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_close, .outcome = .rejected }, options.on_result, slot.generation, false);
             };
@@ -15229,7 +15231,9 @@ pub fn Effects(comptime Msg: type) type {
                     slot.chunk = null;
                 }
                 slot.state = .sink_open;
-                if (result.outcome != .ok) self.retireFileStream(slot);
+                if (result.outcome != .ok and result.outcome != .rejected and result.outcome != .out_of_order) {
+                    self.retireFileStream(slot);
+                }
             } else if (result.op == .write_stream_close) {
                 self.retireFileStream(slot);
             }
@@ -15258,6 +15262,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.worker_ctx = ctx;
             slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
                 slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
                 destroyFileStreamContext(ctx, io);
                 slot.chunk_pending = false;
                 return self.deliverLoopFileStream(.{ .key = slot.key, .op = .read_stream, .outcome = .rejected }, slot.on_result, slot.generation, false);
@@ -16475,7 +16480,14 @@ pub fn Effects(comptime Msg: type) type {
 
         fn createFileStreamContext(self: *Self, slot: *FileStreamSlot) ?*FileStreamWorkerContext {
             const ctx = process_allocator.create(FileStreamWorkerContext) catch return null;
-            ctx.* = .{ .op = slot.op, .offset = slot.offset, .total = slot.total };
+            const chunk = if (slot.chunk) |bytes|
+                process_allocator.dupe(u8, bytes) catch {
+                    process_allocator.destroy(ctx);
+                    return null;
+                }
+            else
+                null;
+            ctx.* = .{ .op = slot.op, .offset = slot.offset, .total = slot.total, .chunk = chunk };
             @memcpy(ctx.path_storage[0..slot.path_len], slot.path());
             ctx.path_len = slot.path_len;
             ctx.parent = slot.parent;
@@ -16485,28 +16497,35 @@ pub fn Effects(comptime Msg: type) type {
                 atomic.* = undefined;
                 slot.atomic = null;
                 if (slot.atomic_dest) |dest| {
-                    ctx.atomic_dest = process_allocator.dupe(u8, dest) catch {
-                        ctx.atomic.?.deinit(self.ensureIo() catch unreachable);
-                        if (ctx.parent) |parent| parent.close(self.ensureIo() catch unreachable);
-                        process_allocator.destroy(ctx);
-                        return null;
-                    };
-                    process_allocator.free(dest);
+                    ctx.atomic_dest = dest;
                     slot.atomic_dest = null;
-                    ctx.atomic.?.dest_sub_path = ctx.atomic_dest.?;
+                    ctx.atomic.?.dest_sub_path = dest;
                 }
             }
             if (slot.chunk) |bytes| {
-                ctx.chunk = process_allocator.dupe(u8, bytes) catch {
-                    if (ctx.atomic) |*atomic| atomic.deinit(self.ensureIo() catch unreachable);
-                    if (ctx.parent) |parent| parent.close(self.ensureIo() catch unreachable);
-                    process_allocator.destroy(ctx);
-                    return null;
-                };
                 self.allocator.free(bytes);
                 slot.chunk = null;
             }
             return ctx;
+        }
+
+        /// Move durable resources back into the owner without allocating. A
+        /// rejected chunk attempt stays context-owned and is discarded; its
+        /// retry supplies the bytes again while the atomic sink survives.
+        fn moveFileStreamResourcesToSlot(slot: *FileStreamSlot, ctx: *FileStreamWorkerContext) void {
+            std.debug.assert(slot.parent == null and slot.atomic == null and slot.atomic_dest == null);
+            slot.parent = ctx.parent;
+            ctx.parent = null;
+            if (ctx.atomic) |*atomic| {
+                slot.atomic = atomic.*;
+                atomic.* = undefined;
+                ctx.atomic = null;
+                if (ctx.atomic_dest) |dest| {
+                    slot.atomic_dest = dest;
+                    ctx.atomic_dest = null;
+                    slot.atomic.?.dest_sub_path = dest;
+                }
+            }
         }
 
         fn destroyFileStreamContext(ctx: *FileStreamWorkerContext, io: std.Io) void {
@@ -16535,22 +16554,7 @@ pub fn Effects(comptime Msg: type) type {
             ctx.mutex.unlock();
             const slot = &self.file_stream_slots[index];
             if (slot.generation != generation or slot.cancelled.load(.acquire)) return;
-            slot.parent = ctx.parent;
-            ctx.parent = null;
-            if (ctx.atomic) |*atomic| {
-                slot.atomic = atomic.*;
-                atomic.* = undefined;
-                ctx.atomic = null;
-                if (ctx.atomic_dest) |dest| {
-                    // The completed worker no longer needs this stable copy.
-                    // Transfer it directly: allocating another copy here made
-                    // OOM leave `slot.atomic.dest_sub_path` pointing at freed
-                    // memory while the open still reported success.
-                    slot.atomic_dest = dest;
-                    ctx.atomic_dest = null;
-                    slot.atomic.?.dest_sub_path = dest;
-                }
-            }
+            moveFileStreamResourcesToSlot(slot, ctx);
             slot.offset = ctx.offset;
             slot.total = ctx.total;
             const buffer = if (ctx.read_buffer) |worker_buffer| copy: {
@@ -16616,6 +16620,8 @@ pub fn Effects(comptime Msg: type) type {
                         return;
                     };
                     ctx.atomic_dest = process_allocator.dupe(u8, ctx.atomic.?.dest_sub_path) catch {
+                        ctx.atomic.?.deinit(io);
+                        ctx.atomic = null;
                         ctx.outcome = .rejected;
                         return;
                     };

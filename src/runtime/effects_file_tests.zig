@@ -504,6 +504,59 @@ test "streaming file round-trip has no total-size cliff and finalizes atomically
     try std.testing.expectEqual(@as(u64, chunk.len * 5), total);
 }
 
+test "a rejected write-stream chunk can retry without losing its atomic sink" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "export.bin", .data = "previous generation" });
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var fx = Fx.init(failing.allocator());
+    defer fx.deinit();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/export.bin", .{tmp.sub_path[0..]});
+
+    fx.writeFileStream(.{ .key = 55, .path = path, .on_result = Fx.fileMsg(.result) });
+    var result: ?effects_mod.EffectFileResult = null;
+    while (result == null) {
+        if (fx.takeMsg()) |msg| result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, result.?.outcome);
+
+    // Reject the engine-owned chunk copy after the atomic sink is open.
+    failing.fail_index = failing.alloc_index;
+    fx.writeFileChunk(.{ .key = 55, .bytes = "replacement", .on_result = Fx.fileMsg(.result) });
+    result = null;
+    while (result == null) {
+        if (fx.takeMsg()) |msg| result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, result.?.outcome);
+
+    const still_visible = try tmp.dir.readFileAlloc(io, "export.bin", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(still_visible);
+    try std.testing.expectEqualStrings("previous generation", still_visible);
+
+    failing.fail_index = std.math.maxInt(usize);
+    fx.writeFileChunk(.{ .key = 55, .bytes = "replacement", .on_result = Fx.fileMsg(.result) });
+    result = null;
+    while (result == null) {
+        if (fx.takeMsg()) |msg| result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, result.?.outcome);
+    fx.writeFileClose(.{ .key = 55, .on_result = Fx.fileMsg(.result) });
+    result = null;
+    while (result == null) {
+        if (fx.takeMsg()) |msg| result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, result.?.outcome);
+
+    const visible = try tmp.dir.readFileAlloc(io, "export.bin", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(visible);
+    try std.testing.expectEqualStrings("replacement", visible);
+}
+
 test "an unclosed write stream never exposes a partial destination" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
