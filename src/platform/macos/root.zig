@@ -2394,6 +2394,31 @@ fn isSupportedNativeViewKind(kind: platform_mod.ViewKind) bool {
     };
 }
 
+test "macos notification actions use process-scoped opaque tokens" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "NSString *actionToken = [NSUUID UUID].UUIDString;",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "notification.userInfo = @{ @\"native-sdk-action-token\": actionToken };",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "self.notificationActionCommands[token]",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "@\"native-sdk-action-command\"",
+        ) == null);
+    }
+}
+
 test "macos supports native container and control kinds" {
     try std.testing.expect(isSupportedNativeViewKind(.split));
     try std.testing.expect(isSupportedNativeViewKind(.stack));

@@ -611,6 +611,10 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) uint64_t nextWebViewGeneration;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSTimer *> *appTimers;
+/* Delivered notifications outlive this object, so userInfo carries only
+ * a per-process token; the command remains in these live-host maps. */
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *notificationActionCommands;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *notificationActionTokensByIdentifier;
 @property(nonatomic, strong) NSString *appName;
 /* The human-facing app name (app.zon display_name, empty = appName):
  * drives the application menu title and its About/Hide/Quit labels, the
@@ -879,6 +883,8 @@ static const char *NativeSdkCefBridgeScript() {
     self.webviewGenerations = [[NSMutableDictionary alloc] init];
     self.closingWebViewKeys = [[NSMutableSet alloc] init];
     self.appTimers = [[NSMutableDictionary alloc] init];
+    self.notificationActionCommands = [[NSMutableDictionary alloc] init];
+    self.notificationActionTokensByIdentifier = [[NSMutableDictionary alloc] init];
     self.statusItems = [[NSMutableDictionary alloc] init];
     self.nextWebViewGeneration = 1;
     self.cefClients = new std::map<uint64_t, CefRefPtr<NativeSdkCefClient>>();
@@ -1374,9 +1380,19 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
     NSInteger activation = notification.activationType;
     if (activation != NSUserNotificationActivationTypeActionButtonClicked) return;
-    NSString *command = [notification.userInfo[@"native-sdk-action-command"] isKindOfClass:[NSString class]]
-        ? notification.userInfo[@"native-sdk-action-command"] : @"";
-    if (command.length == 0) return;
+    NSString *token = [notification.userInfo[@"native-sdk-action-token"] isKindOfClass:[NSString class]]
+        ? notification.userInfo[@"native-sdk-action-token"] : @"";
+    NSString *command = token.length > 0 ? self.notificationActionCommands[token] : @"";
+    if (command.length == 0) {
+        [center removeDeliveredNotification:notification];
+        return;
+    }
+    NSString *identifier = notification.identifier ?: @"";
+    if (identifier.length > 0 &&
+        [self.notificationActionTokensByIdentifier[identifier] isEqualToString:token]) {
+        [self.notificationActionTokensByIdentifier removeObjectForKey:identifier];
+    }
+    [self.notificationActionCommands removeObjectForKey:token];
     const char *commandBytes = command.UTF8String ?: "";
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_COMMAND,
@@ -3229,15 +3245,23 @@ int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const ch
     NSString *identifier = notification_id ? [[NSString alloc] initWithBytes:notification_id length:notification_id_len encoding:NSUTF8StringEncoding] : @"";
     NSString *actionLabel = action_label ? [[NSString alloc] initWithBytes:action_label length:action_label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *actionCommand = action_command ? [[NSString alloc] initWithBytes:action_command length:action_command_len encoding:NSUTF8StringEncoding] : @"";
+    if (identifier.length > 0) {
+        NSString *oldToken = object.notificationActionTokensByIdentifier[identifier];
+        if (oldToken.length > 0) [object.notificationActionCommands removeObjectForKey:oldToken];
+        [object.notificationActionTokensByIdentifier removeObjectForKey:identifier];
+    }
     NSUserNotification *notification = [[NSUserNotification alloc] init];
     notification.title = titleString;
     if (subtitleString.length > 0) notification.subtitle = subtitleString;
     if (bodyString.length > 0) notification.informativeText = bodyString;
     if (identifier.length > 0) notification.identifier = identifier;
     if (actionCommand.length > 0) {
+        NSString *actionToken = [NSUUID UUID].UUIDString;
+        object.notificationActionCommands[actionToken] = actionCommand;
+        if (identifier.length > 0) object.notificationActionTokensByIdentifier[identifier] = actionToken;
         notification.hasActionButton = YES;
         notification.actionButtonTitle = actionLabel;
-        notification.userInfo = @{ @"native-sdk-action-command": actionCommand };
+        notification.userInfo = @{ @"native-sdk-action-token": actionToken };
     }
     NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
     center.delegate = object;

@@ -173,6 +173,7 @@ OS bridge commands are default-deny. Add explicit `builtin_bridge` entries for e
 .builtin_bridge = .{
     .enabled = true,
     .commands = &.{
+        .{ .name = "native-sdk.command.invoke", .permissions = .{ "command" }, .origins = .{ "zero://app" } },
         .{ .name = "native-sdk.platform.supports", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "native-sdk.os.openUrl", .permissions = .{ "network" }, .origins = .{ "zero://app" } },
         .{ .name = "native-sdk.os.showNotification", .permissions = .{ "notifications" }, .origins = .{ "zero://app" } },
@@ -192,6 +193,8 @@ OS bridge commands are default-deny. Add explicit `builtin_bridge` entries for e
     },
 },
 ```
+
+Because the JavaScript example below supplies a notification action, the app/runtime permission list must also include `command`. Display-only notifications need only the `native-sdk.os.showNotification` policy and `notifications` permission.
 
 Opening external URLs is also gated by the external-link policy:
 
@@ -257,7 +260,7 @@ Use the `app.zon` app id as `service` when WebView code and a model core need to
 
 ## Model cores
 
-Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications. An optional nonempty `id` replaces the app's earlier notification with the same id. Supply `actionLabel` and `actionCommand` together to route activation through the same application command path as menus, shortcuts, and bridge command invocation. Action delivery is process-live; it does not cold-launch an exited app.
+Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications. An optional nonempty `id` replaces the app's earlier notification with the same id. Supply `actionLabel` and `actionCommand` together to route activation through the same application command path as menus, shortcuts, and bridge command invocation. Action-command delivery is process-scoped: a notification from an earlier execution cannot dispatch its command into a later one. Linux notification shells may still D-Bus-activate an exited app when the notification or its action is clicked, but the stale action is rejected rather than entering the new runtime.
 
 ### TypeScript
 

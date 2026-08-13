@@ -1892,6 +1892,40 @@ test "linux platform module exports type" {
     _ = LinuxPlatform;
 }
 
+test "linux notification actions use process-scoped opaque tokens" {
+    const host_source = @embedFile("gtk_host.c");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "char *action_token = native_sdk_random_notification_action_token();",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "open(\"/dev/urandom\", O_RDONLY | O_CLOEXEC)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "g_variant_new_string(action_token)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "native_sdk_take_notification_action_command(host, token, token_len)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "g_hash_table_remove(host->notification_actions, token);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "g_variant_new_string(command_copy)",
+    ) == null);
+}
+
 test "linux transparent windows clear the main webview background" {
     const host_source = @embedFile("gtk_host.c");
     const ensure_at = std.mem.indexOf(

@@ -3,12 +3,15 @@
 #include <gtk/gtk.h>
 #include <glib/gstdio.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
 /* NATIVE_SDK_ALLOW_WEBKITGTK_STUB is the build graph's declaration that
  * this app uses no web layer, and it wins over header visibility: on a
@@ -383,6 +386,13 @@ typedef struct native_sdk_gtk_window {
     int native_view_count;
 } native_sdk_gtk_window_t;
 
+typedef struct native_sdk_gtk_notification_action {
+    char *command;
+    char *notification_id;
+} native_sdk_gtk_notification_action_t;
+
+static const char native_sdk_notification_action_name[] = "native-sdk-notification-action";
+
 struct native_sdk_gtk_host {
     GtkApplication *app;
     /* Display providers are global and the display retains them until
@@ -452,6 +462,14 @@ struct native_sdk_gtk_host {
     native_sdk_gtk_context_menu_t *context_menu_teardowns;
     /* Feeds each context menu's per-invocation action-group name. */
     uint64_t context_menu_serial;
+    /* Notification buttons carry only an unguessable, process-scoped
+     * token across the exported GApplication action. The command stays
+     * private to this host, so another session-bus client cannot supply
+     * an arbitrary command name and notifications from an earlier app
+     * execution cannot dispatch into this one. The id map invalidates a
+     * superseded same-id notification's token before replacement. */
+    GHashTable *notification_actions;
+    GHashTable *notification_action_tokens_by_id;
     native_sdk_gtk_audio_t audio;
 };
 
@@ -469,6 +487,46 @@ static char *native_sdk_strndup(const char *s, size_t len) {
     memcpy(out, s, len);
     out[len] = '\0';
     return out;
+}
+
+static void native_sdk_notification_action_free(gpointer data) {
+    native_sdk_gtk_notification_action_t *notification_action = data;
+    if (!notification_action) return;
+    free(notification_action->command);
+    free(notification_action->notification_id);
+    free(notification_action);
+}
+
+static char *native_sdk_random_notification_action_token(void) {
+    uint8_t random_bytes[16];
+    int random_fd;
+    do {
+        random_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    } while (random_fd < 0 && errno == EINTR);
+    if (random_fd < 0) return NULL;
+
+    size_t offset = 0;
+    while (offset < sizeof(random_bytes)) {
+        const ssize_t count = read(
+            random_fd, random_bytes + offset, sizeof(random_bytes) - offset);
+        if (count > 0) {
+            offset += (size_t)count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        close(random_fd);
+        return NULL;
+    }
+    close(random_fd);
+
+    static const char hex[] = "0123456789abcdef";
+    char *token = g_malloc(sizeof(random_bytes) * 2 + 1);
+    for (size_t i = 0; i < sizeof(random_bytes); i++) {
+        token[i * 2] = hex[random_bytes[i] >> 4];
+        token[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
+    }
+    token[sizeof(random_bytes) * 2] = '\0';
+    return token;
 }
 
 static void native_sdk_free_string_list(char **list, int count) {
@@ -3253,6 +3311,10 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     host->allowed_external_urls_count = 0;
 
     host->app = gtk_application_new(host->bundle_id, G_APPLICATION_DEFAULT_FLAGS);
+    host->notification_actions = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, native_sdk_notification_action_free);
+    host->notification_action_tokens_by_id = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, g_free);
 
     return host;
 }
@@ -3295,6 +3357,15 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
         g_object_unref(host->transparent_css_provider);
         g_object_unref(host->transparent_css_display);
     }
+    if (host->app && g_action_map_lookup_action(
+            G_ACTION_MAP(host->app), native_sdk_notification_action_name)) {
+        g_action_map_remove_action(
+            G_ACTION_MAP(host->app), native_sdk_notification_action_name);
+    }
+    if (host->notification_action_tokens_by_id) {
+        g_hash_table_destroy(host->notification_action_tokens_by_id);
+    }
+    if (host->notification_actions) g_hash_table_destroy(host->notification_actions);
     g_object_unref(host->app);
     free(host->app_name);
     free(host->window_title);
@@ -4755,26 +4826,66 @@ int native_sdk_gtk_reveal_path(native_sdk_gtk_host_t *host, const char *path, si
     return 1;
 }
 
+static void native_sdk_forget_notification_action_for_id(native_sdk_gtk_host_t *host, const char *notification_id) {
+    if (!host || !host->notification_actions ||
+        !host->notification_action_tokens_by_id || !notification_id) return;
+    const char *token = g_hash_table_lookup(
+        host->notification_action_tokens_by_id, notification_id);
+    if (token) g_hash_table_remove(host->notification_actions, token);
+    g_hash_table_remove(host->notification_action_tokens_by_id, notification_id);
+}
+
+static char *native_sdk_take_notification_action_command(
+    native_sdk_gtk_host_t *host, const char *token, size_t token_len)
+{
+    if (!host || !host->notification_actions || !token || token_len == 0) return NULL;
+    native_sdk_gtk_notification_action_t *notification_action =
+        g_hash_table_lookup(host->notification_actions, token);
+    if (!notification_action || !notification_action->command) return NULL;
+
+    char *command = native_sdk_strndup(
+        notification_action->command, strlen(notification_action->command));
+    if (!command) return NULL;
+    if (notification_action->notification_id &&
+        host->notification_action_tokens_by_id) {
+        const char *current_token = g_hash_table_lookup(
+            host->notification_action_tokens_by_id,
+            notification_action->notification_id);
+        if (current_token && strcmp(current_token, token) == 0) {
+            g_hash_table_remove(
+                host->notification_action_tokens_by_id,
+                notification_action->notification_id);
+        }
+    }
+    /* One click consumes the capability before app code runs. App code
+     * may synchronously show or replace another notification. */
+    g_hash_table_remove(host->notification_actions, token);
+    return command;
+}
+
 static void native_sdk_notification_action_activated(GSimpleAction *action, GVariant *parameter, gpointer data) {
     (void)action;
     native_sdk_gtk_host_t *host = data;
     if (!host || !parameter || !g_variant_is_of_type(parameter, G_VARIANT_TYPE_STRING)) return;
-    gsize command_len = 0;
-    const char *command = g_variant_get_string(parameter, &command_len);
-    if (!command || command_len == 0) return;
+    gsize token_len = 0;
+    const char *token = g_variant_get_string(parameter, &token_len);
+    char *command = native_sdk_take_notification_action_command(host, token, token_len);
+    if (!command) return;
+    const size_t command_len = strlen(command);
     native_sdk_emit(host, (native_sdk_gtk_event_t){
         .kind = NATIVE_SDK_GTK_EVENT_NOTIFICATION_COMMAND,
         .window_id = 1,
         .command_name = command,
         .command_name_len = command_len,
     });
+    free(command);
 }
 
 static int native_sdk_ensure_notification_action(native_sdk_gtk_host_t *host) {
-    static const char action_name[] = "native-sdk-notification-action";
     GActionMap *map = G_ACTION_MAP(host->app);
-    if (g_action_map_lookup_action(map, action_name)) return 1;
-    GSimpleAction *action = g_simple_action_new(action_name, G_VARIANT_TYPE_STRING);
+    if (g_action_map_lookup_action(map, native_sdk_notification_action_name)) return 1;
+    GSimpleAction *action = g_simple_action_new(
+        native_sdk_notification_action_name, G_VARIANT_TYPE_STRING);
     if (!action) return 0;
     g_signal_connect(action, "activate", G_CALLBACK(native_sdk_notification_action_activated), host);
     g_action_map_add_action(map, G_ACTION(action));
@@ -4818,30 +4929,57 @@ int native_sdk_gtk_show_notification(native_sdk_gtk_host_t *host, const char *ti
         free(message);
     }
 
-    if (action_command_len > 0) {
-        if (!native_sdk_ensure_notification_action(host)) {
-            g_object_unref(notification);
-            return 0;
-        }
-        char *label_copy = native_sdk_strndup(action_label, action_label_len);
-        char *command_copy = native_sdk_strndup(action_command, action_command_len);
-        if (!label_copy || !command_copy) {
-            free(label_copy);
-            free(command_copy);
-            g_object_unref(notification);
-            return 0;
-        }
-        g_notification_add_button_with_target_value(notification, label_copy,
-            "app.native-sdk-notification-action", g_variant_new_string(command_copy));
-        free(label_copy);
-        free(command_copy);
-    }
-
     char *id_copy = notification_id_len > 0 ? native_sdk_strndup(notification_id, notification_id_len) : NULL;
     if (notification_id_len > 0 && !id_copy) {
         g_object_unref(notification);
         return 0;
     }
+    if (id_copy) native_sdk_forget_notification_action_for_id(host, id_copy);
+
+    if (action_command_len > 0) {
+        if (!native_sdk_ensure_notification_action(host)) {
+            free(id_copy);
+            g_object_unref(notification);
+            return 0;
+        }
+        char *label_copy = native_sdk_strndup(action_label, action_label_len);
+        char *command_copy = native_sdk_strndup(action_command, action_command_len);
+        char *action_token = native_sdk_random_notification_action_token();
+        native_sdk_gtk_notification_action_t *notification_action =
+            calloc(1, sizeof(native_sdk_gtk_notification_action_t));
+        if (!label_copy || !command_copy || !action_token || !notification_action) {
+            free(label_copy);
+            free(command_copy);
+            g_free(action_token);
+            free(notification_action);
+            free(id_copy);
+            g_object_unref(notification);
+            return 0;
+        }
+        notification_action->command = command_copy;
+        notification_action->notification_id = id_copy
+            ? native_sdk_strndup(id_copy, strlen(id_copy))
+            : NULL;
+        if (id_copy && !notification_action->notification_id) {
+            free(label_copy);
+            g_free(action_token);
+            native_sdk_notification_action_free(notification_action);
+            free(id_copy);
+            g_object_unref(notification);
+            return 0;
+        }
+        g_notification_add_button_with_target_value(notification, label_copy,
+            "app.native-sdk-notification-action", g_variant_new_string(action_token));
+        g_hash_table_insert(host->notification_actions, action_token, notification_action);
+        if (id_copy) {
+            g_hash_table_replace(
+                host->notification_action_tokens_by_id,
+                g_strdup(id_copy),
+                g_strdup(action_token));
+        }
+        free(label_copy);
+    }
+
     g_application_send_notification(G_APPLICATION(host->app), id_copy, notification);
     free(id_copy);
     g_object_unref(notification);
