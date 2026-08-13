@@ -154,12 +154,24 @@ pub fn linuxGlibcSpellingHitsDefaultFloor(target: std.Build.ResolvedTarget) bool
     return glibc.order(.{ .major = 2, .minor = 36, .patch = 0 }) == .lt;
 }
 
-/// The glibc-floor teaching for service builds (both carriers compile the
-/// service class for the target, so both hit the missing symbol).
-pub fn panicLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
+/// Whether ScriptC needs its zig-cc target lane rather than the native host
+/// compiler. Keep this identical to the driver scripts' platform-triple
+/// comparison: a stated glibc version makes an otherwise same-triple Linux
+/// target cross because that floor must reach Zig's `-target` argument.
+pub fn scriptcTargetIsCross(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    return target.result.os.tag != host.os.tag or
+        target.result.cpu.arch != host.cpu.arch or
+        target.result.abi != host.abi or
+        target.query.glibc_version != null;
+}
+
+/// The glibc-floor teaching for cross-target ScriptC builds. Both the core
+/// archive and either service carrier carry the compiled TypeScript runtime,
+/// so all of them hit the same missing symbol.
+pub fn panicScriptcLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
     @panic(b.fmt(
-        "\nTypeScript services target {t}-linux-gnu at Zig's default glibc floor, which" ++
-            " predates arc4random_buf — a symbol the compiled service runtime needs (glibc" ++
+        "\nTypeScript target {t}-linux-gnu uses Zig's default glibc floor, which" ++
+            " predates arc4random_buf — a symbol the compiled runtime needs (glibc" ++
             " 2.36+).\nSpell the target as \"{t}-linux-gnu.2.36\" (or later), or" ++
             " \"{t}-linux-musl\".\n",
         .{ target.result.cpu.arch, target.result.cpu.arch, target.result.cpu.arch },
@@ -185,30 +197,13 @@ fn resolveServiceCarrier(
                 " for this target.\n",
         ),
     };
-    // The service class compiles FOR the target on either carrier: the
-    // archive links into the Zig-built app, and a cross-compiled child
-    // executable links inside the compiler's own zig-cc lane. Both walk
-    // into the default glibc floor on a bare `-gnu` Linux spelling, so
-    // teach at configure time instead. A child compile whose target
-    // equals the build host stays on the native compile lane and never
-    // consults the floor.
-    const cross = target.result.os.tag != host.os.tag or
-        target.result.cpu.arch != host.cpu.arch or
-        target.result.abi != host.abi or
-        target.query.glibc_version != null;
-    const hits_floor = switch (carrier) {
-        .in_process => linuxGlibcSpellingHitsDefaultFloor(target),
-        .child => cross and linuxGlibcSpellingHitsDefaultFloor(target),
-        .none => false,
-    };
-    if (hits_floor) panicLinuxGlibcSpelling(b, target);
     return carrier;
 }
 
-/// The `arch-os-abi` platform spelling the service compile lane receives.
+/// The `arch-os-abi` platform spelling every ScriptC compile lane receives.
 /// A stated glibc version rides the abi (`gnu.2.36`) so the compiler's
 /// cross lane builds at the spelled floor rather than the default one.
-pub fn servicePlatformTriple(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+pub fn scriptcPlatformTriple(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
     const triple = b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi });
     if (target.result.os.tag != .linux or !target.result.abi.isGnu()) return triple;
     const glibc = target.query.glibc_version orelse return triple;
@@ -534,6 +529,12 @@ fn tsCoreStage(
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
+    // Every TypeScript app compiles its core archive for the target. On a
+    // true cross-Linux GNU compile, reject Zig's too-old default glibc floor
+    // before either the core or optional service lane reaches the linker.
+    if (scriptcTargetIsCross(b.graph.host.result, target) and linuxGlibcSpellingHitsDefaultFloor(target)) {
+        panicScriptcLinuxGlibcSpelling(b, target);
+    }
     const service_carrier = resolveServiceCarrier(service_carrier_choice, has_services, b, target);
 
     // Relational schema analysis runs the real SQLite parser in memory before
@@ -712,7 +713,7 @@ fn tsCoreStage(
             "--host-platform",
             b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
             "--target-platform",
-            servicePlatformTriple(b, target),
+            scriptcPlatformTriple(b, target),
             // Cross service compiles run the pinned compiler's zig-cc
             // lane; hand over this build's own zig so the lane never
             // depends on a PATH zig (native compiles ignore it).
@@ -765,6 +766,16 @@ fn tsCoreStage(
     const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{symbol_name}));
     compile.addArg("--out-sidecar");
     const compiled_sidecar = compile.addOutputFileArg("core.contract.json");
+    compile.addArgs(&.{
+        "--host-platform",
+        b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+        "--target-platform",
+        scriptcPlatformTriple(b, target),
+        // Keep the core and service archives on the same cross compiler and
+        // target. Native compiles ignore the supplied Zig path.
+        "--zig-exe",
+        b.graph.zig_exe,
+    });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         // The development override: point at any toolchain command; the
         // driver still refuses a release other than the SDK's pin.

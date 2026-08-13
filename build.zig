@@ -684,6 +684,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
         .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
+        .{ .path = "build/app.zig", .pattern = "scriptcPlatformTriple(b, target),\n        // Keep the core and service archives on the same cross compiler" },
+        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe," },
+        .{ .path = "build.zig", .pattern = "abi_laws_mod.addObjectFile(markup_fixture.archive);\n    addScriptcArchiveSystemLibs(abi_laws_mod, target);" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "SCRIPTC_TARGET: args[\"target-platform\"]" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
         .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
         .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },
@@ -3284,6 +3290,7 @@ fn tsCoreE2eArtifact(
     abi_laws_mod.addImport("core_abi", module(b, target, optimize, "tools/corewire/core_abi.zig"));
     abi_laws_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, markup_fixture.sidecar));
     abi_laws_mod.addObjectFile(markup_fixture.archive);
+    addScriptcArchiveSystemLibs(abi_laws_mod, target);
 
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
@@ -3345,8 +3352,10 @@ fn externalServiceFixture(
     name: []const u8,
 ) ExternalServiceFixture {
     const app_build = @import("build/app.zig");
-    const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target.result) and
-        !app_build.linuxGlibcSpellingHitsDefaultFloor(target);
+    if (app_build.scriptcTargetIsCross(b.graph.host.result, target) and app_build.linuxGlibcSpellingHitsDefaultFloor(target)) {
+        app_build.panicScriptcLinuxGlibcSpelling(b, target);
+    }
+    const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target.result);
     const project = b.addRunArtifact(corewire_exe);
     project.addArg("--services-sidecar");
     project.addFileArg(contract);
@@ -3396,7 +3405,7 @@ fn externalServiceFixture(
         break :archive compile.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
     } else null;
     const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
-    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", app_build.servicePlatformTriple(b, target), "--zig-exe", b.graph.zig_exe });
+    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", app_build.scriptcPlatformTriple(b, target), "--zig-exe", b.graph.zig_exe });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
@@ -3536,6 +3545,10 @@ fn externalCoreFixtureModule(
     corewire_exe: *std.Build.Step.Compile,
     spec: ExternalCoreFixtureSpec,
 ) ExternalCoreFixture {
+    const app_build = @import("build/app.zig");
+    if (app_build.scriptcTargetIsCross(b.graph.host.result, target) and app_build.linuxGlibcSpellingHitsDefaultFloor(target)) {
+        app_build.panicScriptcLinuxGlibcSpelling(b, target);
+    }
     // The frontend, in check-only mode: the subset checker gates the
     // compile, and the contract sidecar states the build-root-relative
     // entry spelling. The frontend reads its own sources, the SDK
@@ -3630,6 +3643,14 @@ fn externalCoreFixtureModule(
     const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{spec.name}));
     compile.addArg("--out-sidecar");
     const compiled_sidecar = compile.addOutputFileArg("core.contract.json");
+    compile.addArgs(&.{
+        "--host-platform",
+        b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+        "--target-platform",
+        app_build.scriptcPlatformTriple(b, target),
+        "--zig-exe",
+        b.graph.zig_exe,
+    });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         // The development override: point at any toolchain command; the
         // driver still refuses a release other than the SDK's pin.
