@@ -499,9 +499,12 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, chanState: msg.state, chanEvents: (model.chanEvents < 9007199254740991 ? model.chanEvents + 1 : 9007199254740991) }, Cmd.none];
     case "notify":
       return [model, Cmd.showNotification({
+        id: asciiBytes("build-status"),
         title: model.status,
         subtitle: asciiBytes("native-sdk"),
         body: asciiBytes("TS core notification"),
+        actionLabel: asciiBytes("Pause polling"),
+        actionCommand: asciiBytes("core.toggle"),
       })];
     case "store_put":
       return [model, Cmd.store.set("fixture/one", model.status, { key: "store", ok: "wrote", err: "failed" })];

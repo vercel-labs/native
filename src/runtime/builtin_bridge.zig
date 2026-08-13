@@ -186,7 +186,17 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             return bridge.writeSuccessResponse(response_buffer, request.id, result);
         }
 
-        pub fn dispatchOsBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        pub fn dispatchOsBridgeCommand(self: *Runtime, request: bridge.Request, origin: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (std.mem.eql(u8, request.command, "native-sdk.os.showNotification")) {
+                var action_scratch: [platform.max_notification_action_command_bytes]u8 = undefined;
+                var action_storage = json.StringStorage.init(&action_scratch);
+                const action_command = jsonStringField(request.payload, "actionCommand", &action_storage) orelse "";
+                if (action_command.len > 0 and
+                    !Self.allowsBuiltinBridgeCommand(self, "native-sdk.command.invoke", origin, security.permission_command))
+                {
+                    return bridge.writeErrorResponse(response_buffer, request.id, .permission_denied, "Notification actions require command invoke permission");
+                }
+            }
             const result = if (std.mem.eql(u8, request.command, "native-sdk.os.openUrl"))
                 SystemServiceMethods.openExternalUrlFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.os.showNotification"))

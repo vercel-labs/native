@@ -139,6 +139,7 @@ enum EventKind {
     kContextMenuAction = 19,
     kViewFocused = 20,
     kTrayCommand = 21,
+    kNotificationCommand = 22,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -718,6 +719,9 @@ struct Host {
     int external_link_action = 0;
     bool app_active = false;
     bool notification_icon_added = false;
+    std::string notification_id;
+    std::string notification_action_label;
+    std::string notification_action_command;
     bool tray_active = false;
     AppTimer app_timers[kMaxAppTimers];
     /* Last emitted appearance values; -1 = nothing emitted yet, so the
@@ -1587,6 +1591,22 @@ static bool emitStatusCommand(Host *host, HWND hwnd, const std::string &command)
     WindowsEvent event = {};
     event.kind = kTrayCommand;
     event.window_id = window->id;
+    event.command_name = command.c_str();
+    event.command_name_len = command.size();
+    host->callback(host->callback_context, &event);
+    return true;
+}
+
+static bool emitNotificationCommand(Host *host, HWND hwnd) {
+    if (!host || !host->callback || host->notification_action_command.empty()) return false;
+    std::string command = host->notification_action_command;
+    host->notification_id.clear();
+    host->notification_action_label.clear();
+    host->notification_action_command.clear();
+    const Window *window = windowForHwnd(host, hwnd);
+    WindowsEvent event = {};
+    event.kind = kNotificationCommand;
+    event.window_id = window ? window->id : 1;
     event.command_name = command.c_str();
     event.command_name_len = command.size();
     host->callback(host->callback_context, &event);
@@ -5095,7 +5115,7 @@ static const wchar_t *nativeSdkBridgeScript() {
 	});
 	var os=Object.freeze({
 	openUrl:function(value){var options=typeof value==='string'?{url:value}:(value||{});return invoke('native-sdk.os.openUrl',{url:ensureString(options.url,'url')});},
-	showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}return invoke('native-sdk.os.showNotification',payload);},
+	showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.id!=null){payload.id=ensureString(options.id,'id');}if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}if(options.actionLabel!=null){payload.actionLabel=ensureString(options.actionLabel,'actionLabel');}if(options.actionCommand!=null){payload.actionCommand=ensureString(options.actionCommand,'actionCommand');}return invoke('native-sdk.os.showNotification',payload);},
 	revealPath:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.revealPath',{path:ensureString(options.path,'path')});},
 	addRecentDocument:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.addRecentDocument',{path:ensureString(options.path,'path')});},
 	clearRecentDocuments:function(){return invoke('native-sdk.os.clearRecentDocuments',{});}
@@ -5688,8 +5708,12 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) showAppContextMenu(host, hwnd);
             return 0;
         case kNotificationCallbackMessage:
-            if (host && host->tray_active) {
+            if (host) {
                 UINT tray_event = LOWORD(lparam);
+                if (tray_event == NIN_BALLOONUSERCLICK && emitNotificationCommand(host, hwnd)) {
+                    return 0;
+                }
+                if (!host->tray_active) break;
                 if (tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP) {
                     if (keyDown(VK_MENU) && !host->tray_alternate_activation_command.empty()) {
                         emitStatusCommand(host, hwnd, host->tray_alternate_activation_command);
@@ -7452,9 +7476,13 @@ int native_sdk_windows_show_message_dialog(Host *host, const WindowsMessageDialo
     return 0;
 }
 
-int native_sdk_windows_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len) {
+int native_sdk_windows_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
     if (!host || !title || title_len == 0) return 0;
-    if ((subtitle_len > 0 && !subtitle) || (body_len > 0 && !body)) return 0;
+    if ((subtitle_len > 0 && !subtitle) || (body_len > 0 && !body) ||
+        (notification_id_len > 0 && !notification_id) ||
+        (action_label_len > 0 && !action_label) ||
+        (action_command_len > 0 && !action_command) ||
+        ((action_label_len == 0) != (action_command_len == 0))) return 0;
     if (!ensureNotificationIcon(host)) return 0;
 
     std::wstring title_wide = widen(slice(title, title_len));
@@ -7462,6 +7490,10 @@ int native_sdk_windows_show_notification(Host *host, const char *title, size_t t
     if (subtitle && subtitle_len > 0) body_wide += widen(slice(subtitle, subtitle_len));
     if (subtitle_len > 0 && body_len > 0) body_wide += L"\n";
     if (body && body_len > 0) body_wide += widen(slice(body, body_len));
+    if (action_label_len > 0) {
+        if (!body_wide.empty()) body_wide += L"\n\n";
+        body_wide += L"[" + widen(slice(action_label, action_label_len)) + L"]";
+    }
 
     NOTIFYICONDATAW data = notificationIconData(host);
     if (!data.hWnd) return 0;
@@ -7469,7 +7501,11 @@ int native_sdk_windows_show_notification(Host *host, const char *title, size_t t
     data.dwInfoFlags = NIIF_INFO;
     copyWideField(data.szInfoTitle, ARRAYSIZE(data.szInfoTitle), title_wide);
     copyWideField(data.szInfo, ARRAYSIZE(data.szInfo), body_wide);
-    return Shell_NotifyIconW(NIM_MODIFY, &data) ? 1 : 0;
+    if (!Shell_NotifyIconW(NIM_MODIFY, &data)) return 0;
+    host->notification_id = slice(notification_id, notification_id_len);
+    host->notification_action_label = slice(action_label, action_label_len);
+    host->notification_action_command = slice(action_command, action_command_len);
+    return 1;
 }
 
 int native_sdk_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {

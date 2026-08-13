@@ -2026,7 +2026,7 @@ static const char *native_sdk_bridge_script(void) {
         "});"
         "var os=Object.freeze({"
         "openUrl:function(value){var options=typeof value==='string'?{url:value}:(value||{});return invoke('native-sdk.os.openUrl',{url:ensureString(options.url,'url')});},"
-        "showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}return invoke('native-sdk.os.showNotification',payload);},"
+        "showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.id!=null){payload.id=ensureString(options.id,'id');}if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}if(options.actionLabel!=null){payload.actionLabel=ensureString(options.actionLabel,'actionLabel');}if(options.actionCommand!=null){payload.actionCommand=ensureString(options.actionCommand,'actionCommand');}return invoke('native-sdk.os.showNotification',payload);},"
         "revealPath:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.revealPath',{path:ensureString(options.path,'path')});},"
         "addRecentDocument:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.addRecentDocument',{path:ensureString(options.path,'path')});},"
         "clearRecentDocuments:function(){return invoke('native-sdk.os.clearRecentDocuments',{});}"
@@ -4755,9 +4755,40 @@ int native_sdk_gtk_reveal_path(native_sdk_gtk_host_t *host, const char *path, si
     return 1;
 }
 
-int native_sdk_gtk_show_notification(native_sdk_gtk_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len) {
+static void native_sdk_notification_action_activated(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action;
+    native_sdk_gtk_host_t *host = data;
+    if (!host || !parameter || !g_variant_is_of_type(parameter, G_VARIANT_TYPE_STRING)) return;
+    gsize command_len = 0;
+    const char *command = g_variant_get_string(parameter, &command_len);
+    if (!command || command_len == 0) return;
+    native_sdk_emit(host, (native_sdk_gtk_event_t){
+        .kind = NATIVE_SDK_GTK_EVENT_NOTIFICATION_COMMAND,
+        .window_id = 1,
+        .command_name = command,
+        .command_name_len = command_len,
+    });
+}
+
+static int native_sdk_ensure_notification_action(native_sdk_gtk_host_t *host) {
+    static const char action_name[] = "native-sdk-notification-action";
+    GActionMap *map = G_ACTION_MAP(host->app);
+    if (g_action_map_lookup_action(map, action_name)) return 1;
+    GSimpleAction *action = g_simple_action_new(action_name, G_VARIANT_TYPE_STRING);
+    if (!action) return 0;
+    g_signal_connect(action, "activate", G_CALLBACK(native_sdk_notification_action_activated), host);
+    g_action_map_add_action(map, G_ACTION(action));
+    g_object_unref(action);
+    return 1;
+}
+
+int native_sdk_gtk_show_notification(native_sdk_gtk_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
     if (!host || !host->app || !title || title_len == 0) return 0;
-    if ((subtitle_len > 0 && !subtitle) || (body_len > 0 && !body)) return 0;
+    if ((subtitle_len > 0 && !subtitle) || (body_len > 0 && !body) ||
+        (notification_id_len > 0 && !notification_id) ||
+        (action_label_len > 0 && !action_label) ||
+        (action_command_len > 0 && !action_command) ||
+        ((action_label_len == 0) != (action_command_len == 0))) return 0;
     char *title_copy = native_sdk_strndup(title, title_len);
     if (!title_copy) return 0;
 
@@ -4787,7 +4818,32 @@ int native_sdk_gtk_show_notification(native_sdk_gtk_host_t *host, const char *ti
         free(message);
     }
 
-    g_application_send_notification(G_APPLICATION(host->app), NULL, notification);
+    if (action_command_len > 0) {
+        if (!native_sdk_ensure_notification_action(host)) {
+            g_object_unref(notification);
+            return 0;
+        }
+        char *label_copy = native_sdk_strndup(action_label, action_label_len);
+        char *command_copy = native_sdk_strndup(action_command, action_command_len);
+        if (!label_copy || !command_copy) {
+            free(label_copy);
+            free(command_copy);
+            g_object_unref(notification);
+            return 0;
+        }
+        g_notification_add_button_with_target_value(notification, label_copy,
+            "app.native-sdk-notification-action", g_variant_new_string(command_copy));
+        free(label_copy);
+        free(command_copy);
+    }
+
+    char *id_copy = notification_id_len > 0 ? native_sdk_strndup(notification_id, notification_id_len) : NULL;
+    if (notification_id_len > 0 && !id_copy) {
+        g_object_unref(notification);
+        return 0;
+    }
+    g_application_send_notification(G_APPLICATION(host->app), id_copy, notification);
+    free(id_copy);
     g_object_unref(notification);
     return 1;
 }

@@ -43,6 +43,7 @@ const AppKitEventKind = enum(c_int) {
     video = 21,
     view_focused = 22,
     tray_command = 23,
+    notification_command = 24,
 };
 
 const AppKitEvent = extern struct {
@@ -247,7 +248,7 @@ extern fn native_sdk_appkit_decode_image(bytes: [*]const u8, bytes_len: usize, p
 extern fn native_sdk_appkit_clipboard_write(host: *AppKitHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_appkit_clipboard_read_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_clipboard_write_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, bytes: [*]const u8, bytes_len: usize) c_int;
-extern fn native_sdk_appkit_show_notification(host: *AppKitHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
+extern fn native_sdk_appkit_show_notification(host: *AppKitHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
 extern fn native_sdk_appkit_open_external_url(host: *AppKitHost, url: [*]const u8, url_len: usize) c_int;
 extern fn native_sdk_appkit_reveal_path(host: *AppKitHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_appkit_add_recent_document(host: *AppKitHost, path: [*]const u8, path_len: usize) c_int;
@@ -974,6 +975,10 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
             .status_item_id = event.status_item_id,
+        } }),
+        .notification_command => state.emit(.{ .notification_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
         } }),
         .timer => state.emit(.{ .timer = .{
             .id = event.timer_id,
@@ -2113,6 +2118,12 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.subtitle.len,
         options.body.ptr,
         options.body.len,
+        options.id.ptr,
+        options.id.len,
+        options.action_label.ptr,
+        options.action_label.len,
+        options.action_command.ptr,
+        options.action_command.len,
     ) == 0) return error.UnsupportedService;
 }
 

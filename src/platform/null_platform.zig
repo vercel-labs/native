@@ -29,6 +29,9 @@ const max_recent_document_path_bytes = types.max_recent_document_path_bytes;
 const max_notification_title_bytes = types.max_notification_title_bytes;
 const max_notification_subtitle_bytes = types.max_notification_subtitle_bytes;
 const max_notification_body_bytes = types.max_notification_body_bytes;
+const max_notification_id_bytes = types.max_notification_id_bytes;
+const max_notification_action_label_bytes = types.max_notification_action_label_bytes;
+const max_notification_action_command_bytes = types.max_notification_action_command_bytes;
 const max_clipboard_mime_type_bytes = types.max_clipboard_mime_type_bytes;
 const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 const max_credential_service_bytes = types.max_credential_service_bytes;
@@ -122,6 +125,7 @@ const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
 const TrayCommandEvent = types.TrayCommandEvent;
+const Event = types.Event;
 const TimerEvent = types.TimerEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
@@ -148,7 +152,6 @@ const WidgetAccessibilityActionEvent = types.WidgetAccessibilityActionEvent;
 const ClipboardData = types.ClipboardData;
 const ColorScheme = types.ColorScheme;
 const Appearance = types.Appearance;
-const Event = types.Event;
 const splitDropPaths = types.splitDropPaths;
 const EventHandler = types.EventHandler;
 const PlatformServices = types.PlatformServices;
@@ -316,6 +319,16 @@ const NullStatusItem = struct {
     presentation: TrayPresentation = .{},
     items: [max_tray_items]TrayMenuItem = undefined,
     item_count: usize = 0,
+};
+
+const max_null_notifications: usize = 16;
+
+const NullNotification = struct {
+    active: bool = false,
+    id: [max_notification_id_bytes]u8 = undefined,
+    id_len: usize = 0,
+    action_command: [max_notification_action_command_bytes]u8 = undefined,
+    action_command_len: usize = 0,
 };
 
 pub const NullPlatform = struct {
@@ -488,7 +501,15 @@ pub const NullPlatform = struct {
     notification_subtitle_len: usize = 0,
     notification_body: [max_notification_body_bytes]u8 = undefined,
     notification_body_len: usize = 0,
+    notification_id: [max_notification_id_bytes]u8 = undefined,
+    notification_id_len: usize = 0,
+    notification_action_label: [max_notification_action_label_bytes]u8 = undefined,
+    notification_action_label_len: usize = 0,
+    notification_action_command: [max_notification_action_command_bytes]u8 = undefined,
+    notification_action_command_len: usize = 0,
+    notifications: [max_null_notifications]NullNotification = [_]NullNotification{.{}} ** max_null_notifications,
     notification_count: usize = 0,
+    notification_replacement_count: usize = 0,
     clipboard_mime_type: [max_clipboard_mime_type_bytes]u8 = undefined,
     clipboard_mime_type_len: usize = 0,
     clipboard_data: [max_clipboard_data_bytes]u8 = undefined,
@@ -1554,9 +1575,36 @@ pub const NullPlatform = struct {
         self.notification_title = undefined;
         self.notification_subtitle = undefined;
         self.notification_body = undefined;
+        self.notification_id = undefined;
+        self.notification_action_label = undefined;
+        self.notification_action_command = undefined;
         self.notification_title_len = (try copyInto(&self.notification_title, options.title)).len;
         self.notification_subtitle_len = (try copyInto(&self.notification_subtitle, options.subtitle)).len;
         self.notification_body_len = (try copyInto(&self.notification_body, options.body)).len;
+        self.notification_id_len = (try copyInto(&self.notification_id, options.id)).len;
+        self.notification_action_label_len = (try copyInto(&self.notification_action_label, options.action_label)).len;
+        self.notification_action_command_len = (try copyInto(&self.notification_action_command, options.action_command)).len;
+
+        if (options.id.len > 0) {
+            var selected: ?usize = null;
+            var free: ?usize = null;
+            for (&self.notifications, 0..) |*entry, index| {
+                if (!entry.active) {
+                    if (free == null) free = index;
+                    continue;
+                }
+                if (std.mem.eql(u8, entry.id[0..entry.id_len], options.id)) {
+                    selected = index;
+                    self.notification_replacement_count += 1;
+                    break;
+                }
+            }
+            const index = selected orelse free orelse (self.notification_count % max_null_notifications);
+            var entry = &self.notifications[index];
+            entry.* = .{ .active = true };
+            entry.id_len = (try copyInto(&entry.id, options.id)).len;
+            entry.action_command_len = (try copyInto(&entry.action_command, options.action_command)).len;
+        }
         self.notification_count += 1;
     }
 
@@ -3033,8 +3081,43 @@ pub const NullPlatform = struct {
         return self.notification_body[0..self.notification_body_len];
     }
 
+    pub fn lastNotificationId(self: *const NullPlatform) []const u8 {
+        return self.notification_id[0..self.notification_id_len];
+    }
+
+    pub fn lastNotificationActionLabel(self: *const NullPlatform) []const u8 {
+        return self.notification_action_label[0..self.notification_action_label_len];
+    }
+
+    pub fn lastNotificationActionCommand(self: *const NullPlatform) []const u8 {
+        return self.notification_action_command[0..self.notification_action_command_len];
+    }
+
+    /// Deterministically model a user activating the action on a named,
+    /// currently active notification. The returned event borrows this
+    /// platform's fixed storage until the next notification update.
+    pub fn activateNotification(self: *const NullPlatform, id: []const u8) ?Event {
+        for (&self.notifications) |*entry| {
+            if (!entry.active or !std.mem.eql(u8, entry.id[0..entry.id_len], id)) continue;
+            if (entry.action_command_len == 0) return null;
+            return .{ .notification_command = .{ .name = entry.action_command[0..entry.action_command_len] } };
+        }
+        return null;
+    }
+
+    /// Anonymous notifications have no replacement key; tests can still
+    /// activate the most recently delivered action through this seam.
+    pub fn activateLastNotification(self: *const NullPlatform) ?Event {
+        if (self.notification_action_command_len == 0) return null;
+        return .{ .notification_command = .{ .name = self.lastNotificationActionCommand() } };
+    }
+
     pub fn notificationCount(self: *const NullPlatform) usize {
         return self.notification_count;
+    }
+
+    pub fn notificationReplacementCount(self: *const NullPlatform) usize {
+        return self.notification_replacement_count;
     }
 
     pub fn lastClipboardMimeType(self: *const NullPlatform) []const u8 {

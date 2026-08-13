@@ -39,6 +39,7 @@ pub const CommandSource = enum {
     shortcut,
     toolbar,
     tray,
+    notification,
     native_view,
     bridge,
 };

@@ -551,9 +551,15 @@ export interface NativeSdkRecentDocumentOptions {
 }
 
 export interface NativeSdkNotificationOptions {
+  /** Stable replacement/deduplication identifier. */
+  id?: string;
   title: string;
   subtitle?: string;
   body?: string;
+  /** Paired with actionCommand; both must be present or both omitted. */
+  actionLabel?: string;
+  /** Normal application command dispatched when the user activates the action. */
+  actionCommand?: string;
 }
 
 export interface NativeSdkClipboardReadOptions {

@@ -1,5 +1,5 @@
 //! Decoder over the app-core Cmd/Sub wire format (rt.zig, cmd_format_version
-//! 5), shared by the ts-track behavioral harnesses. The graders copy this
+//! 6), shared by the ts-track behavioral harnesses. The graders copy this
 //! file next to each case's harness so assertions read decoded ops — "a
 //! fetch with key `feed` targeting this URL", "the delay re-armed" — instead
 //! of hand-built byte strings, which keeps harnesses lenient about the parts
@@ -61,7 +61,7 @@ pub const Op = union(enum) {
     pty_write: struct { key: []const u8, bytes: []const u8 },
     pty_resize: struct { key: []const u8, cols: f64, rows: f64 },
     pty_kill: struct { key: []const u8 },
-    show_notification: struct { title: []const u8, subtitle: []const u8, body: []const u8 },
+    show_notification: struct { id: []const u8, title: []const u8, subtitle: []const u8, body: []const u8, action_label: []const u8, action_command: []const u8 },
     audio_capture_start: struct { key: f64, source: u8, sample_rate: u32, channels: u8, event_tag: u8 },
     audio_capture_stop: struct { key: f64 },
 
@@ -412,7 +412,7 @@ pub const CmdIter = struct {
                 const title = longBytes(b, &off);
                 const subtitle = longBytes(b, &off);
                 const body = longBytes(b, &off);
-                break :blk .{ .show_notification = .{ .title = title, .subtitle = subtitle, .body = body } };
+                break :blk .{ .show_notification = .{ .id = "", .title = title, .subtitle = subtitle, .body = body, .action_label = "", .action_command = "" } };
             },
             // audio_capture_start [op 0x1E][key f64 LE][source u8]
             // [sample_rate u32 LE][channels u8][event_tag u8].
@@ -477,6 +477,24 @@ pub const CmdIter = struct {
                     .header_count = header_count,
                     .header_bytes = header_bytes,
                     .body = body,
+                } };
+            },
+            // actionable_notification [op 0x31][id/title/subtitle/body/
+            // action_label/action_command as u32-length bytes].
+            0x31 => blk: {
+                const id = longBytes(b, &off);
+                const title = longBytes(b, &off);
+                const subtitle = longBytes(b, &off);
+                const body = longBytes(b, &off);
+                const action_label = longBytes(b, &off);
+                const action_command = longBytes(b, &off);
+                break :blk .{ .show_notification = .{
+                    .id = id,
+                    .title = title,
+                    .subtitle = subtitle,
+                    .body = body,
+                    .action_label = action_label,
+                    .action_command = action_command,
                 } };
             },
             // window_hide [op 0x21][label_len u8][label].

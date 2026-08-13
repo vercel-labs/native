@@ -35,6 +35,7 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_VIDEO = 21,
     NATIVE_SDK_APPKIT_EVENT_VIEW_FOCUSED = 22,
     NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND = 23,
+    NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_COMMAND = 24,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -646,7 +647,7 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
 void native_sdk_appkit_clipboard_write(native_sdk_appkit_host_t *host, const char *text, size_t text_len);
 size_t native_sdk_appkit_clipboard_read_data(native_sdk_appkit_host_t *host, const char *mime_type, size_t mime_type_len, char *buffer, size_t buffer_len);
 int native_sdk_appkit_clipboard_write_data(native_sdk_appkit_host_t *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
-int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len);
+int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len);
 int native_sdk_appkit_open_external_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len);
 int native_sdk_appkit_reveal_path(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
 int native_sdk_appkit_add_recent_document(native_sdk_appkit_host_t *host, const char *path, size_t path_len);

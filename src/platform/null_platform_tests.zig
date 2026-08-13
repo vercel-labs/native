@@ -283,9 +283,12 @@ test "null platform records OS actions" {
     const services = null_platform.platform().services;
 
     try services.showNotification(.{
+        .id = "build-status",
         .title = "Build finished",
         .subtitle = "native-sdk",
         .body = "All checks passed.",
+        .action_label = "Open",
+        .action_command = "build.open",
     });
     try services.openExternalUrl("https://example.com/docs");
     try services.revealPath("/tmp/example.txt");
@@ -306,6 +309,11 @@ test "null platform records OS actions" {
     try std.testing.expectEqualStrings("Build finished", null_platform.lastNotificationTitle());
     try std.testing.expectEqualStrings("native-sdk", null_platform.lastNotificationSubtitle());
     try std.testing.expectEqualStrings("All checks passed.", null_platform.lastNotificationBody());
+    try std.testing.expectEqualStrings("build-status", null_platform.lastNotificationId());
+    try std.testing.expectEqualStrings("Open", null_platform.lastNotificationActionLabel());
+    try std.testing.expectEqualStrings("build.open", null_platform.lastNotificationActionCommand());
+    const notification_event = null_platform.activateNotification("build-status") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("build.open", notification_event.notification_command.name);
     try std.testing.expectEqualStrings("https://example.com/docs", null_platform.lastExternalUrl());
     try std.testing.expectEqualStrings("/tmp/example.txt", null_platform.lastRevealedPath());
     try std.testing.expectEqualStrings("/tmp/recent.txt", null_platform.lastRecentDocumentPath());
@@ -364,6 +372,37 @@ test "null platform records OS actions" {
     try services.removeTray();
     try std.testing.expectEqual(@as(usize, 1), null_platform.trayRemoveCount());
     try std.testing.expectEqual(@as(usize, 0), null_platform.trayItems().len);
+}
+
+test "null platform notification ids replace their action binding" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+    const services = null_platform.platform().services;
+
+    try services.showNotification(.{
+        .id = "sync",
+        .title = "Syncing",
+        .action_label = "Cancel",
+        .action_command = "sync.cancel",
+    });
+    try services.showNotification(.{
+        .id = "other",
+        .title = "Other",
+        .action_label = "Open",
+        .action_command = "other.open",
+    });
+    try services.showNotification(.{
+        .id = "sync",
+        .title = "Synced",
+        .action_label = "View",
+        .action_command = "sync.view",
+    });
+
+    try std.testing.expectEqual(@as(usize, 3), null_platform.notificationCount());
+    try std.testing.expectEqual(@as(usize, 1), null_platform.notificationReplacementCount());
+    try std.testing.expectEqualStrings("sync.view", null_platform.activateNotification("sync").?.notification_command.name);
+    try std.testing.expectEqualStrings("other.open", null_platform.activateNotification("other").?.notification_command.name);
+    try std.testing.expect(null_platform.activateNotification("missing") == null);
 }
 
 test "null platform records configured shortcuts" {

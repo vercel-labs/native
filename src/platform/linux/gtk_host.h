@@ -31,6 +31,7 @@ typedef enum {
     NATIVE_SDK_GTK_EVENT_AUDIO = 17,
     NATIVE_SDK_GTK_EVENT_CONTEXT_MENU_ACTION = 18,
     NATIVE_SDK_GTK_EVENT_VIEW_FOCUSED = 19,
+    NATIVE_SDK_GTK_EVENT_NOTIFICATION_COMMAND = 20,
 } native_sdk_gtk_event_kind_t;
 
 typedef struct {
@@ -248,7 +249,7 @@ int native_sdk_gtk_set_webview_layer(native_sdk_gtk_host_t *host, uint64_t windo
 int native_sdk_gtk_close_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int native_sdk_gtk_open_external_url(native_sdk_gtk_host_t *host, const char *url, size_t url_len);
 int native_sdk_gtk_reveal_path(native_sdk_gtk_host_t *host, const char *path, size_t path_len);
-int native_sdk_gtk_show_notification(native_sdk_gtk_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len);
+int native_sdk_gtk_show_notification(native_sdk_gtk_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len);
 int native_sdk_gtk_add_recent_document(native_sdk_gtk_host_t *host, const char *path, size_t path_len);
 int native_sdk_gtk_clear_recent_documents(native_sdk_gtk_host_t *host);
 int native_sdk_gtk_credentials_available(native_sdk_gtk_host_t *host);

@@ -778,7 +778,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSString *openCommand;
 @end
 
-@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSMenuDelegate>
+@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSMenuDelegate, NSUserNotificationCenterDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
@@ -1089,6 +1089,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
 - (void)applicationDidResignActive:(NSNotification *)notification;
+- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification;
+- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification;
 - (void)startAppearanceObservers;
 - (void)stopAppearanceObservers;
 - (void)emitAppearanceChanged;
@@ -7956,6 +7958,8 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 }
 
 - (void)dealloc {
+    NSUserNotificationCenter *notificationCenter = [NSUserNotificationCenter defaultUserNotificationCenter];
+    if (notificationCenter.delegate == self) notificationCenter.delegate = nil;
     [self invalidateAppTimers];
     [self audioCaptureStopSource:0];
     [self audioCaptureStopSource:1];
@@ -9254,7 +9258,7 @@ static NSString *NativeSdkAppKitBridgeScript(void) {
         "});"
         "var os=Object.freeze({"
         "openUrl:function(value){var options=typeof value==='string'?{url:value}:(value||{});return invoke('native-sdk.os.openUrl',{url:ensureString(options.url,'url')});},"
-        "showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}return invoke('native-sdk.os.showNotification',payload);},"
+        "showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.id!=null){payload.id=ensureString(options.id,'id');}if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}if(options.actionLabel!=null){payload.actionLabel=ensureString(options.actionLabel,'actionLabel');}if(options.actionCommand!=null){payload.actionCommand=ensureString(options.actionCommand,'actionCommand');}return invoke('native-sdk.os.showNotification',payload);},"
         "revealPath:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.revealPath',{path:ensureString(options.path,'path')});},"
         "addRecentDocument:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.addRecentDocument',{path:ensureString(options.path,'path')});},"
         "clearRecentDocuments:function(){return invoke('native-sdk.os.clearRecentDocuments',{});}"
@@ -9876,6 +9880,28 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)applicationDidResignActive:(NSNotification *)notification {
     (void)notification;
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_APP_DEACTIVATED }];
+}
+
+- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification {
+    (void)center;
+    (void)notification;
+    return YES;
+}
+
+- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
+    NSInteger activation = notification.activationType;
+    if (activation != NSUserNotificationActivationTypeActionButtonClicked) return;
+    NSString *command = [notification.userInfo[@"native-sdk-action-command"] isKindOfClass:[NSString class]]
+        ? notification.userInfo[@"native-sdk-action-command"] : @"";
+    if (command.length == 0) return;
+    const char *commandBytes = command.UTF8String ?: "";
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_COMMAND,
+        .window_id = [self activeCommandWindowId],
+        .command_name = commandBytes,
+        .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+    }];
+    [center removeDeliveredNotification:notification];
 }
 
 - (void)startAppearanceObservers {
@@ -12785,17 +12811,34 @@ int native_sdk_appkit_clipboard_write_data(native_sdk_appkit_host_t *host, const
     return [pasteboard setData:data forType:type] ? 1 : 0;
 }
 
-int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len) {
-    (void)host;
+int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
+    if (!host || ((action_label_len == 0) != (action_command_len == 0))) return 0;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *titleString = title ? [[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] : @"";
     if (titleString.length == 0) return 0;
     NSString *subtitleString = subtitle ? [[NSString alloc] initWithBytes:subtitle length:subtitle_len encoding:NSUTF8StringEncoding] : @"";
     NSString *bodyString = body ? [[NSString alloc] initWithBytes:body length:body_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *identifier = notification_id ? [[NSString alloc] initWithBytes:notification_id length:notification_id_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *actionLabel = action_label ? [[NSString alloc] initWithBytes:action_label length:action_label_len encoding:NSUTF8StringEncoding] : @"";
+    NSString *actionCommand = action_command ? [[NSString alloc] initWithBytes:action_command length:action_command_len encoding:NSUTF8StringEncoding] : @"";
     NSUserNotification *notification = [[NSUserNotification alloc] init];
     notification.title = titleString;
     if (subtitleString.length > 0) notification.subtitle = subtitleString;
     if (bodyString.length > 0) notification.informativeText = bodyString;
-    [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
+    if (identifier.length > 0) notification.identifier = identifier;
+    if (actionCommand.length > 0) {
+        notification.hasActionButton = YES;
+        notification.actionButtonTitle = actionLabel;
+        notification.userInfo = @{ @"native-sdk-action-command": actionCommand };
+    }
+    NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
+    center.delegate = object;
+    if (identifier.length > 0) {
+        for (NSUserNotification *delivered in center.deliveredNotifications) {
+            if ([delivered.identifier isEqualToString:identifier]) [center removeDeliveredNotification:delivered];
+        }
+    }
+    [center deliverNotification:notification];
     return 1;
 }
 

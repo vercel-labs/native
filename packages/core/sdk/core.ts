@@ -10,7 +10,7 @@
 // return path (NS1017) — they never live in the Model, in a Msg, in a local,
 // or in a helper.
 //
-// The v4 command set:
+// The v5 command set:
 //
 //   Cmd.none                     no effects (what a bare `return model` means)
 //   Cmd.persist()                ask the host to persist the committed model
@@ -79,7 +79,7 @@
 //                                clipboard read; ok arm carries the text bytes,
 //                                err arm the reason bytes ("failed",
 //                                "rejected")
-//   Cmd.showNotification({ title, subtitle?, body? })
+//   Cmd.showNotification({ id?, title, subtitle?, body?, actionLabel?, actionCommand? })
 //                                fire-and-forget desktop notification; the OS
 //                                remains authoritative over final delivery
 //   Cmd.openExternalUrl(url)      open an allowed HTTP(S) URL in the system
@@ -1080,9 +1080,12 @@ export interface FetchStreamSpec extends FetchSpec {
 /// fire-and-forget because the OS may suppress an accepted request through
 /// Focus / Do Not Disturb or the user's notification settings.
 export interface NotificationSpec {
+  readonly id?: Uint8Array;
   readonly title: Uint8Array;
   readonly subtitle?: Uint8Array;
   readonly body?: Uint8Array;
+  readonly actionLabel?: Uint8Array;
+  readonly actionCommand?: Uint8Array;
 }
 
 /// The three bounded host-local timestamp presentations. Unlike the markup
@@ -1257,7 +1260,7 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
-  | { readonly op: "show_notification"; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array }
+  | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
   | {
       readonly op: "spawn";
@@ -1750,14 +1753,20 @@ export const Cmd = {
 
   /// Ask the desktop host to show a system notification. Fire-and-forget:
   /// platform acceptance cannot promise display while OS focus modes and user
-  /// notification settings remain authoritative. Empty or over-bound titles,
-  /// over-bound optional fields, and unavailable services fail closed.
+  /// notification settings remain authoritative. A stable id replaces the
+  /// earlier notification with that id; paired actionLabel/actionCommand bytes
+  /// dispatch through the normal app-command path while the process is live.
+  /// Empty or over-bound titles, over-bound optional fields, unpaired actions,
+  /// invalid command names, and unavailable services fail closed.
   showNotification(spec: NotificationSpec): Cmd<never> {
     return {
       op: "show_notification",
+      id: spec.id ?? new Uint8Array(0),
       title: spec.title,
       subtitle: spec.subtitle ?? new Uint8Array(0),
       body: spec.body ?? new Uint8Array(0),
+      actionLabel: spec.actionLabel ?? new Uint8Array(0),
+      actionCommand: spec.actionCommand ?? new Uint8Array(0),
     };
   },
 

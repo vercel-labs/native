@@ -185,6 +185,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "native_command=" ++ layout_fingerprint.describe(platform.NativeCommandEvent) ++ "\n" ++
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
             "tray_command=" ++ layout_fingerprint.describe(platform.TrayCommandEvent) ++ "\n" ++
+            "notification_command=" ++ layout_fingerprint.describe(platform.NotificationCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
             "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
@@ -466,6 +467,7 @@ const EventTag = enum(u8) {
     video = 25,
     view_focused = 26,
     tray_command = 27,
+    notification_command = 28,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -613,6 +615,11 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeStr(command.name);
             try cursor.writeInt(u64, command.window_id);
             try cursor.writeInt(u32, command.status_item_id);
+        },
+        .notification_command => |command| {
+            try cursor.writeEnum(EventTag.notification_command);
+            try cursor.writeStr(command.name);
+            try cursor.writeInt(u64, command.window_id);
         },
         .timer => |timer| {
             try cursor.writeEnum(EventTag.timer);
@@ -848,6 +855,13 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
                 .name = name,
                 .window_id = try cursor.readInt(u64),
                 .status_item_id = try cursor.readInt(u32),
+            } };
+        },
+        .notification_command => blk: {
+            const name = try cursor.readStr();
+            break :blk .{ .notification_command = .{
+                .name = name,
+                .window_id = try cursor.readInt(u64),
             } };
         },
         .timer => blk: {
@@ -1654,6 +1668,11 @@ test "event codec round-trips every payload variant" {
         const decoded = try roundTripEvent(.{ .tray_command = .{ .name = "app.refresh", .window_id = 3 } });
         try testing.expectEqualStrings("app.refresh", decoded.tray_command.name);
         try testing.expectEqual(@as(platform.WindowId, 3), decoded.tray_command.window_id);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .notification_command = .{ .name = "build.open", .window_id = 2 } });
+        try testing.expectEqualStrings("build.open", decoded.notification_command.name);
+        try testing.expectEqual(@as(platform.WindowId, 2), decoded.notification_command.window_id);
     }
     {
         const decoded = try roundTripEvent(.{ .tray_action = .{ .status_item_id = 3, .item_id = 9 } });

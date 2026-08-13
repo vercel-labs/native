@@ -79,6 +79,14 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td><Tier tier="none" /></td>
     </tr>
     <tr>
+      <td>System notifications</td>
+      <td><Tier tier="full" note="same-id replacement and a native action button; actions dispatch while the app is running" fn={11} /></td>
+      <td><Tier tier="caveats" note="one in-flight legacy balloon, so every new notification replaces the current one; there is no custom button, and clicking the notification invokes its labeled action" fn={11} /></td>
+      <td><Tier tier="full" note="same-id replacement and a native action button; actions dispatch while the app is running" fn={11} /></td>
+      <td><Tier tier="none" /></td>
+      <td><Tier tier="none" /></td>
+    </tr>
+    <tr>
       <td>Menu-bar app lifecycle (<code>close_policy = "hide"</code>)</td>
       <td><Tier tier="full" note="close hides, the Dock reopen re-shows, tray Open/Quit drive showWindow/quitApp" /></td>
       <td><Tier tier="full" note="close hides (SW_HIDE); the tray icon is the re-show affordance" /></td>
@@ -131,6 +139,7 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
 8. `native package` targets all five platforms: macOS gets a `.app` bundle plus a styled drag-to-Applications DMG with `--archive`, Linux an install tree, Windows a distributable directory with a per-user file-type registration script, iOS a complete generated Xcode project — toolkit host sources, Info.plist, asset catalog, shared scheme, and the device-slice embed library — that `xcodebuild archive` builds with zero edits (code signing stays a manual step, like notarization), and Android a complete generated host project whose debug APK assembles with zero edits, directly with the SDK's build tools (store signing keys stay a manual step). Every platform's icons generate from one square source image. See [Packaging](/docs/packaging).
 9. macOS signing supports `adhoc` and `identity` modes with entitlements; notarization is submitted manually with the platform tools after packaging. No signing tooling exists yet for the other platforms. See [Code Signing](/docs/packaging/signing).
 10. The automation server is a file-based protocol the runtime serves on every desktop platform: snapshots, assertions, synthetic input, screenshots, record/replay. Engine screenshots render through the deterministic CPU reference renderer on every platform, so they are byte-comparable across hosts. Mobile exposes accessibility snapshots and actions through the embed ABI; the iOS and Android toolkit hosts serve the same file-based protocol inside the app's data container when launched with automation enabled.
+11. Desktop notification identifiers are app-local replacement keys. macOS and Linux expose the requested action as a native button. The current Windows host uses the in-box `Shell_NotifyIcon` balloon surface, which has no app-defined action button; it includes the label in the notification and treats a notification click as activation. All three route activation through ordinary application command dispatch only while the process remains alive; cold-start notification activation is not wired.
 
 ## Desktop Hosts
 

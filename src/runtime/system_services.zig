@@ -29,6 +29,11 @@ const validateTrayOptions = validation.validateTrayOptions;
 const validateTrayShell = validation.validateTrayShell;
 const validateTrayTitle = validation.validateTrayTitle;
 
+fn optionalNotificationString(payload: []const u8, field: []const u8, storage: *json.StringStorage) ![]const u8 {
+    if (json.fieldValue(payload, field) == null) return "";
+    return jsonStringField(payload, field, storage) orelse error.InvalidNotificationOptions;
+}
+
 pub fn RuntimeSystemServices(comptime Runtime: type) type {
     return struct {
         pub fn readClipboard(self: *Runtime, buffer: []u8) anyerror![]const u8 {
@@ -326,12 +331,21 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         pub fn showNotificationFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
             var storage = json.StringStorage.init(output);
             const title = jsonStringField(payload, "title", &storage) orelse return error.InvalidNotificationOptions;
-            const subtitle = jsonStringField(payload, "subtitle", &storage) orelse "";
-            const body = jsonStringField(payload, "body", &storage) orelse jsonStringField(payload, "message", &storage) orelse "";
+            const subtitle = try optionalNotificationString(payload, "subtitle", &storage);
+            const body = if (json.fieldValue(payload, "body") != null)
+                try optionalNotificationString(payload, "body", &storage)
+            else
+                try optionalNotificationString(payload, "message", &storage);
+            const notification_id = try optionalNotificationString(payload, "id", &storage);
+            const action_label = try optionalNotificationString(payload, "actionLabel", &storage);
+            const action_command = try optionalNotificationString(payload, "actionCommand", &storage);
             try self.showNotification(.{
+                .id = notification_id,
                 .title = title,
                 .subtitle = subtitle,
                 .body = body,
+                .action_label = action_label,
+                .action_command = action_command,
             });
             return writeTrueJson(output);
         }

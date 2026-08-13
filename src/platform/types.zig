@@ -243,6 +243,9 @@ pub const max_recent_document_path_bytes: usize = 4096;
 pub const max_notification_title_bytes: usize = 128;
 pub const max_notification_subtitle_bytes: usize = 128;
 pub const max_notification_body_bytes: usize = 1024;
+pub const max_notification_id_bytes: usize = 128;
+pub const max_notification_action_label_bytes: usize = 128;
+pub const max_notification_action_command_bytes: usize = 128;
 pub const max_clipboard_mime_type_bytes: usize = 128;
 pub const max_clipboard_data_bytes: usize = 65536;
 pub const max_credential_service_bytes: usize = 128;
@@ -1376,9 +1379,17 @@ pub const MessageDialogOptions = struct {
 };
 
 pub const NotificationOptions = struct {
+    /// Stable host identity. Reissuing a non-empty id replaces the
+    /// notification with that id and its action binding.
+    id: []const u8 = "",
     title: []const u8,
     subtitle: []const u8 = "",
     body: []const u8 = "",
+    /// Action fields are paired: both empty means display-only; both
+    /// non-empty presents the label and routes activation as an ordinary
+    /// application command.
+    action_label: []const u8 = "",
+    action_command: []const u8 = "",
 };
 
 pub const CredentialKey = struct {
@@ -1510,6 +1521,14 @@ pub const TrayCommandEvent = struct {
     name: []const u8,
     window_id: WindowId = 1,
     status_item_id: StatusItemId = primary_status_item_id,
+};
+
+/// A notification action activated while the app process is live. The
+/// platform keeps replacement identity private; only the validated command
+/// crosses into the runtime, where it follows the normal command path.
+pub const NotificationCommandEvent = struct {
+    name: []const u8,
+    window_id: WindowId = 1,
 };
 
 /// A selected row is namespaced by its owning status item. Row ids only
@@ -2465,6 +2484,7 @@ pub const Event = union(enum) {
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
     tray_command: TrayCommandEvent,
+    notification_command: NotificationCommandEvent,
     timer: TimerEvent,
     /// A cross-thread nudge posted through `PlatformServices.wake_fn`:
     /// worker threads (effect executors) ask the platform loop to deliver
@@ -2503,6 +2523,7 @@ pub const Event = union(enum) {
             .native_command => "native_command",
             .menu_command => "menu_command",
             .tray_command => "tray_command",
+            .notification_command => "notification_command",
             .timer => "timer",
             .wake => "wake",
             .files_dropped => "files_dropped",

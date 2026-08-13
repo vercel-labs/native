@@ -312,9 +312,12 @@ export interface FetchStreamSpec extends FetchSpec {
 }
 
 export interface NotificationSpec {
+  readonly id?: Uint8Array;
   readonly title: Uint8Array;
   readonly subtitle?: Uint8Array;
   readonly body?: Uint8Array;
+  readonly actionLabel?: Uint8Array;
+  readonly actionCommand?: Uint8Array;
 }
 
 export type LocalTimeStyle = "date" | "time" | "datetime";
@@ -444,7 +447,7 @@ export type CmdData =
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
-  | { readonly op: "show_notification"; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array }
+  | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
   | {
       readonly op: "spawn";
@@ -824,9 +827,12 @@ export const Cmd = {
   showNotification(spec: NotificationSpec): CmdData {
     return {
       op: "show_notification",
+      id: spec.id ?? new Uint8Array(0),
       title: spec.title,
       subtitle: spec.subtitle ?? new Uint8Array(0),
       body: spec.body ?? new Uint8Array(0),
+      actionLabel: spec.actionLabel ?? new Uint8Array(0),
+      actionCommand: spec.actionCommand ?? new Uint8Array(0),
     };
   },
 

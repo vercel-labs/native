@@ -449,24 +449,30 @@ Files ride the same channel without smuggling an `Io` handle from `main` into `u
 .saved => |result| model.noteSaved(result.outcome),
 ```
 
-Desktop notifications use the same bounded platform-services facade but are intentionally fire-and-forget: once the host accepts a request, the OS can still suppress it through Focus / Do Not Disturb or the user's notification settings, so a success Msg would over-promise. Return `Cmd.showNotification` from a TypeScript core or call `fx.showNotification` from a Zig `update_fx` arm; invalid or over-bound fields and unavailable services fail closed. The fake executor and session replay never display one.
+Desktop notifications use the same bounded platform-services facade but are intentionally fire-and-forget: once the host accepts a request, the OS can still suppress it through Focus / Do Not Disturb or the user's notification settings, so a success Msg would over-promise. A nonempty `id` replaces an earlier notification with that id. Paired `actionLabel` / `actionCommand` fields add an action whose activation returns through the ordinary application command path while the process is running. Return `Cmd.showNotification` from a TypeScript core or call `fx.showNotification` from a Zig `update_fx` arm; invalid or over-bound fields, unpaired action fields, invalid command names, and unavailable services fail closed. The fake executor and session replay never display one; the null test platform records and can activate one deterministically.
 
 <CodeToggle>
 
 ```ts
 case "build_finished":
   return [model, Cmd.showNotification({
+    id: asciiBytes("build-status"),
     title: asciiBytes("Build finished"),
     subtitle: asciiBytes("native-sdk"),
     body: asciiBytes("All checks passed."),
+    actionLabel: asciiBytes("Open results"),
+    actionCommand: asciiBytes("build.open-results"),
   })];
 ```
 
 ```zig
 .build_finished => fx.showNotification(.{
+    .id = "build-status",
     .title = "Build finished",
     .subtitle = "native-sdk",
     .body = "All checks passed.",
+    .action_label = "Open results",
+    .action_command = "build.open-results",
 }),
 ```
 

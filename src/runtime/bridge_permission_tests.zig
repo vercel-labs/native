@@ -377,10 +377,11 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     try std.testing.expect(std.mem.indexOf(u8, denied.null_platform.lastBridgeResponse(), "OS API is not permitted") != null);
     try std.testing.expect(std.mem.indexOf(u8, denied.null_platform.lastBridgeResponse(), "\"permission_denied\"") != null);
 
-    const grants = [_][]const u8{ security.permission_network, security.permission_filesystem, security.permission_notifications };
+    const grants = [_][]const u8{ security.permission_network, security.permission_filesystem, security.permission_notifications, security.permission_command };
     const network_permission = [_][]const u8{security.permission_network};
     const filesystem_permission = [_][]const u8{security.permission_filesystem};
     const notifications_permission = [_][]const u8{security.permission_notifications};
+    const command_permission = [_][]const u8{security.permission_command};
     const origins = [_][]const u8{"zero://inline"};
     const policies = [_]bridge.CommandPolicy{
         .{ .name = "native-sdk.os.openUrl", .permissions = &network_permission, .origins = &origins },
@@ -388,6 +389,14 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
         .{ .name = "native-sdk.os.revealPath", .permissions = &filesystem_permission, .origins = &origins },
         .{ .name = "native-sdk.os.addRecentDocument", .permissions = &filesystem_permission, .origins = &origins },
         .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = &filesystem_permission, .origins = &origins },
+    };
+    const action_policies = [_]bridge.CommandPolicy{
+        .{ .name = "native-sdk.os.openUrl", .permissions = &network_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.showNotification", .permissions = &notifications_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.revealPath", .permissions = &filesystem_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.addRecentDocument", .permissions = &filesystem_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = &filesystem_permission, .origins = &origins },
+        .{ .name = "native-sdk.command.invoke", .permissions = &command_permission, .origins = &origins },
     };
     const allowed_urls = [_][]const u8{"https://example.com/*"};
 
@@ -407,6 +416,31 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
     try std.testing.expectEqual(@as(usize, 1), allowed.null_platform.notificationCount());
     try std.testing.expectEqualStrings("Build finished", allowed.null_platform.lastNotificationTitle());
+
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"action-denied\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":\"build\",\"title\":\"Build finished\",\"actionLabel\":\"Open\",\"actionCommand\":\"build.open\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "Notification actions require command invoke permission") != null);
+    try std.testing.expectEqual(@as(usize, 1), allowed.null_platform.notificationCount());
+
+    allowed.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &action_policies };
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"action-allowed\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":\"build\",\"title\":\"Build finished\",\"actionLabel\":\"Open\",\"actionCommand\":\"build.open\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    try std.testing.expectEqual(@as(usize, 2), allowed.null_platform.notificationCount());
+    try std.testing.expectEqualStrings("build", allowed.null_platform.lastNotificationId());
+    try std.testing.expectEqualStrings("Open", allowed.null_platform.lastNotificationActionLabel());
+    try std.testing.expectEqualStrings("build.open", allowed.null_platform.lastNotificationActionCommand());
+
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"invalid-notification\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":42,\"title\":\"Build finished\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), allowed.null_platform.notificationCount());
 
     try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"open\",\"command\":\"native-sdk.os.openUrl\",\"payload\":{\"url\":\"https://example.com/docs\"}}",

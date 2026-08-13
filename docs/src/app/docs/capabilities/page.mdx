@@ -211,9 +211,12 @@ Opening external URLs is also gated by the external-link policy:
 ```javascript
 await window.zero.os.openUrl("https://example.com/docs/start");
 await window.zero.os.showNotification({
+  id: "build-status",
   title: "Build finished",
   subtitle: "native-sdk",
   body: "All checks passed.",
+  actionLabel: "Open results",
+  actionCommand: "build.open-results",
 });
 await window.zero.os.revealPath("/Users/me/Downloads/report.pdf");
 await window.zero.os.addRecentDocument("/Users/me/Downloads/report.pdf");
@@ -254,16 +257,19 @@ Use the `app.zon` app id as `service` when WebView code and a model core need to
 
 ## Model cores
 
-Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications.
+Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications. An optional nonempty `id` replaces the app's earlier notification with the same id. Supply `actionLabel` and `actionCommand` together to route activation through the same application command path as menus, shortcuts, and bridge command invocation. Action delivery is process-live; it does not cold-launch an exited app.
 
 ### TypeScript
 
 ```ts
 case "build_finished":
   return [model, Cmd.showNotification({
+    id: asciiBytes("build-status"),
     title: asciiBytes("Build finished"),
     subtitle: asciiBytes("native-sdk"),
     body: asciiBytes("All checks passed."),
+    actionLabel: asciiBytes("Open results"),
+    actionCommand: asciiBytes("build.open-results"),
   })];
 ```
 
@@ -271,9 +277,12 @@ case "build_finished":
 
 ```zig
 .build_finished => fx.showNotification(.{
+    .id = "build-status",
     .title = "Build finished",
     .subtitle = "native-sdk",
     .body = "All checks passed.",
+    .action_label = "Open results",
+    .action_command = "build.open-results",
 }),
 ```
 

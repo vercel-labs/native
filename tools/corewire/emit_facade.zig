@@ -2663,7 +2663,7 @@ const FacadeEmitter = struct {
             \\// ---------------------------------------------------- the cmd wire
             \\// Encoder for the inert Cmd data the author's update returns —
             \\// byte-for-byte the layouts the host's command decoder expects
-            \\// (cmd_format_version 5). nscfTagOf maps a Msg arm name onto its
+            \\// (cmd_format_version 6). nscfTagOf maps a Msg arm name onto its
             \\// declaration-order wire tag.
             \\
             \\const nscfFetchMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
@@ -3042,10 +3042,20 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.key);
             \\      return;
             \\    case "show_notification":
-            \\      nscfWU8(sink, 0x1d);
-            \\      nscfWBytes(sink, cmd.title);
-            \\      nscfWBytes(sink, cmd.subtitle);
-            \\      nscfWBytes(sink, cmd.body);
+            \\      if (cmd.id.length === 0 && cmd.actionLabel.length === 0 && cmd.actionCommand.length === 0) {
+            \\        nscfWU8(sink, 0x1d);
+            \\        nscfWBytes(sink, cmd.title);
+            \\        nscfWBytes(sink, cmd.subtitle);
+            \\        nscfWBytes(sink, cmd.body);
+            \\      } else {
+            \\        nscfWU8(sink, 0x31);
+            \\        nscfWBytes(sink, cmd.id);
+            \\        nscfWBytes(sink, cmd.title);
+            \\        nscfWBytes(sink, cmd.subtitle);
+            \\        nscfWBytes(sink, cmd.body);
+            \\        nscfWBytes(sink, cmd.actionLabel);
+            \\        nscfWBytes(sink, cmd.actionCommand);
+            \\      }
             \\      return;
             \\    case "audio_capture_start":
             \\      nscfWU8(sink, 0x1e);

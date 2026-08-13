@@ -246,7 +246,7 @@ Dialog commands are **always default-deny** and require an explicit `builtin_bri
     <tr>
       <td><code>native-sdk.os.showNotification</code></td>
       <td><code>notifications</code></td>
-      <td>Show a native system notification with a title, optional subtitle, and optional body</td>
+      <td>Show or replace a native notification; optional paired <code>actionLabel</code> / <code>actionCommand</code> fields dispatch an app command</td>
     </tr>
     <tr>
       <td><code>native-sdk.os.revealPath</code></td>
@@ -266,7 +266,7 @@ Dialog commands are **always default-deny** and require an explicit `builtin_bri
   </tbody>
 </table>
 
-OS commands are **always default-deny** and require an explicit `builtin_bridge` policy. `native-sdk.os.openUrl` also checks `security.navigation.external_links`; the URL must match the external link allowlist before the platform service is called. macOS, Linux, and Windows system WebView hosts implement `openUrl`, `revealPath`, notifications, and recent-document commands; macOS Chromium also implements the current OS command set. Other platform hosts return `invalid_request` with the standard unsupported-service message until implemented.
+OS commands are **always default-deny** and require an explicit `builtin_bridge` policy. `native-sdk.os.openUrl` also checks `security.navigation.external_links`; the URL must match the external link allowlist before the platform service is called. An actionable notification additionally requires an allowed `native-sdk.command.invoke` policy and the `command` permission for the same origin, because activating it enters the normal app-command path. macOS, Linux, and Windows system WebView hosts implement `openUrl`, `revealPath`, notifications, and recent-document commands; macOS Chromium also implements the current OS command set. Other platform hosts return `invalid_request` with the standard unsupported-service message until implemented.
 
 ## Credential Commands
 
@@ -466,9 +466,12 @@ const result = await window.zero.invoke("native-sdk.dialog.showMessage", {
 
 await window.zero.os.openUrl("https://example.com/docs/start");
 await window.zero.os.showNotification({
+  id: "build-status",
   title: "Build finished",
   subtitle: "native-sdk",
   body: "All checks passed.",
+  actionLabel: "Open results",
+  actionCommand: "build.open-results",
 });
 await window.zero.os.revealPath("/Users/me/Downloads/report.pdf");
 await window.zero.os.addRecentDocument("/Users/me/Downloads/report.pdf");

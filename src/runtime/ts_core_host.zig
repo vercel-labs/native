@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 5) onto the real effect engine
+//! emits (`cmd_format_version` 6) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -1407,6 +1407,24 @@ pub fn TsCoreHost(comptime core: type) type {
                             .title = title,
                             .subtitle = subtitle,
                             .body = body,
+                        });
+                    },
+                    // actionable_notification [op 0x31][id/title/subtitle/body/
+                    // action_label/action_command as u32-length bytes]
+                    0x31 => {
+                        const notification_id = takeLongBytes(cmd, &at);
+                        const title = takeLongBytes(cmd, &at);
+                        const subtitle = takeLongBytes(cmd, &at);
+                        const body = takeLongBytes(cmd, &at);
+                        const action_label = takeLongBytes(cmd, &at);
+                        const action_command = takeLongBytes(cmd, &at);
+                        fx.showNotification(.{
+                            .id = notification_id,
+                            .title = title,
+                            .subtitle = subtitle,
+                            .body = body,
+                            .action_label = action_label,
+                            .action_command = action_command,
                         });
                     },
                     // audio_capture_start [op][key f64 LE][source u8]

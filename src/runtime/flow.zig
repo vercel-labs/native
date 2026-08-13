@@ -454,6 +454,13 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         .status_item_id = command.status_item_id,
                     });
                 },
+                .notification_command => |command| {
+                    try dispatchCommand(self, app, .{
+                        .name = command.name,
+                        .source = .notification,
+                        .window_id = command.window_id,
+                    });
+                },
                 .timer => |timer_event| {
                     try dispatchEvent(self, app, .{ .timer = timer_event });
                 },
@@ -1191,7 +1198,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             else if (is_credentials)
                 dispatchCredentialBridgeCommand(self, request, &result_buffer, &response_buffer)
             else
-                dispatchOsBridgeCommand(self, request, &result_buffer, &response_buffer);
+                dispatchOsBridgeCommand(self, request, message.origin, &result_buffer, &response_buffer);
 
             try completeBridgeResponse(self, message.window_id, message.webview_label, result);
             self.invalidateFor(.command, null);

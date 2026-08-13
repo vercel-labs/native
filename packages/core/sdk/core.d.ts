@@ -246,9 +246,12 @@ export interface FetchStreamSpec extends FetchSpec {
     readonly maxLineBytes?: number;
 }
 export interface NotificationSpec {
+    readonly id?: Uint8Array;
     readonly title: Uint8Array;
     readonly subtitle?: Uint8Array;
     readonly body?: Uint8Array;
+    readonly actionLabel?: Uint8Array;
+    readonly actionCommand?: Uint8Array;
 }
 export type LocalTimeStyle = "date" | "time" | "datetime";
 export type Cmd<M extends Msgish> = {
@@ -417,9 +420,12 @@ export type Cmd<M extends Msgish> = {
     readonly errKind: string;
 } | {
     readonly op: "show_notification";
+    readonly id: Uint8Array;
     readonly title: Uint8Array;
     readonly subtitle: Uint8Array;
     readonly body: Uint8Array;
+    readonly actionLabel: Uint8Array;
+    readonly actionCommand: Uint8Array;
 } | {
     readonly op: "delay";
     readonly key: string;

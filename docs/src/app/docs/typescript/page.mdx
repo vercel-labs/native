@@ -305,8 +305,8 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>System clipboard: write is fire-and-forget, read routes the text bytes back</td>
     </tr>
     <tr>
-      <td><code>Cmd.showNotification(&#123; title, subtitle?, body? &#125;)</code></td>
-      <td>Show a desktop notification, fire-and-forget; text fields are bytes and the OS remains authoritative over final delivery</td>
+      <td><code>Cmd.showNotification(&#123; id?, title, subtitle?, body?, actionLabel?, actionCommand? &#125;)</code></td>
+      <td>Show or replace a desktop notification, fire-and-forget; paired action fields dispatch through the ordinary app-command path while the process is running</td>
     </tr>
     <tr>
       <td><code>Cmd.openExternalUrl(url)</code> / <code>Cmd.revealPath(path)</code></td>

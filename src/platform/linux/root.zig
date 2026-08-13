@@ -35,6 +35,7 @@ const GtkEventKind = enum(c_int) {
     audio = 17,
     context_menu_action = 18,
     view_focused = 19,
+    notification_command = 20,
 };
 
 const GtkEvent = extern struct {
@@ -156,7 +157,7 @@ extern fn native_sdk_gtk_set_webview_layer(host: *GtkHost, window_id: u64, label
 extern fn native_sdk_gtk_close_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_open_external_url(host: *GtkHost, url: [*]const u8, url_len: usize) c_int;
 extern fn native_sdk_gtk_reveal_path(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
-extern fn native_sdk_gtk_show_notification(host: *GtkHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
+extern fn native_sdk_gtk_show_notification(host: *GtkHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
 extern fn native_sdk_gtk_add_recent_document(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_gtk_clear_recent_documents(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_credentials_available(host: *GtkHost) c_int;
@@ -596,6 +597,10 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .view_label = event.view_label[0..event.view_label_len],
         } }),
         .menu_command => state.emit(.{ .menu_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
+        } }),
+        .notification_command => state.emit(.{ .notification_command = .{
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
@@ -1330,6 +1335,12 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.subtitle.len,
         options.body.ptr,
         options.body.len,
+        options.id.ptr,
+        options.id.len,
+        options.action_label.ptr,
+        options.action_label.len,
+        options.action_command.ptr,
+        options.action_command.len,
     ) == 0) return error.UnsupportedService;
 }
 
