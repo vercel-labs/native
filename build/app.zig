@@ -170,14 +170,18 @@ pub fn scriptcTargetIsCross(host: std.Target, target: std.Build.ResolvedTarget) 
 /// The glibc-floor teaching for cross-target ScriptC builds. Both the core
 /// archive and either service carrier carry the compiled TypeScript runtime,
 /// so all of them hit the same missing symbol.
-pub fn panicScriptcLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
-    @panic(b.fmt(
+pub fn scriptcLinuxGlibcSpellingTeaching(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    return b.fmt(
         "\nTypeScript target {t}-linux-gnu uses Zig's default glibc floor, which" ++
             " predates arc4random_buf — a symbol the compiled runtime needs (glibc" ++
             " 2.36+).\nSpell the target as \"{t}-linux-gnu.2.36\" (or later), or" ++
             " \"{t}-linux-musl\".\n",
         .{ target.result.cpu.arch, target.result.cpu.arch, target.result.cpu.arch },
-    ));
+    );
+}
+
+pub fn panicScriptcLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
+    @panic(scriptcLinuxGlibcSpellingTeaching(b, target));
 }
 
 fn resolveServiceCarrier(

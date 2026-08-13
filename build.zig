@@ -726,6 +726,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = ".windows => target.result.cpu.arch == .x86_64" },
         .{ .path = "build/app.zig", .pattern = "scriptcPlatformTriple(b, target),\n        // Keep the core and service archives on the same cross compiler" },
         .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe," },
+        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--host-platform\", host_platform, \"--target-platform\", app_build.scriptcPlatformTriple(b, target), \"--zig-exe\", b.graph.zig_exe });\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
+        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe,\n    });\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
         .{ .path = "build.zig", .pattern = "abi_laws_mod.addObjectFile(markup_fixture.archive);\n    addScriptcArchiveSystemLibs(abi_laws_mod, target);" },
         .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "SCRIPTC_TARGET: args[\"target-platform\"]" },
     });
@@ -3361,6 +3363,17 @@ fn addScriptcArchiveSystemLibs(mod: *std.Build.Module, target: std.Build.Resolve
     mod.linkSystemLibrary("advapi32", .{});
 }
 
+/// Attach ScriptC's Linux glibc-floor teaching to an actual compile step.
+/// The root graph constructs fixture lanes even for unrelated selections such
+/// as the release pipeline's cross-compiled `zig build cli`; making the
+/// teaching a dependency preserves those CLI-only builds while still refusing
+/// the unsupported target before a selected ScriptC compile does any work.
+fn addScriptcGlibcFloorTeaching(b: *std.Build, target: std.Build.ResolvedTarget, step: *std.Build.Step) void {
+    const app_build = @import("build/app.zig");
+    if (!app_build.scriptcTargetIsCross(b.graph.host.result, target) or !app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;
+    step.dependOn(&b.addFail(app_build.scriptcLinuxGlibcSpellingTeaching(b, target)).step);
+}
+
 const ExternalServiceFixture = struct {
     executable: std.Build.LazyPath,
     /// The in-process carrier's library archive (thread-instanced,
@@ -3392,9 +3405,6 @@ fn externalServiceFixture(
     name: []const u8,
 ) ExternalServiceFixture {
     const app_build = @import("build/app.zig");
-    if (app_build.scriptcTargetIsCross(b.graph.host.result, target) and app_build.linuxGlibcSpellingHitsDefaultFloor(target)) {
-        app_build.panicScriptcLinuxGlibcSpelling(b, target);
-    }
     const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target);
     const project = b.addRunArtifact(corewire_exe);
     project.addArg("--services-sidecar");
@@ -3446,6 +3456,7 @@ fn externalServiceFixture(
     } else null;
     const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
     compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", app_build.scriptcPlatformTriple(b, target), "--zig-exe", b.graph.zig_exe });
+    addScriptcGlibcFloorTeaching(b, target, &compile.step);
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
@@ -3586,9 +3597,6 @@ fn externalCoreFixtureModule(
     spec: ExternalCoreFixtureSpec,
 ) ExternalCoreFixture {
     const app_build = @import("build/app.zig");
-    if (app_build.scriptcTargetIsCross(b.graph.host.result, target) and app_build.linuxGlibcSpellingHitsDefaultFloor(target)) {
-        app_build.panicScriptcLinuxGlibcSpelling(b, target);
-    }
     // The frontend, in check-only mode: the subset checker gates the
     // compile, and the contract sidecar states the build-root-relative
     // entry spelling. The frontend reads its own sources, the SDK
@@ -3691,6 +3699,7 @@ fn externalCoreFixtureModule(
         "--zig-exe",
         b.graph.zig_exe,
     });
+    addScriptcGlibcFloorTeaching(b, target, &compile.step);
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         // The development override: point at any toolchain command; the
         // driver still refuses a release other than the SDK's pin.
