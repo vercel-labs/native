@@ -1,6 +1,6 @@
 # TypeScript Services
 
-Modules under `src/services/` are ordinary TypeScript compiled to native code on the compiler's full static tier: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, `JSON`, `Map`/`Set`, `Date`, and classes, when the pinned compiler supports them. The same pinned compiler builds the deterministic core ([TypeScript Cores](/docs/typescript)) and the service tier; no JavaScript engine ships in either.
+Modules under `src/services/` are ordinary TypeScript compiled to native code on the compiler's full static tier: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, `JSON`, `Map`/`Set`, `Date`, and classes, when the pinned compiler supports them. The same pinned compiler builds the deterministic core ([TypeScript Cores](/docs/typescript)) and the services; no JavaScript engine ships in either.
 
 The core calls a service by returning a command from `update`. The typed result returns as an ordinary `Msg`:
 
@@ -17,14 +17,14 @@ case "parse":
 
 Services run on a supervised carrier — as a separate child process by default, or compiled into the app binary on an explicitly selected worker-thread pool — and are desktop-only today (see [Runtime behavior](#runtime-behavior)).
 
-## The two tiers
+## The two roles
 
-Record→replay, headless testing, and [automation](/docs/automation) depend on `update` being a pure function of its inputs. A service reads the real filesystem, clock, and network, so the checker refuses a core import of a service file (NS1065) and the core-to-service edge is always a command. Service results are journaled like every other effect result.
+The split is by role: the core is the app's deterministic logic — `Model`, `Msg`, `update` — and services do the app's imperative work. Record→replay, headless testing, and [automation](/docs/automation) depend on `update` being a pure function of its inputs. A service reads the real filesystem, clock, and network, so the checker refuses a core import of a service file (NS1065) and the core-to-service edge is always a command. Service results are journaled like every other effect result.
 
 <table>
   <thead>
     <tr>
-      <th>Tier</th>
+      <th>Role</th>
       <th>Owns</th>
       <th>Language rules</th>
     </tr>
@@ -102,7 +102,7 @@ A service module is any `.ts` file under `src/services/`. Every directly exporte
 - It declares a contract-encodable result type.
 - Its name is `<module-basename>.<export>` — `export function parse` in `src/services/feeds.ts` is `feeds.parse`.
 
-Boundary shapes live in a shared, subset-legal module outside `src/services/`, imported by both tiers:
+Boundary shapes live in a shared, subset-legal module outside `src/services/`, imported by the core and the service:
 
 ```ts:src/shared.ts
 export type ParseRequest = {
@@ -130,7 +130,7 @@ export function parse(request: ParseRequest): ParseResult {
 }
 ```
 
-`native check` projects the complete type table into a contract sidecar (`services.contract.json`), checks both tiers, and generates the typed client the core imports. An operation shaped any other way — `async`, a default export, an unannotated request, a non-encodable result — is a teaching error (NS1067) naming the rewrite.
+`native check` projects the complete type table into a contract sidecar (`services.contract.json`), checks both classes, and generates the typed client the core imports. An operation shaped any other way — `async`, a default export, an unannotated request, a non-encodable result — is a teaching error (NS1067) naming the rewrite.
 
 ### Boundary types
 
@@ -148,7 +148,7 @@ export function parse(request: ParseRequest): ParseResult {
     </tr>
     <tr>
       <td><code>Uint8Array</code></td>
-      <td>The bytes form both tiers already share</td>
+      <td>The bytes form the core and services already share</td>
     </tr>
     <tr>
       <td>Optionals, readonly slices</td>
@@ -380,4 +380,4 @@ Three checker rules enforce the boundary. Each teaches the fix and the reason at
 
 ## Reference
 
-`examples/service-feed-reader` is the minimal two-tier app: a deterministic core, a service using `node:fs`, regex, `Map`, `Date`, and JSON, and a kind-tagged error path. The machine-precise authoring guide ships as `native skills get ts-services`.
+`examples/service-feed-reader` is the minimal core-plus-service app: a deterministic core, a service using `node:fs`, regex, `Map`, `Date`, and JSON, and a kind-tagged error path. The machine-precise authoring guide ships as `native skills get ts-services`.

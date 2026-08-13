@@ -714,6 +714,29 @@ test("diagnostics carry rule, fix, and why", () => {
   assert.ok(d.title.length > 0, "has a rule title");
   assert.ok(d.message.includes("Cmd."), "shows the idiomatic rewrite");
   assert.ok(d.message.toLowerCase().includes("replay"), "says why");
+  assert.ok(d.message.includes("src/services/"), "names the service alternative");
+  assert.ok(!d.message.includes("deliberately deferred"), "guarantee rules carry no deferral clause");
+});
+
+test("every rule carries a class and the deferred set is exact", async () => {
+  const { rules } = await import("../src/diagnostics.ts");
+  const deferred = Object.values(rules)
+    .filter((r) => r.class === "deferred")
+    .map((r) => r.id)
+    .sort();
+  assert.deepEqual(deferred, ["NS1011", "NS1019", "NS1040", "NS1042", "NS1044"]);
+  for (const r of Object.values(rules)) {
+    assert.ok(r.class === "guarantee" || r.class === "deferred", `${r.id} has a class`);
+  }
+});
+
+test("deferred rules teach the deferral, not impossibility", () => {
+  const result = checkOnly(`export function f(): number { const m = new Map<number, number>(); return m.size; }`);
+  const d = result.diagnostics.find((x) => x.id === "NS1011");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("deliberately deferred"), "names the class");
+  assert.ok(d.message.includes("id-keyed array"), "still teaches the core idiom first");
+  assert.ok(d.message.includes("src/services/"), "names the service alternative");
 });
 
 test("NS1022 in-place sort teaches the toSorted rewrite", () => {
