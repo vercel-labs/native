@@ -770,7 +770,7 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // is `.rejected`.
         .pty => record.pty_kind == .exit and record.truncated,
         .response => record.fetch_outcome == .rejected,
-        .file => record.file_outcome == .rejected and record.file_event == .terminal,
+        .file => record.file_rejected_admission,
         .clipboard => record.clipboard_outcome == .rejected,
         // Audio rejections are loop-side validation (path bounds) that
         // refuses again; everything else — loaded acknowledgments,
@@ -820,6 +820,21 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // replay launch's environment is never consulted.
         .line, .clock, .env, .persist => false,
     };
+}
+
+test "only admission-tagged file rejections regenerate" {
+    try std.testing.expect(effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 1,
+        .file_outcome = .rejected,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(!effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 1,
+        .file_op = .read_stream,
+        .file_outcome = .rejected,
+    }));
 }
 
 /// Re-render a journaled screenshot mark through the same deterministic

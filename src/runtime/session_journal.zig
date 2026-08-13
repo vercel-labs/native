@@ -1039,6 +1039,7 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u64, record.file_total);
     try cursor.writeInt(i64, record.file_mtime_ms);
     try cursor.writeBool(record.file_exists);
+    try cursor.writeBool(record.file_rejected_admission);
     try cursor.writeEnum(record.clipboard_op);
     try cursor.writeEnum(record.clipboard_outcome);
     try cursor.writeInt(u64, record.timer_timestamp_ns);
@@ -1131,6 +1132,7 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .file_total = try cursor.readInt(u64),
         .file_mtime_ms = try cursor.readInt(i64),
         .file_exists = try cursor.readBool(),
+        .file_rejected_admission = try cursor.readBool(),
         .clipboard_op = try cursor.readEnum(runtime_effects.EffectClipboardOp),
         .clipboard_outcome = try cursor.readEnum(runtime_effects.EffectClipboardOutcome),
         .timer_timestamp_ns = try cursor.readInt(u64),

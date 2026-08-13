@@ -3,7 +3,7 @@ import fs from "node:fs";
 // Kept in lockstep with `zig build print-pins`; the Node test suite checks
 // both values so a runtime wire change cannot silently strand dev-host
 // recordings.
-export const journalFormatFingerprint = 0x6e7e3eb90e15e8f0n;
+export const journalFormatFingerprint = 0x0fd53566253aae9bn;
 export const automationProtocolFingerprint = 0x096c8aa4730c11ecn;
 
 const requestKeyBase = 0x5453525100000000n;
@@ -40,7 +40,7 @@ function defaultEffect(kind, key, payload, options = {}) {
     new Uint8Array([kind]), u64(key), stringBytes(payload), stringBytes(new Uint8Array(0)),
     new Uint8Array([0]), u32(options.dropped ?? 0), i32(options.code ?? 0), new Uint8Array([0, 0, 0]), u16(0),
     // fetch outcome; file op/event/outcome + total/mtime/exists; clipboard op/outcome; timer outcome
-    new Uint8Array([0, 0, 0, 0]), u64(0), i64(0), new Uint8Array([0, 1, 0]), u64(0), new Uint8Array([0]), i64(0),
+    new Uint8Array([0, 0, 0, 0]), u64(0), i64(0), new Uint8Array([0, 0, 1, 0]), u64(0), new Uint8Array([0]), i64(0),
     // audio defaults: position, zero timing/state; file blob address; 32 zero bands
     new Uint8Array([1]), u64(0), u64(0), new Uint8Array([0, 0]), new Uint8Array(16), u64(0), new Uint8Array(32),
     // image defaults + 16-byte blob hash
@@ -121,7 +121,7 @@ function decodeEffect(payload) {
   const dropped = r.u32();
   const code = r.i32();
   r.byte(); r.byte(); r.byte(); r.u16();
-  r.byte(); r.byte(); r.byte(); r.byte(); r.u64(); r.i64(); r.byte(); r.byte(); r.byte(); r.u64(); r.byte(); r.i64();
+  r.byte(); r.byte(); r.byte(); r.byte(); r.u64(); r.i64(); r.byte(); r.byte(); r.byte(); r.byte(); r.u64(); r.byte(); r.i64();
   r.byte(); r.u64(); r.u64(); r.byte(); r.byte(); r.take(16); r.u64(); r.take(32);
   r.byte(); r.u64(); r.u64(); r.take(16); r.u64();
   const channelKind = r.byte();

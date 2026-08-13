@@ -565,6 +565,21 @@ test "read streams replace and cancel silently while sinks cancel loudly" {
     try std.testing.expectEqual(effects_mod.EffectFileOutcome.cancelled, cancelled.outcome);
 }
 
+test "replay cancellation keeps a fake sink parked for its recorded terminal" {
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+
+    fx.writeFileStream(.{ .key = 22, .path = "sink.bin", .on_result = Fx.fileMsg(.result) });
+    fx.cancel(22);
+    try std.testing.expectEqual(@as(?TestMsg, null), fx.takeMsg());
+    try fx.feedFileResultDetailed(.{ .key = 22, .op = .write_stream_open, .outcome = .cancelled });
+    const cancelled = fx.takeMsg().?.result;
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.cancelled, cancelled.outcome);
+}
+
 test "disk capacity errors are closed and enum-named across whole and streaming writes" {
     const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
     const Fx = effects_mod.Effects(TestMsg);
