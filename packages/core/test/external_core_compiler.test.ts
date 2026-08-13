@@ -58,3 +58,83 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "cross-target"
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the external core compile lane refuses cross-target Windows MSVC before compiler work", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-msvc-cross-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    const manifest = path.join(root, "package.json");
+    fs.writeFileSync(manifest, JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    const frontendSidecar = path.join(root, "frontend.contract.json");
+    fs.writeFileSync(frontendSidecar, JSON.stringify({
+      model_fingerprint: "0123456789abcdef",
+      has_migrate: false,
+    }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--name", "fixture_core",
+      "--manifest", manifest,
+      "--frontend-sidecar", frontendSidecar,
+      "--out-archive", path.join(root, "libfixture_core.a"),
+      "--out-sidecar", path.join(root, "compiled.contract.json"),
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "x86_64-windows-msvc",
+      "--compiler", process.execPath,
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /cross-target Windows build/);
+    assert.match(result.stderr, /x86_64-windows-gnu/);
+    assert.doesNotMatch(result.stderr, /external core compiler did not report a version/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the external core compile lane preserves native Windows MSVC", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-msvc-native-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, "profile.json"), "{}\n");
+    const manifest = path.join(root, "package.json");
+    fs.writeFileSync(manifest, JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    const frontendSidecar = path.join(root, "frontend.contract.json");
+    fs.writeFileSync(frontendSidecar, JSON.stringify({
+      model_fingerprint: "0123456789abcdef",
+      has_migrate: false,
+    }));
+    const compiler = path.join(root, "compiler.mjs");
+    fs.writeFileSync(compiler, `
+import fs from "node:fs";
+if (process.argv.includes("-v")) { console.log("0.0.28"); process.exit(0); }
+if (process.env.SCRIPTC_CC !== undefined || process.env.SCRIPTC_TARGET !== undefined) { console.error("native compile received cross environment"); process.exit(9); }
+const output = process.argv[process.argv.indexOf("-o") + 1];
+fs.writeFileSync(output + ".lib.a", "native msvc archive bytes");
+fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "native-msvc" }));
+`);
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
+    const archive = path.join(root, "libfixture_core.a");
+    const env = { ...process.env };
+    delete env.SCRIPTC_CC;
+    delete env.SCRIPTC_TARGET;
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--name", "fixture_core",
+      "--manifest", manifest,
+      "--frontend-sidecar", frontendSidecar,
+      "--out-archive", archive,
+      "--out-sidecar", path.join(root, "compiled.contract.json"),
+      "--host-platform", "x86_64-windows-gnu",
+      "--target-platform", "x86_64-windows-msvc",
+      "--compiler-js", compiler,
+    ], { encoding: "utf8", env });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(fs.readFileSync(archive, "utf8"), "native msvc archive bytes");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

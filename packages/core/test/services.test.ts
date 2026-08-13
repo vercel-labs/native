@@ -668,6 +668,71 @@ test("the service compile lane refuses a pairing outside the compiler's build ma
   }
 });
 
+test("the service compile lane refuses cross-target Windows MSVC before compiler work", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-msvc-cross-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.28" }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-exe", path.join(root, "service-host.exe"),
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "x86_64-windows-msvc",
+      "--compiler", process.execPath,
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /cross-target Windows build/);
+    assert.match(result.stderr, /x86_64-windows-gnu/);
+    assert.doesNotMatch(result.stderr, /service compiler reports/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the service archive lane preserves native Windows MSVC", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-msvc-native-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, "service_profile.json"), "{}\n");
+    fs.writeFileSync(path.join(stage, "service_inproc_main.ts"), "export {};\n");
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.28" }));
+    const compiler = path.join(root, "compiler.mjs");
+    fs.writeFileSync(compiler, `
+import fs from "node:fs";
+if (process.argv.includes("-v")) { console.log("0.0.28"); process.exit(0); }
+if (process.env.SCRIPTC_CC !== undefined || process.env.SCRIPTC_TARGET !== undefined) { console.error("native compile received cross environment"); process.exit(9); }
+fs.writeFileSync(process.argv[process.argv.indexOf("-o") + 1] + ".lib.a", "native msvc archive bytes");
+`);
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    const output = path.join(root, "libservices.a");
+    const env = { ...process.env };
+    delete env.SCRIPTC_CC;
+    delete env.SCRIPTC_TARGET;
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-archive", output,
+      "--host-platform", "x86_64-windows-gnu",
+      "--target-platform", "x86_64-windows-msvc",
+      "--compiler-js", compiler,
+    ], { encoding: "utf8", env });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(output, "utf8"), "native msvc archive bytes");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the service archive lane refuses architectures outside the localized-object matrix", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-archive-matrix-"));
   try {
@@ -690,7 +755,7 @@ test("the service archive lane refuses architectures outside the localized-objec
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /cannot build a runtime-localized archive/);
       assert.match(result.stderr, new RegExp(target));
-      assert.match(result.stderr, /cross-Linux x86_64\/aarch64, Windows x86_64/);
+      assert.match(result.stderr, /cross-Linux x86_64\/aarch64, native Windows x86_64, cross-Windows x86_64 GNU/);
       assert.match(result.stderr, /Use the child carrier/);
     }
   } finally {

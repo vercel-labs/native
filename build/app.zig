@@ -121,18 +121,34 @@ const ServiceCarrierOption = enum { auto, in_process, child };
 
 const ServiceCarrier = enum { none, child, in_process };
 
-/// Whether the pinned service compiler can build the in-process carrier's
-/// archive (runtime-localized, thread-instanced) on this build host for
-/// this target. Its object localizers are deliberately architecture-aware:
-/// native Linux uses host binutils, cross-ELF accepts x86_64/aarch64, COFF
-/// accepts x86_64, and Mach-O needs a macOS host (Apple linking rides the
-/// host toolchain's SDK).
-pub fn serviceArchiveSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
+/// Whether the pinned compiler can build TypeScript archives/executables for
+/// this host/target pairing. Native desktop targets use their host toolchain,
+/// including native Windows/MSVC. Cross-Windows builds use Zig's bundled GNU
+/// sysroot; an MSVC cross target has no CRT headers or libraries to compile
+/// the ScriptC runtime against.
+pub fn scriptcCompileSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
     const desktop_host = switch (host.os.tag) {
         .macos, .linux, .windows => true,
         else => false,
     };
     if (!desktop_host) return false;
+    const cross = scriptcTargetIsCross(host, target);
+    return switch (target.result.os.tag) {
+        .linux => true,
+        .windows => !cross or target.result.abi == .gnu,
+        .macos => host.os.tag == .macos,
+        else => false,
+    };
+}
+
+/// Whether the pinned service compiler can build the in-process carrier's
+/// archive (runtime-localized, thread-instanced) on this build host for
+/// this target. Its object localizers are deliberately architecture-aware:
+/// native Linux uses host binutils, cross-ELF accepts x86_64/aarch64, COFF
+/// accepts x86_64 (GNU when cross-compiled; the host ABI when native), and
+/// Mach-O needs a macOS host (Apple linking rides the host toolchain's SDK).
+pub fn serviceArchiveSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    if (!scriptcCompileSupported(host, target)) return false;
     const cross = scriptcTargetIsCross(host, target);
     return switch (target.result.os.tag) {
         .linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64,
@@ -161,15 +177,21 @@ pub fn linuxGlibcSpellingHitsDefaultFloor(target: std.Build.ResolvedTarget) bool
 /// comparison: a stated glibc version makes an otherwise same-triple Linux
 /// target cross because that floor must reach Zig's `-target` argument.
 pub fn scriptcTargetIsCross(host: std.Target, target: std.Build.ResolvedTarget) bool {
-    return target.result.os.tag != host.os.tag or
-        target.result.cpu.arch != host.cpu.arch or
-        target.result.abi != host.abi or
-        target.query.glibc_version != null;
+    if (target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch) return true;
+    // Zig's Windows host triple defaults to GNU even when native clang uses
+    // the installed Windows toolchain. A same-architecture MSVC target is
+    // therefore still native compiler work. Preserve an exact native GNU
+    // triple too; every other ABI change needs the zig-cc cross lane.
+    if (target.result.os.tag == .windows) {
+        return target.result.abi != host.abi and target.result.abi != .msvc;
+    }
+    return target.result.abi != host.abi or target.query.glibc_version != null;
 }
 
-/// The glibc-floor teaching for cross-target ScriptC builds. Both the core
-/// archive and either service carrier carry the compiled TypeScript runtime,
-/// so all of them hit the same missing symbol.
+/// The glibc-floor teaching for explicitly targeted ScriptC builds. Both the
+/// core archive and either service carrier carry the compiled TypeScript
+/// runtime, so all of them hit the same missing symbol. This is independent of
+/// whether the target triple happens to match the build host.
 pub fn scriptcLinuxGlibcSpellingTeaching(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
     return b.fmt(
         "\nTypeScript target {t}-linux-gnu uses Zig's default glibc floor, which" ++
@@ -182,6 +204,23 @@ pub fn scriptcLinuxGlibcSpellingTeaching(b: *std.Build, target: std.Build.Resolv
 
 pub fn panicScriptcLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
     @panic(scriptcLinuxGlibcSpellingTeaching(b, target));
+}
+
+pub fn panicUnsupportedScriptcTarget(b: *std.Build, host: std.Target, target: std.Build.ResolvedTarget) noreturn {
+    if (target.result.os.tag == .windows and scriptcTargetIsCross(host, target) and target.result.abi != .gnu) {
+        @panic(b.fmt(
+            "\nTypeScript cross-target Windows builds require the GNU ABI: Zig supplies" ++
+                " that target's CRT and system libraries, while an MSVC target needs a native" ++
+                " Windows toolchain.\nBuild {t}-windows-msvc on a matching Windows host, or" ++
+                " cross-compile as \"{t}-windows-gnu\".\n",
+            .{ target.result.cpu.arch, target.result.cpu.arch },
+        ));
+    }
+    @panic(
+        "\nTypeScript desktop builds support native host targets, Linux and Windows GNU" ++
+            " cross targets from macOS/Linux/Windows, and macOS targets from macOS." ++
+            "\nChoose a supported target/host pairing.\n",
+    );
 }
 
 fn resolveServiceCarrier(
@@ -198,7 +237,8 @@ fn resolveServiceCarrier(
         .in_process => if (supported) .in_process else @panic(
             "\nservice_carrier = \"in_process\" requires a target the pinned service compiler" ++
                 " can produce a runtime-localized archive for: native Linux, cross-Linux" ++
-                " x86_64/aarch64, Windows x86_64, or macOS from a macOS build host." ++
+                " x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU," ++
+                " or macOS from a macOS build host." ++
                 "\nUse \"child\" (or drop the setting — auto selects the child carrier)" ++
                 " for this target.\n",
         ),
@@ -535,10 +575,14 @@ fn tsCoreStage(
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
-    // Every TypeScript app compiles its core archive for the target. On a
-    // true cross-Linux GNU compile, reject Zig's too-old default glibc floor
-    // before either the core or optional service lane reaches the linker.
-    if (scriptcTargetIsCross(b.graph.host.result, target) and linuxGlibcSpellingHitsDefaultFloor(target)) {
+    if (!scriptcCompileSupported(b.graph.host.result, target)) {
+        panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
+    }
+    // Every TypeScript app compiles its core archive for the target. Any
+    // explicitly spelled Linux GNU target without a sufficient glibc version
+    // lands on Zig's too-old default floor, even when its triple matches the
+    // build host; reject it before either compile lane reaches the linker.
+    if (linuxGlibcSpellingHitsDefaultFloor(target)) {
         panicScriptcLinuxGlibcSpelling(b, target);
     }
     const service_carrier = resolveServiceCarrier(service_carrier_choice, has_services, b, target);

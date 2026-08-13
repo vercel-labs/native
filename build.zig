@@ -64,6 +64,7 @@ test "service archive support matches ScriptC localized object formats" {
     macos_host.cpu.arch = .aarch64;
     macos_host.abi = .none;
     try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.windows, .x86_64, .gnu)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.windows, .x86_64, .msvc)));
     try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.windows, .aarch64, .gnu)));
     try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .x86_64, .musl)));
     try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .aarch64, .musl)));
@@ -76,6 +77,24 @@ test "service archive support matches ScriptC localized object formats" {
     linux_host.abi = .musl;
     try std.testing.expect(app_build.serviceArchiveSupported(linux_host, .{ .query = .{}, .result = linux_host }));
     try std.testing.expect(!app_build.serviceArchiveSupported(linux_host, resolved(.macos, .aarch64, .none)));
+
+    var gnu_linux_host = host;
+    gnu_linux_host.os.tag = .linux;
+    gnu_linux_host.cpu.arch = .x86_64;
+    gnu_linux_host.abi = .gnu;
+    const explicit_same_triple_gnu = resolved(.linux, .x86_64, .gnu);
+    try std.testing.expect(!app_build.scriptcTargetIsCross(gnu_linux_host, explicit_same_triple_gnu));
+    try std.testing.expect(app_build.linuxGlibcSpellingHitsDefaultFloor(explicit_same_triple_gnu));
+    try std.testing.expect(!app_build.linuxGlibcSpellingHitsDefaultFloor(.{ .query = .{}, .result = gnu_linux_host }));
+
+    var windows_host = host;
+    windows_host.os.tag = .windows;
+    windows_host.cpu.arch = .x86_64;
+    windows_host.abi = .gnu;
+    const native_windows_msvc = resolved(.windows, .x86_64, .msvc);
+    try std.testing.expect(!app_build.scriptcTargetIsCross(windows_host, native_windows_msvc));
+    try std.testing.expect(app_build.scriptcCompileSupported(windows_host, native_windows_msvc));
+    try std.testing.expect(app_build.serviceArchiveSupported(windows_host, native_windows_msvc));
 }
 
 pub fn build(b: *std.Build) void {
@@ -723,7 +742,10 @@ pub fn build(b: *std.Build) void {
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
         .{ .path = "build/app.zig", .pattern = ".linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64" },
+        .{ .path = "build/app.zig", .pattern = ".windows => !cross or target.result.abi == .gnu" },
         .{ .path = "build/app.zig", .pattern = ".windows => target.result.cpu.arch == .x86_64" },
+        .{ .path = "build/app.zig", .pattern = "if (linuxGlibcSpellingHitsDefaultFloor(target)) {" },
+        .{ .path = "build.zig", .pattern = "if (!app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;" },
         .{ .path = "build/app.zig", .pattern = "scriptcPlatformTriple(b, target),\n        // Keep the core and service archives on the same cross compiler" },
         .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe," },
         .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--host-platform\", host_platform, \"--target-platform\", app_build.scriptcPlatformTriple(b, target), \"--zig-exe\", b.graph.zig_exe });\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
@@ -3363,14 +3385,16 @@ fn addScriptcArchiveSystemLibs(mod: *std.Build.Module, target: std.Build.Resolve
     mod.linkSystemLibrary("advapi32", .{});
 }
 
-/// Attach ScriptC's Linux glibc-floor teaching to an actual compile step.
+/// Attach ScriptC's explicit-Linux-target glibc-floor teaching to an actual
+/// compile step. A target can match the host triple and still need the teaching
+/// because Zig's explicitly spelled `-gnu` target uses its default glibc floor.
 /// The root graph constructs fixture lanes even for unrelated selections such
 /// as the release pipeline's cross-compiled `zig build cli`; making the
 /// teaching a dependency preserves those CLI-only builds while still refusing
 /// the unsupported target before a selected ScriptC compile does any work.
 fn addScriptcGlibcFloorTeaching(b: *std.Build, target: std.Build.ResolvedTarget, step: *std.Build.Step) void {
     const app_build = @import("build/app.zig");
-    if (!app_build.scriptcTargetIsCross(b.graph.host.result, target) or !app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;
+    if (!app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;
     step.dependOn(&b.addFail(app_build.scriptcLinuxGlibcSpellingTeaching(b, target)).step);
 }
 

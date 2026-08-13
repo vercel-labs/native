@@ -66,8 +66,28 @@ const argv0 = args.compiler
 // zig-cc lane as the service archive that links beside it; otherwise a cross
 // build mixes a host-format core archive with target-format Zig and service
 // objects. Standalone host-only callers may omit both platform arguments.
+const hostParts = args["host-platform"]?.split("-") ?? [];
+const targetParts = args["target-platform"]?.split("-") ?? [];
+const hostArch = hostParts[0] ?? "";
+const hostOs = (hostParts[1] ?? "").split(".")[0];
+const hostAbi = (hostParts[2] ?? "").split(".")[0];
+const targetArch = targetParts[0] ?? "";
+const targetOs = (targetParts[1] ?? "").split(".")[0];
+const targetAbi = (targetParts[2] ?? "").split(".")[0];
+// A Windows host's Zig triple defaults to GNU, but an explicit same-arch MSVC
+// target still compiles through native clang and the installed Windows SDK.
+const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch === targetArch &&
+  (targetAbi === hostAbi || targetAbi === "msvc");
 const cross = args["host-platform"] !== undefined &&
-  args["target-platform"] !== args["host-platform"];
+  args["target-platform"] !== args["host-platform"] && !nativeWindows;
+if (cross) {
+  if (targetOs === "windows" && targetAbi !== "gnu") {
+    console.error(
+      `TypeScript cores for a cross-target Windows build (${args["target-platform"]}) require the GNU ABI: Zig supplies that target's CRT and system libraries, while an MSVC target needs a native Windows toolchain. Build ${targetArch}-windows-msvc on a matching Windows host, or cross-compile as "${targetArch}-windows-gnu".`,
+    );
+    process.exit(2);
+  }
+}
 const compileEnv = cross
   ? {
       ...process.env,

@@ -7,8 +7,8 @@
 // The compiler version is verified against the one packages/core pin and the
 // echo in services.contract.json before any compiler work starts. Host/target
 // pairings follow the pinned compiler's build matrix: same-triple compiles run
-// natively; Linux and Windows targets cross-compile from any desktop host over
-// the compiler's zig-cc lane; macOS targets need a macOS build host.
+// natively; Linux and Windows GNU targets cross-compile from any desktop host
+// over the compiler's zig-cc lane; macOS targets need a macOS build host.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -47,25 +47,38 @@ const args = parseArgs(process.argv);
 
 // The pairing matrix the pinned compiler covers. Same-triple compiles run
 // the native lane (host clang, no cross env). Different triples run the
-// compiler's zig-cc lane: Linux and Windows targets build from any desktop
-// host (the compiler cross-compiles its runtime and localizes ELF and COFF
-// objects itself); macOS targets build on a macOS host only, where Apple
+// compiler's zig-cc lane: Linux and Windows GNU targets build from any
+// desktop host (the compiler cross-compiles its runtime and localizes ELF and
+// COFF objects itself); macOS targets build on a macOS host only, where Apple
 // linking rides the host toolchain's SDK.
 const platformOs = (platform) => (platform.split("-")[1] ?? "").split(".")[0];
 const platformArch = (platform) => platform.split("-")[0] ?? "";
+const platformAbi = (platform) => (platform.split("-")[2] ?? "").split(".")[0];
+const hostArch = platformArch(args["host-platform"]);
 const hostOs = platformOs(args["host-platform"]);
+const hostAbi = platformAbi(args["host-platform"]);
 const targetOs = platformOs(args["target-platform"]);
 const targetArch = platformArch(args["target-platform"]);
-const cross = args["target-platform"] !== args["host-platform"];
+const targetAbi = platformAbi(args["target-platform"]);
+// Zig names a native Windows host with the GNU ABI by default, while a user
+// may explicitly target MSVC on that same machine. That remains native
+// compiler work; an exact native GNU triple does too.
+const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch === targetArch &&
+  (targetAbi === hostAbi || targetAbi === "msvc");
+const cross = args["target-platform"] !== args["host-platform"] && !nativeWindows;
 if (cross) {
   const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
   const admitted = desktopHost &&
-    (["linux", "windows"].includes(targetOs) || (targetOs === "macos" && hostOs === "macos"));
+    (targetOs === "linux" ||
+      (targetOs === "windows" && targetAbi === "gnu") ||
+      (targetOs === "macos" && hostOs === "macos"));
   if (!admitted) {
     console.error(
-      targetOs === "macos"
+      targetOs === "windows" && targetAbi !== "gnu"
+        ? `TypeScript services for a cross-target Windows build (${args["target-platform"]}) require the GNU ABI: Zig supplies that target's CRT and system libraries, while an MSVC target needs a native Windows toolchain. Build ${targetArch}-windows-msvc on a matching Windows host, or cross-compile as "${targetArch}-windows-gnu".`
+        : targetOs === "macos"
         ? `TypeScript services for a macOS target (${args["target-platform"]}) compile on a macOS build host only — Apple linking needs the host toolchain's SDK — but this build host is ${args["host-platform"]}. Build macOS service apps on a Mac.`
-        : `TypeScript services compile for desktop targets the pinned compiler covers — Linux and Windows from a macOS/Linux/Windows build host, macOS from a macOS host — but this build pairs host ${args["host-platform"]} with target ${args["target-platform"]}.`,
+        : `TypeScript services compile for desktop targets the pinned compiler covers — Linux and Windows GNU from a macOS/Linux/Windows build host, macOS from a macOS host — but this build pairs host ${args["host-platform"]} with target ${args["target-platform"]}.`,
     );
     process.exit(2);
   }
@@ -79,12 +92,12 @@ if (cross) {
 if (args["out-archive"]) {
   const archiveSupported =
     (targetOs === "linux" && (!cross || ["x86_64", "aarch64"].includes(targetArch))) ||
-    (targetOs === "windows" && targetArch === "x86_64") ||
+    (targetOs === "windows" && targetArch === "x86_64" && (!cross || targetAbi === "gnu")) ||
     (targetOs === "macos" && hostOs === "macos");
   if (!archiveSupported) {
     console.error(
       `TypeScript in-process services cannot build a runtime-localized archive for ${args["target-platform"]} from ${args["host-platform"]}. ` +
-      "The pinned compiler supports native Linux, cross-Linux x86_64/aarch64, Windows x86_64, and macOS targets on a macOS host. " +
+      "The pinned compiler supports native Linux, cross-Linux x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU, and macOS targets on a macOS host. " +
       "Use the child carrier (the default), or choose a supported in-process target.",
     );
     process.exit(2);
