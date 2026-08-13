@@ -172,8 +172,14 @@ pub fn serviceDataRoot(root: []const u8) void {
     @memcpy(data_root_buffer[0..root.len], root);
     const installed = data_root_buffer[0..root.len];
     if (comptime use_pool) pool_transport.cwd = installed;
-    for (data_root_env_indices[0..data_root_env_count]) |index| {
-        env_entries[index].value = installed;
+    // Keep the whole projection out of a serviceDataRoot instantiation when
+    // this core exports no envMsgs. Zig still analyzes a runtime loop body
+    // over a zero-length array, so relying on data_root_env_count == 0 would
+    // leave `env_entries[index]` as an illegal index into [0]EnvValue.
+    if (comptime envMsgsLen() > 0) {
+        for (data_root_env_indices[0..data_root_env_count]) |index| {
+            env_entries[index].value = installed;
+        }
     }
 }
 

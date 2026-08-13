@@ -110,12 +110,34 @@ run_step "stage-android" stage_battery aarch64-linux-android
 # core (and in-process service) archives, and the host tiers link it.
 run_step "build-cli" zig build
 
-app_package() { # app-dir target
-  (cd "$1" && "$repo_root/zig-out/bin/native" package --target "$2")
+app_package() { # app-dir target app-name
+  local app_dir="$1"
+  local target="$2"
+  local app_name="$3"
+  local artifact="$app_dir/zig-out/package/$app_name-$target"
+
+  # A previous successful package must not satisfy this run's assertions
+  # after a failed rebuild. Remove only the outputs this step proves; the
+  # package command owns refreshing the surrounding generated host project.
+  rm -f "$artifact/Libraries/libnative-sdk.a" "$artifact/$app_name-debug.apk"
+  (cd "$app_dir" && "$repo_root/zig-out/bin/native" package --target "$target") || return
+
+  # `native package` may deliberately emit a libraryless host project for
+  # apps with no mobile UiApp. These fixtures DO have TypeScript mobile cores,
+  # so this lane's contract is stronger: packaging must have built and copied
+  # the embed archive, and Android must have linked it into the runnable APK.
+  if [ ! -s "$artifact/Libraries/libnative-sdk.a" ]; then
+    echo "mobile-e2e: $app_name $target package contains no Libraries/libnative-sdk.a" >&2
+    return 1
+  fi
+  if [ "$target" = "android" ] && [ ! -s "$artifact/$app_name-debug.apk" ]; then
+    echo "mobile-e2e: $app_name android package contains no $app_name-debug.apk" >&2
+    return 1
+  fi
 }
-run_step "app-services-ios" app_package tests/ts-services/ok ios
-run_step "app-services-android" app_package tests/ts-services/ok android
-run_step "app-kanban-android" app_package examples/kanban android
+run_step "app-services-ios" app_package tests/ts-services/ok ios ts-services-fixture
+run_step "app-services-android" app_package tests/ts-services/ok android ts-services-fixture
+run_step "app-kanban-android" app_package examples/kanban android kanban
 
 # ---- the battery harness ----------------------------------------------------
 
