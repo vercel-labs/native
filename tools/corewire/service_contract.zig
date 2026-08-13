@@ -216,7 +216,7 @@ test "service contract validates typed operations and authority attestation" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const good =
-        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.27","deterministic":false,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"feeds.parse","client":"feedsParse","module":"src/services/feeds.ts","export":"parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":false,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.28","deterministic":false,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"feeds.parse","client":"feedsParse","module":"src/services/feeds.ts","export":"parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":false,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
     ;
     var diagnostics: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&diagnostics);
@@ -225,7 +225,7 @@ test "service contract validates typed operations and authority attestation" {
     try std.testing.expectEqualStrings("feeds.parse", contract.operations[0].name);
 
     const dollar =
-        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.27","deterministic":false,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"feeds.$parse","client":"feeds$parse","module":"src/services/feeds.ts","export":"$parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":true,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.28","deterministic":false,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"feeds.$parse","client":"feeds$parse","module":"src/services/feeds.ts","export":"$parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":true,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
     ;
     var dollar_diagnostics: [512]u8 = undefined;
     var dollar_writer = std.Io.Writer.fixed(&dollar_diagnostics);
@@ -233,7 +233,7 @@ test "service contract validates typed operations and authority attestation" {
     try std.testing.expectEqualStrings("$parse", dollar_contract.operations[0].@"export");
 
     const bad =
-        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.27","deterministic":true,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"feeds.parse","client":"feedsParse","module":"src/services/feeds.ts","export":"parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":false,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.28","deterministic":true,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"feeds.parse","client":"feedsParse","module":"src/services/feeds.ts","export":"parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":false,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
     ;
     var bad_diagnostics: [512]u8 = undefined;
     var bad_writer = std.Io.Writer.fixed(&bad_diagnostics);
@@ -241,7 +241,7 @@ test "service contract validates typed operations and authority attestation" {
     try std.testing.expect(std.mem.indexOf(u8, bad_writer.buffered(), "deterministic=true") != null);
 
     const skewed =
-        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.27","deterministic":false,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"other.parse","client":"otherParse","module":"src/services/feeds.ts","export":"parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":false,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+        \\{"format":3,"protocol_version":3,"compiler_version":"0.0.28","deterministic":false,"packages":[],"types":{"records":[],"enums":[],"unions":[]},"operations":[{"name":"other.parse","client":"otherParse","module":"src/services/feeds.ts","export":"parse","request":{"kind":"bytes"},"result":{"kind":"bytes"},"deadline_ms":null,"cancellable":false,"stream":null,"source_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
     ;
     var skewed_diagnostics: [512]u8 = undefined;
     var skewed_writer = std.Io.Writer.fixed(&skewed_diagnostics);

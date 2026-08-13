@@ -79,7 +79,7 @@ native vendor . escape-string-regexp@5.0.0
 
 The command installs with lifecycle scripts disabled in a temporary directory, copies the flattened package graph into `src/services/vendor/`, retains package/license files, computes canonical tree hashes, and rewrites app.zon's `service_packages` with exact names, `X.Y.Z` versions, and hashes. Check those bytes and manifest facts into source control.
 
-Builds never run npm or use the network. They verify package identity and every vendored byte, stage only declared packages, and invoke scriptc with `--npm-static <explicit-list>`. `auto`, dynamic-island fallback, and `--dynamic` are refused. Anything below 100% static coverage fails: `native check` preserves the coverage note verbatim and names the three options—choose another exact package, port/vendor a suitable implementation, or wait for compiler support. The checked-in scriptc 0.0.27 spike (`tests/ts-services/npm-static-spike.json`) passed three of five deliberately small candidates and refused `nanoid` and `micromark`; npm support is selective.
+Builds never run npm or use the network. They verify package identity and every vendored byte, stage only declared packages, and invoke scriptc with `--npm-static <explicit-list>`. `auto`, dynamic-island fallback, and `--dynamic` are refused. Anything below 100% static coverage fails: `native check` preserves the coverage note verbatim and names the three options—choose another exact package, port/vendor a suitable implementation, or wait for compiler support. The checked-in scriptc 0.0.28 spike (`tests/ts-services/npm-static-spike.json`) passed three of five deliberately small candidates and refused `nanoid` and `micromark`; npm support is selective.
 
 ## Streaming, cancellation, and deadlines
 

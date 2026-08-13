@@ -44,7 +44,7 @@ export function parse(payload: Uint8Array): Uint8Array {
   const contract = JSON.parse(result.servicesContract!);
   assert.equal(contract.format, 3);
   assert.equal(contract.protocol_version, 3);
-  assert.equal(contract.compiler_version, "0.0.27");
+  assert.equal(contract.compiler_version, "0.0.28");
   assert.equal(contract.deterministic, false);
   assert.deepEqual(contract.packages, []);
   assert.deepEqual(contract.types, { records: [], enums: [], unions: [] });
@@ -596,7 +596,7 @@ test("the service compile lane refuses a contract whose compiler echo skews from
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.27" } }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
     fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.21" }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -610,7 +610,7 @@ test("the service compile lane refuses a contract whose compiler echo skews from
       "--compiler", process.execPath,
     ], { encoding: "utf8" });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /contract echoes scriptc 0\.0\.21, but packages\/core pins 0\.0\.27/);
+    assert.match(result.stderr, /contract echoes scriptc 0\.0\.21, but packages\/core pins 0\.0\.28/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -621,8 +621,8 @@ test("the service compile lane refuses a target that differs from the build host
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.27" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.27" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.28" }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     const result = spawnSync(process.execPath, [
       script,
@@ -647,14 +647,14 @@ test("the service compile lane passes an explicit npm-static allowlist and prese
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.27" } }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
     fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({
-      compiler_version: "0.0.27",
+      compiler_version: "0.0.28",
       packages: [{ name: "dynamic-only", version: "1.0.0", content_hash: "a".repeat(64) }],
     }));
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `
-if (process.argv.includes("-v")) { console.log("0.0.27"); process.exit(0); }
+if (process.argv.includes("-v")) { console.log("0.0.28"); process.exit(0); }
 const at = process.argv.indexOf("--npm-static");
 if (at < 0 || process.argv[at + 1] !== "dynamic-only" || process.argv.includes("auto") || process.argv.includes("--dynamic")) {
   console.error("wrong npm policy: " + process.argv.slice(2).join(" ")); process.exit(9);
@@ -687,15 +687,15 @@ test("the service compile lane refuses a package whose successful coverage verdi
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.27" } }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
     fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({
-      compiler_version: "0.0.27",
+      compiler_version: "0.0.28",
       packages: [{ name: "partial-static", version: "1.0.0", content_hash: "b".repeat(64) }],
     }));
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `
 import fs from "node:fs";
-if (process.argv.includes("-v")) { console.log("0.0.27"); process.exit(0); }
+if (process.argv.includes("-v")) { console.log("0.0.28"); process.exit(0); }
 if (process.argv[2] === "coverage") {
   console.log("scriptc coverage service_host_main.ts\\n\\n  statements analyzed   10\\n  compile statically    8  (80%)\\n\\n  deferred to runtime   2 sites\\n      ×2  unsupported package calls  SC2020");
   process.exit(0);

@@ -36,6 +36,6 @@
     "@typescript/old": "npm:typescript@6.0.3"
   },
   "dependencies": {
-    "scriptc": "0.0.27"
+    "scriptc": "0.0.28"
   }
 }
