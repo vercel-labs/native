@@ -289,13 +289,13 @@ test "runtime dispatches tray item commands" {
         .{ .id = 8, .label = "Legacy" },
     } });
 
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = 7 });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = .{ .item_id = 7 } });
     try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
     try std.testing.expectEqualStrings("app.refresh", app_state.last_name);
     try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
     try std.testing.expectEqual(@as(platform.TrayItemId, 7), app_state.last_tray_item_id);
 
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = 8 });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = .{ .item_id = 8 } });
     try std.testing.expectEqual(@as(u32, 2), app_state.command_count);
     try std.testing.expectEqualStrings("tray.action", app_state.last_name);
     try std.testing.expectEqual(@as(platform.TrayItemId, 8), app_state.last_tray_item_id);

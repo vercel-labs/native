@@ -37,9 +37,10 @@
 //   - `AppearanceEvent`, `ChromeEvent`, `AudioEvent`: the full arm
 //     payload shapes, canonical and importable for helper signatures
 //     (an arm value is structurally assignable to its event record).
-//   - `StatusItemState` and its nested records: the model-derived shell
-//     returned by `statusItem(model)`; the generated launcher installs it
-//     and refreshes its presentation and menu after committed model changes.
+//   - `StatusItemState`, `StatusItemDescriptor`, and their nested records:
+//     the model-derived shell returned by `statusItem(model)` or keyed
+//     `statusItems(model)`; the generated launcher refreshes shell,
+//     presentation, visibility, and menu after committed model changes.
 
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.ts";
 
@@ -83,11 +84,25 @@ export interface StatusItemMenuItem {
 
 /// The generated launcher's model-derived menu-bar status item. Export
 /// `statusItem(model: Model): StatusItemState` from `src/core.ts`; its
-/// install-time shell fields plus the first presentation/menu are captured
-/// on the first frame; presentation and rows are re-derived after every
-/// committed model update. Byte slices are borrowed only for that apply,
-/// so returning literals or freshly built arrays is safe.
+/// shell, presentation, and rows are re-derived after every committed model
+/// update. Byte slices are borrowed only for that apply, so returning literals
+/// or freshly built arrays is safe.
 export interface StatusItemState {
+  readonly iconPath: Uint8Array;
+  readonly tooltip: Uint8Array;
+  readonly activationCommand: Uint8Array;
+  readonly alternateActivationCommand: Uint8Array;
+  readonly openCommand: Uint8Array;
+  readonly presentation: StatusItemPresentation;
+  readonly items: readonly StatusItemMenuItem[];
+}
+
+/// One independently reconciled menu-bar status item. Export
+/// `statusItems(model: Model): readonly StatusItemDescriptor[]`; `id`
+/// preserves the native item while all remaining fields update live.
+export interface StatusItemDescriptor {
+  readonly id: number;
+  readonly visible: boolean;
   readonly iconPath: Uint8Array;
   readonly tooltip: Uint8Array;
   readonly activationCommand: Uint8Array;

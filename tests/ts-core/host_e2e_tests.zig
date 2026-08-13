@@ -427,7 +427,7 @@ test "the compiled core's statusItem helper installs and updates title and menu"
 
     // Native tray selection resolves id -> command, command -> Msg, then
     // the committed model drives both live shell patches.
-    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .tray_action = 1 });
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .tray_action = .{ .item_id = 1 } });
     try std.testing.expect(!Bridge.model().polling);
     try std.testing.expectEqualStrings("TS OFF", h.harness.null_platform.lastTrayTitle());
     const updated_presentation = h.harness.null_platform.lastTrayPresentation();

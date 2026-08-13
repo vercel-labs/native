@@ -88,6 +88,16 @@ pub const RuntimeTrayItem = struct {
     key_storage: [platform.max_menu_key_bytes]u8 = undefined,
 };
 
+pub const RuntimeStatusItem = struct {
+    id: platform.StatusItemId = 0,
+    active: bool = false,
+    visible: bool = true,
+    title: []const u8 = "",
+    title_storage: [platform.max_tray_title_bytes]u8 = undefined,
+    items: [platform.max_tray_items]RuntimeTrayItem = undefined,
+    item_count: usize = 0,
+};
+
 pub const ShellApplyMode = enum {
     create,
     update,

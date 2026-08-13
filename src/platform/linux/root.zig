@@ -1480,20 +1480,23 @@ fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: platfor
     return videoLoad(context, url, token, sink);
 }
 
-fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
+fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, options: platform_mod.TrayOptions) anyerror!void {
     _ = context;
+    _ = status_item_id;
     _ = options;
     return error.UnsupportedService;
 }
 
-fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {
+fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, items: []const platform_mod.TrayMenuItem) anyerror!void {
     _ = context;
+    _ = status_item_id;
     _ = items;
     return error.UnsupportedService;
 }
 
-fn removeTray(context: ?*anyopaque) anyerror!void {
+fn removeTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId) anyerror!void {
     _ = context;
+    _ = status_item_id;
     return error.UnsupportedService;
 }
 

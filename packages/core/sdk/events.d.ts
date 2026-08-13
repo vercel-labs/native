@@ -35,6 +35,17 @@ export interface StatusItemState {
     readonly presentation: StatusItemPresentation;
     readonly items: readonly StatusItemMenuItem[];
 }
+export interface StatusItemDescriptor {
+    readonly id: number;
+    readonly visible: boolean;
+    readonly iconPath: Uint8Array;
+    readonly tooltip: Uint8Array;
+    readonly activationCommand: Uint8Array;
+    readonly alternateActivationCommand: Uint8Array;
+    readonly openCommand: Uint8Array;
+    readonly presentation: StatusItemPresentation;
+    readonly items: readonly StatusItemMenuItem[];
+}
 export interface ScrollState {
     readonly offsetX: number;
     readonly offsetY: number;

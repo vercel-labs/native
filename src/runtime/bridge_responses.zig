@@ -49,7 +49,7 @@ pub fn writeCommandEventJson(event_value: anytype, output: []u8) ![]const u8 {
     try json.writeString(&writer, @tagName(event_value.source));
     try writer.print(",\"windowId\":{d},\"viewLabel\":", .{event_value.window_id});
     try json.writeString(&writer, event_value.view_label);
-    try writer.print(",\"trayItemId\":{d}", .{event_value.tray_item_id});
+    try writer.print(",\"statusItemId\":{d},\"trayItemId\":{d}", .{ event_value.status_item_id, event_value.tray_item_id });
     try writer.writeByte('}');
     return writer.buffered();
 }

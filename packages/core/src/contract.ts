@@ -462,6 +462,7 @@ class ContractEmitter {
     // check that this one helper is intentionally shell-bound without
     // making every app repeat it in `viewUnbound`.
     if (helperNames.includes("statusItem") && !model.includes("statusItem")) model.push("statusItem");
+    if (helperNames.includes("statusItems") && !model.includes("statusItems")) model.push("statusItems");
     return { model, msg };
   }
 

@@ -233,6 +233,8 @@ pub const TrayItem = struct {
 /// The macOS menu bar is outside every window capture, so this is the
 /// only automation-visible evidence a model-driven tray exists.
 pub const Tray = struct {
+    id: platform.StatusItemId = platform.primary_status_item_id,
+    visible: bool = true,
     title: []const u8 = "",
     items: []const TrayItem = &.{},
 };
@@ -304,8 +306,8 @@ pub const Input = struct {
     /// headroom.
     text_layout_plan_budget: usize = 0,
     text_layout_line_budget: usize = 0,
-    /// The live status item, when the app created one.
-    tray: ?Tray = null,
+    /// Every live status item, keyed by its stable identifier.
+    trays: []const Tray = &.{},
     /// Live audio playback, when the app started any (null once stopped
     /// or failed — an idle player is honest, not zeroed-out noise).
     audio: ?Audio = null,
@@ -593,8 +595,8 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetContextMenu(widget, writer);
         try writer.writeByte('\n');
     }
-    if (input.tray) |tray| {
-        try writer.print("tray title=\"{s}\" items={d}\n", .{ tray.title, tray.items.len });
+    for (input.trays) |tray| {
+        try writer.print("tray #{d} title=\"{s}\" visible={any} items={d}\n", .{ tray.id, tray.title, tray.visible, tray.items.len });
         for (tray.items) |item| {
             if (item.separator) {
                 try writer.writeAll("  tray-item separator\n");
@@ -925,10 +927,10 @@ test "snapshot emits tray title and dropdown items" {
     };
     try writeText(.{
         .windows = &windows,
-        .tray = .{ .title = "ZN 3", .items = &items },
+        .trays = &.{.{ .id = 7, .title = "ZN 3", .visible = false, .items = &items }},
     }, &writer);
     const text = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "\ntray title=\"ZN 3\" items=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\ntray #7 title=\"ZN 3\" visible=false items=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #1 label=\"Refresh\" command=\"app.refresh\" enabled=true detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item separator\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=false detail=\"warning ⚠\" role=agent key=\"q\" modifiers=(primary=false,command=true,control=false,option=false,shift=false)\n") != null);

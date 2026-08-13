@@ -217,7 +217,7 @@ export const rules = {
   NS1033: {
     id: "NS1033",
     title: "wiring exports match their runtime shapes",
-    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; `statusItem(model: Model): StatusItemState`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; `envMsgs` entries targeting one-`Uint8Array`-field arms; and persistence ok/none routes naming void arms while err names a one-`Uint8Array`-field arm. Import canonical records from `@native-sdk/core/events`.",
+    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; singular `statusItem(model: Model): StatusItemState` or collection `statusItems(model: Model): readonly StatusItemDescriptor[]`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; `envMsgs` entries targeting one-`Uint8Array`-field arms; and persistence ok/none routes naming void arms while err names a one-`Uint8Array`-field arm. Import canonical records from `@native-sdk/core/events`.",
     why: "The generated wiring builds host events, persistence restore results, model-derived theme selection, and the live menu-bar status item structurally from your declarations at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
   },
   NS1034: {

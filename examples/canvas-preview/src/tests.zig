@@ -126,7 +126,7 @@ test "toolbar and status-item commands navigate and reload the webview" {
     try testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
     try testing.expectEqualStrings("NS", harness.null_platform.lastTrayTitle());
     try testing.expectEqual(@as(usize, main.status_items.len), harness.null_platform.trayItems().len);
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = 3 });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = .{ .item_id = 3 } });
     try testing.expectEqual(@as(u32, 1), app_state.model.reload_count);
     try testing.expectEqualStrings(main.docs_url, (try previewWebView(harness)).url);
     try testing.expectEqual(navigations_after_install + 2, harness.null_platform.webview_navigate_count);

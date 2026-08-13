@@ -101,6 +101,7 @@ const RuntimeMainWebViewState = runtime_state.RuntimeMainWebViewState;
 const RuntimeSourceStorage = runtime_state.RuntimeSourceStorage;
 const RuntimeWebView = runtime_state.RuntimeWebView;
 const RuntimeTrayItem = runtime_state.RuntimeTrayItem;
+const RuntimeStatusItem = runtime_state.RuntimeStatusItem;
 const ShellApplyMode = runtime_state.ShellApplyMode;
 const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
 const FocusTraversalDirection = runtime_state.FocusTraversalDirection;
@@ -205,11 +206,8 @@ pub const Runtime = struct {
     view_count: usize = 0,
     webviews: [platform.max_webviews]RuntimeWebView = undefined,
     webview_count: usize = 0,
-    tray_items: [platform.max_tray_items]RuntimeTrayItem = undefined,
-    tray_item_count: usize = 0,
-    tray_created: bool = false,
-    tray_title: []const u8 = "",
-    tray_title_storage: [platform.max_tray_title_bytes]u8 = undefined,
+    status_items: [platform.max_status_items]RuntimeStatusItem = [_]RuntimeStatusItem{.{}} ** platform.max_status_items,
+    status_item_count: usize = 0,
     /// Audio playback mirror for the automation snapshot, stamped by
     /// the ui-app layer whenever a dispatch or effect drain may have
     /// moved the effects channel's playback state. Like the tray, the
@@ -325,7 +323,8 @@ pub const Runtime = struct {
     /// list its full per-view item budget — the snapshot never truncates
     /// menus the runtime accepted.
     automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem = undefined,
-    automation_tray_items: [platform.max_tray_items]automation.snapshot.TrayItem = undefined,
+    automation_tray_items: [platform.max_status_items * platform.max_tray_items]automation.snapshot.TrayItem = undefined,
+    automation_trays: [platform.max_status_items]automation.snapshot.Tray = undefined,
     /// Handshake for the `provenance` verb: cleared before the query is
     /// evented to the app, set by the app's response publish — so the
     /// dispatcher can answer with a teaching error when no app-side
@@ -777,11 +776,18 @@ pub const Runtime = struct {
     pub const deleteCredential = SystemServiceMethods.deleteCredential;
     pub const formatLocalTime = SystemServiceMethods.formatLocalTime;
     pub const createTray = SystemServiceMethods.createTray;
+    pub const createStatusItem = SystemServiceMethods.createStatusItem;
+    pub const updateStatusItemShell = SystemServiceMethods.updateStatusItemShell;
+    pub const updateStatusItemMenu = SystemServiceMethods.updateStatusItemMenu;
+    pub const updateStatusItemTitle = SystemServiceMethods.updateStatusItemTitle;
+    pub const updateStatusItemPresentation = SystemServiceMethods.updateStatusItemPresentation;
+    pub const removeStatusItem = SystemServiceMethods.removeStatusItem;
     pub const updateTrayMenu = SystemServiceMethods.updateTrayMenu;
     pub const updateTrayTitle = SystemServiceMethods.updateTrayTitle;
     pub const updateTrayPresentation = SystemServiceMethods.updateTrayPresentation;
     pub const removeTray = SystemServiceMethods.removeTray;
     const trayCommandNameForItem = SystemServiceMethods.trayCommandNameForItem;
+    const statusItemCommandNameForItem = SystemServiceMethods.statusItemCommandNameForItem;
     const supportsFeatureFromJson = SystemServiceMethods.supportsFeatureFromJson;
     const readClipboardTextFromJson = SystemServiceMethods.readClipboardTextFromJson;
     const writeClipboardTextFromJson = SystemServiceMethods.writeClipboardTextFromJson;

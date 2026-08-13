@@ -1149,6 +1149,64 @@ export function statusItem(): StatusItemState { throw { kind: "unreachable" }; }
   assert.ok(ruleIds(wrongHelper).includes("NS1033"), `got ${ruleIds(wrongHelper)}`);
 });
 
+test("NS1033 statusItems is the canonical independent-item collection", () => {
+  const clean = check(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const exportList = check(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+export { statusItems };
+`);
+  assert.equal(exportList.ok, true, exportList.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(exportList).includes("NS1033"), `got ${ruleIds(exportList)}`);
+
+  const wrongNestedShape = checkOnly(`
+export interface BadPresentation { readonly title: Uint8Array; }
+export interface BadItem { readonly id: number; }
+export interface StatusItemDescriptor {
+  readonly id: number;
+  readonly visible: boolean;
+  readonly iconPath: Uint8Array;
+  readonly tooltip: Uint8Array;
+  readonly activationCommand: Uint8Array;
+  readonly alternateActivationCommand: Uint8Array;
+  readonly openCommand: Uint8Array;
+  readonly presentation: BadPresentation;
+  readonly items: readonly BadItem[];
+}
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.ok(ruleIds(wrongNestedShape).includes("NS1033"), `got ${ruleIds(wrongNestedShape)}`);
+
+  const mutuallyExclusive = checkOnly(`
+import { type StatusItemDescriptor, type StatusItemState } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItem(model: Model): StatusItemState { throw { kind: "unreachable" }; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.ok(ruleIds(mutuallyExclusive).includes("NS1033"), `got ${ruleIds(mutuallyExclusive)}`);
+});
+
 test("NS1061: value-record aliases refuse the shapes value storage cannot carry", () => {
   // The model root is reference storage by contract.
   const root = checkOnly(`

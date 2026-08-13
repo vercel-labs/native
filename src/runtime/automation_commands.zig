@@ -153,8 +153,8 @@ pub fn parseAutomationCommandName(value: []const u8) ![]const u8 {
     return trimmed[0..separator];
 }
 
-/// `tray-action <item-id>`: the numeric dropdown item id printed by the
-/// snapshot's `tray-item #N` lines (bare number, like widget ids).
+/// Parses the one-id `tray-action <item-id>` compatibility form: the
+/// numeric dropdown row id printed by a primary item's `tray-item #N` line.
 pub fn parseAutomationTrayItemId(value: []const u8) !platform.TrayItemId {
     const trimmed = std.mem.trim(u8, value, " \n\r\t");
     if (trimmed.len == 0) return error.InvalidCommand;
@@ -162,6 +162,27 @@ pub fn parseAutomationTrayItemId(value: []const u8) !platform.TrayItemId {
     const id = std.fmt.parseInt(platform.TrayItemId, trimmed, 10) catch return error.InvalidCommand;
     if (id == 0) return error.InvalidCommand;
     return id;
+}
+
+pub const AutomationTrayTarget = struct {
+    status_item_id: platform.StatusItemId = platform.primary_status_item_id,
+    item_id: platform.TrayItemId,
+};
+
+/// `tray-action <item-id>` targets the reserved primary status item;
+/// `tray-action <status-item-id> <item-id>` addresses any live item.
+pub fn parseAutomationTrayTarget(value: []const u8) !AutomationTrayTarget {
+    var tokens = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    const first = tokens.next() orelse return error.InvalidCommand;
+    const second = tokens.next();
+    if (tokens.next() != null) return error.InvalidCommand;
+    if (second) |item_text| {
+        const status_item_id = std.fmt.parseUnsigned(platform.StatusItemId, first, 10) catch return error.InvalidCommand;
+        const item_id = std.fmt.parseUnsigned(platform.TrayItemId, item_text, 10) catch return error.InvalidCommand;
+        if (status_item_id == 0 or item_id == 0) return error.InvalidCommand;
+        return .{ .status_item_id = status_item_id, .item_id = item_id };
+    }
+    return .{ .item_id = try parseAutomationTrayItemId(first) };
 }
 
 pub fn parseAutomationViewLabel(value: []const u8) ![]const u8 {
@@ -599,6 +620,18 @@ test "runtime parses automation tray item ids" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationTrayItemId("0"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationTrayItemId("open"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationTrayItemId("4 5"));
+}
+
+test "runtime parses primary and explicit automation tray targets" {
+    const primary = try parseAutomationTrayTarget("4");
+    try std.testing.expectEqual(platform.primary_status_item_id, primary.status_item_id);
+    try std.testing.expectEqual(@as(platform.TrayItemId, 4), primary.item_id);
+    const explicit = try parseAutomationTrayTarget("23 12");
+    try std.testing.expectEqual(@as(platform.StatusItemId, 23), explicit.status_item_id);
+    try std.testing.expectEqual(@as(platform.TrayItemId, 12), explicit.item_id);
+    try std.testing.expectError(error.InvalidCommand, parseAutomationTrayTarget("0 2"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationTrayTarget("2 0"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationTrayTarget("1 2 3"));
 }
 
 test "runtime parses automation widget click targets" {

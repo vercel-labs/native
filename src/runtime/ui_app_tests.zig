@@ -3895,12 +3895,138 @@ test "ui app status item installs a tray and dispatches its commands" {
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
 
     // Selecting the item dispatches its command through on_command.
-    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 1 });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .item_id = 1 } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.refresh_count);
     // Items without commands fall back to the generic name and map to
     // no Msg here.
-    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 2 });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .item_id = 2 } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.refresh_count);
+}
+
+const MultiStatusModel = struct {
+    spend: u32 = 7,
+    controls_visible: bool = true,
+    spend_visible: bool = true,
+};
+
+const MultiStatusMsg = union(enum) { bump_spend, toggle_controls, remove_spend };
+const MultiStatusApp = ui_app_model.UiApp(MultiStatusModel, MultiStatusMsg);
+
+fn multiStatusUpdate(model: *MultiStatusModel, msg: MultiStatusMsg) void {
+    switch (msg) {
+        .bump_spend => model.spend += 1,
+        .toggle_controls => model.controls_visible = !model.controls_visible,
+        .remove_spend => model.spend_visible = false,
+    }
+}
+
+fn multiStatusView(ui: *MultiStatusApp.Ui, model: *const MultiStatusModel) MultiStatusApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Spend {d}", .{model.spend}));
+}
+
+fn multiStatusCommand(name: []const u8) ?MultiStatusMsg {
+    if (std.mem.eql(u8, name, "spend.bump")) return .bump_spend;
+    if (std.mem.eql(u8, name, "control.toggle") or std.mem.eql(u8, name, "control.hide") or std.mem.eql(u8, name, "control.show")) return .toggle_controls;
+    if (std.mem.eql(u8, name, "spend.remove")) return .remove_spend;
+    return null;
+}
+
+fn multiStatusItems(model: *const MultiStatusModel, scratch: *MultiStatusApp.StatusItemsScratch) []const MultiStatusApp.StatusItemDescriptor {
+    var count: usize = 0;
+    if (model.spend_visible) {
+        const title = std.fmt.bufPrint(&scratch.title_buffers[count], "${d}", .{model.spend}) catch "$";
+        scratch.items[0] = .{ .id = 1, .label = "Refresh spend", .command = "spend.bump" };
+        scratch.items[1] = .{ .id = 2, .label = "Remove spend", .command = "spend.remove" };
+        scratch.status_items[count] = .{
+            .id = 100,
+            .state = .{
+                .presentation = .{ .title = title, .monospaced = true },
+                .icon_path = if (model.spend % 2 == 0) "spend-even.png" else "spend-odd.png",
+                .tooltip = "Vercel spend",
+                .items = scratch.items[0..2],
+            },
+        };
+        count += 1;
+    }
+    const row_start = zero_platform.max_tray_items;
+    scratch.items[row_start] = .{
+        .id = 1,
+        .label = if (model.controls_visible) "Hide controls" else "Show controls",
+        .command = "control.toggle",
+    };
+    scratch.status_items[count] = .{
+        .id = 200,
+        .visible = model.controls_visible,
+        .state = .{
+            .presentation = .{ .title = "V" },
+            .icon_path = if (model.controls_visible) "control-on.png" else "control-off.png",
+            .tooltip = if (model.controls_visible) "Controls visible" else "Controls hidden",
+            .activation_command = if (model.controls_visible) "control.hide" else "control.show",
+            .items = scratch.items[row_start .. row_start + 1],
+        },
+    };
+    count += 1;
+    return scratch.status_items[0..count];
+}
+
+test "ui app reconciles multiple status items independently by id" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(MultiStatusApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = MultiStatusApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-multi-status",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = multiStatusUpdate,
+        .view = multiStatusView,
+        .on_command = multiStatusCommand,
+        .status_items_fn = multiStatusItems,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.statusItemCount());
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.trayCreateCount());
+    try std.testing.expectEqualStrings("$7", harness.null_platform.statusItemTitle(100));
+    try std.testing.expectEqualStrings("V", harness.null_platform.statusItemTitle(200));
+    try std.testing.expectEqualStrings("spend-odd.png", harness.null_platform.statusItemIconPath(100));
+    try std.testing.expectEqualStrings("control.hide", harness.null_platform.statusItemActivationCommand(200));
+
+    // Both menus deliberately reuse row id 1; the status-item id keeps
+    // command resolution independent.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .status_item_id = 100, .item_id = 1 } });
+    try std.testing.expectEqual(@as(u32, 8), app_state.model.spend);
+    try std.testing.expectEqualStrings("$8", harness.null_platform.statusItemTitle(100));
+    try std.testing.expectEqualStrings("spend-even.png", harness.null_platform.statusItemIconPath(100));
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.trayCreateCount());
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .status_item_id = 200, .item_id = 1 } });
+    try std.testing.expect(!harness.null_platform.statusItemVisible(200));
+    try std.testing.expectEqualStrings("control-off.png", harness.null_platform.statusItemIconPath(200));
+    try std.testing.expectEqualStrings("Controls hidden", harness.null_platform.statusItemTooltip(200));
+    try std.testing.expectEqualStrings("control.show", harness.null_platform.statusItemActivationCommand(200));
+    try std.testing.expectEqualStrings("Show controls", harness.null_platform.statusItemMenu(200)[0].label);
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.trayCreateCount());
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.trayShellUpdateCount());
+    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.trayUpdateCount());
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .status_item_id = 100, .item_id = 2 } });
+    try std.testing.expect(!harness.null_platform.statusItemExists(100));
+    try std.testing.expect(harness.null_platform.statusItemExists(200));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.statusItemCount());
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayRemoveCount());
 }
 
 // ------------------------------------------------ model-driven status item
@@ -4001,7 +4127,7 @@ test "ui app status_item_fn drives the tray title and menu from the model" {
 
     // A model change that only affects the TITLE re-titles the live
     // button without rebuilding the menu or re-creating the item.
-    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 1 });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .item_id = 1 } });
     try std.testing.expectEqual(@as(u32, 4), app_state.model.open_count);
     try std.testing.expectEqualStrings("ZN 4", harness.null_platform.lastTrayTitle());
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayTitleUpdateCount());
@@ -4010,7 +4136,7 @@ test "ui app status_item_fn drives the tray title and menu from the model" {
 
     // Selecting a dropdown row closes the loop: tray action -> command ->
     // Msg -> model, and the menu (not the title) re-applies.
-    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 11 });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .item_id = 11 } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.selected_issue);
     try std.testing.expectEqual(updates_after_install + 1, harness.null_platform.trayUpdateCount());
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayTitleUpdateCount());
@@ -4018,7 +4144,7 @@ test "ui app status_item_fn drives the tray title and menu from the model" {
 
     // A rebuild whose tray output is unchanged touches nothing (the
     // repeat selection Msg still rebuilds the view).
-    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 11 });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = .{ .item_id = 11 } });
     try std.testing.expectEqual(updates_after_install + 1, harness.null_platform.trayUpdateCount());
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayTitleUpdateCount());
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
@@ -4072,7 +4198,7 @@ test "ui app tray state rides automation snapshots and tray-action drives a row"
         var writer = std.Io.Writer.fixed(&buffer);
         try automation.snapshot.writeText(harness.runtime.automationSnapshot("Tray"), &writer);
         const text = writer.buffered();
-        try std.testing.expect(std.mem.indexOf(u8, text, "tray title=\"ZN 3\" items=4\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "tray #1 title=\"ZN 3\" visible=true items=4\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #1 label=\"Refresh\" command=\"app.refresh\" enabled=true detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item separator\n") != null);
         // The fixture disables the SELECTED row (initially issue 0).

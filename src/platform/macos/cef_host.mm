@@ -552,6 +552,21 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+@interface NativeSdkChromiumStatusItemEntry : NSObject
+@property(nonatomic, assign) uint32_t identifier;
+@property(nonatomic, strong) NSStatusItem *item;
+@property(nonatomic, strong) NSImage *baseImage;
+@property(nonatomic, strong) NSMenu *menu;
+@property(nonatomic, strong) NSString *presentationTitle;
+@property(nonatomic, assign) double presentationWidth;
+@property(nonatomic, assign) int presentationTone;
+@property(nonatomic, assign) double presentationIconOpacity;
+@property(nonatomic, assign) BOOL presentationMonospaced;
+@property(nonatomic, strong) NSString *activationCommand;
+@property(nonatomic, strong) NSString *alternateActivationCommand;
+@property(nonatomic, strong) NSString *openCommand;
+@end
+
 /* Captures the selected item id of a context-menu popUp (NSMenuItem
  * targets are weak; the presenter block keeps this alive). */
 @interface NativeSdkChromiumContextMenuTarget : NSObject
@@ -618,16 +633,7 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) BOOL observesApplicationActivation;
 @property(nonatomic, strong) id shortcutEventMonitor;
 @property(nonatomic, strong) NSArray<NativeSdkChromiumShortcut *> *shortcuts;
-@property(nonatomic, strong) NSStatusItem *statusItem;
-@property(nonatomic, strong) NSImage *statusItemBaseImage;
-@property(nonatomic, strong) NSMenu *statusMenu;
-@property(nonatomic, assign) double statusPresentationWidth;
-@property(nonatomic, assign) int statusPresentationTone;
-@property(nonatomic, assign) double statusPresentationIconOpacity;
-@property(nonatomic, assign) BOOL statusPresentationMonospaced;
-@property(nonatomic, strong) NSString *statusActivationCommand;
-@property(nonatomic, strong) NSString *statusAlternateActivationCommand;
-@property(nonatomic, strong) NSString *statusOpenCommand;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkChromiumStatusItemEntry *> *statusItems;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
 @property(nonatomic) CefRefPtr<NativeSdkCefClient> cefClient;
@@ -703,11 +709,16 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event;
 - (void)trayMenuItemClicked:(NSMenuItem *)menuItem;
 - (void)menuWillOpen:(NSMenu *)menu;
-- (void)emitStatusCommand:(NSString *)command;
+- (NativeSdkChromiumStatusItemEntry *)statusEntryForId:(uint32_t)identifier;
+- (NativeSdkChromiumStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu;
+- (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId;
 - (void)statusItemActivated:(id)sender;
 @end
 
 @implementation NativeSdkChromiumShortcut
+@end
+
+@implementation NativeSdkChromiumStatusItemEntry
 @end
 
 @implementation NativeSdkChromiumWindowDelegate
@@ -866,6 +877,7 @@ static const char *NativeSdkCefBridgeScript() {
     self.webviewGenerations = [[NSMutableDictionary alloc] init];
     self.closingWebViewKeys = [[NSMutableSet alloc] init];
     self.appTimers = [[NSMutableDictionary alloc] init];
+    self.statusItems = [[NSMutableDictionary alloc] init];
     self.nextWebViewGeneration = 1;
     self.cefClients = new std::map<uint64_t, CefRefPtr<NativeSdkCefClient>>();
     self.browsers = new std::map<uint64_t, CefRefPtr<CefBrowser>>();
@@ -1989,33 +2001,51 @@ static const char *NativeSdkCefBridgeScript() {
 }
 
 - (void)trayMenuItemClicked:(NSMenuItem *)menuItem {
-    if (self.trayCallback) self.trayCallback(self.trayContext, (uint32_t)menuItem.tag);
+    if (self.trayCallback) {
+        uint64_t packed = (uint64_t)(NSUInteger)menuItem.tag;
+        self.trayCallback(self.trayContext, (uint32_t)(packed >> 32), (uint32_t)packed);
+    }
 }
 
-- (void)emitStatusCommand:(NSString *)command {
+- (NativeSdkChromiumStatusItemEntry *)statusEntryForId:(uint32_t)identifier {
+    return self.statusItems[@(identifier)];
+}
+
+- (NativeSdkChromiumStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu {
+    for (NativeSdkChromiumStatusItemEntry *entry in self.statusItems.allValues) {
+        if (entry.menu == menu) return entry;
+    }
+    return nil;
+}
+
+- (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId {
     if (command.length == 0) return;
     const char *bytes = command.UTF8String;
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND,
         .window_id = 1,
+        .status_item_id = statusItemId,
         .command_name = bytes,
         .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
     }];
 }
 
 - (void)menuWillOpen:(NSMenu *)menu {
-    if (!self.statusItem || menu != self.statusMenu) return;
-    [self emitStatusCommand:self.statusOpenCommand];
+    NativeSdkChromiumStatusItemEntry *entry = [self statusEntryForMenu:menu];
+    if (!entry) return;
+    [self emitStatusCommand:entry.openCommand statusItemId:entry.identifier];
 }
 
 - (void)statusItemActivated:(id)sender {
-    (void)sender;
-    if ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0 && self.statusAlternateActivationCommand.length > 0) {
-        [self emitStatusCommand:self.statusAlternateActivationCommand];
+    NSStatusBarButton *button = [sender isKindOfClass:[NSStatusBarButton class]] ? sender : nil;
+    NativeSdkChromiumStatusItemEntry *entry = button ? [self statusEntryForId:(uint32_t)button.tag] : nil;
+    if (!entry) return;
+    if ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0 && entry.alternateActivationCommand.length > 0) {
+        [self emitStatusCommand:entry.alternateActivationCommand statusItemId:entry.identifier];
         return;
     }
-    [self emitStatusCommand:self.statusActivationCommand];
-    if (self.statusMenu) [self.statusItem popUpStatusItemMenu:self.statusMenu];
+    [self emitStatusCommand:entry.activationCommand statusItemId:entry.identifier];
+    if (entry.menu) [entry.item popUpStatusItemMenu:entry.menu];
 }
 
 @end
@@ -3409,63 +3439,84 @@ static NSImage *NativeSdkCefTrayImageWithOpacity(NSImage *source, double opacity
     return image;
 }
 
-static void NativeSdkCefApplyTrayPresentation(NativeSdkChromiumHost *object, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
-    if (!object.statusItem) return;
-    object.statusPresentationWidth = width;
-    object.statusPresentationTone = tone;
-    object.statusPresentationIconOpacity = iconOpacity;
-    object.statusPresentationMonospaced = monospaced;
+static void NativeSdkCefApplyTrayPresentation(NativeSdkChromiumHost *object, NativeSdkChromiumStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
+    if (!entry.item) return;
+    entry.presentationTitle = requestedTitle ?: @"";
+    entry.presentationWidth = width;
+    entry.presentationTone = tone;
+    entry.presentationIconOpacity = iconOpacity;
+    entry.presentationMonospaced = monospaced;
     NSString *title = requestedTitle ?: @"";
-    if (!object.statusItemBaseImage && title.length == 0) title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+    if (!entry.baseImage && title.length == 0) title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
     NSFont *font = monospaced ? [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular] : [NSFont systemFontOfSize:11];
     if (tone == 0) {
-        object.statusItem.button.title = title;
-        object.statusItem.button.font = font;
-        object.statusItem.button.contentTintColor = nil;
+        entry.item.button.title = title;
+        entry.item.button.font = font;
+        entry.item.button.contentTintColor = nil;
     } else {
         NSColor *color = tone == 1 ? NSColor.systemOrangeColor : NSColor.systemRedColor;
-        object.statusItem.button.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{ NSForegroundColorAttributeName: color, NSFontAttributeName: font }];
-        object.statusItem.button.contentTintColor = color;
+        entry.item.button.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{ NSForegroundColorAttributeName: color, NSFontAttributeName: font }];
+        entry.item.button.contentTintColor = color;
     }
-    object.statusItem.button.image = NativeSdkCefTrayImageWithOpacity(object.statusItemBaseImage, iconOpacity);
-    object.statusItem.length = width > 0 ? width : (requestedTitle.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength);
+    entry.item.button.image = NativeSdkCefTrayImageWithOpacity(entry.baseImage, iconOpacity);
+    entry.item.length = width > 0 ? width : (requestedTitle.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength);
 }
 
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+static void NativeSdkCefApplyTrayShell(NativeSdkChromiumHost *object, NativeSdkChromiumStatusItemEntry *entry, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, int visible, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+    entry.baseImage = nil;
+    if (icon_path && icon_path_len > 0) {
+        NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
+        NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];
+        if (image) {
+            image.template = YES;
+            image.size = NSMakeSize(18, 18);
+            entry.baseImage = image;
+        }
+    }
+    entry.item.button.toolTip = tooltip && tooltip_len > 0 ? ([[NSString alloc] initWithBytes:tooltip length:tooltip_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    entry.activationCommand = activation_command ? ([[NSString alloc] initWithBytes:activation_command length:activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    entry.alternateActivationCommand = alternate_activation_command ? ([[NSString alloc] initWithBytes:alternate_activation_command length:alternate_activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    entry.openCommand = open_command ? ([[NSString alloc] initWithBytes:open_command length:open_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+    NSStatusBarButton *button = entry.item.button;
+    button.tag = (NSInteger)entry.identifier;
+    button.target = object;
+    button.action = (entry.activationCommand.length > 0 || entry.alternateActivationCommand.length > 0) ? @selector(statusItemActivated:) : NULL;
+    if (button.action) [button sendActionOn:NSEventMaskLeftMouseUp];
+    entry.item.visible = visible != 0;
+}
+
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
-        if (object.statusItem) {
-            [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
+        NSNumber *key = @(status_item_id);
+        NativeSdkChromiumStatusItemEntry *entry = object.statusItems[key];
+        if (entry) {
+            [[NSStatusBar systemStatusBar] removeStatusItem:entry.item];
+        } else {
+            entry = [[NativeSdkChromiumStatusItemEntry alloc] init];
+            entry.identifier = status_item_id;
+            object.statusItems[key] = entry;
         }
-        object.statusMenu = nil;
+        entry.menu = nil;
         // A titled menu-bar extra needs variable width; icon-only status
         // items keep the classic square well.
         BOOL hasTitle = title != NULL && title_len > 0;
-        object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
-        object.statusItemBaseImage = nil;
-
-        if (icon_path && icon_path_len > 0) {
-            NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
-            NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];
-            if (image) {
-                [image setTemplate:YES];
-                image.size = NSMakeSize(18, 18);
-                object.statusItemBaseImage = image;
-            }
-        }
+        entry.item = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
         NSString *titleString = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        if (tooltip && tooltip_len > 0) {
-            object.statusItem.button.toolTip = [[NSString alloc] initWithBytes:tooltip length:tooltip_len encoding:NSUTF8StringEncoding];
-        }
-        object.statusActivationCommand = activation_command ? ([[NSString alloc] initWithBytes:activation_command length:activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        object.statusAlternateActivationCommand = alternate_activation_command ? ([[NSString alloc] initWithBytes:alternate_activation_command length:alternate_activation_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        object.statusOpenCommand = open_command ? ([[NSString alloc] initWithBytes:open_command length:open_command_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        if (object.statusActivationCommand.length > 0 || object.statusAlternateActivationCommand.length > 0) {
-            object.statusItem.button.target = object;
-            object.statusItem.button.action = @selector(statusItemActivated:);
-            [object.statusItem.button sendActionOn:NSEventMaskLeftMouseUp];
-        }
-        NativeSdkCefApplyTrayPresentation(object, titleString, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkCefApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
+        NativeSdkCefApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0);
+    }
+}
+
+void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, int visible, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    @autoreleasepool {
+        NativeSdkChromiumStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
+        NativeSdkCefApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
+        NativeSdkCefApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced);
+        if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = entry.menu;
+        else entry.item.menu = nil;
     }
 }
 
@@ -3478,14 +3529,15 @@ static NSEventModifierFlags NativeSdkCefTrayModifiers(uint32_t modifiers) {
     return flags;
 }
 
-void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
+void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t status_item_id, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
-        if (!object.statusItem) return;
-        NSMenu *menu = object.statusMenu;
+        NativeSdkChromiumStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
+        NSMenu *menu = entry.menu;
         if (menu == nil) {
             menu = [[NSMenu alloc] initWithTitle:@""];
-            object.statusMenu = menu;
+            entry.menu = menu;
         } else {
             [menu removeAllItems];
         }
@@ -3499,7 +3551,7 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
                                                           action:@selector(trayMenuItemClicked:)
                                                    keyEquivalent:@""];
-            item.tag = (NSInteger)item_ids[i];
+            item.tag = (NSInteger)(((uint64_t)status_item_id << 32) | item_ids[i]);
             item.target = object;
             item.enabled = enabled_flags[i] != 0 && (roles[i] == 0 || roles[i] == 4);
             if (details[i] && detail_lens[i] > 0) {
@@ -3514,7 +3566,7 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
             [menu addItem:item];
         }
         menu.delegate = object;
-        if (object.statusActivationCommand.length == 0 && object.statusAlternateActivationCommand.length == 0) object.statusItem.menu = menu;
+        if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = menu;
     }
 }
 
@@ -3531,38 +3583,41 @@ int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host
     return 1;
 }
 
-void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const char *title, size_t title_len) {
+void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
-        if (!object.statusItem) return;
+        NativeSdkChromiumStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
         NSString *value = title && title_len > 0 ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
         NativeSdkCefApplyTrayPresentation(
             object,
+            entry,
             value,
-            object.statusPresentationWidth,
-            object.statusPresentationTone,
-            object.statusPresentationIconOpacity,
-            object.statusPresentationMonospaced
+            entry.presentationWidth,
+            entry.presentationTone,
+            entry.presentationIconOpacity,
+            entry.presentationMonospaced
         );
     }
 }
 
-void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
+        NativeSdkChromiumStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry) return;
         NSString *value = title ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        NativeSdkCefApplyTrayPresentation(object, value, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkCefApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0);
     }
 }
 
-void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host) {
+void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
-    if (object.statusItem) {
-        [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
-        object.statusItem = nil;
-        object.statusItemBaseImage = nil;
-        object.statusMenu = nil;
-    }
+    NSNumber *key = @(status_item_id);
+    NativeSdkChromiumStatusItemEntry *entry = object.statusItems[key];
+    if (!entry) return;
+    [[NSStatusBar systemStatusBar] removeStatusItem:entry.item];
+    [object.statusItems removeObjectForKey:key];
 }
 
 /* Dock icon entry points, CEF engine: the Chromium shell is still a
