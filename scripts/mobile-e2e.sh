@@ -17,6 +17,8 @@
 #     headless arm64 emulator via adb. Reuses (or creates, then deletes)
 #     the AVD named by NATIVE_SDK_MOBILE_AVD (default native-mobile-e2e;
 #     creation needs a JDK and the arm64-v8a android-35 system image).
+#     NATIVE_SDK_MOBILE_ANDROID_PORT selects its dedicated even emulator
+#     port (default 5584), keeping every adb command pinned to this run.
 #
 # The executed proof per target: core update round trips with typed
 # service results through the in-process pool, trap isolation, and a
@@ -33,8 +35,21 @@ adb="$sdk_root/platform-tools/adb"
 emulator="$sdk_root/emulator/emulator"
 avdmanager="$sdk_root/cmdline-tools/latest/bin/avdmanager"
 avd_name="${NATIVE_SDK_MOBILE_AVD:-native-mobile-e2e}"
+android_port="${NATIVE_SDK_MOBILE_ANDROID_PORT:-5584}"
+android_serial="emulator-$android_port"
 ios_min="15.0"
 harness_dir=".zig-cache/mobile/harness"
+
+case "$android_port" in
+  ''|*[!0-9]*)
+    echo "mobile-e2e: NATIVE_SDK_MOBILE_ANDROID_PORT must be an even port in 5554..5682." >&2
+    exit 2
+    ;;
+esac
+if [ "$android_port" -lt 5554 ] || [ "$android_port" -gt 5682 ] || [ $((android_port % 2)) -ne 0 ]; then
+  echo "mobile-e2e: NATIVE_SDK_MOBILE_ANDROID_PORT must be an even port in 5554..5682." >&2
+  exit 2
+fi
 
 # ---- step machinery (gate.sh's shape) --------------------------------------
 
@@ -200,25 +215,34 @@ run_step "ensure-avd" ensure_avd
 emulator_pid=""
 execute_android() {
   "$adb" start-server >/dev/null 2>&1
-  "$emulator" -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot \
+  if "$adb" -s "$android_serial" get-state >/dev/null 2>&1; then
+    echo "mobile-e2e: $android_serial is already in use; choose another NATIVE_SDK_MOBILE_ANDROID_PORT." >&2
+    return 1
+  fi
+  "$emulator" -avd "$avd_name" -port "$android_port" -no-window -no-audio -no-boot-anim -no-snapshot \
     > .zig-cache/mobile/emulator.log 2>&1 &
   emulator_pid=$!
-  "$adb" wait-for-device || return 1
   booted=""
   for _ in $(seq 1 60); do
-    booted="$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+    if ! kill -0 "$emulator_pid" 2>/dev/null; then
+      echo "mobile-e2e: $android_serial exited before boot; see .zig-cache/mobile/emulator.log" >&2
+      return 1
+    fi
+    booted="$("$adb" -s "$android_serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
     [ "$booted" = "1" ] && break
     sleep 5
   done
   [ "$booted" = "1" ] || { echo "mobile-e2e: the emulator did not finish booting" >&2; return 1; }
-  "$adb" push "$harness_dir/battery-android" /data/local/tmp/ts-mobile-e2e >/dev/null &&
-  "$adb" shell "chmod +x /data/local/tmp/ts-mobile-e2e && rm -rf /data/local/tmp/nsme && mkdir -p /data/local/tmp/nsme && /data/local/tmp/ts-mobile-e2e /data/local/tmp/nsme"
+  "$adb" -s "$android_serial" push "$harness_dir/battery-android" /data/local/tmp/ts-mobile-e2e >/dev/null &&
+  "$adb" -s "$android_serial" shell "chmod +x /data/local/tmp/ts-mobile-e2e && rm -rf /data/local/tmp/nsme && mkdir -p /data/local/tmp/nsme && /data/local/tmp/ts-mobile-e2e /data/local/tmp/nsme"
 }
 run_step "execute-android-emulator" execute_android
 
 # Teardown: stop the emulator; delete the AVD only if this run created it.
-"$adb" emu kill >/dev/null 2>&1
-[ -n "$emulator_pid" ] && wait "$emulator_pid" 2>/dev/null
+if [ -n "$emulator_pid" ]; then
+  "$adb" -s "$android_serial" emu kill >/dev/null 2>&1
+  wait "$emulator_pid" 2>/dev/null
+fi
 if $created_avd; then
   java_home="$(resolve_java_home)"
   [ -n "$java_home" ] && JAVA_HOME="$java_home" "$avdmanager" delete avd -n "$avd_name" >/dev/null 2>&1

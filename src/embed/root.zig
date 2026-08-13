@@ -23,6 +23,7 @@ pub const MobileImageService = types.MobileImageService;
 pub const MobileChromeItem = chrome.MobileChromeItem;
 pub const renderChromeIconPixels = chrome.renderIconPixels;
 pub const mobile_gpu_surface_label = types.mobile_gpu_surface_label;
+pub const max_mobile_asset_root_bytes = types.max_mobile_asset_root_bytes;
 
 pub const EmbeddedApp = host.EmbeddedApp;
 pub const MobileHostApp = host.MobileHostApp;

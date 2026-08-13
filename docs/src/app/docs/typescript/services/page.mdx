@@ -318,17 +318,17 @@ Two carriers run the same operations behind the same routes, keys, deadlines, ca
     <tr>
       <td><code>child</code></td>
       <td>A second native executable — <code>&lt;app&gt;_services</code> — beside the app binary, packaged with it</td>
-      <td>Unset/<code>auto</code> default; available on every supported desktop build</td>
+      <td>Unset/<code>auto</code> default on desktop; unavailable on mobile</td>
     </tr>
     <tr>
       <td><code>in_process</code></td>
       <td>Compiled into the app binary; a small thread pool, one isolated module instance per thread</td>
-      <td>Explicit opt-in: native Linux, cross-Linux x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU, or macOS built on macOS</td>
+      <td>Explicit opt-in on native Linux, cross-Linux x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU, or macOS built on macOS; unset/<code>auto</code> default on iOS and Android</td>
     </tr>
   </tbody>
 </table>
 
-`.service_carrier = "in_process" | "child"` in app.zon (or `-Dservice-carrier`) states the choice; unset/`"auto"` selects the child carrier. `.service_pool_size` (or `-Dservice-pool-size`, 1-16) sets the in-process pool width; the default is min(4, cores).
+`.service_carrier = "in_process" | "child"` in app.zon (or `-Dservice-carrier`) states the choice. Unset/`"auto"` selects the child carrier on desktop and the in-process pool on iOS/Android, where a child process is unavailable. `.service_pool_size` (or `-Dservice-pool-size`, 1-16) sets the in-process pool width; the default is min(4, cores).
 
 Shared guarantees:
 

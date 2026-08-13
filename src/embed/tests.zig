@@ -982,6 +982,9 @@ test "mobile C ABI dispatches GPU widget accessibility actions" {
 // render pixels, touch that mutates the model, and IME text that lands in a
 // textbox — with NullPlatform standing in for the (M2) real surface.
 
+var mobile_service_data_root: [types.max_mobile_asset_root_bytes]u8 = undefined;
+var mobile_service_data_root_len: usize = 0;
+
 const MobileCounterDef = struct {
     pub const Model = struct {
         count: u32 = 0,
@@ -1007,6 +1010,11 @@ const MobileCounterDef = struct {
             .update = update,
             .view = view,
         };
+    }
+
+    pub fn serviceDataRoot(root: []const u8) void {
+        @memcpy(mobile_service_data_root[0..root.len], root);
+        mobile_service_data_root_len = root.len;
     }
 
     fn update(model: *Model, msg: Msg) void {
@@ -1224,6 +1232,21 @@ test "mobile store capability requires and binds the OS app-data root before sta
     try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
     try std.testing.expect(self.ui.effects.record_store_binding != null);
     MobileStoreApi.native_sdk_app_stop(app);
+}
+
+test "mobile host passes the complete maximum-length data root to app wiring" {
+    const app = MobileCounterApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileCounterApi.native_sdk_app_destroy(app);
+
+    var root: [types.max_mobile_asset_root_bytes]u8 = @splat('a');
+    root[0] = '.';
+    mobile_service_data_root_len = 0;
+    try std.testing.expectEqual(
+        @as(c_int, 1),
+        MobileCounterApi.native_sdk_app_set_data_root(app, &root, root.len),
+    );
+    try std.testing.expectEqual(root.len, mobile_service_data_root_len);
+    try std.testing.expectEqualSlices(u8, &root, mobile_service_data_root[0..mobile_service_data_root_len]);
 }
 
 test "mobile relational capability opens app.db from the OS app-data root" {

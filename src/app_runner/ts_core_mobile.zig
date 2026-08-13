@@ -75,9 +75,13 @@ const mobile_scene: native_sdk.app_manifest.ShellConfig = .{
 // pool, its executor, and the shim-installed app-data directory.
 var pool_io_state: std.Io.Threaded = undefined;
 var pool_transport: PoolTransport = undefined;
-var data_root_buffer: [512]u8 = undefined;
-var data_root_len: usize = 0;
-var env_entries = [_]Adapter.EnvValue{.{ .msg = dataDirMsgArm(), .value = "" }};
+var data_root_buffer: [native_sdk.embed.max_mobile_asset_root_bytes]u8 = undefined;
+var env_entries: [envMsgsLen()]Adapter.EnvValue = undefined;
+var env_entry_count: usize = 0;
+var env_value_copies: [envMsgsLen()][]u8 = undefined;
+var env_value_copy_count: usize = 0;
+var data_root_env_indices: [envMsgsLen()]usize = undefined;
+var data_root_env_count: usize = 0;
 
 /// The embed host calls `mobileOptions()` first (UiAppHost.create), so the
 /// boot model is committed by the time `initModel` reads it.
@@ -104,6 +108,7 @@ pub fn mobileOptions() Adapter.Options {
 }
 
 fn coreOptions() Adapter.CoreOptions {
+    freeEnvValueCopies();
     var core_options: Adapter.CoreOptions = .{};
     if (comptime use_pool) {
         // The pool's own executor: mobile has no `std.process.Init` to
@@ -125,9 +130,33 @@ fn coreOptions() Adapter.CoreOptions {
             .decode_fn = services.resultDecoder(core),
         };
     }
-    if (comptime coreWantsDataDir()) {
-        core_options.env_values = env_entries[0..1];
+    env_entry_count = 0;
+    data_root_env_count = 0;
+    if (comptime @hasDecl(core, "envMsgs")) {
+        inline for (core.envMsgs) |entry| {
+            if (comptime std.mem.eql(u8, entry.env, app_data_dir_env)) {
+                // The embed host installs the authoritative app-data path
+                // after mobileOptions(), before start. Keep its compacted
+                // slot so serviceDataRoot can fill it without trusting an
+                // ambient value for this reserved variable.
+                data_root_env_indices[data_root_env_count] = env_entry_count;
+                data_root_env_count += 1;
+                env_entries[env_entry_count] = .{ .msg = entry.msg, .value = "" };
+                env_entry_count += 1;
+            } else if (std.c.getenv(entry.env)) |value| {
+                // Snapshot the process value at launch, matching the desktop
+                // runner. Keep an owned copy because later setenv calls may
+                // invalidate getenv storage before the first installing frame.
+                if (std.heap.page_allocator.dupe(u8, std.mem.span(value))) |copy| {
+                    env_value_copies[env_value_copy_count] = copy;
+                    env_value_copy_count += 1;
+                    env_entries[env_entry_count] = .{ .msg = entry.msg, .value = copy };
+                    env_entry_count += 1;
+                } else |_| {}
+            }
+        }
     }
+    core_options.env_values = env_entries[0..env_entry_count];
     return core_options;
 }
 
@@ -137,11 +166,15 @@ fn coreOptions() Adapter.CoreOptions {
 /// both mobile sandboxes guarantee — and a core's `envMsgs` request for
 /// the data directory resolves to it.
 pub fn serviceDataRoot(root: []const u8) void {
-    const len = @min(root.len, data_root_buffer.len);
-    @memcpy(data_root_buffer[0..len], root[0..len]);
-    data_root_len = len;
-    if (comptime use_pool) pool_transport.cwd = data_root_buffer[0..len];
-    if (comptime coreWantsDataDir()) env_entries[0].value = data_root_buffer[0..len];
+    // UiAppHost validates this against the same exported ABI limit before
+    // invoking the hook, so every accepted path fits whole.
+    std.debug.assert(root.len <= data_root_buffer.len);
+    @memcpy(data_root_buffer[0..root.len], root);
+    const installed = data_root_buffer[0..root.len];
+    if (comptime use_pool) pool_transport.cwd = installed;
+    for (data_root_env_indices[0..data_root_env_count]) |index| {
+        env_entries[index].value = installed;
+    }
 }
 
 /// Embed-host hook (destroy): the pool's shutdown already ran through the
@@ -151,25 +184,20 @@ pub fn serviceTeardown() void {
         pool_transport.deinit();
         pool_io_state.deinit();
     }
+    freeEnvValueCopies();
 }
 
-fn coreWantsDataDir() bool {
-    comptime {
-        if (!@hasDecl(core, "envMsgs")) return false;
-        for (core.envMsgs) |entry| {
-            if (std.mem.eql(u8, entry.env, app_data_dir_env)) return true;
-        }
-        return false;
+fn freeEnvValueCopies() void {
+    for (env_value_copies[0..env_value_copy_count]) |copy| {
+        std.heap.page_allocator.free(copy);
     }
+    env_value_copy_count = 0;
 }
 
-fn dataDirMsgArm() []const u8 {
+fn envMsgsLen() usize {
     comptime {
-        if (!@hasDecl(core, "envMsgs")) return "";
-        for (core.envMsgs) |entry| {
-            if (std.mem.eql(u8, entry.env, app_data_dir_env)) return entry.msg;
-        }
-        return "";
+        if (!@hasDecl(core, "envMsgs")) return 0;
+        return core.envMsgs.len;
     }
 }
 
