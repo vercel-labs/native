@@ -3170,6 +3170,7 @@ fn tsCoreE2eArtifact(
         pool_mod.addImport("ts_services_registry", service_host_fixture.registry);
         pool_mod.link_libc = true;
         pool_mod.addObjectFile(service_archive);
+        addScriptcArchiveSystemLibs(pool_mod, target);
         break :pool pool_mod;
     } else null;
 
@@ -3207,6 +3208,7 @@ fn tsCoreE2eArtifact(
         // service as a linked archive, driven through ServicePool.
         service_bench_mod.link_libc = true;
         service_bench_mod.addObjectFile(bench_archive);
+        addScriptcArchiveSystemLibs(service_bench_mod, target);
     }
     const service_bench_exe = b.addExecutable(.{
         .name = "bench-service-host",
@@ -3301,12 +3303,27 @@ fn tsCoreE2eArtifact(
     };
 }
 
+/// System import libraries scriptc's compiled-archive runtime reaches on
+/// Windows targets — core and service archives alike (Winsock, adapter
+/// enumeration, and crypto-backed randomness). No-op elsewhere; the
+/// archives' other dependencies are libc's. The app lane's twin is the
+/// Windows platform block in build/app.zig.
+fn addScriptcArchiveSystemLibs(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) return;
+    mod.linkSystemLibrary("ws2_32", .{});
+    mod.linkSystemLibrary("iphlpapi", .{});
+    mod.linkSystemLibrary("advapi32", .{});
+}
+
 const ExternalServiceFixture = struct {
     executable: std.Build.LazyPath,
     /// The in-process carrier's library archive (thread-instanced,
-    /// runtime-localized), compiled from the same staged tree. Host-native
-    /// darwin/linux builds only; null elsewhere (runtime localization
-    /// refuses cross targets, and the pool is a desktop host-native carrier).
+    /// runtime-localized), compiled from the same staged tree. Present
+    /// wherever the pinned compiler's build matrix covers the pairing
+    /// (Linux/Windows targets from any desktop host, macOS targets from a
+    /// macOS host — see build/app.zig serviceArchiveSupported); null
+    /// elsewhere, and for explicitly spelled linux-gnu targets below the
+    /// glibc 2.36 runtime floor.
     archive: ?std.Build.LazyPath,
     registry: *std.Build.Module,
 };
@@ -3315,8 +3332,8 @@ const ExternalServiceFixture = struct {
 /// service sidecar -> corewire host/registry -> ordinary source stage (plus
 /// the pinned compiler's tagged-throw compatibility lowering) -> exact pinned
 /// scriptc outputs (the child executable, plus the in-process library archive
-/// on host-native darwin/linux). No author source is re-read for dispatch
-/// facts after the sidecar emission.
+/// wherever the compiler's build matrix covers the host/target pairing). No
+/// author source is re-read for dispatch facts after the sidecar emission.
 fn externalServiceFixture(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -3327,9 +3344,9 @@ fn externalServiceFixture(
     contract: std.Build.LazyPath,
     name: []const u8,
 ) ExternalServiceFixture {
-    const emit_archive = target.result.os.tag == b.graph.host.result.os.tag and
-        target.result.cpu.arch == b.graph.host.result.cpu.arch and
-        (target.result.os.tag == .macos or target.result.os.tag == .linux);
+    const app_build = @import("build/app.zig");
+    const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target.result) and
+        !app_build.linuxGlibcSpellingHitsDefaultFloor(target);
     const project = b.addRunArtifact(corewire_exe);
     project.addArg("--services-sidecar");
     project.addFileArg(contract);
@@ -3372,14 +3389,14 @@ fn externalServiceFixture(
     compile.addArg("--contract");
     compile.addFileArg(contract);
     compile.addArg("--out-exe");
-    const suffix = if (b.graph.host.result.os.tag == .windows) ".exe" else "";
+    const suffix = if (target.result.os.tag == .windows) ".exe" else "";
     const executable = compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
     const archive: ?std.Build.LazyPath = if (emit_archive) archive: {
         compile.addArg("--out-archive");
         break :archive compile.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
     } else null;
     const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
-    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", host_platform });
+    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", app_build.servicePlatformTriple(b, target), "--zig-exe", b.graph.zig_exe });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
@@ -3641,6 +3658,7 @@ fn externalCoreFixtureModule(
     });
     mod.link_libc = true;
     mod.addObjectFile(archive);
+    addScriptcArchiveSystemLibs(mod, target);
     return .{
         .module = mod,
         .contract = contract,

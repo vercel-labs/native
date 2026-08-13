@@ -616,7 +616,7 @@ test("the service compile lane refuses a contract whose compiler echo skews from
   }
 });
 
-test("the service compile lane refuses a target that differs from the build host", () => {
+test("the service compile lane refuses a macOS target on a non-macOS build host", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-target-"));
   try {
     const stage = path.join(root, "stage");
@@ -629,14 +629,79 @@ test("the service compile lane refuses a target that differs from the build host
       "--stage", stage,
       "--manifest", path.join(root, "package.json"),
       "--contract", path.join(root, "services.contract.json"),
-      "--out-exe", path.join(root, "service-host.exe"),
-      "--host-platform", "aarch64-macos-none",
-      "--target-platform", "x86_64-windows-gnu",
+      "--out-exe", path.join(root, "service-host"),
+      "--host-platform", "x86_64-linux-gnu",
+      "--target-platform", "aarch64-macos-none",
       "--compiler", process.execPath,
     ], { encoding: "utf8" });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /currently compile only for the build host/);
-    assert.match(result.stderr, /x86_64-windows-gnu/);
+    assert.match(result.stderr, /compile on a macOS build host only/);
+    assert.match(result.stderr, /aarch64-macos-none/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the service compile lane refuses a pairing outside the compiler's build matrix", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-matrix-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.28" }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-exe", path.join(root, "service-host"),
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "wasm32-wasi-musl",
+      "--compiler", process.execPath,
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /desktop targets the pinned compiler covers/);
+    assert.match(result.stderr, /wasm32-wasi-musl/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the service compile lane cross-compiles an admitted pairing over the compiler's zig-cc lane", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-cross-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.28" }));
+    const compiler = path.join(root, "compiler.mjs");
+    // The stub asserts the cross environment the lane must receive: the
+    // zig-cc driver selection, the target triple, and the supplied zig's
+    // directory at the front of PATH.
+    fs.writeFileSync(compiler, `
+import fs from "node:fs";
+if (process.argv.includes("-v")) { console.log("0.0.28"); process.exit(0); }
+if (process.env.SCRIPTC_CC !== "zigcc") { console.error("expected SCRIPTC_CC=zigcc, got " + process.env.SCRIPTC_CC); process.exit(9); }
+if (process.env.SCRIPTC_TARGET !== "x86_64-windows-gnu") { console.error("expected SCRIPTC_TARGET=x86_64-windows-gnu, got " + process.env.SCRIPTC_TARGET); process.exit(9); }
+if (!(process.env.PATH ?? "").startsWith(${JSON.stringify(path.join(root, "toolchain"))})) { console.error("zig directory missing from PATH front: " + process.env.PATH); process.exit(9); }
+fs.writeFileSync(process.argv[process.argv.indexOf("-o") + 1], "cross exe bytes");
+`);
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    const output = path.join(root, "service-host.exe");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--manifest", path.join(root, "package.json"),
+      "--contract", path.join(root, "services.contract.json"),
+      "--out-exe", output,
+      "--host-platform", "aarch64-macos-none",
+      "--target-platform", "x86_64-windows-gnu",
+      "--zig-exe", path.join(root, "toolchain", "zig"),
+      "--compiler-js", compiler,
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(output, "utf8"), "cross exe bytes");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

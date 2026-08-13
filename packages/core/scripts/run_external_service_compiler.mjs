@@ -5,7 +5,10 @@
 // archive the in-process carrier links (service_inproc_main.ts under the
 // staged service_profile.json). One invocation may produce either or both.
 // The compiler version is verified against the one packages/core pin and the
-// echo in services.contract.json before any compiler work starts.
+// echo in services.contract.json before any compiler work starts. Host/target
+// pairings follow the pinned compiler's build matrix: same-triple compiles run
+// natively; Linux and Windows targets cross-compile from any desktop host over
+// the compiler's zig-cc lane; macOS targets need a macOS build host.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -18,7 +21,7 @@ function parseArgs(argv) {
     const key = argv[i];
     const value = argv[i + 1];
     if (!key?.startsWith("--") || value === undefined) {
-      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> (--out-exe <file> | --out-archive <file>) --host-platform <arch-os-abi> --target-platform <arch-os-abi> (--compiler <cmd> | --compiler-js <main.js>)");
+      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> (--out-exe <file> | --out-archive <file>) --host-platform <arch-os-abi> --target-platform <arch-os-abi> [--zig-exe <path>] (--compiler <cmd> | --compiler-js <main.js>)");
       process.exit(2);
     }
     args[key.slice(2)] = value;
@@ -41,19 +44,51 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv);
-if (args["target-platform"] !== args["host-platform"]) {
-  console.error(
-    `TypeScript services currently compile only for the build host (${args["host-platform"]}), but the app targets ${args["target-platform"]}. ` +
-    "Build the service app on its target platform until the pinned service compiler supports cross-target executables.",
-  );
-  process.exit(2);
+
+// The pairing matrix the pinned compiler covers. Same-triple compiles run
+// the native lane (host clang, no cross env). Different triples run the
+// compiler's zig-cc lane: Linux and Windows targets build from any desktop
+// host (the compiler cross-compiles its runtime and localizes ELF and COFF
+// objects itself); macOS targets build on a macOS host only, where Apple
+// linking rides the host toolchain's SDK.
+const platformOs = (platform) => (platform.split("-")[1] ?? "").split(".")[0];
+const hostOs = platformOs(args["host-platform"]);
+const targetOs = platformOs(args["target-platform"]);
+const cross = args["target-platform"] !== args["host-platform"];
+if (cross) {
+  const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
+  const admitted = desktopHost &&
+    (["linux", "windows"].includes(targetOs) || (targetOs === "macos" && hostOs === "macos"));
+  if (!admitted) {
+    console.error(
+      targetOs === "macos"
+        ? `TypeScript services for a macOS target (${args["target-platform"]}) compile on a macOS build host only — Apple linking needs the host toolchain's SDK — but this build host is ${args["host-platform"]}. Build macOS service apps on a Mac.`
+        : `TypeScript services compile for desktop targets the pinned compiler covers — Linux and Windows from a macOS/Linux/Windows build host, macOS from a macOS host — but this build pairs host ${args["host-platform"]} with target ${args["target-platform"]}.`,
+    );
+    process.exit(2);
+  }
 }
-for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "compiler-js"]) {
+for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "compiler-js", "zig-exe"]) {
   if (args[key]) args[key] = path.resolve(args[key]);
 }
 const argv0 = args.compiler
   ? (fs.existsSync(args.compiler) ? [args.compiler] : args.compiler.split(/\s+/))
   : [process.execPath, args["compiler-js"]];
+
+// Cross compiles hand the compiler its zig-cc lane: the target triple as
+// SCRIPTC_TARGET, and (when the build graph supplied its own zig) that
+// zig's directory at the front of PATH so the lane never depends on an
+// ambient install. Native compiles keep the process environment untouched.
+const compileEnv = cross
+  ? {
+      ...process.env,
+      SCRIPTC_CC: "zigcc",
+      SCRIPTC_TARGET: args["target-platform"],
+      ...(args["zig-exe"]
+        ? { PATH: `${path.dirname(args["zig-exe"])}${path.delimiter}${process.env.PATH ?? ""}` }
+        : {}),
+    }
+  : process.env;
 
 function isNpmStaticRefusal(output) {
   const percent = output.match(/compile statically\s+\d+\s+\((\d+)%\)/i);
@@ -98,7 +133,7 @@ try {
       "service_host_main.ts",
       "--npm-static",
       staticPackages.join(","),
-    ], { cwd: work, encoding: "utf8" });
+    ], { cwd: work, encoding: "utf8", env: compileEnv });
     const coverageOutput = `${coverage.stdout ?? ""}${coverage.stderr ?? ""}`;
     if (coverage.status !== 0 || isNpmStaticRefusal(coverageOutput)) {
       if (coverage.stdout) process.stdout.write(coverage.stdout);
@@ -108,12 +143,13 @@ try {
     }
   }
   if (args["out-exe"]) {
-    const built = path.join(work, process.platform === "win32" ? "service-host.exe" : "service-host");
+    const built = path.join(work, targetOs === "windows" ? "service-host.exe" : "service-host");
     const compileArgs = [...argv0.slice(1), "build", "service_host_main.ts", "-o", built];
     if (staticPackages.length > 0) compileArgs.push("--npm-static", staticPackages.join(","));
     const result = spawnSync(argv0[0], compileArgs, {
       cwd: work,
       encoding: "utf8",
+      env: compileEnv,
     });
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
@@ -149,7 +185,7 @@ try {
       "service_profile.json",
       "-o",
       builtArchive,
-    ], { cwd: work, encoding: "utf8" });
+    ], { cwd: work, encoding: "utf8", env: compileEnv });
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
     if (result.status !== 0) {

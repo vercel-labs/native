@@ -112,12 +112,59 @@ const TsCoreStage = struct {
 };
 
 /// Which carrier runs src/services/ operations. Auto preserves the isolated,
-/// single-instance child carrier; host-native macOS/Linux apps can explicitly
-/// opt into the parallel in-process pool. `.service_carrier` in app.zon and
-/// the `-Dservice-carrier` flag state the choice.
+/// single-instance child carrier; apps can explicitly opt into the parallel
+/// in-process pool wherever the pinned service compiler can build the
+/// runtime-localized service archive for the target (see
+/// serviceArchiveSupported). `.service_carrier` in app.zon and the
+/// `-Dservice-carrier` flag state the choice.
 const ServiceCarrierOption = enum { auto, in_process, child };
 
 const ServiceCarrier = enum { none, child, in_process };
+
+/// Whether the pinned service compiler can build the in-process carrier's
+/// archive (runtime-localized, thread-instanced) on this build host for
+/// this target: Linux and Windows targets compile from any desktop host
+/// (the compiler cross-compiles and localizes ELF and COFF itself), while
+/// macOS targets need a macOS host (Apple linking rides the host
+/// toolchain's SDK).
+pub fn serviceArchiveSupported(host: std.Target, target: std.Target) bool {
+    const desktop_host = switch (host.os.tag) {
+        .macos, .linux, .windows => true,
+        else => false,
+    };
+    if (!desktop_host) return false;
+    return switch (target.os.tag) {
+        .linux, .windows => true,
+        .macos => host.os.tag == .macos,
+        else => false,
+    };
+}
+
+/// Whether a Linux target's spelling lands on Zig's default glibc floor,
+/// which predates `arc4random_buf` — a symbol the compiled service
+/// runtime references, so the link fails late and opaquely without the
+/// configure-time teaching. A native target (no `-Dtarget` os) resolves
+/// the system's own glibc and is exempt; an explicitly spelled `-gnu`
+/// target needs a stated glibc of 2.36 or later (or `-musl`, whose libc
+/// always has the symbol).
+pub fn linuxGlibcSpellingHitsDefaultFloor(target: std.Build.ResolvedTarget) bool {
+    if (target.result.os.tag != .linux or !target.result.abi.isGnu()) return false;
+    if (target.query.os_tag == null) return false;
+    const glibc = target.query.glibc_version orelse return true;
+    return glibc.order(.{ .major = 2, .minor = 36, .patch = 0 }) == .lt;
+}
+
+/// The glibc-floor teaching for service builds (both carriers compile the
+/// service class for the target, so both hit the missing symbol).
+pub fn panicLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
+    @panic(b.fmt(
+        "\nTypeScript services target {t}-linux-gnu at Zig's default glibc floor, which" ++
+            " predates arc4random_buf — a symbol the compiled service runtime needs (glibc" ++
+            " 2.36+).\nSpell the target as \"{t}-linux-gnu.2.36\" (or later), or" ++
+            " \"{t}-linux-musl\".\n",
+        .{ target.result.cpu.arch, target.result.cpu.arch, target.result.cpu.arch },
+    ));
+}
 
 fn resolveServiceCarrier(
     choice: ServiceCarrierOption,
@@ -127,19 +174,48 @@ fn resolveServiceCarrier(
 ) ServiceCarrier {
     if (!has_services) return .none;
     const host = b.graph.host.result;
-    const supported = target.result.os.tag == host.os.tag and
-        target.result.cpu.arch == host.cpu.arch and
-        (target.result.os.tag == .macos or target.result.os.tag == .linux);
-    return switch (choice) {
-        .auto => .child,
+    const supported = serviceArchiveSupported(host, target.result);
+    const carrier: ServiceCarrier = switch (choice) {
+        .auto, .child => .child,
         .in_process => if (supported) .in_process else @panic(
-            "\nservice_carrier = \"in_process\" requires a host-native macOS or Linux build:" ++
-                " the service archive compiles with runtime localization, which is host-native" ++
-                " on those platforms only.\nUse \"child\" (or drop the setting — auto selects" ++
-                " the child carrier) for this target.\n",
+            "\nservice_carrier = \"in_process\" requires a build the pinned service compiler" ++
+                " can produce the runtime-localized service archive for: a macOS, Linux, or" ++
+                " Windows build host targeting Linux, Windows, or (from a macOS host) macOS." ++
+                "\nUse \"child\" (or drop the setting — auto selects the child carrier)" ++
+                " for this target.\n",
         ),
-        .child => .child,
     };
+    // The service class compiles FOR the target on either carrier: the
+    // archive links into the Zig-built app, and a cross-compiled child
+    // executable links inside the compiler's own zig-cc lane. Both walk
+    // into the default glibc floor on a bare `-gnu` Linux spelling, so
+    // teach at configure time instead. A child compile whose target
+    // equals the build host stays on the native compile lane and never
+    // consults the floor.
+    const cross = target.result.os.tag != host.os.tag or
+        target.result.cpu.arch != host.cpu.arch or
+        target.result.abi != host.abi or
+        target.query.glibc_version != null;
+    const hits_floor = switch (carrier) {
+        .in_process => linuxGlibcSpellingHitsDefaultFloor(target),
+        .child => cross and linuxGlibcSpellingHitsDefaultFloor(target),
+        .none => false,
+    };
+    if (hits_floor) panicLinuxGlibcSpelling(b, target);
+    return carrier;
+}
+
+/// The `arch-os-abi` platform spelling the service compile lane receives.
+/// A stated glibc version rides the abi (`gnu.2.36`) so the compiler's
+/// cross lane builds at the spelled floor rather than the default one.
+pub fn servicePlatformTriple(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    const triple = b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi });
+    if (target.result.os.tag != .linux or !target.result.abi.isGnu()) return triple;
+    const glibc = target.query.glibc_version orelse return triple;
+    return if (glibc.patch == 0)
+        b.fmt("{s}.{d}.{d}", .{ triple, glibc.major, glibc.minor })
+    else
+        b.fmt("{s}.{d}.{d}.{d}", .{ triple, glibc.major, glibc.minor, glibc.patch });
 }
 
 fn parseServiceCarrierOption(raw: []const u8) ServiceCarrierOption {
@@ -636,7 +712,12 @@ fn tsCoreStage(
             "--host-platform",
             b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
             "--target-platform",
-            b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi }),
+            servicePlatformTriple(b, target),
+            // Cross service compiles run the pinned compiler's zig-cc
+            // lane; hand over this build's own zig so the lane never
+            // depends on a PATH zig (native compiles ignore it).
+            "--zig-exe",
+            b.graph.zig_exe,
         });
         if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
             service_compile.addArgs(&.{ "--compiler", override });
@@ -1931,9 +2012,12 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("oleacc", .{});
         app_mod.linkSystemLibrary("shell32", .{});
         // TypeScript cores link ScriptC's host runtime, whose network-interface
-        // helpers use GetAdaptersAddresses and Winsock address conversion.
+        // helpers use GetAdaptersAddresses and Winsock address conversion; the
+        // in-process service archive shares the same runtime and additionally
+        // reaches advapi32 (crypto-backed randomness).
         app_mod.linkSystemLibrary("iphlpapi", .{});
         app_mod.linkSystemLibrary("ws2_32", .{});
+        app_mod.linkSystemLibrary("advapi32", .{});
         // The audio backend: Media Foundation (session + source resolver
         // + streaming audio renderer) and WinHTTP (the cache fill).
         app_mod.linkSystemLibrary("mf", .{});
