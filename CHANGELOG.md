@@ -2,9 +2,41 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.8.4
+## 0.9.0
 
 <!-- release:start -->
+
+### New Features
+
+- **Ordinary TypeScript services behind a typed boundary**: Apps can place filesystem, process, JSON, regex, class, and exact-vendored npm work under `src/services/`; Native SDK generates the checked client and codecs, compiles a pinned static service executable, and carries keyed requests, typed streaming, cooperative cancellation, deadlines, supervision, and deterministic replay across the isolated boundary (#317, #321).
+- **Optional in-process TypeScript services**: Services can use the same boundary through a linked, runtime-localized worker pool with per-key FIFO ordering, parallel independent keys, streaming, timeout and trap isolation, and replay that never starts the carrier; the explicit opt-in now follows the compiler's Windows, Linux, macOS, and cross-target matrix while the isolated child remains the automatic default (#334, #337).
+- **Engine-owned model persistence**: TypeScript cores can persist committed models through capability-gated, atomically replaced snapshots with generated codecs, debounced writes, backup recovery, explicit restore and migration routes, rollback safety, and journal/replay support (#316).
+- **SQLite record storage**: TypeScript and Zig apps can use a capability-gated record store for deterministic atomic CRUD effects backed by bundled SQLite across desktop and mobile hosts, with devhost parity and a complete Record Store example (#320).
+- **Checked relational SQLite**: Append-only migrations, build-validated named SQL, transactions, generated typed commands and live-query subscriptions, replay, and the Relational Notes example make relational SQLite a first-class offline data layer across desktop and mobile (#326).
+- **Model-driven menu-bar apps**: TypeScript apps can derive status-item labels, icons, tooltips, and rich menus from committed model state, while new macOS effects control hidden startup, fullscreen, Dock visibility, and launch-at-login behavior across both native hosts (#311, #314).
+- **Platform services for TypeScript cores**: Typed effects now open external URLs, reveal filesystem paths, and format local time through validated macOS, Linux, and Windows backends (#315).
+- **App-scoped credentials**: TypeScript and Zig cores can store, load, and delete credentials through capability- and permission-gated native providers, with redacted journals, deterministic replay placeholders, and hermetic devhost stores across desktop and mobile (#335).
+- **Cross-compiled TypeScript cores**: The external core compiler now builds Linux and Windows GNU targets from macOS, Linux, or Windows and macOS targets from macOS, with target-independent contracts and cross-platform end-to-end batteries for Windows and Linux musl (#340).
+
+### Bug Fixes
+
+- **Working documentation root**: `/docs`, `/docs/`, and the matching Markdown route now resolve to the Introduction instead of ending at a 404 (#338).
+
+### Improvements
+
+- **Faster retained desktop frames**: Animation pumping and Windows wake scheduling now avoid stalled or redundant work, profiling uses monotonic frame-correlated telemetry, and physical macOS and Windows performance gates protect input latency and frame budgets (#313).
+- **Measured, compiler-truth service tooling**: A dedicated TypeScript Services reference documents the two-tier model and failure semantics; production-carrier benchmarks measure cold start, latency, and throughput; generated compiler-surface references and manifest diffs keep capability claims mechanically honest; and scriptc advances through 0.0.28 with refreshed contracts and calibration (#325, #327, #328, #329, #333, #336).
+
+### Contributors
+
+- @ctate
+- @carvalab
+- @Railly
+- @camilocbarrera
+
+<!-- release:end -->
+
+## 0.8.4
 
 ### New Features
 
@@ -28,8 +60,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 - @ctate
 - @marcusschiesser
 - @NyxTools-M
-
-<!-- release:end -->
 
 ## 0.8.3
 

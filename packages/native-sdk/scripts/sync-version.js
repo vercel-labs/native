@@ -15,10 +15,10 @@
 // scaffold pins (templates read the bundled manifest) and the editor copy
 // the CLI materializes match the npm publish the moment the package goes
 // public. The committed TS examples pin the bundled version by hand, so
-// they are stamped here too (tests/ts-core/scaffold_ide_e2e_tests.zig
-// fails the build when an example pin drifts from the bundled version).
+// they are stamped here too (version:check fails when any example pin
+// drifts from the bundled version).
 
-import { readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -114,13 +114,20 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
   }
 }
 
-// The committed TS examples' @native-sdk/core pins (exact, like the
+// Every committed TS example's @native-sdk/core pin (exact, like the
 // scaffold's, so a post-publish `npm install` resolves the same content
-// the CLI materializes).
-for (const example of ['examples/kanban', 'examples/soundboard-ts', 'examples/system-monitor-ts']) {
-  const examplePath = join(repoRoot, ...example.split('/'), 'package.json');
+// the CLI materializes). Discover these instead of maintaining a list:
+// new examples often exercise the release's new SDK surface and must not
+// accidentally keep the version that happened to be current at creation.
+const examplesDir = join(repoRoot, 'examples');
+for (const entry of readdirSync(examplesDir, { withFileTypes: true })) {
+  if (!entry.isDirectory()) continue;
+  const examplePath = join(examplesDir, entry.name, 'package.json');
+  if (!existsSync(examplePath)) continue;
   const exampleJson = JSON.parse(readFileSync(examplePath, 'utf-8'));
-  if (exampleJson.dependencies?.['@native-sdk/core'] !== version) {
+  if (!exampleJson.dependencies?.['@native-sdk/core']) continue;
+  const example = `examples/${entry.name}`;
+  if (exampleJson.dependencies['@native-sdk/core'] !== version) {
     exampleJson.dependencies['@native-sdk/core'] = version;
     writeFileSync(examplePath, JSON.stringify(exampleJson, null, 2) + '\n');
     console.log(`  Updated ${example}/package.json`);
