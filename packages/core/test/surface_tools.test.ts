@@ -41,10 +41,10 @@ function generatorFixture(entries: unknown[]) {
   fs.mkdirSync(scriptDir, { recursive: true });
   fs.mkdirSync(manifestDir, { recursive: true });
   fs.copyFileSync(genScript, path.join(scriptDir, "gen_service_surface.mjs"));
-  fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+  fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
   fs.writeFileSync(path.join(manifestDir, "surface-manifest.json"), JSON.stringify({
     schemaVersion: 1,
-    compilerVersion: "0.0.28",
+    compilerVersion: "0.0.29",
     coverage: [],
     entries,
   }));
@@ -140,11 +140,11 @@ test("surface_manifest_diff refuses unknown schema versions", () => {
 });
 
 test("surface_manifest_diff refuses a stale install for the pinned spec", () => {
-  const script = diffToolFixture("0.0.28", "0.0.25");
+  const script = diffToolFixture("0.0.29", "0.0.25");
   const run = spawnSync(process.execPath, [script, "pinned", "pinned"], { encoding: "utf8" });
   assert.equal(run.status, 2);
   assert.match(run.stderr, /installed compiler manifest is 0\.0\.25/);
-  assert.match(run.stderr, /package\.json pins scriptc 0\.0\.28/);
+  assert.match(run.stderr, /package\.json pins scriptc 0\.0\.29/);
 });
 
 test("identical manifests diff to no differences", () => {
@@ -267,7 +267,7 @@ test("the claim scan covers Markdown formatting and docs while ignoring unrelate
   const unrelated = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(unrelated.status, 0, unrelated.stderr);
 
-  fs.writeFileSync(skill, "The pinned scriptc compiler\nversion `0.0.28` was used for this calibration.\n");
+  fs.writeFileSync(skill, "The pinned scriptc compiler\nversion `0.0.29` was used for this calibration.\n");
   const current = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(current.status, 0, current.stderr);
 
@@ -275,19 +275,19 @@ test("the claim scan covers Markdown formatting and docs while ignoring unrelate
   const stale = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(stale.status, 1);
   assert.match(stale.stderr, /skills\/example\/SKILL\.md:2:/);
-  assert.match(stale.stderr, /compiler version 0\.0\.25 but the pin is 0\.0\.28/);
+  assert.match(stale.stderr, /compiler version 0\.0\.25 but the pin is 0\.0\.29/);
 
   fs.writeFileSync(skill, "Compiler support was measured with scriptc version: `0.0.24`.\n");
   const punctuated = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(punctuated.status, 1);
   assert.match(punctuated.stderr, /skills\/example\/SKILL\.md:1:/);
-  assert.match(punctuated.stderr, /compiler version 0\.0\.24 but the pin is 0\.0\.28/);
+  assert.match(punctuated.stderr, /compiler version 0\.0\.24 but the pin is 0\.0\.29/);
 
   fs.writeFileSync(skill, "The scriptc compiler pin is 0.0.23.\n");
   const pinClaim = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(pinClaim.status, 1);
   assert.match(pinClaim.stderr, /skills\/example\/SKILL\.md:1:/);
-  assert.match(pinClaim.stderr, /compiler version 0\.0\.23 but the pin is 0\.0\.28/);
+  assert.match(pinClaim.stderr, /compiler version 0\.0\.23 but the pin is 0\.0\.29/);
 
   fs.writeFileSync(skill, "The Zig compiler version is 0.16.0.\n");
   const otherCompiler = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
@@ -300,7 +300,7 @@ test("the claim scan covers Markdown formatting and docs while ignoring unrelate
   fs.writeFileSync(skill, "The scriptc 0.0.22 calibration established this service surface.\n");
   const scriptcCalibration = spawnSync(process.execPath, [fixture.script, "--check"], { encoding: "utf8" });
   assert.equal(scriptcCalibration.status, 1);
-  assert.match(scriptcCalibration.stderr, /compiler version 0\.0\.22 but the pin is 0\.0\.28/);
+  assert.match(scriptcCalibration.stderr, /compiler version 0\.0\.22 but the pin is 0\.0\.29/);
 
   for (const formattedVersion of ["**0.0.22**", "_0.0.21_", "```0.0.20```"]) {
     fs.writeFileSync(skill, `The scriptc version is ${formattedVersion}.\n`);

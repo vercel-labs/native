@@ -87,7 +87,7 @@ if (cross) {
 // Runtime localization is narrower than executable cross-compilation. The
 // in-process archive's object merger supports native Linux through host
 // binutils, cross-ELF for x86_64/aarch64, COFF for x86_64, and Mach-O on a
-// macOS host. Keep this preflight in lockstep with ScriptC 0.0.28's
+// macOS host. Keep this preflight in lockstep with ScriptC 0.0.29's
 // compileLibrary guard so `in_process` refusals teach before compiler work.
 if (args["out-archive"]) {
   const archiveSupported =

@@ -717,7 +717,7 @@ fn tsCoreStage(
 
         // Ordinary service TypeScript is staged without core-subset rewrites.
         // The one service-boundary lowering turns NS1067's `{ kind, message }`
-        // throw into the tagged Error shape scriptc 0.0.28 can catch from an
+        // throw into the tagged Error shape scriptc 0.0.29 can catch from an
         // imported op; no deterministic profile fences participate here.
         const service_stage_run = b.addSystemCommand(&.{node});
         service_stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_services.mjs"));

@@ -6,7 +6,7 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.0.28
+# Service compile surface — scriptc 0.0.29
 
 What TypeScript under `src/services/` can use, as stated by the pinned
 compiler itself (surface manifest schema 1, 527 entries:
@@ -600,4 +600,5 @@ statuses promise, verbatim:
 - The engine-free fetch projection targets Node 24.15.0 with bundled Undici 7.24.4. Each projected row names the differential evidence that guards it; changing the pinned Node or Undici version is an explicit profile update.
 - The fetch profile also contains a runtime-reflected census of the selected fetch, abort, Headers, and readable-stream interfaces plus RequestInit/ResponseInit dictionary reads. Static, dynamic-only, and unsupported census rows are projected here; its explicitly out-of-scope metadata rows and adjacent-interface exclusions remain in the profile so absence is deliberate rather than ambiguous.
 - Process-level diagnostic codes are not surface entries: SC0001-SC0004 are preflight gates, SC1110 is a comptime evaluation failure, SC3001/SC3002 are backend/target tier refusals, SC9001/SC9002 are internal errors.
+- Entry statuses are projected for the desktop targets. The mobile targets (aarch64-apple-ios, aarch64-apple-ios-simulator, aarch64-linux-android) compile library-mode archives only: the library-admissible surface (what SC4005's async_free requirement and the library link set admit) is supported there, the executable lane refuses those triples with SC3002, and no entry outside the library-admissible surface carries a mobile support claim. iOS archives build for iOS 15.0 on darwin hosts; Android archives build against NDK API level 26.
 - No scheduling metadata is published; entry ids are the stable diff keys across releases.
