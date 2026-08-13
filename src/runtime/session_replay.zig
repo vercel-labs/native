@@ -866,6 +866,19 @@ test "only admission-tagged file results regenerate" {
         .file_outcome = .out_of_order,
         .file_rejected_admission = true,
     }));
+    try std.testing.expect(!fileRecordDamaged(.{
+        .kind = .file,
+        .key = 4,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .ok,
+    }));
+    try std.testing.expect(fileRecordDamaged(.{
+        .kind = .file,
+        .key = 4,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .ok,
+        .file_total = 1,
+    }));
 }
 
 /// Re-render a journaled screenshot mark through the same deterministic

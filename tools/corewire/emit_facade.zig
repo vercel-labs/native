@@ -2663,7 +2663,7 @@ const FacadeEmitter = struct {
             \\// ---------------------------------------------------- the cmd wire
             \\// Encoder for the inert Cmd data the author's update returns —
             \\// byte-for-byte the layouts the host's command decoder expects
-            \\// (cmd_format_version 4). nscfTagOf maps a Msg arm name onto its
+            \\// (cmd_format_version 5). nscfTagOf maps a Msg arm name onto its
             \\// declaration-order wire tag.
             \\
             \\const nscfFetchMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];

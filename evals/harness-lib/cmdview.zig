@@ -1,5 +1,5 @@
 //! Decoder over the app-core Cmd/Sub wire format (rt.zig, cmd_format_version
-//! 4), shared by the ts-track behavioral harnesses. The graders copy this
+//! 5), shared by the ts-track behavioral harnesses. The graders copy this
 //! file next to each case's harness so assertions read decoded ops — "a
 //! fetch with key `feed` targeting this URL", "the delay re-armed" — instead
 //! of hand-built byte strings, which keeps harnesses lenient about the parts

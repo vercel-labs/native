@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 4) onto the real effect engine
+//! emits (`cmd_format_version` 5) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -1973,6 +1973,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
                 return;
             }
+            if (file_streams[index].cancelling) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
+                return;
+            }
             if (file_streams[index].busy) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "out_of_order"));
                 return;
@@ -1989,6 +1993,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 return;
             };
             if (!file_streams[index].sink) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
+                return;
+            }
+            if (file_streams[index].cancelling) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
                 return;
             }

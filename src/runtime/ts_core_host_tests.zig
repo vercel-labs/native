@@ -1,7 +1,7 @@
 //! Bridge coverage for `TsCoreHost` against a hand-written core that
 //! replicates the transpiler's emitted ABI (rt kernel, commit walker,
 //! `UpdateResult`/`InitResult`, wire-encoded commands and
-//! subscriptions). Hand-encoding the wire records here pins the v4
+//! subscriptions). Hand-encoding the wire records here pins the v5
 //! byte layout independently of the rt builders that normally produce
 //! it; the transpiled-fixture end-to-end suite (tests/ts-core) drives
 //! the same bridge with genuinely emitted code through a full UiApp.
@@ -336,6 +336,8 @@ const mini_core = struct {
         replace_full_db_live_set, // 100: replace them with one disjoint key
         malformed_credential, // 101: reserved request with an invalid inner record
         open_save_sink, // 102: write_file_stream "save" -> wrote/failed
+        write_save_chunk, // 103: write_file_chunk "save" -> wrote/failed
+        close_save_sink, // 104: write_file_close "save" -> wrote/failed
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -487,6 +489,8 @@ const mini_core = struct {
             },
             .save_file => return .{ .model = model, .cmd = cmdWriteFile("save", 12, 8, "notes.bin", model.status) },
             .open_save_sink => return .{ .model = model, .cmd = cmdWriteFileStream("save", 12, 8, "notes.bin") },
+            .write_save_chunk => return .{ .model = model, .cmd = cmdWriteFileChunk("save", 12, 8, "next") },
+            .close_save_sink => return .{ .model = model, .cmd = cmdWriteFileClose("save", 12, 8) },
             .wrote => {
                 const out = frameCreate(model.*);
                 out.saved = true;
@@ -996,6 +1000,19 @@ const mini_core = struct {
         const out = rt.frameAlloc(u8, 4 + key.len + 4 + file_path.len);
         var off = writeRoutedHead(out, 0x2E, key, ok_tag, err_tag);
         off = writeLongBytes(out, off, file_path);
+        return out;
+    }
+
+    fn cmdWriteFileChunk(key: []const u8, ok_tag: u8, err_tag: u8, bytes: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 4 + key.len + 4 + bytes.len);
+        var off = writeRoutedHead(out, 0x2F, key, ok_tag, err_tag);
+        off = writeLongBytes(out, off, bytes);
+        return out;
+    }
+
+    fn cmdWriteFileClose(key: []const u8, ok_tag: u8, err_tag: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 4 + key.len);
+        _ = writeRoutedHead(out, 0x30, key, ok_tag, err_tag);
         return out;
     }
 
@@ -1803,6 +1820,36 @@ test "file streams and buffered effects cannot share a public key" {
     try std.testing.expectEqual(@as(i64, 3), Host.model().errs);
     try std.testing.expectEqualStrings("cancelled", Host.model().last_err);
     try std.testing.expectError(error.EffectNotFound, fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base));
+}
+
+test "a cancelling file sink rejects later chunk and close commands without orphaning callbacks" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .open_save_sink);
+    try fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base);
+    try fx.feedFileResultDetailed(.{ .key = ts_core_host.file_stream_key_base, .op = .write_stream_open, .outcome = .ok });
+    Host.drain(fx);
+
+    // Cancel keeps the bridge entry until the engine's loud terminal arrives.
+    // A command in that window must reject locally instead of overwriting the
+    // cancellation route and queuing a second callback against the same entry.
+    Host.dispatch(fx, .drop_save);
+    Host.dispatch(fx, .write_save_chunk);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 2), Host.model().errs);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+
+    Host.dispatch(fx, .open_save_sink);
+    try fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base);
+    try fx.feedFileResultDetailed(.{ .key = ts_core_host.file_stream_key_base, .op = .write_stream_open, .outcome = .ok });
+    Host.drain(fx);
+    Host.dispatch(fx, .drop_save);
+    Host.dispatch(fx, .close_save_sink);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 4), Host.model().errs);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
 }
 
 test "fetch decodes the wire record whole and routes the { status, body } ok arm by field type" {

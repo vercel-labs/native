@@ -478,13 +478,25 @@ test "streaming file round-trip has no total-size cliff and finalizes atomically
     for (chunk, 0..) |*byte, index| byte.* = @truncate(index);
 
     fx.writeFileStream(.{ .key = 44, .path = path, .on_result = Fx.fileMsg(.result) });
-    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    var write_result: ?effects_mod.EffectFileResult = null;
+    while (write_result == null) {
+        if (fx.takeMsg()) |msg| write_result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u64, 0), write_result.?.total);
     for (0..5) |_| {
         fx.writeFileChunk(.{ .key = 44, .bytes = chunk, .on_result = Fx.fileMsg(.result) });
-        while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+        write_result = null;
+        while (write_result == null) {
+            if (fx.takeMsg()) |msg| write_result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(@as(u64, 0), write_result.?.total);
     }
     fx.writeFileClose(.{ .key = 44, .on_result = Fx.fileMsg(.result) });
-    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    write_result = null;
+    while (write_result == null) {
+        if (fx.takeMsg()) |msg| write_result = msg.result else try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u64, 0), write_result.?.total);
 
     fx.readFileStream(.{ .key = 45, .path = path, .on_result = Fx.fileMsg(.result) });
     var chunks: usize = 0;
@@ -651,6 +663,36 @@ test "loop-side stream protocol results are journaled as replay-regenerated" {
     try std.testing.expect(Capture.records[4].file_rejected_admission);
     try std.testing.expectEqual(effects_mod.EffectFileOutcome.sink_missing, Capture.records[5].file_outcome);
     try std.testing.expect(Capture.records[5].file_rejected_admission);
+}
+
+test "path-policy file rejections are journaled as executor truth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    const Capture = struct {
+        var record: ?effects_mod.EffectResultRecord = null;
+
+        fn note(_: *anyopaque, value: effects_mod.EffectResultRecord) void {
+            record = value;
+        }
+    };
+
+    Capture.record = null;
+    var context: u8 = 0;
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.bindJournal(.{ .context = &context, .record_fn = Capture.note });
+    fx.bindFileAccess(.{ .roots = &.{}, .permitted = false, .enforce = true });
+
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/denied.bin", .{tmp.sub_path[0..]});
+    fx.readFile(.{ .key = 61, .path = path, .on_result = Fx.fileMsg(.result) });
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, fx.takeMsg().?.result.outcome);
+    try std.testing.expect(Capture.record != null);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, Capture.record.?.file_outcome);
+    try std.testing.expect(!Capture.record.?.file_rejected_admission);
 }
 
 test "read streams replace and cancel silently while sinks cancel loudly" {

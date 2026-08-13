@@ -121,7 +121,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 ```
 
-The command set (Cmd wire format v4):
+The command set (Cmd wire format v5):
 
 - `Cmd.none` — no effects; returning a bare `Model` is sugar for `[model, Cmd.none]`.
 - `Cmd.persist()` — snapshot the just-committed Model through the engine-owned store. Requires `"persist"` in `app.zon` capabilities plus `.persist = .{ .version, .restore = .{ .ok, .none, .err } }`; the host owns canonical encoding, debounce/coalescing, atomic app-data placement, backup recovery, and replay.
