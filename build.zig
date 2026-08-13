@@ -43,6 +43,41 @@ pub const MobileLibOptions = @import("build/app.zig").MobileLibOptions;
 pub const addMobileLib = @import("build/app.zig").addMobileLib;
 const mobile_export_symbol_names = @import("build/app.zig").mobile_export_symbol_names;
 
+test "service archive support matches ScriptC localized object formats" {
+    const app_build = @import("build/app.zig");
+    const host = @import("builtin").target;
+    const resolved = struct {
+        fn target(os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch, abi: std.Target.Abi) std.Build.ResolvedTarget {
+            var result = host;
+            result.os.tag = os;
+            result.cpu.arch = arch;
+            result.abi = abi;
+            return .{
+                .query = .{ .os_tag = os, .cpu_arch = arch, .abi = abi },
+                .result = result,
+            };
+        }
+    }.target;
+
+    var macos_host = host;
+    macos_host.os.tag = .macos;
+    macos_host.cpu.arch = .aarch64;
+    macos_host.abi = .none;
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.windows, .x86_64, .gnu)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.windows, .aarch64, .gnu)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .x86_64, .musl)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .aarch64, .musl)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.linux, .riscv64, .musl)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.macos, .x86_64, .none)));
+
+    var linux_host = host;
+    linux_host.os.tag = .linux;
+    linux_host.cpu.arch = .riscv64;
+    linux_host.abi = .musl;
+    try std.testing.expect(app_build.serviceArchiveSupported(linux_host, .{ .query = .{}, .result = linux_host }));
+    try std.testing.expect(!app_build.serviceArchiveSupported(linux_host, resolved(.macos, .aarch64, .none)));
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const host_target = b.graph.host;
@@ -273,6 +308,7 @@ pub fn build(b: *std.Build) void {
     // where the failure reads as the graded app's, not the tooling's.
     const evals_cmdview_mod = module(b, target, optimize, "evals/harness-lib/cmdview.zig");
     const evals_cmdview_tests = testArtifact(b, evals_cmdview_mod);
+    const build_graph_tests = testArtifact(b, module(b, host_target, optimize, "build.zig"));
 
     // `native version` names the commit the binary was built from, so
     // binary/framework skew ("your native binary may be stale") is a
@@ -497,6 +533,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_dirs_tests).step);
@@ -685,6 +722,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
+        .{ .path = "build/app.zig", .pattern = ".linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64" },
+        .{ .path = "build/app.zig", .pattern = ".windows => target.result.cpu.arch == .x86_64" },
         .{ .path = "build/app.zig", .pattern = "scriptcPlatformTriple(b, target),\n        // Keep the core and service archives on the same cross compiler" },
         .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe," },
         .{ .path = "build.zig", .pattern = "abi_laws_mod.addObjectFile(markup_fixture.archive);\n    addScriptcArchiveSystemLibs(abi_laws_mod, target);" },
@@ -3326,11 +3365,11 @@ const ExternalServiceFixture = struct {
     executable: std.Build.LazyPath,
     /// The in-process carrier's library archive (thread-instanced,
     /// runtime-localized), compiled from the same staged tree. Present
-    /// wherever the pinned compiler's build matrix covers the pairing
-    /// (Linux/Windows targets from any desktop host, macOS targets from a
-    /// macOS host — see build/app.zig serviceArchiveSupported); null
-    /// elsewhere, and for explicitly spelled linux-gnu targets below the
-    /// glibc 2.36 runtime floor.
+    /// wherever the pinned compiler's localized-archive matrix covers the
+    /// pairing (native Linux, cross-Linux x86_64/aarch64, Windows x86_64,
+    /// or macOS from a macOS host — see build/app.zig
+    /// serviceArchiveSupported); null elsewhere, and for explicitly spelled
+    /// linux-gnu targets below the glibc 2.36 runtime floor.
     archive: ?std.Build.LazyPath,
     registry: *std.Build.Module,
 };
@@ -3339,8 +3378,9 @@ const ExternalServiceFixture = struct {
 /// service sidecar -> corewire host/registry -> ordinary source stage (plus
 /// the pinned compiler's tagged-throw compatibility lowering) -> exact pinned
 /// scriptc outputs (the child executable, plus the in-process library archive
-/// wherever the compiler's build matrix covers the host/target pairing). No
-/// author source is re-read for dispatch facts after the sidecar emission.
+/// wherever the compiler's localized-archive matrix covers the host/target
+/// pairing). No author source is re-read for dispatch facts after the sidecar
+/// emission.
 fn externalServiceFixture(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -3355,7 +3395,7 @@ fn externalServiceFixture(
     if (app_build.scriptcTargetIsCross(b.graph.host.result, target) and app_build.linuxGlibcSpellingHitsDefaultFloor(target)) {
         app_build.panicScriptcLinuxGlibcSpelling(b, target);
     }
-    const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target.result);
+    const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target);
     const project = b.addRunArtifact(corewire_exe);
     project.addArg("--services-sidecar");
     project.addFileArg(contract);

@@ -123,18 +123,20 @@ const ServiceCarrier = enum { none, child, in_process };
 
 /// Whether the pinned service compiler can build the in-process carrier's
 /// archive (runtime-localized, thread-instanced) on this build host for
-/// this target: Linux and Windows targets compile from any desktop host
-/// (the compiler cross-compiles and localizes ELF and COFF itself), while
-/// macOS targets need a macOS host (Apple linking rides the host
-/// toolchain's SDK).
-pub fn serviceArchiveSupported(host: std.Target, target: std.Target) bool {
+/// this target. Its object localizers are deliberately architecture-aware:
+/// native Linux uses host binutils, cross-ELF accepts x86_64/aarch64, COFF
+/// accepts x86_64, and Mach-O needs a macOS host (Apple linking rides the
+/// host toolchain's SDK).
+pub fn serviceArchiveSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
     const desktop_host = switch (host.os.tag) {
         .macos, .linux, .windows => true,
         else => false,
     };
     if (!desktop_host) return false;
-    return switch (target.os.tag) {
-        .linux, .windows => true,
+    const cross = scriptcTargetIsCross(host, target);
+    return switch (target.result.os.tag) {
+        .linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64,
+        .windows => target.result.cpu.arch == .x86_64,
         .macos => host.os.tag == .macos,
         else => false,
     };
@@ -186,13 +188,13 @@ fn resolveServiceCarrier(
 ) ServiceCarrier {
     if (!has_services) return .none;
     const host = b.graph.host.result;
-    const supported = serviceArchiveSupported(host, target.result);
+    const supported = serviceArchiveSupported(host, target);
     const carrier: ServiceCarrier = switch (choice) {
         .auto, .child => .child,
         .in_process => if (supported) .in_process else @panic(
-            "\nservice_carrier = \"in_process\" requires a build the pinned service compiler" ++
-                " can produce the runtime-localized service archive for: a macOS, Linux, or" ++
-                " Windows build host targeting Linux, Windows, or (from a macOS host) macOS." ++
+            "\nservice_carrier = \"in_process\" requires a target the pinned service compiler" ++
+                " can produce a runtime-localized archive for: native Linux, cross-Linux" ++
+                " x86_64/aarch64, Windows x86_64, or macOS from a macOS build host." ++
                 "\nUse \"child\" (or drop the setting — auto selects the child carrier)" ++
                 " for this target.\n",
         ),

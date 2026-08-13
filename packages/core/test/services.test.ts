@@ -668,6 +668,36 @@ test("the service compile lane refuses a pairing outside the compiler's build ma
   }
 });
 
+test("the service archive lane refuses architectures outside the localized-object matrix", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-archive-matrix-"));
+  try {
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.28" } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.28" }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
+    for (const target of ["aarch64-windows-gnu", "riscv64-linux-musl"]) {
+      const result = spawnSync(process.execPath, [
+        script,
+        "--stage", stage,
+        "--manifest", path.join(root, "package.json"),
+        "--contract", path.join(root, "services.contract.json"),
+        "--out-archive", path.join(root, `${target}.a`),
+        "--host-platform", "aarch64-macos-none",
+        "--target-platform", target,
+        "--compiler", process.execPath,
+      ], { encoding: "utf8" });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /cannot build a runtime-localized archive/);
+      assert.match(result.stderr, new RegExp(target));
+      assert.match(result.stderr, /cross-Linux x86_64\/aarch64, Windows x86_64/);
+      assert.match(result.stderr, /Use the child carrier/);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the service compile lane cross-compiles an admitted pairing over the compiler's zig-cc lane", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-cross-"));
   try {

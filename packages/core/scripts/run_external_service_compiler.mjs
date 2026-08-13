@@ -52,8 +52,10 @@ const args = parseArgs(process.argv);
 // objects itself); macOS targets build on a macOS host only, where Apple
 // linking rides the host toolchain's SDK.
 const platformOs = (platform) => (platform.split("-")[1] ?? "").split(".")[0];
+const platformArch = (platform) => platform.split("-")[0] ?? "";
 const hostOs = platformOs(args["host-platform"]);
 const targetOs = platformOs(args["target-platform"]);
+const targetArch = platformArch(args["target-platform"]);
 const cross = args["target-platform"] !== args["host-platform"];
 if (cross) {
   const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
@@ -64,6 +66,26 @@ if (cross) {
       targetOs === "macos"
         ? `TypeScript services for a macOS target (${args["target-platform"]}) compile on a macOS build host only — Apple linking needs the host toolchain's SDK — but this build host is ${args["host-platform"]}. Build macOS service apps on a Mac.`
         : `TypeScript services compile for desktop targets the pinned compiler covers — Linux and Windows from a macOS/Linux/Windows build host, macOS from a macOS host — but this build pairs host ${args["host-platform"]} with target ${args["target-platform"]}.`,
+    );
+    process.exit(2);
+  }
+}
+
+// Runtime localization is narrower than executable cross-compilation. The
+// in-process archive's object merger supports native Linux through host
+// binutils, cross-ELF for x86_64/aarch64, COFF for x86_64, and Mach-O on a
+// macOS host. Keep this preflight in lockstep with ScriptC 0.0.28's
+// compileLibrary guard so `in_process` refusals teach before compiler work.
+if (args["out-archive"]) {
+  const archiveSupported =
+    (targetOs === "linux" && (!cross || ["x86_64", "aarch64"].includes(targetArch))) ||
+    (targetOs === "windows" && targetArch === "x86_64") ||
+    (targetOs === "macos" && hostOs === "macos");
+  if (!archiveSupported) {
+    console.error(
+      `TypeScript in-process services cannot build a runtime-localized archive for ${args["target-platform"]} from ${args["host-platform"]}. ` +
+      "The pinned compiler supports native Linux, cross-Linux x86_64/aarch64, Windows x86_64, and macOS targets on a macOS host. " +
+      "Use the child carrier (the default), or choose a supported in-process target.",
     );
     process.exit(2);
   }
