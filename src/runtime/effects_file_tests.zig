@@ -543,6 +543,63 @@ test "stream sinks reject duplicate and out-of-order operations loudly" {
     try std.testing.expectEqual(effects_mod.EffectFileOutcome.out_of_order, fx.takeMsg().?.result.outcome);
 }
 
+test "loop-side stream protocol results are journaled as replay-regenerated" {
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    const Capture = struct {
+        var records: [8]effects_mod.EffectResultRecord = undefined;
+        var count: usize = 0;
+
+        fn note(_: *anyopaque, record: effects_mod.EffectResultRecord) void {
+            records[count] = record;
+            count += 1;
+        }
+    };
+
+    Capture.count = 0;
+    var context: u8 = 0;
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.bindJournal(.{ .context = &context, .record_fn = Capture.note });
+
+    fx.writeFileChunk(.{ .key = 40, .bytes = "orphan", .on_result = Fx.fileMsg(.result) });
+    _ = fx.takeMsg().?;
+
+    fx.writeFileStream(.{ .key = 41, .path = "sink.bin", .on_result = Fx.fileMsg(.result) });
+    try fx.acknowledgeFakeFileStreamOpen(41);
+    try fx.feedFileResultDetailed(.{ .key = 41, .op = .write_stream_open, .outcome = .ok });
+    _ = fx.takeMsg().?;
+
+    fx.writeFileChunk(.{ .key = 41, .bytes = "one", .on_result = Fx.fileMsg(.result) });
+    fx.writeFileChunk(.{ .key = 41, .bytes = "two", .on_result = Fx.fileMsg(.result) });
+    _ = fx.takeMsg().?;
+    try fx.feedFileResultDetailed(.{ .key = 41, .op = .write_stream_chunk, .outcome = .ok, .total = 3 });
+    _ = fx.takeMsg().?;
+
+    const oversized = try std.testing.allocator.alloc(u8, effects_mod.max_effect_file_bytes + 1);
+    defer std.testing.allocator.free(oversized);
+    fx.writeFileChunk(.{ .key = 41, .bytes = oversized, .on_result = Fx.fileMsg(.result) });
+    _ = fx.takeMsg().?;
+
+    fx.writeFileClose(.{ .key = 42, .on_result = Fx.fileMsg(.result) });
+    _ = fx.takeMsg().?;
+
+    try std.testing.expectEqual(@as(usize, 6), Capture.count);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.sink_missing, Capture.records[0].file_outcome);
+    try std.testing.expect(Capture.records[0].file_rejected_admission);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, Capture.records[1].file_outcome);
+    try std.testing.expect(!Capture.records[1].file_rejected_admission);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.out_of_order, Capture.records[2].file_outcome);
+    try std.testing.expect(Capture.records[2].file_rejected_admission);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, Capture.records[3].file_outcome);
+    try std.testing.expect(!Capture.records[3].file_rejected_admission);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, Capture.records[4].file_outcome);
+    try std.testing.expect(Capture.records[4].file_rejected_admission);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.sink_missing, Capture.records[5].file_outcome);
+    try std.testing.expect(Capture.records[5].file_rejected_admission);
+}
+
 test "read streams replace and cancel silently while sinks cancel loudly" {
     const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
     const Fx = effects_mod.Effects(TestMsg);

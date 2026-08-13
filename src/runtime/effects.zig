@@ -2108,9 +2108,10 @@ pub const EffectResultRecord = struct {
     file_total: u64 = 0,
     file_mtime_ms: i64 = 0,
     file_exists: bool = false,
-    /// True only for a loop-side admission refusal that deterministically
+    /// True only for a loop-side admission/protocol result that deterministically
     /// regenerates under replay. Executor/start failures keep this false even
-    /// when their closed outcome is `.rejected`.
+    /// when their closed outcome is `.rejected`. The retained field name preserves
+    /// the journal layout and also covers `.sink_missing` and `.out_of_order`.
     file_rejected_admission: bool = false,
     file_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
     file_blob_len: u64 = 0,
@@ -7165,14 +7166,14 @@ pub fn Effects(comptime Msg: type) type {
 
         pub fn writeFileChunk(self: *Self, options: WriteFileChunkOptions) void {
             const index = self.findFileStream(options.key) orelse {
-                return self.deliverLoopFile(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .sink_missing }, options.on_result);
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .sink_missing }, options.on_result);
             };
             const slot = &self.file_stream_slots[index];
             if (slot.state != .sink_open or slot.chunk_pending) {
-                return self.deliverLoopFile(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .out_of_order }, options.on_result);
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .out_of_order }, options.on_result);
             }
             if (options.bytes.len > max_effect_file_bytes) {
-                return self.deliverLoopFile(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .rejected }, options.on_result);
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .rejected }, options.on_result);
             }
             if (self.takeTestFileFailure()) |outcome| {
                 return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_chunk, .outcome = outcome }, options.on_result, slot.generation, false);
@@ -7199,11 +7200,11 @@ pub fn Effects(comptime Msg: type) type {
 
         pub fn writeFileClose(self: *Self, options: WriteFileCloseOptions) void {
             const index = self.findFileStream(options.key) orelse {
-                return self.deliverLoopFile(.{ .key = options.key, .op = .write_stream_close, .outcome = .sink_missing }, options.on_result);
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_close, .outcome = .sink_missing }, options.on_result);
             };
             const slot = &self.file_stream_slots[index];
             if (slot.state != .sink_open or slot.chunk_pending) {
-                return self.deliverLoopFile(.{ .key = options.key, .op = .write_stream_close, .outcome = .out_of_order }, options.on_result);
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_close, .outcome = .out_of_order }, options.on_result);
             }
             if (self.takeTestFileFailure()) |outcome| {
                 return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_close, .outcome = outcome }, options.on_result, slot.generation, false);
@@ -16541,10 +16542,13 @@ pub fn Effects(comptime Msg: type) type {
                 atomic.* = undefined;
                 ctx.atomic = null;
                 if (ctx.atomic_dest) |dest| {
-                    slot.atomic_dest = process_allocator.dupe(u8, dest) catch null;
-                    process_allocator.free(dest);
+                    // The completed worker no longer needs this stable copy.
+                    // Transfer it directly: allocating another copy here made
+                    // OOM leave `slot.atomic.dest_sub_path` pointing at freed
+                    // memory while the open still reported success.
+                    slot.atomic_dest = dest;
                     ctx.atomic_dest = null;
-                    if (slot.atomic_dest) |stable| slot.atomic.?.dest_sub_path = stable;
+                    slot.atomic.?.dest_sub_path = dest;
                 }
             }
             slot.offset = ctx.offset;

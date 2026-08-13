@@ -610,6 +610,11 @@ fn dbRecordDamaged(record: journal.EffectResultRecord) bool {
 }
 
 fn fileRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.file_rejected_admission) switch (record.file_outcome) {
+        .rejected => {},
+        .sink_missing, .out_of_order => if (record.file_op != .write_stream_chunk and record.file_op != .write_stream_close) return true,
+        else => return true,
+    };
     if (record.file_blob_len > runtime_effects.effect_file_stream_chunk_bytes) return true;
     if (record.file_event == .chunk) {
         return record.file_op != .read_stream or record.file_outcome != .ok or
@@ -762,12 +767,10 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
     return switch (record.kind) {
         .timer => true,
         .exit => record.exit_reason == .rejected,
-        // Only DETERMINISTIC admission refusals regenerate — marked by
-        // the provenance bit the recorder set (`truncated`, unused for
-        // pty otherwise). Executor-truth terminals — start failures,
-        // the platform-unsupported rejection, output, and real exits —
-        // are external inputs and must be fed, even when their reason
-        // is `.rejected`.
+        // Only DETERMINISTIC admission/protocol results regenerate — marked
+        // by each effect family's provenance bit. Executor-truth terminals —
+        // start failures, platform refusals, output, and real exits — are
+        // external inputs and must be fed, even when their reason is rejected.
         .pty => record.pty_kind == .exit and record.truncated,
         .response => record.fetch_outcome == .rejected,
         .file => record.file_rejected_admission,
@@ -822,11 +825,25 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
     };
 }
 
-test "only admission-tagged file rejections regenerate" {
+test "only admission-tagged file results regenerate" {
     try std.testing.expect(effectRegeneratesUnderReplay(.{
         .kind = .file,
         .key = 1,
         .file_outcome = .rejected,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(!fileRecordDamaged(.{
+        .kind = .file,
+        .key = 2,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .sink_missing,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(fileRecordDamaged(.{
+        .kind = .file,
+        .key = 2,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .ok,
         .file_rejected_admission = true,
     }));
     try std.testing.expect(!effectRegeneratesUnderReplay(.{
@@ -834,6 +851,20 @@ test "only admission-tagged file rejections regenerate" {
         .key = 1,
         .file_op = .read_stream,
         .file_outcome = .rejected,
+    }));
+    try std.testing.expect(effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 2,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .sink_missing,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 3,
+        .file_op = .write_stream_close,
+        .file_outcome = .out_of_order,
+        .file_rejected_admission = true,
     }));
 }
 

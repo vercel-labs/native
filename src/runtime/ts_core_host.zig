@@ -1037,8 +1037,9 @@ pub fn TsCoreHost(comptime core: type) type {
                     0x07 => {
                         const head = takeRoutedHead(cmd, &at);
                         const file_path = takeLongBytes(cmd, &at);
+                        const effect_index = allocEffectEntry(fx, head) orelse continue;
                         fx.readFile(.{
-                            .key = effect_key_base + allocEffectEntry(fx, head),
+                            .key = effect_key_base + effect_index,
                             .path = file_path,
                             .on_result = fileResultMsg,
                         });
@@ -1049,8 +1050,9 @@ pub fn TsCoreHost(comptime core: type) type {
                         const head = takeRoutedHead(cmd, &at);
                         const file_path = takeLongBytes(cmd, &at);
                         const bytes = takeLongBytes(cmd, &at);
+                        const effect_index = allocEffectEntry(fx, head) orelse continue;
                         fx.writeFile(.{
-                            .key = effect_key_base + allocEffectEntry(fx, head),
+                            .key = effect_key_base + effect_index,
                             .path = file_path,
                             .bytes = bytes,
                             .on_result = fileResultMsg,
@@ -1061,12 +1063,14 @@ pub fn TsCoreHost(comptime core: type) type {
                         const head = takeRoutedHead(cmd, &at);
                         const file_path = takeLongBytes(cmd, &at);
                         const bytes = takeLongBytes(cmd, &at);
-                        fx.appendFile(.{ .key = effect_key_base + allocEffectEntry(fx, head), .path = file_path, .bytes = bytes, .on_result = fileResultMsg });
+                        const effect_index = allocEffectEntry(fx, head) orelse continue;
+                        fx.appendFile(.{ .key = effect_key_base + effect_index, .path = file_path, .bytes = bytes, .on_result = fileResultMsg });
                     },
                     0x2C => {
                         const head = takeRoutedHead(cmd, &at);
                         const file_path = takeLongBytes(cmd, &at);
-                        fx.statFile(.{ .key = effect_key_base + allocEffectEntry(fx, head), .path = file_path, .on_result = fileResultMsg });
+                        const effect_index = allocEffectEntry(fx, head) orelse continue;
+                        fx.statFile(.{ .key = effect_key_base + effect_index, .path = file_path, .on_result = fileResultMsg });
                     },
                     0x2D => {
                         const key = takeShortBytes(cmd, &at);
@@ -1114,11 +1118,12 @@ pub fn TsCoreHost(comptime core: type) type {
                         // otherwise find this named op first and leave the
                         // stream running. The live stream owns the key, so
                         // reject the newcomer through its own err arm.
-                        if (head.key.len > 0 and findStream(head.key) != null) {
+                        if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) {
                             fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                         } else {
+                            const effect_index = allocEffectEntry(fx, head) orelse continue;
                             fx.fetch(.{
-                                .key = effect_key_base + allocEffectEntry(fx, head),
+                                .key = effect_key_base + effect_index,
                                 .method = method,
                                 .url = url,
                                 .headers = headers[0..header_count],
@@ -1146,8 +1151,9 @@ pub fn TsCoreHost(comptime core: type) type {
                     // clip_read [op][key_len][key][ok][err]
                     0x0B => {
                         const head = takeRoutedHead(cmd, &at);
+                        const effect_index = allocEffectEntry(fx, head) orelse continue;
                         fx.readClipboard(.{
-                            .key = effect_key_base + allocEffectEntry(fx, head),
+                            .key = effect_key_base + effect_index,
                             .on_result = clipboardResultMsg,
                         });
                     },
@@ -1689,8 +1695,12 @@ pub fn TsCoreHost(comptime core: type) type {
         /// mirrors the engine's slot count, which cannot hold more in
         /// flight either (a dropped entry holds its slot only until
         /// its `.cancelled` terminal drains).
-        fn allocEffectEntry(fx: *Fx, head: RoutedHead) u64 {
+        fn allocEffectEntry(fx: *Fx, head: RoutedHead) ?u64 {
             if (head.key.len > 0) {
+                if (fileStreamOccupiesKey(head.key)) {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                    return null;
+                }
                 if (findEffect(head.key)) |existing| dropEffectEntry(fx, existing);
             }
             const index = freeEffectIndex() orelse
@@ -1734,6 +1744,10 @@ pub fn TsCoreHost(comptime core: type) type {
         /// slot: the engine timer replaces in place under the same
         /// engine key and restarts from now — the debounce discipline.
         fn armDelay(fx: *Fx, key: []const u8, after_ms: f64, tag: u8) void {
+            // A delay has no err arm. Preserve an incumbent file stream and
+            // fail closed instead of creating a second owner that Cmd.cancel
+            // could not address unambiguously.
+            if (fileStreamOccupiesKey(key)) return;
             const index = blk: {
                 if (key.len > 0) {
                     if (findDelay(key)) |existing| break :blk existing;
@@ -1787,7 +1801,7 @@ pub fn TsCoreHost(comptime core: type) type {
             argv: []const []const u8,
             stdin: []const u8,
         ) void {
-            if (head.key.len > 0 and findStream(head.key) != null) {
+            if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             }
@@ -1834,7 +1848,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// two HTTP responses into one app-owned stream.
         fn issueFetchStream(fx: *Fx, head: SpawnHead, options: FetchStreamOptions) void {
             if (head.key.len > 0 and
-                (findStream(head.key) != null or findEffect(head.key) != null))
+                (findStream(head.key) != null or findEffect(head.key) != null or fileStreamOccupiesKey(head.key)))
             {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
@@ -1888,12 +1902,33 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
+        fn fileStreamOccupiesKey(key: []const u8) bool {
+            return key.len > 0 and findFileStream(key) != null;
+        }
+
+        /// Every string-keyed command family shares one authored key surface.
+        /// File streams use a distinct numeric engine namespace, so admission
+        /// must consult the bridge tables explicitly before claiming a slot.
+        fn wireKeyOccupiedOutsideFileStreams(key: []const u8) bool {
+            if (key.len == 0) return false;
+            return findRequest(key) != null or
+                findEffect(key) != null or
+                findStream(key) != null or
+                findDelay(key) != null or
+                findPty(key) != null or
+                findDb(key) != null;
+        }
+
         fn freeFileStreamIndex() ?usize {
             for (&file_streams, 0..) |*entry, index| if (!entry.used) return index;
             return null;
         }
 
         fn issueReadFileStream(fx: *Fx, key: []const u8, chunk_tag: u8, done_tag: u8, err_tag: u8, path: []const u8) void {
+            if (wireKeyOccupiedOutsideFileStreams(key)) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                return;
+            }
             const index = if (key.len > 0 and findFileStream(key) != null) replace: {
                 const existing = findFileStream(key).?;
                 if (file_streams[existing].sink) {
@@ -1915,7 +1950,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueWriteFileStream(fx: *Fx, head: RoutedHead, path: []const u8) void {
-            if (head.key.len == 0 or findFileStream(head.key) != null) {
+            if (head.key.len == 0 or findFileStream(head.key) != null or wireKeyOccupiedOutsideFileStreams(head.key)) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             }
@@ -2560,7 +2595,7 @@ pub fn TsCoreHost(comptime core: type) type {
             term: []const u8,
             argv: []const []const u8,
         ) void {
-            if (key.len > 0 and findPty(key) != null) {
+            if (key.len > 0 and (findPty(key) != null or fileStreamOccupiesKey(key))) {
                 // The rejection is STAGED (delivered a later frame), so its
                 // key must be self-contained: the wire key points into this
                 // dispatch's command buffer, gone by delivery, so intern
@@ -2673,6 +2708,10 @@ pub fn TsCoreHost(comptime core: type) type {
             done_tag: u8,
             err_tag: u8,
         ) ?usize {
+            if (fileStreamOccupiesKey(key)) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                return null;
+            }
             const index = blk: {
                 if (key.len > 0) {
                     if (findDb(key)) |existing| {
@@ -2825,6 +2864,7 @@ pub fn TsCoreHost(comptime core: type) type {
             ok_void: bool,
             pool: RequestPool,
         ) ?u64 {
+            if (fileStreamOccupiesKey(key)) return null;
             const index = blk: {
                 if (key.len > 0) {
                     if (findRequest(key)) |existing| {
@@ -2992,7 +3032,7 @@ pub fn TsCoreHost(comptime core: type) type {
             max_pending: u8,
             payload: []const u8,
         ) void {
-            if (key.len > 0 and findRequest(key) != null) {
+            if (key.len > 0 and (findRequest(key) != null or fileStreamOccupiesKey(key))) {
                 stageRequestRejected(fx, err_tag);
                 return;
             }
