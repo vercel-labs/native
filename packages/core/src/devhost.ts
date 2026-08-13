@@ -330,6 +330,7 @@ const recordStore = new Map<string, VirtualStoreRecord>();
 /// matching the native keychain service/account split. Transcript output
 /// never includes the stored bytes.
 const credentialStore = new Map<string, Uint8Array>();
+const maxCredentialSecretBytes = 5 * 512;
 
 interface PendingStoreResult {
   readonly seq: number;
@@ -1165,7 +1166,7 @@ function performCredentialsCmd(cmd: Cmdish): void {
   const identity = `${appId}\0${key}`;
   if (name === "core.credentials.set") {
     const secret = fields[1]!;
-    if (secret.length > 64 * 1024) return rejectCredentials(cmd, "over_bound");
+    if (secret.length > maxCredentialSecretBytes) return rejectCredentials(cmd, "over_bound");
     credentialStore.set(identity, secret.slice());
     say(`cmd ${name} ${cmd.key as string} ${key} (<redacted, ${secret.length} bytes> stored in virtual host memory)`);
     queueStoreResult(cmd, true, new Uint8Array(0), true);

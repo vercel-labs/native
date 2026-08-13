@@ -745,6 +745,7 @@ fn appHasServiceFiles(b: *std.Build, app_root: []const u8) bool {
 pub const mobile_export_symbol_names = [_][]const u8{
     "native_sdk_app_create",
     "native_sdk_app_destroy",
+    "native_sdk_app_destroy_with_status",
     "native_sdk_app_start",
     "native_sdk_app_activate",
     "native_sdk_app_deactivate",

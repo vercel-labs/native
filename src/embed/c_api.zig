@@ -4,7 +4,8 @@
 //! for a host type: the fixed WebView shell (`MobileHostApp`, this module's
 //! re-exported default) or a user-app canvas host
 //! (`ui_host.UiAppHost(AppDef)` in libs built via `addMobileLib`). A host
-//! must expose `create`/`destroy`/`start`/`frame`, an `embedded`
+//! must expose `create`/`destroy`/`start`/`frame` (`destroy` reports whether
+//! callback context must survive), an `embedded`
 //! `EmbeddedApp`, and the error/command/asset bookkeeping fields both
 //! hosts share. `exportMobileCApi(Host)` exports every function under its
 //! canonical symbol name for a static library root.
@@ -57,7 +58,16 @@ pub fn MobileCApi(comptime Host: type) type {
 
         pub fn native_sdk_app_destroy(app: ?*anyopaque) callconv(.c) void {
             const self = hostApp(Host, app) orelse return;
-            self.destroy();
+            _ = self.destroy();
+        }
+
+        /// Destroy the app and report whether teardown had to preserve the
+        /// host because a detached platform callback may still be running.
+        /// A mobile shim that owns the callback context must preserve that
+        /// context too when this returns 1.
+        pub fn native_sdk_app_destroy_with_status(app: ?*anyopaque) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            return if (self.destroy()) 1 else 0;
         }
 
         pub fn native_sdk_app_start(app: ?*anyopaque) callconv(.c) void {
@@ -781,6 +791,7 @@ const FixedShellApi = MobileCApi(MobileHostApp);
 
 pub const native_sdk_app_create = FixedShellApi.native_sdk_app_create;
 pub const native_sdk_app_destroy = FixedShellApi.native_sdk_app_destroy;
+pub const native_sdk_app_destroy_with_status = FixedShellApi.native_sdk_app_destroy_with_status;
 pub const native_sdk_app_start = FixedShellApi.native_sdk_app_start;
 pub const native_sdk_app_activate = FixedShellApi.native_sdk_app_activate;
 pub const native_sdk_app_deactivate = FixedShellApi.native_sdk_app_deactivate;

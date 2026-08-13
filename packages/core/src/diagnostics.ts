@@ -454,6 +454,12 @@ export const rules = {
     fix: "Add `\"credentials\"` to app.zon's `permissions`, or remove the `Cmd.credentials.*` call.",
     why: "Secrets are the first permission-gated core effect: the runtime refuses every undeclared access with `denied`, even when the build capability is present.",
   },
+  NS1073: {
+    id: "NS1073",
+    title: "credential requests use the typed factory",
+    fix: "Use `Cmd.credentials.set`, `Cmd.credentials.get`, or `Cmd.credentials.delete` instead of spelling `core.credentials.*` through `Cmd.request`.",
+    why: "The typed factories own the bounded credential record encoding; reserving their wire namespace keeps arbitrary request bytes from being mistaken for secrets or keys.",
+  },
   NS1420: {
     id: "NS1420",
     title: "declare stable SQL in src/queries.sql",

@@ -52,6 +52,18 @@
 #define NATIVE_SDK_LOGI(...) __android_log_print(ANDROID_LOG_INFO, NATIVE_SDK_LOG_TAG, __VA_ARGS__)
 #define NATIVE_SDK_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, NATIVE_SDK_LOG_TAG, __VA_ARGS__)
 
+// Immutable per-registration state for credential worker callbacks. Unlike
+// presentation/audio/image upcalls, credential calls run off the activity
+// thread and teardown may deliberately detach a blocked worker. The runtime
+// therefore reports whether this context must be preserved process-lived.
+typedef struct native_sdk_credential_context {
+    JavaVM *vm;
+    jobject activity;
+    jmethodID set_method;
+    jmethodID get_method;
+    jmethodID delete_method;
+} native_sdk_credential_context_t;
+
 // One activity drives one embed app per process (the manifest declares a
 // single launcher activity), so the host-side presentation, measure, and
 // audio state lives in a single static bundle.
@@ -80,13 +92,7 @@ static struct {
     jmethodID audio_stop_method;
     jmethodID audio_seek_method;
     jmethodID audio_set_volume_method;
-    // Secure credential upcalls. Core credential effects execute on their
-    // own worker family, so callbacks attach that worker to the VM for the
-    // duration of each synchronous AndroidKeyStore operation.
-    jobject credential_activity;
-    jmethodID credential_set_method;
-    jmethodID credential_get_method;
-    jmethodID credential_delete_method;
+    native_sdk_credential_context_t *credential_context;
     // Image decode upcall target, registered by nativeSetImageService: the
     // activity owns the platform codec (BitmapFactory on the Java side),
     // and the embed image service callback below calls back into it.
@@ -111,7 +117,9 @@ JNIEXPORT jlong JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeCreate
 
 JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeDestroy(JNIEnv *env, jobject self, jlong app) {
     (void)self;
-    native_sdk_app_destroy((void *)app);
+    native_sdk_credential_context_t *credential_context = host_state.credential_context;
+    host_state.credential_context = NULL;
+    const int preserve_callback_context = native_sdk_app_destroy_with_status((void *)app);
     if (host_state.window) {
         ANativeWindow_release(host_state.window);
         host_state.window = NULL;
@@ -135,12 +143,11 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeDestroy
         host_state.audio_seek_method = NULL;
         host_state.audio_set_volume_method = NULL;
     }
-    if (host_state.credential_activity) {
-        (*env)->DeleteGlobalRef(env, host_state.credential_activity);
-        host_state.credential_activity = NULL;
-        host_state.credential_set_method = NULL;
-        host_state.credential_get_method = NULL;
-        host_state.credential_delete_method = NULL;
+    if (credential_context && !preserve_callback_context) {
+        if (credential_context->activity) (*env)->DeleteGlobalRef(env, credential_context->activity);
+        free(credential_context);
+    } else if (credential_context) {
+        NATIVE_SDK_LOGE("credential callback context preserved after an abandoned platform call");
     }
     if (host_state.image_activity) {
         (*env)->DeleteGlobalRef(env, host_state.image_activity);
@@ -631,29 +638,29 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetAudi
 
 // ----------------------------------------------------------- credentials
 
-static JNIEnv *host_credential_env(int *attached) {
+static JNIEnv *host_credential_env(native_sdk_credential_context_t *credential, int *attached) {
     *attached = 0;
-    if (!host_state.vm || !host_state.credential_activity) return NULL;
+    if (!credential || !credential->vm || !credential->activity) return NULL;
     JNIEnv *env = NULL;
-    jint state = (*host_state.vm)->GetEnv(host_state.vm, (void **)&env, JNI_VERSION_1_6);
+    jint state = (*credential->vm)->GetEnv(credential->vm, (void **)&env, JNI_VERSION_1_6);
     if (state == JNI_OK) return env;
     if (state != JNI_EDETACHED ||
-        (*host_state.vm)->AttachCurrentThread(host_state.vm, &env, NULL) != JNI_OK) return NULL;
+        (*credential->vm)->AttachCurrentThread(credential->vm, &env, NULL) != JNI_OK) return NULL;
     *attached = 1;
     return env;
 }
 
-static void host_credential_done(int attached) {
-    if (attached) (*host_state.vm)->DetachCurrentThread(host_state.vm);
+static void host_credential_done(native_sdk_credential_context_t *credential, int attached) {
+    if (attached) (*credential->vm)->DetachCurrentThread(credential->vm);
 }
 
 static int host_credential_set(void *context,
                                const char *service, uintptr_t service_len,
                                const char *account, uintptr_t account_len,
                                const uint8_t *secret, uintptr_t secret_len) {
-    (void)context;
+    native_sdk_credential_context_t *credential = (native_sdk_credential_context_t *)context;
     int attached = 0;
-    JNIEnv *env = host_credential_env(&attached);
+    JNIEnv *env = host_credential_env(credential, &attached);
     if (!env) return -5;
     jbyteArray service_bytes = host_audio_bytes(env, service, service_len);
     jbyteArray account_bytes = host_audio_bytes(env, account, account_len);
@@ -662,11 +669,11 @@ static int host_credential_set(void *context,
         if (service_bytes) (*env)->DeleteLocalRef(env, service_bytes);
         if (account_bytes) (*env)->DeleteLocalRef(env, account_bytes);
         if (secret_bytes) (*env)->DeleteLocalRef(env, secret_bytes);
-        host_credential_done(attached);
+        host_credential_done(credential, attached);
         return -5;
     }
-    jint result = (*env)->CallIntMethod(env, host_state.credential_activity,
-                                        host_state.credential_set_method,
+    jint result = (*env)->CallIntMethod(env, credential->activity,
+                                        credential->set_method,
                                         service_bytes, account_bytes, secret_bytes);
     (*env)->DeleteLocalRef(env, secret_bytes);
     (*env)->DeleteLocalRef(env, account_bytes);
@@ -675,7 +682,7 @@ static int host_credential_set(void *context,
         (*env)->ExceptionClear(env);
         result = -5;
     }
-    host_credential_done(attached);
+    host_credential_done(credential, attached);
     return (int)result;
 }
 
@@ -683,9 +690,9 @@ static int64_t host_credential_get(void *context,
                                    const char *service, uintptr_t service_len,
                                    const char *account, uintptr_t account_len,
                                    uint8_t *output, uintptr_t output_len) {
-    (void)context;
+    native_sdk_credential_context_t *credential = (native_sdk_credential_context_t *)context;
     int attached = 0;
-    JNIEnv *env = host_credential_env(&attached);
+    JNIEnv *env = host_credential_env(credential, &attached);
     if (!env) return -5;
     jbyteArray service_bytes = host_audio_bytes(env, service, service_len);
     jbyteArray account_bytes = host_audio_bytes(env, account, account_len);
@@ -694,11 +701,11 @@ static int64_t host_credential_get(void *context,
         if (service_bytes) (*env)->DeleteLocalRef(env, service_bytes);
         if (account_bytes) (*env)->DeleteLocalRef(env, account_bytes);
         if (output_buffer) (*env)->DeleteLocalRef(env, output_buffer);
-        host_credential_done(attached);
+        host_credential_done(credential, attached);
         return -5;
     }
-    jlong result = (*env)->CallLongMethod(env, host_state.credential_activity,
-                                          host_state.credential_get_method,
+    jlong result = (*env)->CallLongMethod(env, credential->activity,
+                                          credential->get_method,
                                           service_bytes, account_bytes, output_buffer);
     (*env)->DeleteLocalRef(env, output_buffer);
     (*env)->DeleteLocalRef(env, account_bytes);
@@ -707,27 +714,27 @@ static int64_t host_credential_get(void *context,
         (*env)->ExceptionClear(env);
         result = -5;
     }
-    host_credential_done(attached);
+    host_credential_done(credential, attached);
     return (int64_t)result;
 }
 
 static int host_credential_delete(void *context,
                                   const char *service, uintptr_t service_len,
                                   const char *account, uintptr_t account_len) {
-    (void)context;
+    native_sdk_credential_context_t *credential = (native_sdk_credential_context_t *)context;
     int attached = 0;
-    JNIEnv *env = host_credential_env(&attached);
+    JNIEnv *env = host_credential_env(credential, &attached);
     if (!env) return -5;
     jbyteArray service_bytes = host_audio_bytes(env, service, service_len);
     jbyteArray account_bytes = host_audio_bytes(env, account, account_len);
     if (!service_bytes || !account_bytes) {
         if (service_bytes) (*env)->DeleteLocalRef(env, service_bytes);
         if (account_bytes) (*env)->DeleteLocalRef(env, account_bytes);
-        host_credential_done(attached);
+        host_credential_done(credential, attached);
         return -5;
     }
-    jint result = (*env)->CallIntMethod(env, host_state.credential_activity,
-                                        host_state.credential_delete_method,
+    jint result = (*env)->CallIntMethod(env, credential->activity,
+                                        credential->delete_method,
                                         service_bytes, account_bytes);
     (*env)->DeleteLocalRef(env, account_bytes);
     (*env)->DeleteLocalRef(env, service_bytes);
@@ -735,22 +742,28 @@ static int host_credential_delete(void *context,
         (*env)->ExceptionClear(env);
         result = -5;
     }
-    host_credential_done(attached);
+    host_credential_done(credential, attached);
     return (int)result;
 }
 
 JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetCredentialService(JNIEnv *env, jobject self, jlong app) {
-    if ((*env)->GetJavaVM(env, &host_state.vm) != JNI_OK) return;
-    if (host_state.credential_activity) (*env)->DeleteGlobalRef(env, host_state.credential_activity);
-    host_state.credential_activity = (*env)->NewGlobalRef(env, self);
+    native_sdk_credential_context_t *credential = calloc(1, sizeof(*credential));
+    if (!credential) return;
+    if ((*env)->GetJavaVM(env, &credential->vm) != JNI_OK) {
+        free(credential);
+        return;
+    }
+    credential->activity = (*env)->NewGlobalRef(env, self);
     jclass cls = (*env)->GetObjectClass(env, self);
-    host_state.credential_set_method = (*env)->GetMethodID(env, cls, "credentialSet", "([B[B[B)I");
-    host_state.credential_get_method = (*env)->GetMethodID(env, cls, "credentialGet", "([B[BLjava/nio/ByteBuffer;)J");
-    host_state.credential_delete_method = (*env)->GetMethodID(env, cls, "credentialDelete", "([B[B)I");
+    credential->set_method = (*env)->GetMethodID(env, cls, "credentialSet", "([B[B[B)I");
+    credential->get_method = (*env)->GetMethodID(env, cls, "credentialGet", "([B[BLjava/nio/ByteBuffer;)J");
+    credential->delete_method = (*env)->GetMethodID(env, cls, "credentialDelete", "([B[B)I");
     (*env)->DeleteLocalRef(env, cls);
-    if (!host_state.credential_activity || !host_state.credential_set_method ||
-        !host_state.credential_get_method || !host_state.credential_delete_method) {
+    if (!credential->activity || !credential->set_method ||
+        !credential->get_method || !credential->delete_method) {
         NATIVE_SDK_LOGE("credential_service registration failed");
+        if (credential->activity) (*env)->DeleteGlobalRef(env, credential->activity);
+        free(credential);
         return;
     }
     static const native_sdk_credential_service_t service = {
@@ -758,7 +771,17 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetCred
         .get = host_credential_get,
         .delete = host_credential_delete,
     };
-    native_sdk_app_set_credential_service((void *)app, &service, NULL);
+    if (native_sdk_app_set_credential_service((void *)app, &service, credential) == 0) {
+        (*env)->DeleteGlobalRef(env, credential->activity);
+        free(credential);
+        host_log_error((void *)app, "credential_service");
+        return;
+    }
+    if (host_state.credential_context) {
+        (*env)->DeleteGlobalRef(env, host_state.credential_context->activity);
+        free(host_state.credential_context);
+    }
+    host_state.credential_context = credential;
     host_log_error((void *)app, "credential_service");
     NATIVE_SDK_LOGI("credential service registered");
 }

@@ -2731,11 +2731,27 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueCredentialsRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+            const is_set = std.mem.eql(u8, name, "core.credentials.set");
+            const is_get = std.mem.eql(u8, name, "core.credentials.get");
+            const is_delete = std.mem.eql(u8, name, "core.credentials.delete");
+            if (!is_set and !is_get and !is_delete) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
             var at: usize = 0;
-            const credential_key = takeLongBytes(payload, &at);
-            if (std.mem.eql(u8, name, "core.credentials.set")) {
-                const secret = takeLongBytes(payload, &at);
-                if (at != payload.len) @panic("ts core host: malformed core.credentials.set payload");
+            const credential_key = takeCredentialBytes(payload, &at) orelse {
+                stageRequestRejected(fx, err_tag);
+                return;
+            };
+            if (is_set) {
+                const secret = takeCredentialBytes(payload, &at) orelse {
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                };
+                if (at != payload.len) {
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                }
                 const request_key = allocCredentialsRequestEntry(fx, key, ok_tag, err_tag, true) orelse return;
                 fx.credentialsSet(.{
                     .key = request_key,
@@ -2745,30 +2761,44 @@ pub fn TsCoreHost(comptime core: type) type {
                 });
                 return;
             }
-            if (at != payload.len) @panic("ts core host: malformed core.credentials payload");
+            if (at != payload.len) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
             const request_key = allocCredentialsRequestEntry(
                 fx,
                 key,
                 ok_tag,
                 err_tag,
-                std.mem.eql(u8, name, "core.credentials.delete"),
+                is_delete,
             ) orelse return;
-            if (std.mem.eql(u8, name, "core.credentials.get")) {
+            if (is_get) {
                 fx.credentialsGet(.{
                     .key = request_key,
                     .credential_key = credential_key,
                     .host_result = hostResultMsg,
                 });
-            } else if (std.mem.eql(u8, name, "core.credentials.delete")) {
+            } else {
                 fx.credentialsDelete(.{
                     .key = request_key,
                     .credential_key = credential_key,
                     .host_result = hostResultMsg,
                 });
-            } else {
-                requests[@intCast(request_key - request_key_base)].used = false;
-                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
             }
+        }
+
+        /// Credential records can also arrive through public `Cmd.request`,
+        /// so their inner fields are untrusted even though the outer command
+        /// wire was emitted correctly. Decode them fallibly and route a
+        /// normal rejection instead of turning authored bytes into a panic.
+        fn takeCredentialBytes(bytes: []const u8, at: *usize) ?[]const u8 {
+            if (at.* > bytes.len or bytes.len - at.* < 4) return null;
+            const len: usize = std.mem.readInt(u32, bytes[at.*..][0..4], .little);
+            at.* += 4;
+            if (len > bytes.len - at.*) return null;
+            const field = bytes[at.* .. at.* + len];
+            at.* += len;
+            return field;
         }
 
         /// Streaming services are one admission, not a channel-open/request

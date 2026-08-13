@@ -247,10 +247,10 @@ pub const max_clipboard_mime_type_bytes: usize = 128;
 pub const max_clipboard_data_bytes: usize = 65536;
 pub const max_credential_service_bytes: usize = 128;
 pub const max_credential_account_bytes: usize = 256;
-/// Core credential effects accept secrets through 64 KiB. Individual OS
-/// keychains may impose a lower practical limit and report failure, but the
-/// runtime never truncates an accepted secret.
-pub const max_credential_secret_bytes: usize = 64 * 1024;
+/// One honest cross-platform bound: Windows Credential Manager's generic
+/// credential blob is the narrowest first-party backend at 5 * 512 bytes.
+/// Every host accepts this whole range; none silently truncates it.
+pub const max_credential_secret_bytes: usize = 5 * 512;
 pub const max_local_time_text_bytes: usize = 512;
 pub const max_tray_items: usize = 32;
 pub const max_tray_icon_path_bytes: usize = 4096;

@@ -334,6 +334,7 @@ const mini_core = struct {
         stop_db_live_with_cancel, // 98: remove the Sub while Cmd.cancel names its key
         arm_full_db_live_set, // 99: fill all relational slots with live keys
         replace_full_db_live_set, // 100: replace them with one disjoint key
+        malformed_credential, // 101: reserved request with an invalid inner record
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -450,6 +451,7 @@ const mini_core = struct {
                 return .{ .model = out, .cmd = "" };
             },
             .refresh => return .{ .model = model, .cmd = cmdRequest("status.read", "status", 7, 8, model.status) },
+            .malformed_credential => return .{ .model = model, .cmd = cmdRequest("core.credentials.get", "bad-credential", 7, 8, "") },
             .pair => {
                 const first = cmdRequest("a.read", "", 7, 8, "1");
                 const second = cmdRequest("b.read", "", 7, 8, "2");
@@ -1452,6 +1454,20 @@ test "unkeyed requests dispatch in completion order" {
     try fx.feedHostResult(first.key, true, "from-a");
     Host.drain(fx);
     try std.testing.expectEqualStrings("from-a", Host.model().status);
+}
+
+test "malformed credential request records reject instead of panicking" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+    try fx.feedHostResult(boot_request_key, true, "");
+    Host.drain(fx);
+
+    Host.dispatch(fx, .malformed_credential);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().errs);
+    try std.testing.expectEqualStrings("rejected", Host.model().last_err);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
 }
 
 test "subscription reconcile arms, pauses, resumes, and re-arms on interval change" {

@@ -36,6 +36,7 @@ pub const exportMobileCApi = c_api.exportMobileCApi;
 
 pub const native_sdk_app_create = c_api.native_sdk_app_create;
 pub const native_sdk_app_destroy = c_api.native_sdk_app_destroy;
+pub const native_sdk_app_destroy_with_status = c_api.native_sdk_app_destroy_with_status;
 pub const native_sdk_app_start = c_api.native_sdk_app_start;
 pub const native_sdk_app_activate = c_api.native_sdk_app_activate;
 pub const native_sdk_app_deactivate = c_api.native_sdk_app_deactivate;

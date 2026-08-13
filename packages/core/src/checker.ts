@@ -2569,6 +2569,24 @@ export class SubsetChecker {
         }
       }
 
+      // NS1073 — the core credential wire names belong to the typed factory.
+      // Raw Cmd.request payloads are app-controlled bytes and cannot state
+      // the credential record contract safely at the authoring boundary.
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "request" &&
+        ts.isIdentifier(node.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression) &&
+        node.arguments[0] !== undefined &&
+        ts.isStringLiteral(node.arguments[0]) &&
+        node.arguments[0].text.startsWith("core.credentials.")
+      ) {
+        this.usesCredentials = true;
+        this.report("NS1073", "The `core.credentials.*` request namespace is reserved for `Cmd.credentials.*`.", node);
+      }
+
       // Generated declared-query constructors and live subscriptions are the
       // checked relational surface, and therefore count as sqlite use too.
       if (

@@ -67,6 +67,7 @@ const HostMsg = union(enum) {
     ask_colliding,
     query_launch_at_login,
     enable_launch_at_login,
+    credential_prefixed_request,
     open_external_url,
     reveal_path,
     replace,
@@ -131,6 +132,12 @@ fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
         .enable_launch_at_login => fx.hostRequest(.{
             .key = ask_key,
             .name = "native-sdk.launch-at-login.set",
+            .payload = &.{1},
+            .on_result = HostEffects.hostMsg(.host_result),
+        }),
+        .credential_prefixed_request => fx.hostRequest(.{
+            .key = ask_key,
+            .name = "core.credentials.probe",
             .payload = &.{1},
             .on_result = HostEffects.hostMsg(.host_result),
         }),
@@ -562,6 +569,8 @@ test "real-mode host calls ride the binding and answer through the feed" {
             _ = payload;
             if (std.mem.eql(u8, name, "svc.echo")) {
                 bound.?.feedHostResult(key, true, "echoed") catch unreachable;
+            } else if (std.mem.eql(u8, name, "core.credentials.probe")) {
+                bound.?.feedHostResult(key, false, "host-routed") catch unreachable;
             }
             // svc.other never answers — it stays in flight for the
             // cancel below.
@@ -595,13 +604,20 @@ test "real-mode host calls ride the binding and answer through the feed" {
     try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
     try std.testing.expectEqualStrings("echoed", h.app_state.model.bytesPrefix());
 
+    // A generic request that happens to use the credential prefix remains a
+    // generic host call. It must never fall through to launch-at-login.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .credential_prefixed_request);
+    try h.wake();
+    try std.testing.expectEqualStrings("host-routed", h.app_state.model.bytesPrefix());
+    try std.testing.expectEqual(@as(u32, 0), h.harness.null_platform.launch_at_login_set_count);
+
     // Cancelling an unanswered request notifies the host, silently.
     try h.app_state.dispatch(&h.harness.runtime, 1, .ask_other);
     fx.cancelHostRequest(other_key);
     try h.wake();
     try std.testing.expectEqual(@as(usize, 1), Stub.cancel_count);
     try std.testing.expectEqual(other_key, Stub.last_cancelled);
-    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.result_count);
+    try std.testing.expectEqual(@as(u32, 2), h.app_state.model.result_count);
 }
 
 test "service bindings reject a duplicate live key without replacing the first request" {

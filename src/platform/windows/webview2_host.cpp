@@ -7551,6 +7551,7 @@ int native_sdk_windows_clear_recent_documents(Host *host) {
 int native_sdk_windows_set_credential(Host *host, const char *service, size_t service_len, const char *account, size_t account_len, const char *secret, size_t secret_len) {
     (void)host;
     if (!service || service_len == 0 || !account || account_len == 0 || (!secret && secret_len > 0) || secret_len > UINT32_MAX) return 0;
+    if (secret_len > CRED_MAX_CREDENTIAL_BLOB_SIZE) return -4;
     HMODULE advapi = LoadLibraryW(L"advapi32.dll");
     if (!advapi) return 0;
     auto cred_write = reinterpret_cast<BOOL (WINAPI *)(PCREDENTIALW, DWORD)>(GetProcAddress(advapi, "CredWriteW"));

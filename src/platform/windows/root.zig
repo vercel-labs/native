@@ -1598,6 +1598,7 @@ fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anye
         credential.secret.len,
     );
     if (result == -3) return error.AccessDenied;
+    if (result == -4) return error.CredentialFieldTooLarge;
     if (result <= 0) return error.CredentialStoreFailed;
 }
 

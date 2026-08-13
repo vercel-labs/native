@@ -156,6 +156,10 @@ typedef struct native_sdk_gpu_frame_state {
 
 void *native_sdk_app_create(void);
 void native_sdk_app_destroy(void *app);
+// Returns 1 when teardown preserved the app because a detached platform
+// callback may still be executing; the shim must preserve that callback's
+// context too. Returns 0 after ordinary complete destruction.
+int native_sdk_app_destroy_with_status(void *app);
 void native_sdk_app_start(void *app);
 void native_sdk_app_activate(void *app);
 void native_sdk_app_deactivate(void *app);

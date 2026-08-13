@@ -29,6 +29,7 @@ const mobileWidgetActions = conversions.mobileWidgetActions;
 const mobileWidgetActionKindFromInt = conversions.mobileWidgetActionKindFromInt;
 const native_sdk_app_create = c_api.native_sdk_app_create;
 const native_sdk_app_destroy = c_api.native_sdk_app_destroy;
+const native_sdk_app_destroy_with_status = c_api.native_sdk_app_destroy_with_status;
 const native_sdk_app_start = c_api.native_sdk_app_start;
 const native_sdk_app_activate = c_api.native_sdk_app_activate;
 const native_sdk_app_deactivate = c_api.native_sdk_app_deactivate;
@@ -264,6 +265,17 @@ test "mobile C ABI destroy returns registered font bytes through the embedded de
     // through `EmbeddedApp.deinit` (one lifecycle owner), so the
     // leak-checked font bytes must come back here.
     native_sdk_app_destroy(app);
+}
+
+test "mobile C ABI destroy status reports whether callback context must survive" {
+    const normal = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(c_int, 0), native_sdk_app_destroy_with_status(normal));
+
+    const preserved = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    mobileApp(preserved).?.null_platform.channel_wake_abandoned.store(true, .seq_cst);
+    // The host is deliberately process-lived after this call, exactly like a
+    // real detached callback's context. Do not touch or destroy it again.
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_destroy_with_status(preserved));
 }
 
 test "mobile C ABI can load packaged asset source" {

@@ -235,7 +235,11 @@ pub fn UiAppHostWithStorageAndCredentials(
             return self;
         }
 
-        pub fn destroy(self: *Self) void {
+        /// Returns true when teardown deliberately preserves the host because
+        /// an abandoned platform callback may still enter it. Mobile shims
+        /// use the companion C ABI result to preserve their callback context
+        /// under the same condition.
+        pub fn destroy(self: *Self) bool {
             host.disableAutomation(self);
             self.render_memo.deinit();
             self.ui.deinit();
@@ -251,7 +255,7 @@ pub fn UiAppHostWithStorageAndCredentials(
             }
             // The embedded null platform lives inside `self`, so freeing
             // `self` IS this path's platform destruction — and an
-            // abandoned channel wake call may still enter that platform
+            // abandoned platform call may still enter that platform
             // at any later time (see
             // `PlatformServices.note_channel_wake_abandoned_fn`; the
             // null platform's own enqueue-only wake never triggers it,
@@ -259,10 +263,11 @@ pub fn UiAppHostWithStorageAndCredentials(
             // like every first-party destroy path: skip the free and
             // leak the host storage, process-lived, with one loud line.
             if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) {
-                std.debug.print("mobile ui host teardown: an abandoned channel wake call may still enter the embedded platform; skipping the host free and leaking it, process-lived, so the stale call stays safe\n", .{});
-                return;
+                std.debug.print("mobile ui host teardown: an abandoned platform call may still enter the embedded platform; skipping the host free and leaking it, process-lived, so the stale call stays safe\n", .{});
+                return true;
             }
             std.heap.page_allocator.destroy(self);
+            return false;
         }
 
         pub fn start(self: *Self) anyerror!void {

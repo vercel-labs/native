@@ -8896,15 +8896,17 @@ pub fn Effects(comptime Msg: type) type {
         ) void {
             self.reclaimSlots();
             const fake = self.executor == .fake;
-            const native_request = isNativeHostRequestName(options.name);
             const store_request = store_op != null;
             const credentials_request = credentials_op != null;
+            const native_request = isNativeHostRequestName(options.name);
             if (options.name.len == 0 or options.name.len > max_effect_host_name_bytes or
                 options.payload.len > payload_limit)
             {
                 return self.rejectStartedHost(options.key, options.on_result, credentials_op, credentials_fn);
             }
-            if (!fake and self.host_calls == null and !native_request) return self.rejectStartedHost(options.key, options.on_result, credentials_op, credentials_fn);
+            if (!fake and self.host_calls == null and !native_request and !credentials_request) {
+                return self.rejectStartedHost(options.key, options.on_result, credentials_op, credentials_fn);
+            }
             // A staged non-regenerating image terminal holds the key
             // exactly like the slot windows below (see
             // `stagedImageOccupiesKey`): under replay that image
@@ -9054,7 +9056,6 @@ pub fn Effects(comptime Msg: type) type {
 
         fn isNativeHostRequestName(name: []const u8) bool {
             return std.mem.startsWith(u8, name, "core.store.") or
-                std.mem.startsWith(u8, name, "core.credentials.") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
                 std.mem.eql(u8, name, "native-sdk.time.formatLocal");

@@ -884,7 +884,11 @@ pub const MobileHostApp = struct {
         return self;
     }
 
-    pub fn destroy(self: *MobileHostApp) void {
+    /// Returns true when teardown deliberately preserves the host because an
+    /// abandoned platform callback may still enter it. Mobile shims that own
+    /// callback context use the companion C ABI result to preserve that
+    /// context under the same condition.
+    pub fn destroy(self: *MobileHostApp) bool {
         disableAutomation(self);
         // One lifecycle owner: the embedded app's own deinit returns
         // the runtime's heap-owned storage (registered canvas font
@@ -897,8 +901,9 @@ pub const MobileHostApp = struct {
         // platform's abandon latch. Such a call still resolves this wrapper
         // from the services context, so preserve the complete host block just
         // as desktop platform destroy paths preserve theirs.
-        if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) return;
+        if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) return true;
         std.heap.page_allocator.destroy(self);
+        return false;
     }
 
     pub fn start(self: *MobileHostApp) anyerror!void {

@@ -7,7 +7,7 @@ const std = @import("std");
 const platform = @import("../platform/root.zig");
 
 pub const max_key_bytes: usize = 256;
-pub const max_secret_bytes: usize = 64 * 1024;
+pub const max_secret_bytes: usize = platform.max_credential_secret_bytes;
 
 pub const Operation = enum(u8) { set, get, delete };
 

@@ -147,6 +147,7 @@ test "credential effects round-trip through the hermetic platform backing" {
 }
 
 test "credential permission and bounds failures are staged closed outcomes" {
+    try std.testing.expectEqual(@as(usize, 2_560), effects_mod.max_effect_credentials_secret_bytes);
     var null_platform = platform.NullPlatform.init(.{});
     defer null_platform.deinit();
     var services = null_platform.platform();
@@ -184,6 +185,12 @@ test "credential permission and bounds failures are staged closed outcomes" {
     fx.credentialsGet(.{ .key = 14, .credential_key = "prefix\x00suffix", .on_result = Fx.credentialsMsg(.result) });
     const nul = try takeResult(&fx);
     try std.testing.expectEqual(effects_mod.EffectCredentialsOutcome.over_bound, nul.outcome);
+
+    var oversized_secret: [effects_mod.max_effect_credentials_secret_bytes + 1]u8 = undefined;
+    @memset(&oversized_secret, 's');
+    fx.credentialsSet(.{ .key = 15, .credential_key = "token", .secret = &oversized_secret, .on_result = Fx.credentialsMsg(.result) });
+    const secret = try takeResult(&fx);
+    try std.testing.expectEqual(effects_mod.EffectCredentialsOutcome.over_bound, secret.outcome);
 }
 
 test "real credential replacements coalesce and execute in issue order" {

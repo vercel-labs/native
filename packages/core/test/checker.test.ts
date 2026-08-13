@@ -137,6 +137,28 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(unused.warnings.filter((d) => d.id === "NS1071").length, 1);
 });
 
+test("NS1073 reserves the core credential request namespace for typed factories", () => {
+  const result = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: new Uint8Array(0) }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.request("core.credentials.get", model.bytes, { ok: "loaded", err: "failed" })];
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics.filter((d) => d.id === "NS1073").length, 1);
+  assert.equal(result.warnings.some((d) => d.id === "NS1071"), false);
+});
+
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {
   const source = `
 import { Cmd } from "@native-sdk/core";
