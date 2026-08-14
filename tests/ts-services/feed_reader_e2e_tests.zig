@@ -307,6 +307,17 @@ fn expectFeedViewportAboveActions(h: *Harness) !void {
 
 // ------------------------------------------------------------- the loop
 
+test "the service facade preserves the core's unbound view declarations" {
+    try std.testing.expectEqualDeep(
+        .{ "phase", "totalItems" },
+        core.Model.view_unbound,
+    );
+    try std.testing.expectEqualDeep(
+        .{ "fetched", "fetch_failed", "parsed", "parse_failed", "url_set" },
+        core.Msg.view_unbound,
+    );
+}
+
 test "boot parses the built-in sample through the real service child and the markup lists it" {
     const h = try Harness.create(null, "/feed.xml");
     defer h.destroy();

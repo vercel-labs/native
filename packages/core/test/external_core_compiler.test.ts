@@ -18,6 +18,8 @@ test("the external core compile lane uses the target-aware zig-cc environment", 
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: ["phase"],
+      msg: { unbound: ["loaded"] },
     }));
     const compiler = path.join(root, "compiler.mjs");
     const zigDir = path.join(root, "toolchain");
@@ -53,6 +55,8 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "cross-target"
       build_id: "cross-target",
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: ["phase"],
+      msg: { unbound: ["loaded"] },
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -70,6 +74,8 @@ test("the external core compile lane refuses cross-target Windows MSVC before co
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -104,6 +110,8 @@ test("the external core compile lane refuses a macOS target from a non-macOS hos
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -137,6 +145,8 @@ test("the external core compile lane refuses pairings outside the compiler's mat
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -170,6 +180,8 @@ test("the external core compile lane admits mobile pairings and refuses the rest
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const refuse = (host, target, pattern) => {
@@ -241,6 +253,8 @@ test("the external core compile lane preserves native Windows MSVC", () => {
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `

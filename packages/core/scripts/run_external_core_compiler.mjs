@@ -194,15 +194,30 @@ try {
 
   // The pinned compiler owns the archive contract (including its build id),
   // while the SDK frontend owns facts the compiler release predates. Carry
-  // exactly those checked persistence facts across the compile boundary.
+  // exactly that checked source metadata across the compile boundary.
   const compiledContract = JSON.parse(fs.readFileSync(sidecar, "utf8"));
   const frontendContract = JSON.parse(fs.readFileSync(args["frontend-sidecar"], "utf8"));
-  if (!/^[0-9a-f]{16}$/.test(frontendContract.model_fingerprint ?? "") || typeof frontendContract.has_migrate !== "boolean") {
-    console.error("the frontend contract is missing its checked persistence metadata — the SDK frontend and build driver are out of sync");
+  const modelUnbound = frontendContract.model_unbound;
+  const msgUnbound = frontendContract.msg?.unbound;
+  const stringList = (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string");
+  if (
+    !/^[0-9a-f]{16}$/.test(frontendContract.model_fingerprint ?? "") ||
+    typeof frontendContract.has_migrate !== "boolean" ||
+    !stringList(modelUnbound) ||
+    !stringList(msgUnbound)
+  ) {
+    console.error("the frontend contract is missing its checked persistence or unbound-view metadata — the SDK frontend and build driver are out of sync");
     process.exit(1);
   }
   compiledContract.model_fingerprint = frontendContract.model_fingerprint;
   compiledContract.has_migrate = frontendContract.has_migrate;
+  // Model and Msg are re-exported into the generated facade, so the pinned
+  // compiler cannot resolve that entry module's viewUnbound list against an
+  // entry-owned root declaration. These lists are lint-only source facts:
+  // restore the frontend's checked names without replacing any ABI fact the
+  // compiler co-emitted for the archive.
+  compiledContract.model_unbound = modelUnbound;
+  compiledContract.msg = { ...(compiledContract.msg ?? {}), unbound: msgUnbound };
   fs.writeFileSync(args["out-sidecar"], `${JSON.stringify(compiledContract, null, 2)}\n`);
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
