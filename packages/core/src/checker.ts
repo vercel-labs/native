@@ -1172,7 +1172,7 @@ export class SubsetChecker {
       field("title")?.type.k === "bytes" &&
       numeric("width") && numeric("height") && optionalNumeric("x") && optionalNumeric("y") &&
       field("resizable")?.type.k === "bool" && numeric("minWidth") && numeric("minHeight") &&
-      enumMembersAre("titlebar", ["standard", "hidden_inset", "hidden_inset_tall"]) &&
+      enumMembersAre("titlebar", ["standard", "hidden_inset", "hidden_inset_tall", "chromeless"]) &&
       field("transparent")?.type.k === "bool" && field("alwaysOnTop")?.type.k === "bool" &&
       field("clickThrough")?.type.k === "bool" && field("activateOnShow")?.type.k === "bool" &&
       field("allowsFullscreen")?.type.k === "bool" && enumMembersAre("closePolicy", ["quit", "hide"]) &&

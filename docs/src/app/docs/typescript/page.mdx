@@ -478,9 +478,11 @@ Export `statusItems(model): readonly StatusItemDescriptor[]` when the app needs 
 
 ## Model-declared secondary windows
 
-Export `windows(model): readonly WindowDescriptor[]` to derive the live secondary-window set from model state. Construct entries with `windowDescriptor` from `@native-sdk/core`, import `WindowDescriptor` from `@native-sdk/core/events`, and put each window's markup at `src/windows/<label>.native`. Adding/removing descriptors creates/closes only those windows; all open windows rebuild from the same committed model.
+Export `windows(model): readonly WindowDescriptor[]` to derive the live secondary-window set from model state. Construct entries with `windowDescriptor` from `@native-sdk/core`, import `WindowDescriptor` from `@native-sdk/core/events`, and put each window's markup at `src/windows/<label>.native`. Window roots can import shared components nested under `src/windows/`; the generated launcher embeds and hot-reloads the complete import closure. Adding/removing descriptors creates/closes only those windows; all open windows rebuild from the same committed model.
 
 `closePolicy` accepts `"quit"` (the default) or `"hide"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`, where the app maps it to the Msg that clears its open flag. A `"hide"` close retains the same native window and view and dispatches no close command; `Cmd.showWindow(label)` reveals it. Model-declared secondary windows are desktop-only. See `examples/system-monitor-ts`.
+
+`titlebar` accepts `"standard"`, `"hidden_inset"`, `"hidden_inset_tall"`, or `"chromeless"`. Transparent Windows windows require `"chromeless"`; because that removes the system buttons, fully skinned windows must draw working close/minimize controls.
 
 ## Subscriptions are Sub data
 

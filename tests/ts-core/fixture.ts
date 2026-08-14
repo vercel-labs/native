@@ -182,7 +182,7 @@ export type Msg =
   | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number }
   | { readonly kind: "store_scan_invalid" }
   | { readonly kind: "open_settings" }
-  | { readonly kind: "close_settings" };
+  | { readonly kind: "close_settings"; readonly reason: Uint8Array };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -552,7 +552,7 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
     case "open_settings":
       return [{ ...model, settingsOpen: true }, Cmd.none];
     case "close_settings":
-      return [{ ...model, settingsOpen: false }, Cmd.none];
+      return [{ ...model, settingsOpen: false, status: msg.reason }, Cmd.none];
   }
 }
 
@@ -615,7 +615,9 @@ export function windows(model: Model): readonly WindowDescriptor[] {
     width: 320,
     height: 240,
     resizable: false,
+    titlebar: "chromeless",
+    transparent: true,
     closePolicy: model.polling ? "hide" : "quit",
-    onCloseCommand: asciiBytes("core.close-settings"),
+    onCloseCommand: asciiBytes("core.close-settings:payload"),
   })];
 }

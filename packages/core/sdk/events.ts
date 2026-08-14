@@ -117,7 +117,7 @@ export interface StatusItemDescriptor {
 /// the native window and view tree alive for `Cmd.showWindow(label)`.
 export type WindowClosePolicy = "quit" | "hide";
 
-export type WindowTitlebarStyle = "standard" | "hidden_inset" | "hidden_inset_tall";
+export type WindowTitlebarStyle = "standard" | "hidden_inset" | "hidden_inset_tall" | "chromeless";
 
 /// Author-facing input to `windowDescriptor`; omitted fields receive the
 /// same defaults as UiApp.WindowDescriptor.

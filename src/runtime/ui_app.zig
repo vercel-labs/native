@@ -830,6 +830,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             canvas_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
             canvas_label_len: usize = 0,
             window_id: platform.WindowId = 0,
+            /// Owned copy of `on_close`: windows outlive the callback pass
+            /// that declared them, and TypeScript channel messages in
+            /// particular may point into a per-cycle decode arena. Keep the
+            /// payload alive until the user closes the window (or the model
+            /// replaces the declaration).
+            on_close_arena: std.heap.ArenaAllocator,
             on_close: ?MsgT = null,
             /// The descriptor's top-level alpha contract also controls
             /// this slot's gpu alpha mode and frame clear. Without both,
@@ -866,10 +872,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             arenas: [2]std.heap.ArenaAllocator,
 
             fn init(backing: std.mem.Allocator) WindowSlot {
-                return .{ .arenas = .{
-                    std.heap.ArenaAllocator.init(backing),
-                    std.heap.ArenaAllocator.init(backing),
-                } };
+                return .{
+                    .on_close_arena = std.heap.ArenaAllocator.init(backing),
+                    .arenas = .{
+                        std.heap.ArenaAllocator.init(backing),
+                        std.heap.ArenaAllocator.init(backing),
+                    },
+                };
+            }
+
+            fn setOnClose(self: *WindowSlot, msg: ?MsgT) error{ OutOfMemory, HoverCapturePayloadUnsupported }!void {
+                _ = self.on_close_arena.reset(.retain_capacity);
+                self.on_close = null;
+                if (msg) |value| {
+                    self.on_close = try Self.deepCopyMsgValue(MsgT, value, self.on_close_arena.allocator(), 0);
+                }
+            }
+
+            fn deinit(self: *WindowSlot) void {
+                self.on_close_arena.deinit();
+                self.arenas[0].deinit();
+                self.arenas[1].deinit();
             }
 
             fn label(self: *const WindowSlot) []const u8 {
@@ -1398,8 +1421,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
             }
             for (&self.window_slots) |*slot| {
-                slot.arenas[0].deinit();
-                slot.arenas[1].deinit();
+                slot.deinit();
             }
             for (&self.hover_msg_leave_arenas) |*arena| arena.deinit();
             self.drag_msg_template_arena.deinit();
@@ -2728,7 +2750,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (declared) |descriptor| {
                 if (self.windowSlotIndexByLabel(descriptor.label)) |slot_index| {
                     // Already live: the close Msg follows the model.
-                    self.window_slots[slot_index].on_close = descriptor.on_close;
+                    self.setWindowSlotOnClose(&self.window_slots[slot_index], descriptor.on_close);
                     continue;
                 }
                 self.createWindowSlot(runtime, descriptor);
@@ -2818,7 +2840,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.canvas_label_len = descriptor.canvas_label.len;
             @memcpy(slot.canvas_label_storage[0..descriptor.canvas_label.len], descriptor.canvas_label);
             slot.window_id = info.id;
-            slot.on_close = descriptor.on_close;
+            self.setWindowSlotOnClose(slot, descriptor.on_close);
             slot.transparent = descriptor.transparent;
             slot.installed = false;
             slot.canvas_size = .{ .width = descriptor.width, .height = descriptor.height };
@@ -2829,6 +2851,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.tree = null;
             slot.arena_index = 0;
             self.window_slot_count += 1;
+        }
+
+        fn setWindowSlotOnClose(self: *Self, slot: *WindowSlot, msg: ?MsgT) void {
+            _ = self;
+            slot.setOnClose(msg) catch |err| {
+                slot.on_close = null;
+                _ = slot.on_close_arena.reset(.free_all);
+                switch (err) {
+                    error.OutOfMemory => ui_app_log.warn(
+                        "declared window '{s}' could not retain its on_close message: out of memory; user close will not dispatch it",
+                        .{slot.label()},
+                    ),
+                    error.HoverCapturePayloadUnsupported => ui_app_log.warn(
+                        "declared window '{s}' has an on_close payload that cannot be owned; bind scalar, record, union, array, optional, or slice data",
+                        .{slot.label()},
+                    ),
+                }
+            };
         }
 
         /// The gpu_surface shell view for a declared window: the
@@ -2877,8 +2917,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.window_slots[index] = self.window_slots[last];
             self.window_slots[last] = WindowSlot.init(self.backing);
             self.window_slot_count = last;
-            removed.arenas[0].deinit();
-            removed.arenas[1].deinit();
+            removed.deinit();
             runtime.closeWindow(window_id) catch |err| {
                 ui_app_log.warn("declared window close failed: {s}", .{@errorName(err)});
             };
@@ -2886,17 +2925,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Drop a slot whose runtime window is ALREADY gone (the user
         /// closed it): bookkeeping only, no platform call.
-        fn forgetWindowSlot(self: *Self, index: usize) ?MsgT {
+        fn forgetWindowSlot(self: *Self, index: usize) WindowSlot {
             self.releaseContextMenuSnapshotForWindow(self.window_slots[index].window_id);
-            const on_close = self.window_slots[index].on_close;
             const last = self.window_slot_count - 1;
             var removed = self.window_slots[index];
             self.window_slots[index] = self.window_slots[last];
             self.window_slots[last] = WindowSlot.init(self.backing);
             self.window_slot_count = last;
+            // The retained tree is dead with the native window. Keep only
+            // the on-close arena alive through the synchronous dispatch
+            // below, then release it there as well.
             removed.arenas[0].deinit();
             removed.arenas[1].deinit();
-            return on_close;
+            return removed;
         }
 
         /// Rebuild every installed secondary window's tree from the
@@ -4303,8 +4344,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // in its place), a non-owner just drops out of the table.
             self.captureSlotVideoDeclaration(closed.window_id, null);
             self.applyVideoDeclaration(runtime);
-            const on_close = self.forgetWindowSlot(index);
-            if (on_close) |msg| {
+            var removed = self.forgetWindowSlot(index);
+            defer removed.on_close_arena.deinit();
+            if (removed.on_close) |msg| {
                 try self.dispatch(runtime, self.canvas_window_id, msg);
             }
         }

@@ -47,7 +47,7 @@ export interface StatusItemDescriptor {
     readonly items: readonly StatusItemMenuItem[];
 }
 export type WindowClosePolicy = "quit" | "hide";
-export type WindowTitlebarStyle = "standard" | "hidden_inset" | "hidden_inset_tall";
+export type WindowTitlebarStyle = "standard" | "hidden_inset" | "hidden_inset_tall" | "chromeless";
 export interface WindowDescriptorSpec {
     readonly label: Uint8Array;
     readonly canvasLabel: Uint8Array;

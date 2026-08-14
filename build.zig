@@ -3228,6 +3228,7 @@ fn tsCoreE2eArtifact(
     const monitor_root = monitor_stage.addCopyFile(b.path("tests/ts-core/system_monitor_e2e_tests.zig"), "system_monitor_e2e_tests.zig");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor-ts/src/app.native"), "app.native");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor-ts/src/windows/settings.native"), "settings.native");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor-ts/src/windows/components/sampling.native"), "components/sampling.native");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/sysctl.txt"), "fixtures/sysctl.txt");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/ps.txt"), "fixtures/ps.txt");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/vm_stat.txt"), "fixtures/vm_stat.txt");

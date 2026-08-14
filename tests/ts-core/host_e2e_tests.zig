@@ -114,7 +114,7 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.mixrejectflip")) return .mix_reject_flip;
     if (std.mem.eql(u8, name, "core.notify")) return .notify;
     if (std.mem.eql(u8, name, "core.open-settings")) return .open_settings;
-    if (std.mem.eql(u8, name, "core.close-settings")) return .close_settings;
+    if (std.mem.startsWith(u8, name, "core.close-settings:")) return .{ .close_settings = name["core.close-settings:".len..] };
     if (std.mem.eql(u8, name, "core.storeput")) return .store_put;
     if (std.mem.eql(u8, name, "core.storeget")) return .store_get;
     if (std.mem.eql(u8, name, "core.storedelete")) return .store_delete;
@@ -891,7 +891,7 @@ test "compiled TypeScript windows helper projects hide close policy and command-
     // Switch the descriptor to .quit through the compiled helper's model
     // source, then close through the normal command mapper. This pins that
     // onCloseCommand resolves to an ordinary Msg and removes the declaration.
-    try h.menu("core.close-settings");
+    try h.menu("core.close-settings:manual");
     try std.testing.expect(!Bridge.model().settingsOpen);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.window_slot_count);
 
@@ -906,9 +906,23 @@ test "compiled TypeScript windows helper projects hide close policy and command-
     }
     try std.testing.expect(settings_id != 0);
     try std.testing.expectEqual(native_sdk.WindowClosePolicy.quit, h.harness.null_platform.closePolicyForWindow(settings_id).?);
+    var settings_index: ?usize = null;
+    for (h.harness.null_platform.windows[0..h.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id == settings_id) settings_index = index;
+    }
+    const platform_index = settings_index orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(native_sdk.WindowTitlebarStyle.chromeless, h.harness.null_platform.window_titlebar[platform_index]);
+    try std.testing.expect(h.harness.null_platform.window_transparent[platform_index]);
+    // Reuse the decode arena that produced the close message before the
+    // user closes the window. This proves the live slot owns the payload
+    // rather than retaining a borrowed pointer into that arena.
+    fixture.rt.frameReset();
+    const overwrite = fixture.rt.frameAlloc(u8, "core.close-settings:payload".len);
+    @memset(overwrite, '!');
     const close = h.harness.null_platform.userCloseWindow(settings_id) orelse return error.TestUnexpectedResult;
     try h.harness.runtime.dispatchPlatformEvent(h.app, close);
     try std.testing.expect(!Bridge.model().settingsOpen);
+    try std.testing.expectEqualStrings("payload", Bridge.model().status);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.window_slot_count);
 }
 

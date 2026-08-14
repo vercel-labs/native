@@ -1276,7 +1276,7 @@ export function initialModel(): Model { return { settingsOpen: false }; }
 export function update(model: Model, msg: Msg): Model { return model; }
 export function windows(model: Model): readonly WindowDescriptor[] {
   if (!model.settingsOpen) return [];
-  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
+  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), titlebar: "chromeless", transparent: true, closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
 }
 `);
   assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));

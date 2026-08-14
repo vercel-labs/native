@@ -1,9 +1,4 @@
+<import src="components/sampling.native"/>
 <column grow="1" padding="20" background="background" label="Settings window">
-  <row gap="12" cross="center">
-    <column grow="1" gap="2">
-      <text>Sampling</text>
-      <text size="sm" foreground="text_muted" wrap="false">60 samples kept · one every 2 s while live</text>
-    </column>
-    <switch selected="{not paused}" on-toggle="toggle_sampling" label="Pause or resume sampling" />
-  </row>
+  <use template="sampling-setting" />
 </column>

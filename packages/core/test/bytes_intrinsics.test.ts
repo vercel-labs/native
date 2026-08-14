@@ -27,13 +27,14 @@ test("windowDescriptor fills canonical window defaults", () => {
   const descriptor = windowDescriptor({
     label: asciiBytes("settings"),
     canvasLabel: asciiBytes("settings-canvas"),
+    titlebar: "chromeless",
     closePolicy: "hide",
   });
   assert.deepEqual([...descriptor.label], [...asciiBytes("settings")]);
   assert.equal(descriptor.width, 480);
   assert.equal(descriptor.height, 360);
   assert.equal(descriptor.resizable, true);
-  assert.equal(descriptor.titlebar, "standard");
+  assert.equal(descriptor.titlebar, "chromeless");
   assert.equal(descriptor.closePolicy, "hide");
   assert.equal(descriptor.onCloseCommand.length, 0);
 });

@@ -217,7 +217,7 @@ Commands are constructed inline in the return path and nowhere else (NS1017): ne
 
 Export `windows(model): readonly WindowDescriptor[]` to derive the secondary windows that should exist from committed model state. Import `WindowDescriptor` from `@native-sdk/core/events`, and construct entries with `windowDescriptor` from `@native-sdk/core` so omitted fields receive the canonical defaults. Presence is liveness: adding a descriptor creates the window, removing it closes the window and releases its retained view.
 
-Each possible label has a statically compiled Native markup view at `src/windows/<label>.native`; for example descriptor label `settings` uses `src/windows/settings.native`. The descriptor's `canvasLabel` must be unique across the whole app. Both the main view and every open window view rebuild from the same model after a Msg, and the generated launcher hot-reloads secondary view files in Debug.
+Each possible label has a statically compiled Native markup view at `src/windows/<label>.native`; for example descriptor label `settings` uses `src/windows/settings.native`. Window roots may import shared components nested under `src/windows/` with the ordinary `<import>` syntax; the generated launcher embeds and hot-reloads the full import closure. The descriptor's `canvasLabel` must be unique across the whole app. Both the main view and every open window view rebuild from the same model after a Msg.
 
 ```ts
 import { asciiBytes, windowDescriptor } from "@native-sdk/core";
@@ -239,6 +239,8 @@ export function windows(model: Model): readonly WindowDescriptor[] {
 ```
 
 `closePolicy` is `"quit"` by default. Under `"quit"`, a user close really closes the window and routes `onCloseCommand` through `commandMsg`; map it to the Msg that clears the model's open flag. If the model keeps declaring the label, source wins and the next reconciliation recreates it. Under `"hide"`, the same native window and view stay alive, no close command fires, and `Cmd.showWindow("settings")` reveals it. Stopping the declaration always performs a real reconcile close. The platform safeguards for `hide` are the same as manifest windows. Model-declared secondary windows are desktop-only.
+
+`titlebar` accepts `"standard"`, `"hidden_inset"`, `"hidden_inset_tall"`, and `"chromeless"`. The last removes all OS chrome and is required when a transparent model-declared window targets Windows; provide working app-drawn close/minimize controls for that fully skinned shape.
 
 ### The init command
 

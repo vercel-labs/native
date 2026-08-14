@@ -45,7 +45,11 @@ const Bridge = Adapter.Host;
 const app_markup = @embedFile("app.native");
 const CompiledAppView = canvas.CompiledMarkupView(core.Model, core.Msg, app_markup);
 const settings_markup = @embedFile("settings.native");
-const CompiledSettingsView = canvas.CompiledMarkupView(core.Model, core.Msg, settings_markup);
+const settings_markup_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "settings.native", .source = settings_markup },
+    .{ .path = "components/sampling.native", .source = @embedFile("components/sampling.native") },
+};
+const CompiledSettingsView = canvas.CompiledMarkupImports(core.Model, core.Msg, "settings.native", &settings_markup_sources);
 
 // The Zig example's committed real captures (10 cores, 32 GiB) and its
 // constructed edge fixture — shared truth, staged beside this root.
