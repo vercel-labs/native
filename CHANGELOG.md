@@ -2,9 +2,38 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.0
+## 0.9.1
 
 <!-- release:start -->
+
+### New Features
+
+- **Multi-item macOS menu bars**: Apps can now manage independent, keyed status items with model-driven updates, events, automation, journaling, and regression coverage (#343).
+- **Complete TypeScript file effects**: Secure, permission-gated effects now support bounded streaming reads, atomic writes, stat, append, and deletion while preserving deterministic record and replay behavior (#339, #350).
+- **Actionable desktop notifications**: Notification replacement identifiers and actions dispatch through the ordinary command path on macOS, Windows, and Linux (#347).
+- **Secondary-window lifecycle control**: Window descriptors can declare quit or hide-on-close behavior, preserve hidden-window identity when reopened, and expose the same model-driven window contract to TypeScript apps (#349, #351).
+- **Mobile TypeScript cores and services**: TypeScript apps with services now compile into iOS and Android library archives, with mobile packaging and device-level runtime coverage (#346).
+
+### Bug Fixes
+
+- **Safe Linux alert dialogs**: GTK alert dialogs now initialize with a valid empty format string, avoiding a crash from a null constructor argument (#354).
+- **Correct compiled-core tuple returns**: The SDK now pins the scriptc tuple-normalization fix and verifies bare-model and effect-tuple ABI returns with a compiled-core regression (#356).
+
+### Improvements
+
+- **Stronger TypeScript core guidance and diagnostics**: Subset rules now distinguish permanent guarantees from deliberately deferred capabilities and point authors to the appropriate service alternative (#345).
+- **End-to-end services showcase**: The Feed Reader example now demonstrates the full TypeScript service workflow with typed feed parsing, shared data, fixtures, and replay coverage (#352).
+- **Updated compiler integration**: scriptc advances through 0.0.31 with refreshed generated contracts, compatibility fixtures, and compiler-surface references (#344, #356).
+
+### Contributors
+
+- @ctate
+- @ElSebas41
+- @johnlindquist
+
+<!-- release:end -->
+
+## 0.9.0
 
 ### New Features
 
@@ -33,8 +62,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 - @carvalab
 - @Railly
 - @camilocbarrera
-
-<!-- release:end -->
 
 ## 0.8.4
 

@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli-linux-arm64-musl",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "The native CLI binary for Linux arm64 (musl)",
   "os": [
     "linux"
