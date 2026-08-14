@@ -513,9 +513,17 @@ test "append and stat are bounded one-shot file effects" {
     var path_buffer: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/log/events.log", .{tmp.sub_path[0..]});
     fx.appendFile(.{ .key = 1, .path = path, .bytes = "one", .on_result = Fx.fileMsg(.result) });
-    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    const first = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, first.outcome);
     fx.appendFile(.{ .key = 2, .path = path, .bytes = "-two", .on_result = Fx.fileMsg(.result) });
-    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    const second = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, second.outcome);
     fx.statFile(.{ .key = 3, .path = path, .on_result = Fx.fileMsg(.result) });
     var stat_result: ?effects_mod.EffectFileResult = null;
     while (stat_result == null) {

@@ -16459,7 +16459,7 @@ pub fn Effects(comptime Msg: type) type {
                     defer file.close(io);
                     const stat = file.stat(io) catch |err| return fileOpFailure(err);
                     if (comptime builtin.os.tag == .windows) {
-                        appendFileWindows(file, ctx.payload()) catch |err| return fileOpFailure(err);
+                        appendFileWindows(file, io, ctx.payload()) catch |err| return fileOpFailure(err);
                     } else {
                         file.writePositionalAll(io, ctx.payload(), stat.size) catch |err| return fileOpFailure(err);
                     }
@@ -16519,22 +16519,44 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Windows' Zig 0.16 threaded positional writer can surface
-        /// STATUS_PENDING as unreachable for a synchronous file handle, while
-        /// its streaming writer rejects the same post-seek handle. NT defines
-        /// `ByteOffset = -1` as the atomic write-to-end sentinel. The handle is
-        /// already exclusively locked by the caller, and this loop preserves
-        /// the full-payload-or-error contract.
-        fn appendFileWindows(file: std.Io.File, bytes: []const u8) !void {
+        /// STATUS_PENDING for the asynchronous handle `follow_symlinks=false`
+        /// deliberately opens, while its streaming writer rejects the same
+        /// post-seek handle. NT defines `ByteOffset = -1` as the atomic
+        /// write-to-end sentinel. Give every write its own completion event:
+        /// neither the stack IOSB nor the caller's payload may die while the
+        /// kernel can still reach them. The handle is already exclusively
+        /// locked by the caller, and this loop preserves the
+        /// full-payload-or-error contract.
+        fn appendFileWindows(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
             if (comptime builtin.os.tag != .windows) unreachable;
             const windows = std.os.windows;
             var at: usize = 0;
             while (at < bytes.len) {
-                var iosb: windows.IO_STATUS_BLOCK = undefined;
+                var event: windows.HANDLE = undefined;
+                switch (windows.ntdll.NtCreateEvent(
+                    &event,
+                    .{
+                        .SPECIFIC = .{ .EVENT = .{ .MODIFY_STATE = true } },
+                        .STANDARD = .{ .SYNCHRONIZE = true },
+                    },
+                    null,
+                    .Synchronization,
+                    .FALSE,
+                )) {
+                    .SUCCESS => {},
+                    else => return error.InputOutput,
+                }
+                defer windows.CloseHandle(event);
+
+                var iosb: windows.IO_STATUS_BLOCK = .{
+                    .u = .{ .Status = .PENDING },
+                    .Information = 0,
+                };
                 const end_offset: windows.LARGE_INTEGER = -1;
                 const len: windows.ULONG = @intCast(@min(bytes.len - at, std.math.maxInt(windows.ULONG)));
-                switch (windows.ntdll.NtWriteFile(
+                const status = windows.ntdll.NtWriteFile(
                     file.handle,
-                    null,
+                    event,
                     null,
                     null,
                     &iosb,
@@ -16542,7 +16564,48 @@ pub fn Effects(comptime Msg: type) type {
                     len,
                     &end_offset,
                     null,
-                )) {
+                );
+                if (status == .PENDING) {
+                    wait: while (true) {
+                        // A short kernel wait plus Io.checkCancel makes this
+                        // direct NT call participate in the surrounding
+                        // concurrent task's cancellation protocol without
+                        // depending on Threaded's private alertable-syscall
+                        // machinery.
+                        const poll_interval_100ns: windows.LARGE_INTEGER = -50_000;
+                        switch (windows.ntdll.NtWaitForSingleObject(event, .FALSE, &poll_interval_100ns)) {
+                            windows.NTSTATUS.WAIT_0 => break :wait,
+                            .TIMEOUT => std.Io.checkCancel(io) catch {
+                                // The threaded Io cancels a concurrent task
+                                // through this check. Cancel this exact
+                                // request, then wait non-alertably until
+                                // the kernel has dropped every reference to
+                                // IOSB and payload before reporting it.
+                                var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+                                _ = windows.ntdll.NtCancelIoFileEx(file.handle, &iosb, &cancel_iosb);
+                                switch (windows.ntdll.NtWaitForSingleObject(event, .FALSE, null)) {
+                                    windows.NTSTATUS.WAIT_0 => {},
+                                    else => unreachable,
+                                }
+                                return error.Canceled;
+                            },
+                            else => {
+                                var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+                                _ = windows.ntdll.NtCancelIoFileEx(file.handle, &iosb, &cancel_iosb);
+                                switch (windows.ntdll.NtWaitForSingleObject(event, .FALSE, null)) {
+                                    windows.NTSTATUS.WAIT_0 => {},
+                                    else => unreachable,
+                                }
+                                return error.InputOutput;
+                            },
+                        }
+                    }
+                } else {
+                    // A failed immediate submission does not promise to fill
+                    // the IOSB; make the returned status authoritative.
+                    iosb.u.Status = status;
+                }
+                switch (iosb.u.Status) {
                     .SUCCESS => {},
                     .DISK_FULL => return error.NoSpaceLeft,
                     .ACCESS_DENIED => return error.AccessDenied,
@@ -16551,7 +16614,7 @@ pub fn Effects(comptime Msg: type) type {
                     .PENDING => return error.InputOutput,
                     else => return error.InputOutput,
                 }
-                if (iosb.Information == 0) return error.InputOutput;
+                if (iosb.Information == 0 or iosb.Information > len) return error.InputOutput;
                 at += iosb.Information;
             }
         }
