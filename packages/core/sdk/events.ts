@@ -144,7 +144,9 @@ export interface WindowDescriptorSpec {
 
 /// One independently reconciled secondary window returned by
 /// `windows(model)`. The generated launcher compiles
-/// `src/windows/<label>.native` as its view; presence is liveness.
+/// `src/windows/<label>.native` as its view; presence is liveness. Construct
+/// entries with `windowDescriptor` and spell `label` as a literal
+/// `asciiBytes("<label>")` so check/build can prove that root exists.
 export interface WindowDescriptor {
   readonly label: Uint8Array;
   readonly canvasLabel: Uint8Array;

@@ -49,6 +49,11 @@ export interface FrontendOptions {
   /// Generated @native-sdk/core surface carrying declared SQLite query
   /// constructors. Omitted for non-relational apps and direct checker tests.
   readonly sdkCorePath?: string;
+  /// Statically compiled secondary-window view labels discovered from direct
+  /// `src/windows/<label>.native` children. Undefined keeps core-only checker
+  /// use independent of an app tree; an empty set means app validation is
+  /// active and the app supplies no secondary-window roots.
+  readonly windowViews?: readonly string[];
 }
 
 export interface FrontendResult {
@@ -204,6 +209,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     options.permissions ?? [],
     options.persistRoutes,
     options.sdkCorePath,
+    options.windowViews,
   );
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {

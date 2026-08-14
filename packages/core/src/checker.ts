@@ -462,6 +462,7 @@ export class SubsetChecker {
   private readonly permissions: Set<string>;
   private readonly persistRoutes: PersistRoutes | undefined;
   private readonly sdkCorePath: string;
+  private readonly windowViews: ReadonlySet<string> | undefined;
   private usesPersist = false;
   private usesStore = false;
   private usesSqlite = false;
@@ -476,6 +477,7 @@ export class SubsetChecker {
     permissions: readonly string[] = [],
     persistRoutes?: PersistRoutes,
     sdkCorePath: string = sdkCoreModulePath,
+    windowViews?: readonly string[],
   ) {
     this.tast = tast;
     this.table = table;
@@ -487,6 +489,7 @@ export class SubsetChecker {
     this.permissions = new Set(permissions);
     this.persistRoutes = persistRoutes;
     this.sdkCorePath = sdkCorePath;
+    this.windowViews = windowViews === undefined ? undefined : new Set(windowViews);
   }
 
   check(): CheckResult {
@@ -996,6 +999,97 @@ export class SubsetChecker {
     }
   }
 
+  /// The generated launcher owns a closed, comptime-compiled registry keyed
+  /// by direct `src/windows/<label>.native` stems. Require every possible
+  /// descriptor to declare that identity as a literal at its canonical
+  /// constructor call, then prove the root exists before compilation. This
+  /// turns a would-be first-render panic into a source diagnostic in both
+  /// `native check` and every build.
+  private checkWindowViewRegistry(windowsDecl: ts.FunctionDeclaration): void {
+    if (this.windowViews === undefined) return;
+
+    const calls: ts.CallExpression[] = [];
+    const visited = new Set<ts.FunctionDeclaration>();
+    const visitFunction = (fn: ts.FunctionDeclaration): void => {
+      if (visited.has(fn)) return;
+      visited.add(fn);
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node)) {
+          if (this.sdkRootFunctionName(node.expression) === "windowDescriptor") {
+            calls.push(node);
+          } else if (ts.isIdentifier(node.expression) || ts.isPropertyAccessExpression(node.expression)) {
+            // Follow app helpers reached from windows(), including helpers in
+            // imported core modules and namespace-import dot syntax. This
+            // keeps descriptor construction factored without letting an
+            // unrelated windowDescriptor call elsewhere create a false
+            // registry requirement.
+            const target = this.tast.declarationOf(
+              ts.isIdentifier(node.expression) ? node.expression : node.expression.name,
+            );
+            if (target && ts.isFunctionDeclaration(target) && this.fileSet.has(target.getSourceFile())) {
+              visitFunction(target);
+            }
+          }
+        }
+        // A hand-written WindowDescriptor object bypasses the constructor
+        // inventory. Reject it at its contextual type so every possible
+        // descriptor identity remains visible to the static registry proof.
+        if (ts.isObjectLiteralExpression(node)) {
+          const contextual = this.tast.contextualTypeOf(node);
+          if (contextual !== undefined && this.tast.typeToString(contextual) === "WindowDescriptor") {
+            this.report(
+              "NS1033",
+              "Construct model-declared windows with `windowDescriptor({...})`; direct `WindowDescriptor` objects hide their label from the generated view-registry check.",
+              node,
+            );
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(fn.body ?? fn);
+    };
+    visitFunction(windowsDecl);
+
+    if (calls.length === 0) {
+      this.report(
+        "NS1033",
+        "`windows` must construct each possible entry with `windowDescriptor({ label: asciiBytes(\"<label>\"), ... })` so the generated launcher can prove its `src/windows/<label>.native` view exists.",
+        windowsDecl.name ?? windowsDecl,
+      );
+      return;
+    }
+
+    for (const call of calls) {
+      const spec = call.arguments[0];
+      const labelProp = spec && ts.isObjectLiteralExpression(spec)
+        ? spec.properties.find((prop): prop is ts.PropertyAssignment =>
+            ts.isPropertyAssignment(prop) &&
+            ((ts.isIdentifier(prop.name) && prop.name.text === "label") ||
+              (ts.isStringLiteral(prop.name) && prop.name.text === "label")))
+        : undefined;
+      const labelExpr = labelProp?.initializer;
+      const labelArg = labelExpr && ts.isCallExpression(labelExpr) &&
+          this.sdkRootFunctionName(labelExpr.expression) === "asciiBytes"
+        ? labelExpr.arguments[0]
+        : undefined;
+      if (!labelArg || !ts.isStringLiteral(labelArg)) {
+        this.report(
+          "NS1033",
+          "A model-declared window label must be a static `asciiBytes(\"<label>\")` property inside `windowDescriptor({...})`; that literal selects `src/windows/<label>.native` at build time.",
+          labelProp ?? spec ?? call,
+        );
+        continue;
+      }
+      if (!this.windowViews.has(labelArg.text)) {
+        this.report(
+          "NS1033",
+          `Window label \`${labelArg.text}\` has no compiled view; add \`src/windows/${labelArg.text}.native\` or change the descriptor label to an existing root.`,
+          labelArg,
+        );
+      }
+    }
+  }
+
   private checkStatusItemsHelper(): void {
     let decl: ts.FunctionDeclaration | null = null;
     for (const stmt of this.entry.statements) {
@@ -1184,7 +1278,9 @@ export class SubsetChecker {
         `\`windows\` must return \`readonly WindowDescriptor[]\`; import \`WindowDescriptor\` from \`@native-sdk/core/events\` and construct entries with \`windowDescriptor(...)\`. Resolved: ${shape}`,
         decl.type,
       );
+      return;
     }
+    this.checkWindowViewRegistry(decl);
   }
 
   /// NS1032 — `export const viewUnbound = [...] as const`: the dead-state

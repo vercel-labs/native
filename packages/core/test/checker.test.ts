@@ -1267,7 +1267,7 @@ export function statusItems(model: Model): readonly StatusItemDescriptor[] { ret
 });
 
 test("NS1033 windows is the canonical model-declared secondary-window collection", () => {
-  const clean = check(`
+  const cleanSource = `
 import { asciiBytes, windowDescriptor } from "@native-sdk/core";
 import { type WindowDescriptor } from "@native-sdk/core/events";
 export interface Model { readonly settingsOpen: boolean; }
@@ -1278,9 +1278,73 @@ export function windows(model: Model): readonly WindowDescriptor[] {
   if (!model.settingsOpen) return [];
   return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), titlebar: "chromeless", transparent: true, closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
 }
-`);
+`;
+  const clean = check(cleanSource, { windowViews: ["settings"] });
   assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
   assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const missingView = check(cleanSource, { windowViews: [] });
+  assert.equal(missingView.ok, false);
+  assert.match(missingView.diagnostics.map((d) => d.message).join("\n"), /src\/windows\/settings\.native/);
+
+  const mismatchedView = check(cleanSource, { windowViews: ["preferences"] });
+  assert.equal(mismatchedView.ok, false);
+  assert.match(mismatchedView.diagnostics.map((d) => d.message).join("\n"), /src\/windows\/settings\.native/);
+
+  const dynamicLabel = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("settings") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({ label: model.label, canvasLabel: asciiBytes("settings-canvas") })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(dynamicLabel.ok, false);
+  assert.match(dynamicLabel.diagnostics.map((d) => d.message).join("\n"), /static `asciiBytes/);
+
+  const factored = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function settingsWindow(): WindowDescriptor {
+  return windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+}
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [settingsWindow()];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(factored.ok, true, factored.diagnostics.map((d) => d.message).join("\n"));
+
+  const namespaced = checkFiles({
+    "core.ts": `
+import * as shell from "./windows.ts";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [shell.settingsWindow()];
+}
+`,
+    "windows.ts": `
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export function settingsWindow(): WindowDescriptor {
+  return windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+}
+`,
+  }, { windowViews: ["settings"] });
+  assert.equal(namespaced.ok, true, namespaced.diagnostics.map((d) => d.message).join("\n"));
 
   const wrong = checkOnly(`
 export interface BadWindow { readonly label: Uint8Array; readonly closePolicy: boolean; }

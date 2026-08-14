@@ -35,6 +35,8 @@ function main(argv: string[]): number {
   let persistNone: string | null = null;
   let persistErr: string | null = null;
   let sdkCorePath: string | null = null;
+  let windowViewsEnabled = false;
+  const windowViews: string[] = [];
   const capabilities: string[] = [];
   const permissions: string[] = [];
   const servicePackages: ServicePackage[] = [];
@@ -109,6 +111,16 @@ function main(argv: string[]): number {
         console.error("--sdk-core requires a generated core.ts path");
         return 2;
       }
+    } else if (args[i] === "--window-views") {
+      windowViewsEnabled = true;
+    } else if (args[i] === "--window-view") {
+      windowViewsEnabled = true;
+      const label = args[++i] ?? null;
+      if (label === null || label.length === 0) {
+        console.error("--window-view requires a non-empty label");
+        return 2;
+      }
+      windowViews.push(label);
     } else if (args[i] === "-o" || args[i] === "--out") {
       console.error(
         "-o named the removed TS-to-Zig emitter (v0.7.0 removed it): TypeScript cores compile through the external core compiler now, and this CLI checks the core and emits its contract sidecar (--contract). Drop the flag.",
@@ -148,6 +160,7 @@ function main(argv: string[]): number {
     persistStatePath: persistStatePath ?? undefined,
     persistRoutes,
     sdkCorePath: sdkCorePath ?? undefined,
+    windowViews: windowViewsEnabled ? windowViews : undefined,
   };
   const result = checkFile(entry, options);
   for (const e of result.typeErrors) console.error(e);

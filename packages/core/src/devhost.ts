@@ -91,6 +91,8 @@ let appId = "app";
 const servicePackages: { name: string; version: string; content_hash: string }[] = [];
 const capabilities = new Set<string>();
 const permissions = new Set<string>();
+let windowViewsEnabled = false;
+const windowViews: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--script") script = args[++i] ?? null;
   else if (args[i] === "--capability") {
@@ -102,6 +104,13 @@ for (let i = 0; i < args.length; i++) {
     const permission = args[++i] ?? null;
     if (permission === null) usage();
     permissions.add(permission);
+  }
+  else if (args[i] === "--window-views") windowViewsEnabled = true;
+  else if (args[i] === "--window-view") {
+    windowViewsEnabled = true;
+    const label = args[++i] ?? null;
+    if (label === null || label.length === 0) usage();
+    windowViews.push(label);
   }
   else if (args[i] === "--persist-ok") persistOk = args[++i] ?? null;
   else if (args[i] === "--persist-none") persistNone = args[++i] ?? null;
@@ -143,7 +152,7 @@ if (serviceCwd !== null) {
 const persistRouteCount = [persistOk, persistNone, persistErr].filter((route) => route !== null).length;
 if (persistRouteCount !== 0 && persistRouteCount !== 3) usage();
 let checked: ReturnType<typeof checkFile> | null = null;
-if (capabilities.size > 0 || permissions.size > 0 || (persistOk !== null && persistNone !== null && persistErr !== null) || fs.existsSync(path.join(path.dirname(path.resolve(entry)), "services"))) {
+if (capabilities.size > 0 || permissions.size > 0 || windowViewsEnabled || (persistOk !== null && persistNone !== null && persistErr !== null) || fs.existsSync(path.join(path.dirname(path.resolve(entry)), "services"))) {
   // Type information is erased by the time this module imports the app core.
   // Run the frontend inside the watched process so every node --watch restart
   // revalidates manifest-owned routes against the newly edited Msg union.
@@ -154,6 +163,7 @@ if (capabilities.size > 0 || permissions.size > 0 || (persistOk !== null && pers
     servicesContract: true,
     servicePackages,
     sdkCorePath: sdkCore ?? undefined,
+    windowViews: windowViewsEnabled ? windowViews : undefined,
   });
   for (const error of checked.typeErrors) console.error(error);
   for (const diagnostic of checked.diagnostics) console.error(formatDiagnostic(diagnostic));

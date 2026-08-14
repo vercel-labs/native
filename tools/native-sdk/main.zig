@@ -298,6 +298,8 @@ pub fn main(init: std.process.Init) !void {
                 .version = package_entry.version,
                 .content_hash = package_entry.content_hash,
             };
+            const dev_window_views = try tooling.ts_core.collectWindowViewLabels(allocator, init.io, ".");
+            defer tooling.ts_core.freeWindowViewLabels(allocator, dev_window_views);
             var dev_canvas_label: []const u8 = "canvas";
             var dev_window_width: f32 = 800;
             var dev_window_height: f32 = 600;
@@ -328,6 +330,7 @@ pub fn main(init: std.process.Init) !void {
                     .err = persist.restore.err,
                 } else null,
                 .service_packages = dev_service_packages,
+                .window_views = dev_window_views,
             }) catch |err| return failVerb(err);
             return;
         }
@@ -664,6 +667,8 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         else
             null;
         defer if (sqlite_sdk) |path| allocator.free(path);
+        const window_views = try tooling.ts_core.collectWindowViewLabels(allocator, io, ".");
+        defer tooling.ts_core.freeWindowViewLabels(allocator, window_views);
         const check_service_packages = try allocator.alloc(tooling.ts_core.ServicePackage, metadata.service_packages.len);
         defer allocator.free(check_service_packages);
         for (metadata.service_packages, 0..) |package_entry, index| check_service_packages[index] = .{
@@ -686,6 +691,7 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
                 .err = persist.restore.err,
             } else null,
             sqlite_sdk,
+            window_views,
         );
         try tooling.ts_core.compilerTypecheckCore(allocator, io, env_map, framework_root, sqlite_sdk);
     } else if (sqlite_enabled) {

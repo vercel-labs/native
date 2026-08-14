@@ -876,7 +876,7 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 
 ## Secondary windows
 
-In the default TypeScript path, export `windows(model): readonly WindowDescriptor[]` and put each possible window's Native markup at `src/windows/<label>.native`. Those roots may import shared components nested under `src/windows/`; the generated launcher compiles and hot-reloads the full closure. Use `windowDescriptor` from `@native-sdk/core`; its `closePolicy` field accepts `"quit"` or `"hide"`, and `titlebar` includes `"chromeless"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`; a `"hide"` close preserves the window and view and dispatches no close command. The `ts-core` skill has the complete descriptor and example.
+In the default TypeScript path, export `windows(model): readonly WindowDescriptor[]` and put each possible window's Native markup at `src/windows/<label>.native`. Spell each constructor identity as a literal `label: asciiBytes("<label>")`; `native check` and every build reject dynamic labels and missing roots. Those roots may import shared components nested under `src/windows/`; the generated launcher compiles and hot-reloads the full closure. Use `windowDescriptor` from `@native-sdk/core`; its `closePolicy` field accepts `"quit"` or `"hide"`, and `titlebar` includes `"chromeless"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`; a `"hide"` close preserves the window and view and dispatches no close command. The `ts-core` skill has the complete descriptor and example.
 
 ### Zig cores: `windows_fn` + `window_view`
 

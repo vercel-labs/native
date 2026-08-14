@@ -188,7 +188,7 @@ fn tsWindowRegistrySource(b: *std.Build, registry: TsWindowViews) []const u8 {
     if (views.len == 0) {
         out.appendSlice(b.allocator,
             \\pub fn build(_: *App.Ui, _: *const core.Model, _: []const u8) App.Ui.Node {
-            \\    @panic("this TypeScript app has no src/windows/<label>.native views");
+            \\    @compileError("this TypeScript core exports windows(model), but the app has no src/windows/<label>.native views");
             \\}
             \\pub const fragments = [_]canvas.MarkupFragment{};
             \\
@@ -842,6 +842,10 @@ fn tsCoreStage(
     if (relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (credentials_capability) check.addArgs(&.{ "--capability", "credentials" });
     if (credentials_permission) check.addArgs(&.{ "--permission", "credentials" });
+    // Activate the cross-tier registry check even when discovery found no
+    // roots: the empty set must reject a core that declares a window.
+    check.addArg("--window-views");
+    for (window_views.views) |view| check.addArgs(&.{ "--window-view", view.label });
     if (relational_capability) {
         check.addArg("--sdk-core");
         check.addFileArg(checked_sdk_core);

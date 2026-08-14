@@ -412,6 +412,39 @@ pub const PersistRoutes = struct {
     err: []const u8,
 };
 
+/// Direct `src/windows/<label>.native` roots, sorted by label. Nested files
+/// are import components, never independently addressable windows.
+pub fn collectWindowViewLabels(allocator: std.mem.Allocator, io: std.Io, app_root: []const u8) ![][]const u8 {
+    const windows_path = try std.fs.path.join(allocator, &.{ app_root, "src", "windows" });
+    defer allocator.free(windows_path);
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(io, windows_path, .{ .iterate = true }) catch return try allocator.alloc([]const u8, 0);
+    defer dir.close(io);
+    var labels: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (labels.items) |label| allocator.free(label);
+        labels.deinit(allocator);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".native")) continue;
+        const label = entry.name[0 .. entry.name.len - ".native".len];
+        if (label.len == 0) continue;
+        try labels.append(allocator, try allocator.dupe(u8, label));
+    }
+    std.mem.sort([]const u8, labels.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    return try labels.toOwnedSlice(allocator);
+}
+
+pub fn freeWindowViewLabels(allocator: std.mem.Allocator, labels: [][]const u8) void {
+    for (labels) |label| allocator.free(label);
+    allocator.free(labels);
+}
+
 /// Run the real-SQLite schema/query lane used by the build and return the
 /// generated SDK core path that exposes this app's Cmd.q/Sub.q surface.
 /// Generated outputs live under ignored .native/cache. The append-only
@@ -487,6 +520,7 @@ pub fn checkCore(
     persist_version: ?u64,
     persist_routes: ?PersistRoutes,
     sdk_core_path: ?[]const u8,
+    window_views: []const []const u8,
 ) !void {
     const cli_path = try transpilerPath(allocator, io, framework_root, "src/cli.ts");
     defer allocator.free(cli_path);
@@ -536,6 +570,8 @@ pub fn checkCore(
         });
     }
     if (sdk_core_path) |sdk_core| try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core });
+    try argv.append(allocator, "--window-views");
+    for (window_views) |label| try argv.appendSlice(allocator, &.{ "--window-view", label });
     var child = std.process.spawn(io, .{
         .argv = argv.items,
         .stdin = .ignore,
@@ -605,6 +641,7 @@ pub const DevHostOptions = struct {
     watch: bool = false,
     persist_routes: ?PersistRoutes = null,
     service_packages: []const ServicePackage = &.{},
+    window_views: []const []const u8 = &.{},
 };
 
 /// `native dev --core`: the node dev-harness over src/core.ts — the
@@ -696,6 +733,8 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     for (options.permissions) |permission| {
         try argv.appendSlice(allocator, &.{ "--permission", permission });
     }
+    try argv.append(allocator, "--window-views");
+    for (options.window_views) |label| try argv.appendSlice(allocator, &.{ "--window-view", label });
     if (sqlite_source) |sdk_core| {
         try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core, "--sqlite-src", "src" });
     }
@@ -952,6 +991,25 @@ test "a stray package.json is not a language marker: detection keys on the core 
     try cwd.deleteFile(io, root ++ "/package.json");
     try cwd.writeFile(io, .{ .sub_path = root ++ "/src/core.ts", .data = "// ts" });
     try std.testing.expectEqual(CoreTree.ts, detectAt(io, root));
+}
+
+test "window view discovery includes only direct native roots and sorts labels" {
+    const io = std.testing.io;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-ts-window-view-labels";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root ++ "/src/windows/components");
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/windows/settings.native", .data = "<column/>" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/windows/about.native", .data = "<column/>" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/windows/ignored.txt", .data = "" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/windows/components/shared.native", .data = "<template name=\"shared\"/>" });
+
+    const labels = try collectWindowViewLabels(std.testing.allocator, io, root);
+    defer freeWindowViewLabels(std.testing.allocator, labels);
+    try std.testing.expectEqual(@as(usize, 2), labels.len);
+    try std.testing.expectEqualStrings("about", labels[0]);
+    try std.testing.expectEqualStrings("settings", labels[1]);
 }
 
 test "package.json version extraction" {
