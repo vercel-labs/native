@@ -623,7 +623,9 @@ pub fn build(b: *std.Build) void {
         // no build inputs/outputs to hash, so always run it.
         scaffold_ide_e2e_run.has_side_effects = true;
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
+        const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
+        ts_services_e2e_step.dependOn(&feed_reader_e2e_run.step);
         ts_services_e2e_step.dependOn(&services_e2e_run.step);
         // The same fixture through the in-process carrier (ServicePool over
         // the linked service archive): parallel keys, per-key FIFO,
@@ -697,6 +699,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&monitor_e2e_run.step);
         ts_core_e2e_step.dependOn(&scaffold_ide_e2e_run.step);
         ts_core_e2e_step.dependOn(&ai_chat_e2e_run.step);
+        ts_core_e2e_step.dependOn(&feed_reader_e2e_run.step);
         ts_core_e2e_step.dependOn(&services_e2e_run.step);
         if (services_pool_e2e_run) |run| ts_core_e2e_step.dependOn(&run.step);
         test_step.dependOn(&host_e2e_run.step);
@@ -707,6 +710,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&monitor_e2e_run.step);
         test_step.dependOn(&scaffold_ide_e2e_run.step);
         test_step.dependOn(&ai_chat_e2e_run.step);
+        test_step.dependOn(&feed_reader_e2e_run.step);
         test_step.dependOn(&services_e2e_run.step);
         if (services_pool_e2e_run) |run| test_step.dependOn(&run.step);
         test_step.dependOn(&sidecar_conformance_run.step);
@@ -3038,6 +3042,10 @@ const TsCoreE2eArtifacts = struct {
     /// paths, and builds keep working with node_modules deleted.
     scaffold_ide: *std.Build.Step.Compile,
     ai_chat: *std.Build.Step.Compile,
+    /// The complete services loop over examples/service-feed-reader: a real
+    /// loopback Cmd.fetch, the generated typed client into a real service
+    /// child, the shipping markup, and record→replay without either.
+    feed_reader: *std.Build.Step.Compile,
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
     services: *std.Build.Step.Compile,
@@ -3264,6 +3272,42 @@ fn tsCoreE2eArtifact(
     ai_chat_mod.addImport("native_sdk", desktop_mod);
     ai_chat_mod.addImport("ts_ai_chat_core", ai_chat_core_mod);
 
+    // The service-feed-reader example's core, service child, and shipping
+    // markup, tested as one app: a real buffered Cmd.fetch against a
+    // loopback fixture, the generated typed client into the real child,
+    // and record→replay with neither the service nor the network present.
+    const feed_reader_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/service-feed-reader/src/core.ts",
+        .src_dir = b.path("examples/service-feed-reader/src"),
+        .name = "feed_reader_core",
+        .emit_services = true,
+    });
+    const feed_reader_service = externalServiceFixture(
+        b,
+        target,
+        optimize,
+        node,
+        corewire_exe,
+        b.path("examples/service-feed-reader/src"),
+        feed_reader_fixture.services_contract.?,
+        "feed_reader_services",
+    );
+    const feed_reader_stage = b.addWriteFiles();
+    const feed_reader_root = feed_reader_stage.addCopyFile(b.path("tests/ts-services/feed_reader_e2e_tests.zig"), "feed_reader_e2e_tests.zig");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/app.native"), "app.native");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/fixtures/feed.xml"), "fixture_feed.xml");
+    const feed_reader_mod = b.createModule(.{
+        .root_source_file = feed_reader_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    feed_reader_mod.addImport("native_sdk", desktop_mod);
+    feed_reader_mod.addImport("ts_feed_reader_core", feed_reader_fixture.module);
+    feed_reader_mod.addImport("ts_feed_reader_registry", feed_reader_service.registry);
+    const feed_reader_options = b.addOptions();
+    feed_reader_options.addOptionPath("service_executable", feed_reader_service.executable);
+    feed_reader_mod.addOptions("ts_feed_reader_options", feed_reader_options);
+
     // Phase-1 TypeScript services, end to end: the frontend emits BOTH
     // sidecars from one checked two-class program; corewire derives the
     // registry/host only from the service sidecar; plain scriptc compiles the
@@ -3471,6 +3515,7 @@ fn tsCoreE2eArtifact(
         .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
+        .feed_reader = filteredTestArtifact(b, feed_reader_mod, "ts-feed-reader-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
         .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
         .mobile_battery = mobile_battery,

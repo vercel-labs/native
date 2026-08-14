@@ -17,6 +17,7 @@ TypeScript is the primary app-authoring language. A new `native init my_app` pro
 | Example | Shows |
 | --- | --- |
 | `chatbot` | Multi-module TypeScript core, text editing, streaming `Cmd.fetch`, environment messages, and deterministic replay. |
+| `service-feed-reader` | The complete services loop: `Cmd.fetch`, a parsing service reached through the generated `@native-sdk/services` client, shared record shapes, and recorded replay without the service. |
 | `relational-notes` | Append-only SQLite migrations, build-time checked SQL, generated typed transactions and page decoders, FTS5, and live queries. |
 | `gpu-components` | Isolated interactive Native UI specimens, disclosure trees, anchored menus, and controlled component state. |
 | `soundboard-ts` | Full music player: audio effects, timers, search, assets, native context menus, and adaptive markup. |
