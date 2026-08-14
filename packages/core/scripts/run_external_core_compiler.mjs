@@ -194,15 +194,26 @@ try {
 
   // The pinned compiler owns the archive contract (including its build id),
   // while the SDK frontend owns facts the compiler release predates. Carry
-  // exactly those checked persistence facts across the compile boundary.
+  // exactly those checked persistence and markup-lint facts across the
+  // compile boundary.
   const compiledContract = JSON.parse(fs.readFileSync(sidecar, "utf8"));
   const frontendContract = JSON.parse(fs.readFileSync(args["frontend-sidecar"], "utf8"));
-  if (!/^[0-9a-f]{16}$/.test(frontendContract.model_fingerprint ?? "") || typeof frontendContract.has_migrate !== "boolean") {
-    console.error("the frontend contract is missing its checked persistence metadata — the SDK frontend and build driver are out of sync");
+  const stringList = (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string");
+  if (
+    !/^[0-9a-f]{16}$/.test(frontendContract.model_fingerprint ?? "") ||
+    typeof frontendContract.has_migrate !== "boolean" ||
+    !stringList(frontendContract.model_unbound) ||
+    !stringList(frontendContract.msg?.unbound) ||
+    compiledContract.msg === null ||
+    typeof compiledContract.msg !== "object"
+  ) {
+    console.error("the frontend/compiler contract is missing checked persistence or unbound metadata — the SDK frontend, compiler, and build driver are out of sync");
     process.exit(1);
   }
   compiledContract.model_fingerprint = frontendContract.model_fingerprint;
   compiledContract.has_migrate = frontendContract.has_migrate;
+  compiledContract.model_unbound = frontendContract.model_unbound;
+  compiledContract.msg.unbound = frontendContract.msg.unbound;
   fs.writeFileSync(args["out-sidecar"], `${JSON.stringify(compiledContract, null, 2)}\n`);
 } finally {
   fs.rmSync(work, { recursive: true, force: true });

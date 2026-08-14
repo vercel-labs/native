@@ -27,6 +27,7 @@ pub const Error = error{
     MissingTranspiler,
     BrokenToolchainInstall,
     ToolchainVersionMismatch,
+    InvalidWindowViewLabel,
     CoreCheckFailed,
     DevHostFailed,
 };
@@ -429,7 +430,16 @@ pub fn collectWindowViewLabels(allocator: std.mem.Allocator, io: std.Io, app_roo
     while (try it.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".native")) continue;
         const label = entry.name[0 .. entry.name.len - ".native".len];
-        if (label.len == 0) continue;
+        if (label.len == 0 or label.len > 64 or std.mem.eql(u8, label, ".") or std.mem.eql(u8, label, "..")) {
+            std.debug.print("invalid TypeScript secondary-window view filename '{s}': use src/windows/<label>.native with a non-empty label of at most 64 bytes\n", .{entry.name});
+            return error.InvalidWindowViewLabel;
+        }
+        for (label) |ch| {
+            if (ch == 0 or ch == '/' or ch == '\\') {
+                std.debug.print("invalid TypeScript secondary-window view filename '{s}': the filename stem must be a valid window label\n", .{entry.name});
+                return error.InvalidWindowViewLabel;
+            }
+        }
         try labels.append(allocator, try allocator.dupe(u8, label));
     }
     std.mem.sort([]const u8, labels.items, {}, struct {
@@ -1010,6 +1020,21 @@ test "window view discovery includes only direct native roots and sorts labels" 
     try std.testing.expectEqual(@as(usize, 2), labels.len);
     try std.testing.expectEqualStrings("about", labels[0]);
     try std.testing.expectEqualStrings("settings", labels[1]);
+}
+
+test "window view discovery rejects labels beyond the platform budget" {
+    const io = std.testing.io;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-ts-window-view-label-budget";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root ++ "/src/windows");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/src/windows/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.native",
+        .data = "<column/>",
+    });
+
+    try std.testing.expectError(error.InvalidWindowViewLabel, collectWindowViewLabels(std.testing.allocator, io, root));
 }
 
 test "package.json version extraction" {

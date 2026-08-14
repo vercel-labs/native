@@ -375,7 +375,6 @@ export function utf8Bytes(s: string): Uint8Array {
 export type Msgish = { readonly kind: string };
 
 import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
-export type { WindowClosePolicy, WindowTitlebarStyle, WindowDescriptor, WindowDescriptorSpec } from "./events.ts";
 
 /// Fill the canonical defaults for a model-declared secondary window.
 export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {

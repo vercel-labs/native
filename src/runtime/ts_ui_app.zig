@@ -597,6 +597,7 @@ pub fn TsUiApp(comptime core: type) type {
             const kept = raw_windows[0..@min(raw_windows.len, scratch.windows.len)];
             for (kept, 0..) |raw_window, index| {
                 const window = if (comptime @typeInfo(@TypeOf(raw_window)) == .pointer) raw_window.* else raw_window;
+                const close_policy = windowClosePolicy(window.closePolicy);
                 scratch.windows[index] = .{
                     .label = window.label,
                     .canvas_label = window.canvasLabel,
@@ -614,8 +615,13 @@ pub fn TsUiApp(comptime core: type) type {
                     .click_through = window.clickThrough,
                     .activate_on_show = window.activateOnShow,
                     .allows_fullscreen = window.allowsFullscreen,
-                    .close_policy = windowClosePolicy(window.closePolicy),
-                    .on_close = windowCloseMsg(window.onCloseCommand),
+                    .close_policy = close_policy,
+                    // A hide never closes and therefore never routes its
+                    // command. A real close must map a non-empty command
+                    // now, before the window is created, so the adapter
+                    // cannot install a dead callback that lets the model
+                    // resurrect the just-closed window later.
+                    .on_close = if (close_policy == .quit) requireWindowCloseMsg(window.onCloseCommand) else null,
                 };
             }
             return scratch.windows[0..kept.len];
@@ -641,10 +647,25 @@ pub fn TsUiApp(comptime core: type) type {
             unreachable;
         }
 
-        fn windowCloseMsg(command: []const u8) ?Msg {
+        const WindowCloseCommandError = error{
+            MissingCommandMapper,
+            UnmappedCommand,
+        };
+
+        fn windowCloseMsg(command: []const u8) WindowCloseCommandError!?Msg {
             if (command.len == 0) return null;
-            const map = command_store orelse return null;
-            return map(command);
+            const map = command_store orelse return error.MissingCommandMapper;
+            return map(command) orelse error.UnmappedCommand;
+        }
+
+        fn requireWindowCloseMsg(command: []const u8) ?Msg {
+            return windowCloseMsg(command) catch |err| {
+                ts_ui_app_log.err(
+                    "window onCloseCommand '{s}' cannot be installed: {s}; map every quit-close command through Options.on_command (the default launcher wires exported commandMsg)",
+                    .{ command, @errorName(err) },
+                );
+                @panic("TsUiApp: a non-empty quit-close onCloseCommand must map through Options.on_command");
+            };
         }
 
         fn statusItemMenuItem(item: anytype) platform.TrayMenuItem {
@@ -1541,4 +1562,24 @@ test "TypeScript windows adapter keeps the declared prefix on overflow and proje
     try std.testing.expectEqual(@import("app_manifest").WindowTitlebarStyle.chromeless, descriptors[0].titlebar);
     try std.testing.expect(descriptors[0].transparent);
     try std.testing.expectEqualStrings("four", descriptors[3].label);
+}
+
+const WindowCloseCommandTestCore = struct {
+    pub const Msg = union(enum) { closed, noop };
+    pub const Model = struct {};
+};
+
+fn mappedWindowCloseCommand(name: []const u8) ?WindowCloseCommandTestCore.Msg {
+    return if (std.mem.eql(u8, name, "settings.closed")) .closed else null;
+}
+
+test "TypeScript window close commands refuse missing and unmapped command callbacks" {
+    const Adapter = TsUiApp(WindowCloseCommandTestCore);
+    Adapter.command_store = null;
+    try std.testing.expectError(error.MissingCommandMapper, Adapter.windowCloseMsg("settings.closed"));
+    try std.testing.expect((try Adapter.windowCloseMsg("")) == null);
+
+    Adapter.command_store = mappedWindowCloseCommand;
+    try std.testing.expectError(error.UnmappedCommand, Adapter.windowCloseMsg("settings.missing"));
+    try std.testing.expectEqual(WindowCloseCommandTestCore.Msg.closed, (try Adapter.windowCloseMsg("settings.closed")).?);
 }

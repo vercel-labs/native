@@ -4,7 +4,6 @@ export type Msgish = {
     readonly kind: string;
 };
 import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.js";
-export type { WindowClosePolicy, WindowTitlebarStyle, WindowDescriptor, WindowDescriptorSpec } from "./events.js";
 export declare function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor;
 /** Cooperative cancellation capability supplied by generated service hosts. */
 export interface ServiceCancellation {
@@ -652,3 +651,4 @@ export declare const Sub: {
     timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M>;
     batch<M extends Msgish>(subs: readonly Sub<M>[]): Sub<M>;
 };
+export {};

@@ -1291,6 +1291,61 @@ export function windows(model: Model): readonly WindowDescriptor[] {
   assert.equal(mismatchedView.ok, false);
   assert.match(mismatchedView.diagnostics.map((d) => d.message).join("\n"), /src\/windows\/settings\.native/);
 
+  const tooLongLabel = "a".repeat(65);
+  const oversized = check(cleanSource.replaceAll("settings", tooLongLabel), { windowViews: [tooLongLabel] });
+  assert.equal(oversized.ok, false);
+  assert.match(oversized.diagnostics.map((d) => d.message).join("\n"), /at most 64 ASCII bytes/);
+
+  const missingCommandMapper = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    onCloseCommand: asciiBytes("settings.closed"),
+  })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(missingCommandMapper.ok, false);
+  assert.match(missingCommandMapper.diagnostics.map((d) => d.message).join("\n"), /requires `commandMsg/);
+
+  const hiddenWithoutMapper = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  return model.settingsOpen ? [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    closePolicy: "hide",
+    onCloseCommand: asciiBytes("unused.while.hidden"),
+  })] : [];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(hiddenWithoutMapper.ok, true, hiddenWithoutMapper.diagnostics.map((d) => d.message).join("\n"));
+
+  const rootTypeReexport = check(`
+import { asciiBytes, windowDescriptor, type WindowDescriptor } from "@native-sdk/core";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(rootTypeReexport.ok, false);
+  assert.match(rootTypeReexport.typeErrors.join("\n"), /WindowDescriptor/);
+
   const dynamicLabel = check(`
 import { asciiBytes, windowDescriptor } from "@native-sdk/core";
 import { type WindowDescriptor } from "@native-sdk/core/events";

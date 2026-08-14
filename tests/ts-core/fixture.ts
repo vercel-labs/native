@@ -606,6 +606,15 @@ export function statusItem(model: Model): StatusItemState {
   };
 }
 
+export function commandMsg(name: string): Msg | null {
+  if (name === "core.toggle") return { kind: "toggle" };
+  if (name === "core.refresh") return { kind: "refresh" };
+  if (name === "core.open-settings") return { kind: "open_settings" };
+  if (name === "core.close-settings:manual") return { kind: "close_settings", reason: asciiBytes("manual") };
+  if (name === "core.close-settings:payload") return { kind: "close_settings", reason: asciiBytes("payload") };
+  return null;
+}
+
 export function windows(model: Model): readonly WindowDescriptor[] {
   if (!model.settingsOpen) return [];
   return [windowDescriptor({

@@ -310,6 +310,8 @@ export const viewUnbound = [
   "mem_done",
   "mem_err",
   "stamped",
+  "open_settings",
+  "settings_closed",
   "kill_done",
   "kill_err",
   "chrome_changed",

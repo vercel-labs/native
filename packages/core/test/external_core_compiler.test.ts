@@ -18,6 +18,8 @@ test("the external core compile lane uses the target-aware zig-cc environment", 
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: ["count", "summary"],
+      msg: { unbound: ["tick"] },
     }));
     const compiler = path.join(root, "compiler.mjs");
     const zigDir = path.join(root, "toolchain");
@@ -29,7 +31,7 @@ if (process.env.SCRIPTC_TARGET !== "x86_64-windows-gnu") { console.error("wrong 
 if (!(process.env.PATH ?? "").startsWith(${JSON.stringify(zigDir)})) { console.error("zig directory missing from PATH front"); process.exit(9); }
 const output = process.argv[process.argv.indexOf("-o") + 1];
 fs.writeFileSync(output + ".lib.a", "target archive bytes");
-fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "cross-target" }));
+fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "cross-target", model_unbound: [], msg: { unbound: [] } }));
 `);
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const archive = path.join(root, "libfixture_core.a");
@@ -53,6 +55,8 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "cross-target"
       build_id: "cross-target",
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: ["count", "summary"],
+      msg: { unbound: ["tick"] },
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -70,6 +74,8 @@ test("the external core compile lane refuses cross-target Windows MSVC before co
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -104,6 +110,8 @@ test("the external core compile lane refuses a macOS target from a non-macOS hos
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -137,6 +145,8 @@ test("the external core compile lane refuses pairings outside the compiler's mat
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -170,6 +180,8 @@ test("the external core compile lane admits mobile pairings and refuses the rest
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const refuse = (host, target, pattern) => {
@@ -204,7 +216,7 @@ if (process.env.SCRIPTC_CC !== "zigcc") { console.error("mobile compile missing 
 if (process.env.SCRIPTC_TARGET !== "aarch64-apple-ios-simulator") { console.error("mobile compile got SCRIPTC_TARGET=" + process.env.SCRIPTC_TARGET); process.exit(9); }
 const output = process.argv[process.argv.indexOf("-o") + 1];
 fs.writeFileSync(output + ".lib.a", "ios simulator archive bytes");
-fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "ios-simulator" }));
+fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "ios-simulator", model_unbound: [], msg: { unbound: [] } }));
 `);
     const archive = path.join(root, "libfixture_core.a");
     const env = { ...process.env };
@@ -241,6 +253,8 @@ test("the external core compile lane preserves native Windows MSVC", () => {
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
     }));
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `
@@ -249,7 +263,7 @@ if (process.argv.includes("-v")) { console.log("0.0.29"); process.exit(0); }
 if (process.env.SCRIPTC_CC !== undefined || process.env.SCRIPTC_TARGET !== undefined) { console.error("native compile received cross environment"); process.exit(9); }
 const output = process.argv[process.argv.indexOf("-o") + 1];
 fs.writeFileSync(output + ".lib.a", "native msvc archive bytes");
-fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "native-msvc" }));
+fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "native-msvc", model_unbound: [], msg: { unbound: [] } }));
 `);
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const archive = path.join(root, "libfixture_core.a");

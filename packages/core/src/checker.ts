@@ -999,6 +999,29 @@ export class SubsetChecker {
     }
   }
 
+  /// One entry-module function exported under its own wiring name. The
+  /// entry-contract pass separately teaches re-exports and renames; this
+  /// query lets related channels prove that the generated launcher will
+  /// actually have the named callback available.
+  private entryExportedFunction(name: string): ts.FunctionDeclaration | null {
+    for (const stmt of this.entry.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === name && hasExportModifier(stmt)) return stmt;
+    }
+    for (const binding of exportListBindings(this.tast, this.entry)) {
+      if (
+        binding.exportedName === name &&
+        !binding.renamed &&
+        binding.target !== null &&
+        binding.target !== undefined &&
+        ts.isFunctionDeclaration(binding.target) &&
+        binding.target.getSourceFile() === this.entry
+      ) {
+        return binding.target;
+      }
+    }
+    return null;
+  }
+
   /// The generated launcher owns a closed, comptime-compiled registry keyed
   /// by direct `src/windows/<label>.native` stems. Require every possible
   /// descriptor to declare that identity as a literal at its canonical
@@ -1104,12 +1127,58 @@ export class SubsetChecker {
         );
         return;
       }
+      const label = labelArg.text;
+      if (
+        label.length === 0 ||
+        label.length > 64 ||
+        label === "." ||
+        label === ".." ||
+        label.includes("\0") ||
+        label.includes("/") ||
+        label.includes("\\")
+      ) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A model-declared window label must be a non-empty filename stem of at most 64 ASCII bytes, without path separators or NUL bytes.",
+          labelArg,
+        );
+        return;
+      }
       if (!this.windowViews.has(labelArg.text)) {
         productionErrors += 1;
         this.report(
           "NS1033",
           `Window label \`${labelArg.text}\` has no compiled view; add \`src/windows/${labelArg.text}.native\` or change the descriptor label to an existing root.`,
           labelArg,
+        );
+      }
+
+      const propertyNamed = (name: string): ts.PropertyAssignment | undefined =>
+        object.properties.find((prop): prop is ts.PropertyAssignment =>
+          ts.isPropertyAssignment(prop) &&
+          ((ts.isIdentifier(prop.name) && prop.name.text === name) ||
+            (ts.isStringLiteral(prop.name) && prop.name.text === name)),
+        );
+      const closePolicy = propertyNamed("closePolicy")?.initializer;
+      const alwaysHides = closePolicy !== undefined && ts.isStringLiteral(unwrap(closePolicy)) && unwrap(closePolicy).text === "hide";
+      const closeCommand = propertyNamed("onCloseCommand")?.initializer;
+      const closeCommandArg = closeCommand !== undefined && ts.isCallExpression(unwrap(closeCommand)) &&
+          this.sdkRootFunctionName((unwrap(closeCommand) as ts.CallExpression).expression) === "asciiBytes"
+        ? (unwrap(closeCommand) as ts.CallExpression).arguments[0]
+        : undefined;
+      const definitelyEmptyCloseCommand = closeCommandArg !== undefined && ts.isStringLiteral(closeCommandArg) && closeCommandArg.text.length === 0;
+      if (
+        closeCommand !== undefined &&
+        !definitelyEmptyCloseCommand &&
+        !alwaysHides &&
+        this.entryExportedFunction("commandMsg") === null
+      ) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A quit-close `onCloseCommand` requires `commandMsg(name: string): Msg | null`; otherwise the generated launcher cannot map the command to the Msg that removes the window declaration.",
+          closeCommand,
         );
       }
     };
