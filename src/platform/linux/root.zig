@@ -1892,6 +1892,23 @@ test "linux platform module exports type" {
     _ = LinuxPlatform;
 }
 
+test "linux message dialogs construct alerts with a non-null format string" {
+    // gtk_alert_dialog_new takes a required printf-style format string.
+    // The host sets the real message below, but NULL still makes GTK
+    // dereference an invalid format pointer during construction.
+    const host_source = @embedFile("gtk_host.c");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "GtkAlertDialog *dialog = gtk_alert_dialog_new(\"\");",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "gtk_alert_dialog_new(NULL)",
+    ) == null);
+}
+
 test "linux notification actions use process-scoped opaque tokens" {
     const host_source = @embedFile("gtk_host.c");
     try std.testing.expect(std.mem.indexOf(

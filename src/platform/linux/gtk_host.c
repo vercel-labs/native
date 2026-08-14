@@ -6583,7 +6583,8 @@ static void native_sdk_alert_done(GObject *source, GAsyncResult *result, gpointe
 }
 
 int native_sdk_gtk_show_message_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_message_dialog_opts_t *opts) {
-    GtkAlertDialog *dialog = gtk_alert_dialog_new(NULL);
+    /* The constructor requires a non-NULL printf-style format string. */
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("");
     char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
     char *message = native_sdk_bytes_to_string(opts->message, opts->message_len);
     char *informative = native_sdk_bytes_to_string(opts->informative_text, opts->informative_text_len);
