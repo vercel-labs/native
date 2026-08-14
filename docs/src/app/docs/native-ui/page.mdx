@@ -437,7 +437,7 @@ case "fetched":
 
 Response bodies are binary-safe and bounded (256 KiB; longer arrives cut with `truncated = true`), the whole exchange honors a per-fetch timeout (default 30 s), and cancelling a fetch delivers exactly one `cancelled` Msg with nothing after it.
 
-Files ride the same channel without smuggling an `Io` handle from `main` into `update`. Whole-file reads and writes remain bounded at 1 MiB; `appendFile` and `statFile` handle logs and planning, while the dedicated streaming family carries large imports and atomic exports. External paths require the `filesystem` permission; app-owned directories are exempt after symlink-safe normalization. See [Files & Streaming](/docs/files).
+Files ride the same channel without smuggling an `Io` handle from `main` into `update`. Whole-file reads and writes remain bounded at 1 MiB; `appendFile`, `statFile`, and `deleteFile` handle logs and file lifecycle, while the dedicated streaming family carries large imports and atomic exports. External paths require the `filesystem` permission; app-owned directories are exempt after symlink-safe normalization. See [Files & Streaming](/docs/files).
 
 ```zig
 .save => fx.writeFile(.{

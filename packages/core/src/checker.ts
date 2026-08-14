@@ -2963,7 +2963,7 @@ export class SubsetChecker {
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
-        ["readFile", "writeFile", "appendFile", "statFile", "readFileStream", "writeFileStream"].includes(node.expression.name.text) &&
+        ["readFile", "writeFile", "appendFile", "statFile", "deleteFile", "readFileStream", "writeFileStream"].includes(node.expression.name.text) &&
         ts.isIdentifier(node.expression.expression) &&
         this.cmdNames.has(node.expression.expression.text) &&
         this.isSdkReference(node.expression.expression) &&

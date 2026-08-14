@@ -613,6 +613,7 @@ pub const EffectFileOp = enum {
     write_stream_open,
     write_stream_chunk,
     write_stream_close,
+    delete,
 };
 
 /// Whether a file result is an ordinary one-shot terminal or one delivery
@@ -628,7 +629,7 @@ pub const EffectFileOutcome = enum {
     /// The operation completed. Reads carry the whole file in `bytes`;
     /// writes wrote every byte (parent directories created as needed).
     ok,
-    /// The file does not exist (reads only — writes create the path).
+    /// The file does not exist (reads and deletes only — writes create the path).
     not_found,
     /// The OS refused: permissions, the path names a directory, disk
     /// errors, an unwritable parent — anything but absence.
@@ -653,7 +654,7 @@ pub const EffectFileOutcome = enum {
 };
 
 /// Payload for file-effect Msg constructors. Exactly one is delivered
-/// per `readFile`/`writeFile` — terminal, nothing for that key after
+/// per one-shot file effect — terminal, nothing for that key after
 /// it. `bytes` is a read's content (binary-safe), valid only during
 /// the `update` call that receives it — copy what the model keeps.
 /// Writes always deliver empty `bytes`.
@@ -664,7 +665,7 @@ pub const EffectFileResult = struct {
     outcome: EffectFileOutcome = .ok,
     /// Read contents: the whole file for `.ok`, the first
     /// `max_effect_file_bytes` for `.truncated`, `""` otherwise (and
-    /// always for writes).
+    /// always for writes and deletes).
     bytes: []const u8 = "",
     /// Stream total bytes on `.done`; stat size on a successful `.stat`.
     total: u64 = 0,
@@ -3096,6 +3097,12 @@ pub fn Effects(comptime Msg: type) type {
         };
 
         pub const StatFileOptions = struct {
+            key: u64,
+            path: []const u8,
+            on_result: ?FileMsgFn = null,
+        };
+
+        pub const DeleteFileOptions = struct {
             key: u64,
             path: []const u8,
             on_result: ?FileMsgFn = null,
@@ -6287,15 +6294,13 @@ pub fn Effects(comptime Msg: type) type {
             if (self.file_access_binding == null) self.file_access_binding = binding;
         }
 
-        fn resolvedFileAccess(self: *Self, path: []const u8, create_parents: bool) ?file_access.Resolved {
+        fn resolvedFileAccess(self: *Self, path: []const u8, options: file_access.ResolveOptions) ?file_access.Resolved {
             const binding = self.file_access_binding orelse return .{
                 .path = self.allocator.dupe(u8, path) catch return null,
                 .decision = .allow,
             };
             const io = self.ensureIo() catch return null;
-            var resolved = file_access.resolveForOperation(self.allocator, io, binding, path, .{
-                .create_parents = create_parents,
-            }) catch return null;
+            var resolved = file_access.resolveForOperation(self.allocator, io, binding, path, options) catch return null;
             return switch (resolved.decision) {
                 .allow => resolved,
                 .reject => blk: {
@@ -7043,7 +7048,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .write, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
             self.startFile(options.key, .write, &access, options.bytes, options.on_result);
         }
 
@@ -7058,7 +7063,7 @@ pub fn Effects(comptime Msg: type) type {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
                 return self.rejectFile(options.key, .read, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .read, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{}) orelse return self.rejectFileExternal(options.key, .read, options.on_result);
             self.startFile(options.key, .read, &access, "", options.on_result);
         }
 
@@ -7071,7 +7076,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .append, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .append, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .append, options.on_result);
             self.startFile(options.key, .append, &access, options.bytes, options.on_result);
         }
 
@@ -7081,8 +7086,21 @@ pub fn Effects(comptime Msg: type) type {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
                 return self.rejectFile(options.key, .stat, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .stat, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{}) orelse return self.rejectFileExternal(options.key, .stat, options.on_result);
             self.startFile(options.key, .stat, &access, "", options.on_result);
+        }
+
+        /// Delete one file. A final symlink is unlinked without deleting its
+        /// target. Absence is explicit (`.not_found`), while a directory or
+        /// another OS refusal is `.io_failed`. The operation uses the same
+        /// worker, key space, path policy, and exactly-one result callback as
+        /// the other one-shot file effects.
+        pub fn deleteFile(self: *Self, options: DeleteFileOptions) void {
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
+                return self.rejectFile(options.key, .delete, options.on_result);
+            }
+            var access = self.resolvedFileAccess(options.path, .{ .preserve_final_component = true }) orelse return self.rejectFileExternal(options.key, .delete, options.on_result);
+            self.startFile(options.key, .delete, &access, "", options.on_result);
         }
 
         /// Stream a file as 256-KiB chunks followed by one `.done(total)`.
@@ -7104,7 +7122,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .read_stream, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .read_stream, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{}) orelse return self.rejectFileExternal(options.key, .read_stream, options.on_result);
             const access_io = self.ensureIo() catch unreachable;
             defer access.deinit(self.allocator, access_io);
             if (access.path.len > max_effect_file_path_bytes) return self.rejectFileExternal(options.key, .read_stream, options.on_result);
@@ -7142,7 +7160,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .write_stream_open, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
             const access_io = self.ensureIo() catch unreachable;
             defer access.deinit(self.allocator, access_io);
             if (access.path.len > max_effect_file_path_bytes) return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
@@ -7272,7 +7290,7 @@ pub fn Effects(comptime Msg: type) type {
             const buffer_len = switch (op) {
                 .write, .append => bytes.len,
                 .read => max_effect_file_bytes + 1,
-                .stat => 0,
+                .stat, .delete => 0,
                 else => unreachable,
             };
             const buffer = self.allocator.alloc(u8, buffer_len) catch {
@@ -16439,7 +16457,11 @@ pub fn Effects(comptime Msg: type) type {
                     };
                     defer file.close(io);
                     const stat = file.stat(io) catch |err| return fileOpFailure(err);
-                    file.writePositionalAll(io, ctx.payload(), stat.size) catch |err| return fileOpFailure(err);
+                    if (comptime builtin.os.tag == .windows) {
+                        appendFileWindows(file, io, ctx.payload()) catch |err| return fileOpFailure(err);
+                    } else {
+                        file.writePositionalAll(io, ctx.payload(), stat.size) catch |err| return fileOpFailure(err);
+                    }
                     return .ok;
                 },
                 .read => {
@@ -16474,6 +16496,12 @@ pub fn Effects(comptime Msg: type) type {
                     ctx.stat_mtime_ms = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_ms));
                     return .ok;
                 },
+                .delete => {
+                    dir.deleteFile(io, file_path) catch |err| {
+                        return if (err == error.FileNotFound) .not_found else fileOpFailure(err);
+                    };
+                    return .ok;
+                },
                 else => unreachable,
             }
         }
@@ -16487,6 +16515,107 @@ pub fn Effects(comptime Msg: type) type {
                 error.NoSpaceLeft, error.DiskQuota => .disk_full,
                 else => .io_failed,
             };
+        }
+
+        /// Windows' Zig 0.16 threaded positional writer can surface
+        /// STATUS_PENDING for the asynchronous handle `follow_symlinks=false`
+        /// deliberately opens, while its streaming writer rejects the same
+        /// post-seek handle. NT defines `ByteOffset = -1` as the atomic
+        /// write-to-end sentinel. Give every write its own completion event:
+        /// neither the stack IOSB nor the caller's payload may die while the
+        /// kernel can still reach them. The handle is already exclusively
+        /// locked by the caller, and this loop preserves the
+        /// full-payload-or-error contract.
+        fn appendFileWindows(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
+            if (comptime builtin.os.tag != .windows) unreachable;
+            const windows = std.os.windows;
+            var at: usize = 0;
+            while (at < bytes.len) {
+                var event: windows.HANDLE = undefined;
+                switch (windows.ntdll.NtCreateEvent(
+                    &event,
+                    .{
+                        .SPECIFIC = .{ .EVENT = .{ .MODIFY_STATE = true } },
+                        .STANDARD = .{ .SYNCHRONIZE = true },
+                    },
+                    null,
+                    .Synchronization,
+                    .FALSE,
+                )) {
+                    .SUCCESS => {},
+                    else => return error.InputOutput,
+                }
+                defer windows.CloseHandle(event);
+
+                var iosb: windows.IO_STATUS_BLOCK = .{
+                    .u = .{ .Status = .PENDING },
+                    .Information = 0,
+                };
+                const end_offset: windows.LARGE_INTEGER = -1;
+                const len: windows.ULONG = @intCast(@min(bytes.len - at, std.math.maxInt(windows.ULONG)));
+                const status = windows.ntdll.NtWriteFile(
+                    file.handle,
+                    event,
+                    null,
+                    null,
+                    &iosb,
+                    bytes[at..].ptr,
+                    len,
+                    &end_offset,
+                    null,
+                );
+                if (status == .PENDING) {
+                    wait: while (true) {
+                        // A short kernel wait plus Io.checkCancel makes this
+                        // direct NT call participate in the surrounding
+                        // concurrent task's cancellation protocol without
+                        // depending on Threaded's private alertable-syscall
+                        // machinery.
+                        const poll_interval_100ns: windows.LARGE_INTEGER = -50_000;
+                        switch (windows.ntdll.NtWaitForSingleObject(event, .FALSE, &poll_interval_100ns)) {
+                            windows.NTSTATUS.WAIT_0 => break :wait,
+                            .TIMEOUT => std.Io.checkCancel(io) catch {
+                                // The threaded Io cancels a concurrent task
+                                // through this check. Cancel this exact
+                                // request, then wait non-alertably until
+                                // the kernel has dropped every reference to
+                                // IOSB and payload before reporting it.
+                                var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+                                _ = windows.ntdll.NtCancelIoFileEx(file.handle, &iosb, &cancel_iosb);
+                                switch (windows.ntdll.NtWaitForSingleObject(event, .FALSE, null)) {
+                                    windows.NTSTATUS.WAIT_0 => {},
+                                    else => unreachable,
+                                }
+                                return error.Canceled;
+                            },
+                            else => {
+                                var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+                                _ = windows.ntdll.NtCancelIoFileEx(file.handle, &iosb, &cancel_iosb);
+                                switch (windows.ntdll.NtWaitForSingleObject(event, .FALSE, null)) {
+                                    windows.NTSTATUS.WAIT_0 => {},
+                                    else => unreachable,
+                                }
+                                return error.InputOutput;
+                            },
+                        }
+                    }
+                } else {
+                    // A failed immediate submission does not promise to fill
+                    // the IOSB; make the returned status authoritative.
+                    iosb.u.Status = status;
+                }
+                switch (iosb.u.Status) {
+                    .SUCCESS => {},
+                    .DISK_FULL => return error.NoSpaceLeft,
+                    .ACCESS_DENIED => return error.AccessDenied,
+                    .FILE_LOCK_CONFLICT => return error.LockViolation,
+                    .CANCELLED => return error.Canceled,
+                    .PENDING => return error.InputOutput,
+                    else => return error.InputOutput,
+                }
+                if (iosb.Information == 0 or iosb.Information > len) return error.InputOutput;
+                at += iosb.Information;
+            }
         }
 
         fn openedFileIsInsideDir(io: std.Io, dir: std.Io.Dir, file: std.Io.File) bool {

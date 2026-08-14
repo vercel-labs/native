@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 6) onto the real effect engine
+//! emits (`cmd_format_version` 7) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -1071,6 +1071,12 @@ pub fn TsCoreHost(comptime core: type) type {
                         const file_path = takeLongBytes(cmd, &at);
                         const effect_index = allocEffectEntry(fx, head) orelse continue;
                         fx.statFile(.{ .key = effect_key_base + effect_index, .path = file_path, .on_result = fileResultMsg });
+                    },
+                    0x32 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const file_path = takeLongBytes(cmd, &at);
+                        const effect_index = allocEffectEntry(fx, head) orelse continue;
+                        fx.deleteFile(.{ .key = effect_key_base + effect_index, .path = file_path, .on_result = fileResultMsg });
                     },
                     0x2D => {
                         const key = takeShortBytes(cmd, &at);

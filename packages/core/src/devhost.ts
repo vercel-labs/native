@@ -1806,6 +1806,7 @@ function performCmd(cmd: Cmdish): void {
     case "write_file":
     case "append_file":
     case "stat_file":
+    case "delete_file":
     case "read_file_stream":
     case "write_file_stream":
     case "write_file_chunk":

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Native SDK Engineering</title>
+    <link>https://example.com/blog</link>
+    <description>Fixture feed for the service-feed-reader example suite.</description>
+    <item>
+      <title>Records &amp; replay for services</title>
+      <link>https://example.com/blog/records-and-replay</link>
+    </item>
+    <item>
+      <title><![CDATA[Typed clients from one contract]]></title>
+      <link>https://example.com/blog/typed-clients</link>
+    </item>
+    <item>
+      <title>Streaming chunks &lt;in order&gt;</title>
+      <link>https://example.com/blog/streaming</link>
+    </item>
+    <item>
+      <title>A duplicate link is dropped</title>
+      <link>https://example.com/blog/typed-clients</link>
+    </item>
+    <item>
+      <title>Service deadlines stay explicit</title>
+      <link>https://example.com/blog/service-deadlines</link>
+    </item>
+    <item>
+      <title>Cancellation crosses the boundary</title>
+      <link>https://example.com/blog/cancellation</link>
+    </item>
+    <item>
+      <title>Typed records reach the view</title>
+      <link>https://example.com/blog/typed-records</link>
+    </item>
+  </channel>
+</rss>

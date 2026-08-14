@@ -1,0 +1,30 @@
+# The feed reader's core-logic loop, headless: replay with
+#   native dev --core --script dev-script.ndjson
+# Boot parses the built-in sample through the REAL feeds.parse service
+# (the devhost runs service modules in a Node worker); {"settle": true}
+# waits for the service to answer. The fetch leg is a parked Cmd — the
+# `cmd fetch ...` transcript line invites you to stand in for the network
+# by dispatching the result Msg.
+
+# Wait for the boot sample parse, then refresh: the buffered fetch for
+# the model's URL appears in the transcript.
+{"settle": true}
+{"kind":"refresh"}
+
+# A delivered 200 hands the body to feeds.parse; the typed result commits.
+{"kind":"fetched","status":200,"body":{"$bytes":"<rss version=\"2.0\"><channel><title>Scripted Feed</title><item><title>Fed from the script</title><link>https://example.com/scripted</link></item></channel></rss>"}}
+{"settle": true}
+
+# A delivered non-200 is still the ok arm; the core reports the status.
+{"kind":"refresh"}
+{"kind":"fetched","status":404,"body":{"$bytes":"missing"}}
+
+# Bytes that are not a feed make the service throw its kind-tagged error;
+# it arrives on the err arm as UTF-8 JSON.
+{"kind":"refresh"}
+{"kind":"fetched","status":200,"body":{"$bytes":"this is not a feed document"}}
+{"settle": true}
+
+# Back to the built-in sample.
+{"kind":"load_sample"}
+{"settle": true}

@@ -34,7 +34,7 @@ pub const supported_format: i64 = 1;
 /// The command-wire vocabulary generation the SDK's bridge speaks
 /// (rt.zig `cmd_format_version`). A sidecar declaring a different
 /// generation is refused at generate time.
-pub const supported_wire_version: i64 = 6;
+pub const supported_wire_version: i64 = 7;
 
 /// The C-ABI generation of the core entry points this generator binds
 /// (core_abi.zig `abi_version`).
@@ -1832,7 +1832,7 @@ const testing = std.testing;
 pub const minimal_valid_json =
     \\{
     \\  "format": 1,
-    \\  "wire_version": 6,
+    \\  "wire_version": 7,
     \\  "abi_version": 2,
     \\  "compiler_version": "0.0.1",
     \\  "entry": "src/core.ts",
@@ -2428,8 +2428,8 @@ test "unknown payload descriptor kinds refuse as reader-too-old" {
 test "wire and abi version mismatches refuse with both values named" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"wire_version\": 6", "\"wire_version\": 7");
-    try expectRefusal(source, "wire_version", "generation 6, the sidecar declares 7");
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"wire_version\": 7", "\"wire_version\": 8");
+    try expectRefusal(source, "wire_version", "generation 7, the sidecar declares 8");
 }
 
 test "unknown fields warn and are ignored" {

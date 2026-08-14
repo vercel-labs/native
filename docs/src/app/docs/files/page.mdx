@@ -8,16 +8,21 @@ The blob directory is deduplicated but currently has no quota or automatic GC; s
 
 ## Small whole-file operations
 
-`Cmd.readFile` and `Cmd.writeFile` remain convenient for payloads up to 1 MiB. An over-bound write is rejected. An over-bound read returns `truncated` rather than passing cut bytes as a successful file. `Cmd.appendFile` appends one payload up to 1 MiB, and `Cmd.statFile` reports `{ exists, size, mtimeMs }` without reading the content.
+`Cmd.readFile` and `Cmd.writeFile` remain convenient for payloads up to 1 MiB. An over-bound write is rejected. An over-bound read returns `truncated` rather than passing cut bytes as a successful file. `Cmd.appendFile` appends one payload up to 1 MiB, `Cmd.statFile` reports `{ exists, size, mtimeMs }` without reading the content, and `Cmd.deleteFile` removes one file.
 
 ```ts
 return [model, Cmd.statFile(path, {
   ok: "file_stat",
   err: "file_failed",
 })];
+
+return [model, Cmd.deleteFile(path, {
+  ok: "file_deleted",
+  err: "file_failed",
+})];
 ```
 
-File outcomes are closed and machine-readable: `ok`, `not_found`, `io_failed`, `truncated`, `rejected`, `cancelled`, `sink_missing`, `out_of_order`, and `disk_full`.
+Deletion is file-only and never recursive: it reports `not_found` when the path is absent and `io_failed` for a directory or another OS refusal. If the final path component is a symlink, deletion removes the link rather than its target. File outcomes are closed and machine-readable: `ok`, `not_found`, `io_failed`, `truncated`, `rejected`, `cancelled`, `sink_missing`, `out_of_order`, and `disk_full`.
 
 ## Streaming reads
 
@@ -58,7 +63,7 @@ Raw paths inside this app's resolved `data`, `config`, `cache`, `state`, `logs`,
 .permissions = .{ "filesystem" },
 ```
 
-The runtime is authoritative. Before checking, it resolves the target when it exists, or resolves the deepest existing parent and normalizes the missing suffix. Existing symlinks are followed, so a symlink inside an app directory that points outside is external and requires the permission. `..` cannot escape an allowed root.
+The runtime is authoritative. Before checking, it resolves the target when it exists, or resolves the deepest existing parent and normalizes the missing suffix. Existing symlinks are followed for authorization, so a symlink inside an app directory that points outside is external and requires the permission. Deletion still unlinks the final symlink itself after that check. `..` cannot escape an allowed root.
 
 `native check` also reports NS1074 for certainly-external literal paths, but dynamic paths are decided only by the runtime. File pickers therefore require the `filesystem` permission because the selected user file is normally outside app-owned directories.
 

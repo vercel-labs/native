@@ -320,6 +320,12 @@ export type Cmd<M extends Msgish> = {
     readonly errKind: string;
     readonly path: Uint8Array;
 } | {
+    readonly op: "delete_file";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly path: Uint8Array;
+} | {
     readonly op: "read_file_stream";
     readonly key: string;
     readonly chunkKind: string;
@@ -564,6 +570,7 @@ export declare const Cmd: {
     writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
     appendFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
     statFile<M extends Msgish>(path: Uint8Array, route: FileStatRoute<M>): Cmd<M>;
+    deleteFile<M extends Msgish>(path: Uint8Array, route: WriteRoute<M>): Cmd<M>;
     readFileStream<M extends Msgish>(path: Uint8Array, route: FileReadStreamRoute<M>): Cmd<M>;
     writeFileStream<M extends Msgish>(key: string, path: Uint8Array, route: WriteRoute<M>): Cmd<M>;
     writeFileChunk<M extends Msgish>(key: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;

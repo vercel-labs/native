@@ -395,6 +395,7 @@ export type CmdData =
     }
   | { readonly op: "append_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
   | { readonly op: "stat_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
+  | { readonly op: "delete_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
   | { readonly op: "read_file_stream"; readonly key: string; readonly chunkKind: string; readonly doneKind: string; readonly errKind: string; readonly path: Uint8Array }
   | { readonly op: "write_file_stream"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
   | { readonly op: "write_file_chunk"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly bytes: Uint8Array }
@@ -749,6 +750,9 @@ export const Cmd = {
   },
   statFile(path: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
     return { op: "stat_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+  deleteFile(path: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "delete_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
   },
   readFileStream(path: Uint8Array, route: { readonly key?: string; readonly chunk: string; readonly done: string; readonly err: string }): CmdData {
     return { op: "read_file_stream", key: route.key ?? "", chunkKind: route.chunk, doneKind: route.done, errKind: route.err, path };

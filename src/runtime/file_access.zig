@@ -31,7 +31,7 @@ pub const Resolved = struct {
     /// handle-identity path verified inside the selected root.
     parent: ?std.Io.Dir = null,
     basename: []const u8 = "",
-    /// A read/stat whose parent does not exist is authorized but absent. The
+    /// A read/stat/delete whose parent does not exist is authorized but absent. The
     /// caller returns the operation's ordinary not-found shape without ever
     /// reopening the unresolved pathname.
     missing: bool = false,
@@ -45,11 +45,18 @@ pub const Resolved = struct {
 
 pub const ResolveOptions = struct {
     create_parents: bool = false,
+    /// Authorize the fully resolved target, but hand the caller the resolved
+    /// parent plus the request's original final component. Deletion uses this
+    /// so removing a symlink unlinks that directory entry rather than the file
+    /// it names. Both paths must be inside an app root when no filesystem
+    /// permission is present.
+    preserve_final_component: bool = false,
 };
 
-/// Normalize first, then decide authority over that exact spelling. Callers
-/// perform I/O against `path`, never against the original request, so the
-/// checked symlink/parent resolution is also the path handed to the worker.
+/// Normalize first, then decide authority over that exact spelling. Most
+/// callers perform I/O against the resolved target. Operations that preserve
+/// the final component authorize both that target and the resolved directory
+/// entry they hand to the worker.
 pub fn resolve(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -67,20 +74,41 @@ pub fn resolveForOperation(
     options: ResolveOptions,
 ) !Resolved {
     if (requested_path.len == 0 or std.mem.indexOfScalar(u8, requested_path, 0) != null) return error.InvalidPath;
-    const canonical = try canonicalizeTarget(allocator, io, requested_path);
-    errdefer allocator.free(canonical);
-    if (binding.permitted) return .{ .path = canonical, .decision = .allow };
+    const canonical_target = try canonicalizeTarget(allocator, io, requested_path);
+    if (!options.preserve_final_component) {
+        return resolveCanonicalOperation(allocator, io, binding, canonical_target, canonical_target, options);
+    }
+
+    defer allocator.free(canonical_target);
+    const operation_path = try canonicalizeFinalEntry(allocator, io, requested_path);
+    return resolveCanonicalOperation(allocator, io, binding, canonical_target, operation_path, options);
+}
+
+fn resolveCanonicalOperation(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    binding: Binding,
+    canonical_target: []const u8,
+    operation_path: []u8,
+    options: ResolveOptions,
+) Resolved {
+    if (binding.permitted) return .{ .path = operation_path, .decision = .allow };
+    if (options.preserve_final_component and
+        !canonicalIsInsideAnyRoot(allocator, io, binding.roots, canonical_target))
+    {
+        return .{ .path = operation_path, .decision = if (binding.enforce) .reject else .warn };
+    }
 
     for (binding.roots) |root| {
         if (root.len == 0) continue;
         const canonical_root = canonicalizeTarget(allocator, io, root) catch continue;
         defer allocator.free(canonical_root);
         var root_dir = openCanonicalDir(io, canonical_root, options.create_parents) catch {
-            // A missing root can only authorize an absent read/stat. Compare
+            // A missing root can only authorize an absent read/stat/delete. Compare
             // canonical lexical spellings, then return the closed absence
             // result; writes created the root above and never take this path.
-            if (!options.create_parents and pathIsWithin(canonical_root, canonical)) {
-                return .{ .path = canonical, .decision = .allow, .missing = true };
+            if (!options.create_parents and pathIsWithin(canonical_root, operation_path)) {
+                return .{ .path = operation_path, .decision = .allow, .missing = true };
             }
             continue;
         };
@@ -91,12 +119,12 @@ pub fn resolveForOperation(
             continue;
         };
         const root_real = root_real_storage[0..root_real_len];
-        if (!pathIsWithin(root_real, canonical)) {
+        if (!pathIsWithin(root_real, operation_path)) {
             root_dir.close(io);
             continue;
         }
 
-        const relative = relativeToRoot(root_real, canonical) orelse {
+        const relative = relativeToRoot(root_real, operation_path) orelse {
             root_dir.close(io);
             continue;
         };
@@ -107,20 +135,38 @@ pub fn resolveForOperation(
         }
         const parent_path = std.fs.path.dirname(relative) orelse "";
         const parent = openVerifiedParent(io, root_dir, root_real, parent_path, options.create_parents) catch |err| switch (err) {
-            error.FileNotFound => return .{ .path = canonical, .decision = .allow, .missing = true },
+            error.FileNotFound => return .{ .path = operation_path, .decision = .allow, .missing = true },
             else => continue,
         };
         const basename_offset = @intFromPtr(basename.ptr) - @intFromPtr(relative.ptr) +
-            (@intFromPtr(relative.ptr) - @intFromPtr(canonical.ptr));
+            (@intFromPtr(relative.ptr) - @intFromPtr(operation_path.ptr));
         return .{
-            .path = canonical,
+            .path = operation_path,
             .decision = .allow,
             .parent = parent,
-            .basename = canonical[basename_offset .. basename_offset + basename.len],
+            .basename = operation_path[basename_offset .. basename_offset + basename.len],
         };
     }
 
-    return .{ .path = canonical, .decision = if (binding.enforce) .reject else .warn };
+    return .{ .path = operation_path, .decision = if (binding.enforce) .reject else .warn };
+}
+
+/// Resolve every parent component but preserve the request's final directory
+/// entry. Unlike `canonicalizeTarget`, this deliberately does not follow a
+/// final symlink.
+fn canonicalizeFinalEntry(allocator: std.mem.Allocator, io: std.Io, requested_path: []const u8) ![]u8 {
+    const basename = std.fs.path.basename(requested_path);
+    if (basename.len == 0 or
+        std.mem.eql(u8, basename, ".") or
+        std.mem.eql(u8, basename, "..") or
+        std.mem.indexOfAny(u8, basename, if (@import("builtin").os.tag == .windows) "/\\" else "/") != null)
+    {
+        return error.InvalidPath;
+    }
+    const parent_path = std.fs.path.dirname(requested_path) orelse ".";
+    const canonical_parent = try canonicalizeTarget(allocator, io, parent_path);
+    defer allocator.free(canonical_parent);
+    return std.fs.path.resolve(allocator, &.{ canonical_parent, basename });
 }
 
 fn openCanonicalDir(io: std.Io, canonical_path: []const u8, create: bool) !std.Io.Dir {

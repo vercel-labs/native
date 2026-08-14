@@ -380,4 +380,4 @@ Three checker rules enforce the boundary. Each teaches the fix and the reason at
 
 ## Reference
 
-`examples/service-feed-reader` is the minimal core-plus-service app: a deterministic core, a service using `node:fs`, regex, `Map`, `Date`, and JSON, and a kind-tagged error path. The machine-precise authoring guide ships as `native skills get ts-services`.
+[`examples/service-feed-reader`](https://github.com/vercel-labs/native/tree/main/examples/service-feed-reader) is the complete loop as a small app: `Cmd.fetch` downloads a feed, the delivered bytes cross to `feeds.parse` through the generated typed client, the service's regex-and-`Map` parser returns shared `FeedResult` records the markup renders, and malformed input lands on the err arm as kind-tagged JSON. Its end-to-end suite (`tests/ts-services/feed_reader_e2e_tests.zig` in the SDK repo) records the whole loop against a loopback HTTP fixture and replays it byte-identically with the service executable absent. The machine-precise authoring guide ships as `native skills get ts-services`.

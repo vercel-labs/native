@@ -61,6 +61,7 @@ const FileModel = struct {
 const FileMsg = union(enum) {
     save,
     load,
+    delete,
     stop,
     file_result: effects_mod.EffectFileResult,
 };
@@ -90,6 +91,11 @@ fn fileUpdate(model: *FileModel, msg: FileMsg, fx: *FileEffects) void {
             .path = test_path,
             .on_result = FileEffects.fileMsg(.file_result),
         }),
+        .delete => fx.deleteFile(.{
+            .key = file_key,
+            .path = test_path,
+            .on_result = FileEffects.fileMsg(.file_result),
+        }),
         .stop => fx.cancel(file_key),
         .file_result => |result| {
             model.record(result);
@@ -110,6 +116,7 @@ fn fileView(ui: *FileApp.Ui, model: *const FileModel) FileApp.Ui.Node {
         ui.text(.{}, ui.fmt("{d} results", .{model.result_count})),
         ui.button(.{ .on_press = .save }, "Save"),
         ui.button(.{ .on_press = .load }, "Load"),
+        ui.button(.{ .on_press = .delete }, "Delete"),
         ui.button(.{ .on_press = .stop }, "Stop"),
     });
 }
@@ -204,6 +211,42 @@ test "fake executor records file requests and feeds results back as msgs" {
     try h.harness.runtime.dispatchPlatformEvent(h.app, .wake);
     try std.testing.expectEqual(effects_mod.EffectFileOutcome.not_found, h.app_state.model.last_outcome.?);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.bytes_len);
+}
+
+test "fake executor records delete requests and feeds the standard result callback" {
+    const Capture = struct {
+        var record: ?effects_mod.EffectResultRecord = null;
+
+        fn note(_: *anyopaque, value: effects_mod.EffectResultRecord) void {
+            record = value;
+        }
+    };
+
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+    Capture.record = null;
+    var journal_context: u8 = 0;
+    fx.bindJournal(.{ .context = &journal_context, .record_fn = Capture.note });
+
+    test_path = "sessions/obsolete.json";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .delete);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    const request = fx.pendingFileAt(0).?;
+    try std.testing.expectEqual(file_key, request.key);
+    try std.testing.expectEqual(effects_mod.EffectFileOp.delete, request.op);
+    try std.testing.expectEqualStrings("sessions/obsolete.json", request.path);
+    try std.testing.expectEqualStrings("", request.bytes);
+
+    try fx.feedFileResult(file_key, .ok, "ignored");
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .wake);
+    try std.testing.expectEqual(effects_mod.EffectFileOp.delete, h.app_state.model.last_op.?);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.bytes_len);
+    try std.testing.expect(Capture.record != null);
+    try std.testing.expectEqual(effects_mod.EffectFileOp.delete, Capture.record.?.file_op);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, Capture.record.?.file_outcome);
 }
 
 test "fake reads over the file bound arrive cut with outcome truncated" {
@@ -413,6 +456,130 @@ test "real executor reports missing files as not_found" {
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.bytes_len);
 }
 
+test "real executor deletes a file and reports a later delete as not_found" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "obsolete.bin", .data = "remove me" });
+
+    var h = try Harness.create();
+    defer h.destroy();
+    var path_buffer: [256]u8 = undefined;
+    test_path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/obsolete.bin", .{tmp.sub_path[0..]});
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .delete);
+    try waitForRealResult(&h, 1);
+    try std.testing.expectEqual(effects_mod.EffectFileOp.delete, h.app_state.model.last_op.?);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "obsolete.bin", .{}));
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .delete);
+    try waitForRealResult(&h, 2);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.not_found, h.app_state.model.last_outcome.?);
+}
+
+test "delete unlinks a final symlink without deleting its target" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "app-data");
+    try tmp.dir.writeFile(io, .{ .sub_path = "app-data/target.bin", .data = "keep me" });
+    try tmp.dir.symLink(io, "target.bin", "app-data/alias.bin", .{});
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+
+    var root_buffer: [256]u8 = undefined;
+    var alias_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}/app-data", .{tmp.sub_path[0..]});
+    const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias.bin", .{root});
+    fx.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = true });
+    fx.deleteFile(.{ .key = 1, .path = alias, .on_result = Fx.fileMsg(.result) });
+    const result = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, result.outcome);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "app-data/alias.bin", .{ .follow_symlinks = false }));
+    const target = try tmp.dir.readFileAlloc(io, "app-data/target.bin", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("keep me", target);
+
+    try tmp.dir.symLink(io, "missing.bin", "app-data/dangling.bin", .{});
+    var dangling_buffer: [256]u8 = undefined;
+    const dangling = try std.fmt.bufPrint(&dangling_buffer, "{s}/dangling.bin", .{root});
+    fx.deleteFile(.{ .key = 2, .path = dangling, .on_result = Fx.fileMsg(.result) });
+    const dangling_result = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, dangling_result.outcome);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "app-data/dangling.bin", .{ .follow_symlinks = false }));
+}
+
+test "filesystem permission deletes an external symlink entry without following it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "target.bin", .data = "keep me too" });
+    try tmp.dir.symLink(io, "target.bin", "alias.bin", .{});
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindFileAccess(.{ .roots = &.{}, .permitted = true, .enforce = true });
+
+    var alias_buffer: [256]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&alias_buffer, ".zig-cache/tmp/{s}/alias.bin", .{tmp.sub_path[0..]});
+    fx.deleteFile(.{ .key = 1, .path = alias, .on_result = Fx.fileMsg(.result) });
+    const result = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, result.outcome);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "alias.bin", .{ .follow_symlinks = false }));
+    const target = try tmp.dir.readFileAlloc(io, "target.bin", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("keep me too", target);
+}
+
+test "an app-root symlink to an external target still requires filesystem permission" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "app-data");
+    try tmp.dir.createDirPath(io, "outside");
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside/target.bin", .data = "protected" });
+    try tmp.dir.symLink(io, "../outside/target.bin", "app-data/alias.bin", .{});
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+
+    var root_buffer: [256]u8 = undefined;
+    var alias_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}/app-data", .{tmp.sub_path[0..]});
+    const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias.bin", .{root});
+    fx.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = true });
+    fx.deleteFile(.{ .key = 1, .path = alias, .on_result = Fx.fileMsg(.result) });
+
+    const result = fx.takeMsg().?.result;
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, result.outcome);
+    _ = try tmp.dir.statFile(io, "app-data/alias.bin", .{ .follow_symlinks = false });
+    const target = try tmp.dir.readFileAlloc(io, "outside/target.bin", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("protected", target);
+}
+
 test "real executor cuts over-bound reads with outcome truncated" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -448,9 +615,17 @@ test "append and stat are bounded one-shot file effects" {
     var path_buffer: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/log/events.log", .{tmp.sub_path[0..]});
     fx.appendFile(.{ .key = 1, .path = path, .bytes = "one", .on_result = Fx.fileMsg(.result) });
-    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    const first = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, first.outcome);
     fx.appendFile(.{ .key = 2, .path = path, .bytes = "-two", .on_result = Fx.fileMsg(.result) });
-    while (fx.takeMsg() == null) try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    const second = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, second.outcome);
     fx.statFile(.{ .key = 3, .path = path, .on_result = Fx.fileMsg(.result) });
     var stat_result: ?effects_mod.EffectFileResult = null;
     while (stat_result == null) {
@@ -762,7 +937,7 @@ test "disk capacity errors are closed and enum-named across whole and streaming 
     try std.testing.expectEqual(effects_mod.EffectFileOutcome.disk_full, result.outcome);
 }
 
-test "file access gating covers whole, append, stat, and stream verbs without consuming slots" {
+test "file access gating covers whole, append, stat, delete, and stream verbs without consuming slots" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(std.testing.io, "app-data");
@@ -790,9 +965,10 @@ test "file access gating covers whole, append, stat, and stream verbs without co
     fx.writeFile(.{ .key = 3, .path = outside, .bytes = "x", .on_result = Fx.fileMsg(.result) });
     fx.appendFile(.{ .key = 4, .path = outside, .bytes = "x", .on_result = Fx.fileMsg(.result) });
     fx.statFile(.{ .key = 5, .path = outside, .on_result = Fx.fileMsg(.result) });
-    fx.readFileStream(.{ .key = 6, .path = outside, .on_result = Fx.fileMsg(.result) });
-    fx.writeFileStream(.{ .key = 7, .path = outside, .on_result = Fx.fileMsg(.result) });
-    const refused_ops = [_]effects_mod.EffectFileOp{ .read, .write, .append, .stat, .read_stream, .write_stream_open };
+    fx.deleteFile(.{ .key = 6, .path = outside, .on_result = Fx.fileMsg(.result) });
+    fx.readFileStream(.{ .key = 7, .path = outside, .on_result = Fx.fileMsg(.result) });
+    fx.writeFileStream(.{ .key = 8, .path = outside, .on_result = Fx.fileMsg(.result) });
+    const refused_ops = [_]effects_mod.EffectFileOp{ .read, .write, .append, .stat, .delete, .read_stream, .write_stream_open };
     for (refused_ops) |expected_op| {
         const refused = fx.takeMsg().?.result;
         try std.testing.expectEqual(expected_op, refused.op);
@@ -805,10 +981,10 @@ test "file access gating covers whole, append, stat, and stream verbs without co
     defer granted.deinit();
     granted.executor = .fake;
     granted.bindFileAccess(.{ .roots = &.{}, .permitted = true, .enforce = true });
-    granted.statFile(.{ .key = 8, .path = outside, .on_result = Fx.fileMsg(.result) });
+    granted.statFile(.{ .key = 9, .path = outside, .on_result = Fx.fileMsg(.result) });
     try std.testing.expectEqual(@as(usize, 1), granted.pendingFileCount());
-    granted.readFile(.{ .key = 9, .path = inside, .on_result = Fx.fileMsg(.result) });
-    granted.readFileStream(.{ .key = 10, .path = inside, .on_result = Fx.fileMsg(.result) });
+    granted.readFile(.{ .key = 10, .path = inside, .on_result = Fx.fileMsg(.result) });
+    granted.readFileStream(.{ .key = 11, .path = inside, .on_result = Fx.fileMsg(.result) });
     try std.testing.expectEqual(@as(usize, 2), granted.pendingFileCount());
 
     // Full matrix: both whole-file and stream families are admitted inside

@@ -1,5 +1,5 @@
 //! Decoder over the app-core Cmd/Sub wire format (rt.zig, cmd_format_version
-//! 6), shared by the ts-track behavioral harnesses. The graders copy this
+//! 7), shared by the ts-track behavioral harnesses. The graders copy this
 //! file next to each case's harness so assertions read decoded ops — "a
 //! fetch with key `feed` targeting this URL", "the delay re-armed" — instead
 //! of hand-built byte strings, which keeps harnesses lenient about the parts
@@ -31,6 +31,7 @@ pub const Op = union(enum) {
     write_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8, bytes: []const u8 },
     append_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8, bytes: []const u8 },
     stat_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
+    delete_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
     read_file_stream: struct { key: []const u8, chunk_tag: u8, done_tag: u8, err_tag: u8, path: []const u8 },
     write_file_stream: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
     write_file_chunk: struct { key: []const u8, ok_tag: u8, err_tag: u8, bytes: []const u8 },
@@ -598,6 +599,10 @@ pub const CmdIter = struct {
                 const head = routedHead(b, &off);
                 break :blk .{ .write_file_close = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err } };
             },
+            0x32 => blk: {
+                const head = routedHead(b, &off);
+                break :blk .{ .delete_file = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .path = longBytes(b, &off) } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -760,6 +765,23 @@ test "record store command records decode and advance exactly" {
     try std.testing.expectEqualStrings("x", many.entry(0).key);
     try std.testing.expectEqualSlices(u8, &.{ 8, 9 }, many.entry(0).bytes);
     try std.testing.expectEqual(@as(u8, 10), (iter.next() orelse return error.TestUnexpectedResult).now.msg_tag);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "delete_file decodes and advances a batch exactly" {
+    const batch = [_]u8{
+        0x32, 4,   'f', 'i', 'l', 'e', 2,   3,
+        12,   0,   0,   0,   'o', 'b', 's', 'o',
+        'l',  'e', 't', 'e', '.', 'b', 'i', 'n',
+        0x02, 7,
+    };
+    var iter = CmdIter.init(&batch);
+    const deleted = (iter.next() orelse return error.TestUnexpectedResult).delete_file;
+    try std.testing.expectEqualStrings("file", deleted.key);
+    try std.testing.expectEqual(@as(u8, 2), deleted.ok_tag);
+    try std.testing.expectEqual(@as(u8, 3), deleted.err_tag);
+    try std.testing.expectEqualStrings("obsolete.bin", deleted.path);
+    try std.testing.expectEqual(@as(u8, 7), (iter.next() orelse return error.TestUnexpectedResult).now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
 

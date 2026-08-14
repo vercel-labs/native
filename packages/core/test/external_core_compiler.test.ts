@@ -18,8 +18,8 @@ test("the external core compile lane uses the target-aware zig-cc environment", 
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
-      model_unbound: ["count", "summary"],
-      msg: { unbound: ["tick"] },
+      model_unbound: ["phase"],
+      msg: { unbound: ["loaded"] },
     }));
     const compiler = path.join(root, "compiler.mjs");
     const zigDir = path.join(root, "toolchain");
@@ -55,8 +55,8 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "cross-target"
       build_id: "cross-target",
       model_fingerprint: "0123456789abcdef",
       has_migrate: false,
-      model_unbound: ["count", "summary"],
-      msg: { unbound: ["tick"] },
+      model_unbound: ["phase"],
+      msg: { unbound: ["loaded"] },
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

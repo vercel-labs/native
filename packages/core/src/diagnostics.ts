@@ -546,6 +546,7 @@ export const rules = {
     title: "external file paths require filesystem permission",
     fix: "Add `\"filesystem\"` to app.zon's `permissions`, or keep raw file effects under a path delivered from `NATIVE_SDK_APP_DATA_DIR`.",
     why: "The runtime canonicalizes raw paths and refuses access outside this app's data/config/cache/state/logs/temp roots unless the manifest grants filesystem access; catching literal external paths at check time avoids shipping a guaranteed rejection.",
+    class: "guarantee",
   },
   NS1420: {
     id: "NS1420",
