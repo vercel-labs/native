@@ -652,13 +652,15 @@ pub fn build(b: *std.Build) void {
         const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
         const sidecar_conformance_step = b.step("sidecar-conformance", "Validate corewire-generated mirrors over every fixture's frontend-emitted contract (requires node)");
         sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
-        // ABI-law suite over a real compiled core: the markup fixture's
-        // archive driven directly through the C ABI (collect invariant,
-        // deterministic re-init, channel envelopes, integer classes).
+        // ABI-law suites over real compiled cores: the broad markup fixture
+        // plus the focused mixed bare-Model/[Model, Cmd] return regression.
         const abi_laws_run = b.addRunArtifact(ts_core_artifacts.external_core_abi_laws);
-        const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suite over the markup fixture's archive (requires node and `npm ci` in packages/core)");
+        const mixed_return_abi_run = b.addRunArtifact(ts_core_artifacts.mixed_return_abi_laws);
+        const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suites, including mixed update returns (requires node and `npm ci` in packages/core)");
         abi_laws_step.dependOn(&abi_laws_run.step);
+        abi_laws_step.dependOn(&mixed_return_abi_run.step);
         test_step.dependOn(&abi_laws_run.step);
+        test_step.dependOn(&mixed_return_abi_run.step);
         // The cross-execution battery staging: the host-fixture and
         // markup batteries (update/snapshot/effects and the markup view
         // over genuinely compiled cores) plus, where the target admits
@@ -3077,6 +3079,9 @@ const TsCoreE2eArtifacts = struct {
     /// (boot fence, collect invariant, deterministic re-init, channel
     /// envelopes, integer classes).
     external_core_abi_laws: *std.Build.Step.Compile,
+    /// The mixed-return ABI regression: a real compiled core whose update
+    /// returns both bare Model and [Model, Cmd] through the generated facade.
+    mixed_return_abi_laws: *std.Build.Step.Compile,
     /// Per-fixture contract artifacts for an external core toolchain:
     /// the effective contract sidecar and its TypeScript facade/profile
     /// projections, installed by the stage-core-contracts step.
@@ -3171,6 +3176,13 @@ fn tsCoreE2eArtifact(
         .name = "markup_core",
     });
     const markup_fixture_mod = markup_fixture.module;
+    const mixed_return_src = b.addWriteFiles();
+    _ = mixed_return_src.addCopyFile(b.path("tests/ts-core/mixed_return_fixture.ts"), "mixed_return_fixture.ts");
+    const mixed_return_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/mixed_return_fixture.ts",
+        .src_dir = mixed_return_src.getDirectory(),
+        .name = "mixed_return_core",
+    });
 
     const e2e_mod = module(b, target, optimize, "tests/ts-core/host_e2e_tests.zig");
     e2e_mod.addImport("native_sdk", desktop_mod);
@@ -3506,6 +3518,9 @@ fn tsCoreE2eArtifact(
     abi_laws_mod.addObjectFile(markup_fixture.archive);
     addScriptcArchiveSystemLibs(abi_laws_mod, target);
 
+    const mixed_return_abi_mod = module(b, target, optimize, "tests/sidecar/mixed_return_abi_tests.zig");
+    mixed_return_abi_mod.addImport("mixed_return_core", mixed_return_fixture.module);
+
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
         .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
@@ -3522,6 +3537,7 @@ fn tsCoreE2eArtifact(
         .service_host_bench = service_bench_exe,
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
+        .mixed_return_abi_laws = filteredTestArtifact(b, mixed_return_abi_mod, "mixed-return-abi-tests", &.{}),
         .core_contracts = core_contracts.toOwnedSlice(b.allocator) catch @panic("OOM"),
     };
 }

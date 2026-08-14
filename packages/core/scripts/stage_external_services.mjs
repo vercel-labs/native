@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stage the typed service executable: ordinary service TypeScript plus
 // corewire's generated service_host_main.ts. One narrow mechanical lowering
-// is required by scriptc 0.0.29: an escaping `throw { kind, message }` becomes
+// is required by the pinned compiler: an escaping `throw { kind, message }` becomes
 // an Error subclass carrying kind in `.name`, the object form its reachable
 // static catch tier cannot inspect yet. NS1067 rejects locally caught tagged
 // records; shared core-class modules receive the same transform in this

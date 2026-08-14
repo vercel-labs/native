@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 
 const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const manifest = JSON.parse(fs.readFileSync(path.join(pkg, "package.json"), "utf8"));
+const cliManifest = JSON.parse(fs.readFileSync(path.join(pkg, "..", "native-sdk", "package.json"), "utf8"));
 
 test("the manifest names the published package and a real version", () => {
   assert.equal(manifest.name, "@native-sdk/core");
@@ -83,4 +84,5 @@ test("the one runtime dependency is the exact-pinned external core compiler", ()
   const pin = manifest.dependencies?.scriptc;
   assert.match(pin, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(manifest.dependencies, { scriptc: pin });
+  assert.equal(cliManifest.dependencies?.scriptc, pin, "the published CLI and @native-sdk/core must ship one compiler release");
 });

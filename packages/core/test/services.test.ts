@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkFiles } from "./helpers.ts";
+import { checkFiles, scriptcPin } from "./helpers.ts";
 import { mergePackageSpecs, readServicePackages, replaceServicePackages, replaceVendorTree } from "../scripts/vendor_service_packages.mjs";
 
 const serviceCore = `
@@ -44,7 +44,7 @@ export function parse(payload: Uint8Array): Uint8Array {
   const contract = JSON.parse(result.servicesContract!);
   assert.equal(contract.format, 3);
   assert.equal(contract.protocol_version, 3);
-  assert.equal(contract.compiler_version, "0.0.29");
+  assert.equal(contract.compiler_version, scriptcPin);
   assert.equal(contract.deterministic, false);
   assert.deepEqual(contract.packages, []);
   assert.deepEqual(contract.types, { records: [], enums: [], unions: [] });
@@ -596,7 +596,7 @@ test("the service compile lane refuses a contract whose compiler echo skews from
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
     fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.21" }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     const result = spawnSync(process.execPath, [
@@ -610,7 +610,7 @@ test("the service compile lane refuses a contract whose compiler echo skews from
       "--compiler", process.execPath,
     ], { encoding: "utf8" });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /contract echoes scriptc 0\.0\.21, but packages\/core pins 0\.0\.29/);
+    assert.ok(result.stderr.includes(`contract echoes scriptc 0.0.21, but packages/core pins ${scriptcPin}`));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -621,8 +621,8 @@ test("the service compile lane refuses a macOS target on a non-macOS build host"
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: scriptcPin }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     const result = spawnSync(process.execPath, [
       script,
@@ -647,8 +647,8 @@ test("the service compile lane refuses a pairing outside the compiler's build ma
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: scriptcPin }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     const result = spawnSync(process.execPath, [
       script,
@@ -675,8 +675,8 @@ test("the service compile lane refuses executables for mobile targets and thread
     fs.mkdirSync(stage);
     fs.writeFileSync(path.join(stage, "service_profile.json"), "{}\n");
     fs.writeFileSync(path.join(stage, "service_inproc_main.ts"), "export {};\n");
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: scriptcPin }));
     const ndk = path.join(root, "ndk");
     fs.mkdirSync(ndk);
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
@@ -702,7 +702,7 @@ test("the service compile lane refuses executables for mobile targets and thread
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `
 import fs from "node:fs";
-if (process.argv.includes("-v")) { console.log("0.0.29"); process.exit(0); }
+if (process.argv.includes("-v")) { console.log(${JSON.stringify(scriptcPin)}); process.exit(0); }
 if (process.env.SCRIPTC_CC !== "zigcc") { console.error("mobile compile missing SCRIPTC_CC=zigcc"); process.exit(9); }
 if (process.env.SCRIPTC_TARGET !== "aarch64-linux-android") { console.error("mobile compile got SCRIPTC_TARGET=" + process.env.SCRIPTC_TARGET); process.exit(9); }
 if (!process.env.ANDROID_NDK_ROOT) { console.error("mobile compile missing ANDROID_NDK_ROOT"); process.exit(9); }
@@ -737,8 +737,8 @@ test("the service compile lane refuses cross-target Windows MSVC before compiler
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: scriptcPin }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     const result = spawnSync(process.execPath, [
       script,
@@ -766,12 +766,12 @@ test("the service archive lane preserves native Windows MSVC", () => {
     fs.mkdirSync(stage);
     fs.writeFileSync(path.join(stage, "service_profile.json"), "{}\n");
     fs.writeFileSync(path.join(stage, "service_inproc_main.ts"), "export {};\n");
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: scriptcPin }));
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `
 import fs from "node:fs";
-if (process.argv.includes("-v")) { console.log("0.0.29"); process.exit(0); }
+if (process.argv.includes("-v")) { console.log(${JSON.stringify(scriptcPin)}); process.exit(0); }
 if (process.env.SCRIPTC_CC !== undefined || process.env.SCRIPTC_TARGET !== undefined) { console.error("native compile received cross environment"); process.exit(9); }
 fs.writeFileSync(process.argv[process.argv.indexOf("-o") + 1] + ".lib.a", "native msvc archive bytes");
 `);
@@ -802,8 +802,8 @@ test("the service archive lane refuses architectures outside the localized-objec
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: scriptcPin }));
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     for (const target of ["aarch64-windows-gnu", "riscv64-linux-musl"]) {
       const result = spawnSync(process.execPath, [
@@ -832,15 +832,15 @@ test("the service compile lane cross-compiles an admitted pairing over the compi
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
-    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: "0.0.29" }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({ compiler_version: scriptcPin }));
     const compiler = path.join(root, "compiler.mjs");
     // The stub asserts the cross environment the lane must receive: the
     // zig-cc driver selection, the target triple, and the supplied zig's
     // directory at the front of PATH.
     fs.writeFileSync(compiler, `
 import fs from "node:fs";
-if (process.argv.includes("-v")) { console.log("0.0.29"); process.exit(0); }
+if (process.argv.includes("-v")) { console.log(${JSON.stringify(scriptcPin)}); process.exit(0); }
 if (process.env.SCRIPTC_CC !== "zigcc") { console.error("expected SCRIPTC_CC=zigcc, got " + process.env.SCRIPTC_CC); process.exit(9); }
 if (process.env.SCRIPTC_TARGET !== "x86_64-windows-gnu") { console.error("expected SCRIPTC_TARGET=x86_64-windows-gnu, got " + process.env.SCRIPTC_TARGET); process.exit(9); }
 if (!(process.env.PATH ?? "").startsWith(${JSON.stringify(path.join(root, "toolchain"))})) { console.error("zig directory missing from PATH front: " + process.env.PATH); process.exit(9); }
@@ -871,14 +871,14 @@ test("the service compile lane passes an explicit npm-static allowlist and prese
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
     fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({
-      compiler_version: "0.0.29",
+      compiler_version: scriptcPin,
       packages: [{ name: "dynamic-only", version: "1.0.0", content_hash: "a".repeat(64) }],
     }));
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `
-if (process.argv.includes("-v")) { console.log("0.0.29"); process.exit(0); }
+if (process.argv.includes("-v")) { console.log(${JSON.stringify(scriptcPin)}); process.exit(0); }
 const at = process.argv.indexOf("--npm-static");
 if (at < 0 || process.argv[at + 1] !== "dynamic-only" || process.argv.includes("auto") || process.argv.includes("--dynamic")) {
   console.error("wrong npm policy: " + process.argv.slice(2).join(" ")); process.exit(9);
@@ -911,15 +911,15 @@ test("the service compile lane refuses a package whose successful coverage verdi
   try {
     const stage = path.join(root, "stage");
     fs.mkdirSync(stage);
-    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: "0.0.29" } }));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
     fs.writeFileSync(path.join(root, "services.contract.json"), JSON.stringify({
-      compiler_version: "0.0.29",
+      compiler_version: scriptcPin,
       packages: [{ name: "partial-static", version: "1.0.0", content_hash: "b".repeat(64) }],
     }));
     const compiler = path.join(root, "compiler.mjs");
     fs.writeFileSync(compiler, `
 import fs from "node:fs";
-if (process.argv.includes("-v")) { console.log("0.0.29"); process.exit(0); }
+if (process.argv.includes("-v")) { console.log(${JSON.stringify(scriptcPin)}); process.exit(0); }
 if (process.argv[2] === "coverage") {
   console.log("scriptc coverage service_host_main.ts\\n\\n  statements analyzed   10\\n  compile statically    8  (80%)\\n\\n  deferred to runtime   2 sites\\n      ×2  unsupported package calls  SC2020");
   process.exit(0);

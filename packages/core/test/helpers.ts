@@ -3,10 +3,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ts, TypedAst, createSubsetProgram } from "../src/typed_ast.ts";
 import { TypeTable } from "../src/types.ts";
 import { SubsetChecker, type CheckResult } from "../src/checker.ts";
 import { checkFile, type FrontendOptions, type FrontendResult } from "../src/frontend.ts";
+
+export const scriptcPin: string = JSON.parse(
+  fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+).dependencies.scriptc;
 
 export function withTempModule<T>(source: string, run: (entry: string) => T): T {
   const tmp = path.join(os.tmpdir(), `tac-test-${process.pid}-${Math.random().toString(36).slice(2)}.ts`);

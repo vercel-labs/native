@@ -123,7 +123,7 @@ if (mobileTarget) {
 // in-process archive's object merger supports native Linux through host
 // binutils, cross-ELF for x86_64/aarch64 (Android included), COFF for
 // x86_64, and Mach-O — iOS device and simulator included — on a macOS host.
-// Keep this preflight in lockstep with ScriptC 0.0.29's compileLibrary guard
+// Keep this preflight in lockstep with the pinned compiler's compileLibrary guard
 // so `in_process` refusals teach before compiler work.
 if (args["out-archive"]) {
   const archiveSupported =
