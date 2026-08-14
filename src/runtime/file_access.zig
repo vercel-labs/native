@@ -31,7 +31,7 @@ pub const Resolved = struct {
     /// handle-identity path verified inside the selected root.
     parent: ?std.Io.Dir = null,
     basename: []const u8 = "",
-    /// A read/stat whose parent does not exist is authorized but absent. The
+    /// A read/stat/delete whose parent does not exist is authorized but absent. The
     /// caller returns the operation's ordinary not-found shape without ever
     /// reopening the unresolved pathname.
     missing: bool = false,
@@ -76,7 +76,7 @@ pub fn resolveForOperation(
         const canonical_root = canonicalizeTarget(allocator, io, root) catch continue;
         defer allocator.free(canonical_root);
         var root_dir = openCanonicalDir(io, canonical_root, options.create_parents) catch {
-            // A missing root can only authorize an absent read/stat. Compare
+            // A missing root can only authorize an absent read/stat/delete. Compare
             // canonical lexical spellings, then return the closed absence
             // result; writes created the root above and never take this path.
             if (!options.create_parents and pathIsWithin(canonical_root, canonical)) {

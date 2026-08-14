@@ -114,6 +114,7 @@ export type Msg =
   | { readonly kind: "file_stat"; readonly exists: boolean; readonly size: number; readonly mtimeMs: number }
   | { readonly kind: "stat_file" }
   | { readonly kind: "append_file" }
+  | { readonly kind: "delete_file" }
   | { readonly kind: "stream_read" }
   | { readonly kind: "stream_open" }
   | { readonly kind: "stream_chunk" }
@@ -268,6 +269,8 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, Cmd.statFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), { key: "file", ok: "file_stat", err: "failed" })];
     case "append_file":
       return [model, Cmd.appendFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
+    case "delete_file":
+      return [model, Cmd.deleteFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), { key: "file", ok: "wrote", err: "failed" })];
     case "stream_open":
       return [model, Cmd.writeFileStream("file-stream", asciiBytes(".zig-cache/tmp/ts-core-tier5/stream.bin"), { ok: "wrote", err: "failed" })];
     case "stream_chunk":

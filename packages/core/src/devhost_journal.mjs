@@ -3,7 +3,9 @@ import fs from "node:fs";
 // Kept in lockstep with `zig build print-pins`; the Node test suite checks
 // both values so a runtime wire change cannot silently strand dev-host
 // recordings.
-export const journalFormatFingerprint = 0x886975504b050ed4n;
+// EffectFileOp appended `delete`; the reflected journal layout fingerprint
+// moves so older recordings refuse cleanly instead of decoding op 8 wrongly.
+export const journalFormatFingerprint = 0xb3bd2e83971de44dn;
 export const automationProtocolFingerprint = 0x59d66f39803fd602n;
 
 const requestKeyBase = 0x5453525100000000n;

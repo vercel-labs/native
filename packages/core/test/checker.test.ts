@@ -178,6 +178,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       Cmd.writeFile(asciiBytes("../output"), model.bytes, { ok: "wrote", err: "failed" }),
       Cmd.appendFile(asciiBytes("logs/local"), model.bytes, { ok: "wrote", err: "failed" }),
       Cmd.statFile(asciiBytes("C:\\\\Users\\\\outside"), { ok: "stat", err: "failed" }),
+      Cmd.deleteFile(asciiBytes("/tmp/obsolete"), { ok: "wrote", err: "failed" }),
       Cmd.readFileStream(asciiBytes("safe/import"), { chunk: "loaded", done: "done", err: "failed" }),
       Cmd.writeFileStream("sink", asciiBytes("/tmp/export"), { ok: "wrote", err: "failed" }),
     ])];
@@ -190,7 +191,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 `;
   const denied = check(source);
-  assert.equal(denied.diagnostics.filter((d) => d.id === "NS1074").length, 4);
+  assert.equal(denied.diagnostics.filter((d) => d.id === "NS1074").length, 5);
   const granted = check(source, { permissions: ["filesystem"] });
   assert.equal(granted.diagnostics.some((d) => d.id === "NS1074"), false);
 });

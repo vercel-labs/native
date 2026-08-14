@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "wire_version": 6,
+  "wire_version": 7,
   "abi_version": 2,
   "compiler_version": "0.0.1",
   "entry": "tests/sidecar/integer_fixture.ts",

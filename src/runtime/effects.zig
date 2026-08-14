@@ -613,6 +613,7 @@ pub const EffectFileOp = enum {
     write_stream_open,
     write_stream_chunk,
     write_stream_close,
+    delete,
 };
 
 /// Whether a file result is an ordinary one-shot terminal or one delivery
@@ -628,7 +629,7 @@ pub const EffectFileOutcome = enum {
     /// The operation completed. Reads carry the whole file in `bytes`;
     /// writes wrote every byte (parent directories created as needed).
     ok,
-    /// The file does not exist (reads only — writes create the path).
+    /// The file does not exist (reads and deletes only — writes create the path).
     not_found,
     /// The OS refused: permissions, the path names a directory, disk
     /// errors, an unwritable parent — anything but absence.
@@ -653,7 +654,7 @@ pub const EffectFileOutcome = enum {
 };
 
 /// Payload for file-effect Msg constructors. Exactly one is delivered
-/// per `readFile`/`writeFile` — terminal, nothing for that key after
+/// per one-shot file effect — terminal, nothing for that key after
 /// it. `bytes` is a read's content (binary-safe), valid only during
 /// the `update` call that receives it — copy what the model keeps.
 /// Writes always deliver empty `bytes`.
@@ -664,7 +665,7 @@ pub const EffectFileResult = struct {
     outcome: EffectFileOutcome = .ok,
     /// Read contents: the whole file for `.ok`, the first
     /// `max_effect_file_bytes` for `.truncated`, `""` otherwise (and
-    /// always for writes).
+    /// always for writes and deletes).
     bytes: []const u8 = "",
     /// Stream total bytes on `.done`; stat size on a successful `.stat`.
     total: u64 = 0,
@@ -3096,6 +3097,12 @@ pub fn Effects(comptime Msg: type) type {
         };
 
         pub const StatFileOptions = struct {
+            key: u64,
+            path: []const u8,
+            on_result: ?FileMsgFn = null,
+        };
+
+        pub const DeleteFileOptions = struct {
             key: u64,
             path: []const u8,
             on_result: ?FileMsgFn = null,
@@ -7085,6 +7092,18 @@ pub fn Effects(comptime Msg: type) type {
             self.startFile(options.key, .stat, &access, "", options.on_result);
         }
 
+        /// Delete one file. Absence is explicit (`.not_found`), while a
+        /// directory or another OS refusal is `.io_failed`. The operation
+        /// uses the same worker, key space, path policy, and exactly-one
+        /// result callback as the other one-shot file effects.
+        pub fn deleteFile(self: *Self, options: DeleteFileOptions) void {
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
+                return self.rejectFile(options.key, .delete, options.on_result);
+            }
+            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .delete, options.on_result);
+            self.startFile(options.key, .delete, &access, "", options.on_result);
+        }
+
         /// Stream a file as 256-KiB chunks followed by one `.done(total)`.
         /// Reads own `max_effect_file_streams`; no whole-file allocation and
         /// no total-size ceiling is involved.
@@ -7272,7 +7291,7 @@ pub fn Effects(comptime Msg: type) type {
             const buffer_len = switch (op) {
                 .write, .append => bytes.len,
                 .read => max_effect_file_bytes + 1,
-                .stat => 0,
+                .stat, .delete => 0,
                 else => unreachable,
             };
             const buffer = self.allocator.alloc(u8, buffer_len) catch {
@@ -16439,7 +16458,11 @@ pub fn Effects(comptime Msg: type) type {
                     };
                     defer file.close(io);
                     const stat = file.stat(io) catch |err| return fileOpFailure(err);
-                    file.writePositionalAll(io, ctx.payload(), stat.size) catch |err| return fileOpFailure(err);
+                    if (comptime builtin.os.tag == .windows) {
+                        appendFileWindows(file, ctx.payload()) catch |err| return fileOpFailure(err);
+                    } else {
+                        file.writePositionalAll(io, ctx.payload(), stat.size) catch |err| return fileOpFailure(err);
+                    }
                     return .ok;
                 },
                 .read => {
@@ -16474,6 +16497,12 @@ pub fn Effects(comptime Msg: type) type {
                     ctx.stat_mtime_ms = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_ms));
                     return .ok;
                 },
+                .delete => {
+                    dir.deleteFile(io, file_path) catch |err| {
+                        return if (err == error.FileNotFound) .not_found else fileOpFailure(err);
+                    };
+                    return .ok;
+                },
                 else => unreachable,
             }
         }
@@ -16487,6 +16516,44 @@ pub fn Effects(comptime Msg: type) type {
                 error.NoSpaceLeft, error.DiskQuota => .disk_full,
                 else => .io_failed,
             };
+        }
+
+        /// Windows' Zig 0.16 threaded positional writer can surface
+        /// STATUS_PENDING as unreachable for a synchronous file handle, while
+        /// its streaming writer rejects the same post-seek handle. NT defines
+        /// `ByteOffset = -1` as the atomic write-to-end sentinel. The handle is
+        /// already exclusively locked by the caller, and this loop preserves
+        /// the full-payload-or-error contract.
+        fn appendFileWindows(file: std.Io.File, bytes: []const u8) !void {
+            if (comptime builtin.os.tag != .windows) unreachable;
+            const windows = std.os.windows;
+            var at: usize = 0;
+            while (at < bytes.len) {
+                var iosb: windows.IO_STATUS_BLOCK = undefined;
+                const end_offset: windows.LARGE_INTEGER = -1;
+                const len: windows.ULONG = @intCast(@min(bytes.len - at, std.math.maxInt(windows.ULONG)));
+                switch (windows.ntdll.NtWriteFile(
+                    file.handle,
+                    null,
+                    null,
+                    null,
+                    &iosb,
+                    bytes[at..].ptr,
+                    len,
+                    &end_offset,
+                    null,
+                )) {
+                    .SUCCESS => {},
+                    .DISK_FULL => return error.NoSpaceLeft,
+                    .ACCESS_DENIED => return error.AccessDenied,
+                    .FILE_LOCK_CONFLICT => return error.LockViolation,
+                    .CANCELLED => return error.Canceled,
+                    .PENDING => return error.InputOutput,
+                    else => return error.InputOutput,
+                }
+                if (iosb.Information == 0) return error.InputOutput;
+                at += iosb.Information;
+            }
         }
 
         fn openedFileIsInsideDir(io: std.Io, dir: std.Io.Dir, file: std.Io.File) bool {

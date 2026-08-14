@@ -1716,6 +1716,17 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expect(decoded.truncated);
     try testing.expectEqual(@as(u16, 200), decoded.status);
 
+    const delete_encoded = try encodeEffect(.{
+        .kind = .file,
+        .key = 78,
+        .file_op = .delete,
+        .file_outcome = .not_found,
+    }, &buffer);
+    const delete_decoded = try decodeEffect(delete_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.file, delete_decoded.kind);
+    try testing.expectEqual(runtime_effects.EffectFileOp.delete, delete_decoded.file_op);
+    try testing.expectEqual(runtime_effects.EffectFileOutcome.not_found, delete_decoded.file_outcome);
+
     const exit_encoded = try encodeEffect(.{
         .kind = .exit,
         .key = 5,

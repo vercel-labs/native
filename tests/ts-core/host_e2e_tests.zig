@@ -67,6 +67,7 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.load")) return .load;
     if (std.mem.eql(u8, name, "core.filestat")) return .stat_file;
     if (std.mem.eql(u8, name, "core.fileappend")) return .append_file;
+    if (std.mem.eql(u8, name, "core.filedelete")) return .delete_file;
     if (std.mem.eql(u8, name, "core.streamopen")) return .stream_open;
     if (std.mem.eql(u8, name, "core.streamchunk")) return .stream_chunk;
     if (std.mem.eql(u8, name, "core.streamclose")) return .stream_close;
@@ -643,6 +644,15 @@ test "compiled stat, append, and file-stream verbs route through the runtime" {
     const appended = try std.Io.Dir.cwd().readFileAlloc(io, tier5_append_path, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(appended);
     try std.testing.expectEqualStrings("chunk-byteschunk-bytes", appended);
+
+    try h.menu("core.filedelete");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, tier5_append_path, .{}));
+    try h.menu("core.filedelete");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqualStrings("not_found", Bridge.model().lastErr);
 }
 
 test "every Cmd.store factory emits its bounded v3 record through the external core" {

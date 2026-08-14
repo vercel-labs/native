@@ -285,8 +285,8 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Write a whole file (parents created, replaced whole); <code>ok</code> carries no payload — a successful write has nothing to report</td>
     </tr>
     <tr>
-      <td><code>Cmd.appendFile</code> / <code>Cmd.statFile</code></td>
-      <td>Append one bounded payload, or inspect <code>&#123; exists, size, mtimeMs &#125;</code> before choosing how to read a file</td>
+      <td><code>Cmd.appendFile</code> / <code>Cmd.statFile</code> / <code>Cmd.deleteFile</code></td>
+      <td>Append one bounded payload, inspect <code>&#123; exists, size, mtimeMs &#125;</code>, or delete one file with explicit <code>not_found</code> handling</td>
     </tr>
     <tr>
       <td><code>Cmd.readFileStream</code> / <code>Cmd.writeFileStream</code> + <code>writeFileChunk</code>/<code>writeFileClose</code></td>

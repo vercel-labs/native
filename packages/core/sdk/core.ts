@@ -54,7 +54,8 @@
 //                                whole-file write (parents created, replaced
 //                                whole); ok arm carries NOTHING (an arm with
 //                                no payload fields), err arm the reason bytes
-//   Cmd.appendFile / statFile    bounded append and size/mtime/existence probe
+//   Cmd.appendFile / statFile / deleteFile
+//                              bounded append, metadata probe, and deletion
 //   Cmd.readFileStream           256-KiB chunks, then done(total) or err
 //   Cmd.writeFileStream / writeFileChunk / writeFileClose
 //                                atomic streamed sink; chunks are acknowledged
@@ -1156,6 +1157,13 @@ export type Cmd<M extends Msgish> =
       readonly path: Uint8Array;
     }
   | {
+      readonly op: "delete_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
       readonly op: "read_file_stream";
       readonly key: string;
       readonly chunkKind: string;
@@ -1621,6 +1629,13 @@ export const Cmd = {
 
   statFile<M extends Msgish>(path: Uint8Array, route: FileStatRoute<M>): Cmd<M> {
     return { op: "stat_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+
+  /// Delete one file. The ok arm carries no payload. A missing file routes
+  /// the err arm with "not_found"; directories and other OS refusals route
+  /// "io_failed".
+  deleteFile<M extends Msgish>(path: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "delete_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
   },
 
   readFileStream<M extends Msgish>(path: Uint8Array, route: FileReadStreamRoute<M>): Cmd<M> {

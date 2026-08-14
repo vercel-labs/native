@@ -1764,7 +1764,7 @@ test "a u64 attestation on chrome geometry refuses at check time" {
     // class cannot carry.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 6, "abi_version": 2,
+        \\  "format": 1, "wire_version": 7, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
         \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {
@@ -1945,7 +1945,7 @@ test "a shared authored type spelling like a synthesized name stays a top-level 
     // first site would leave the second dangling.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 6, "abi_version": 2,
+        \\  "format": 1, "wire_version": 7, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
         \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {
@@ -2381,7 +2381,7 @@ test "a chrome arm holding its insets by reference refuses" {
     // node (by-reference) insets record cannot take that construction.
     const source =
         \\{
-        \\  "format": 1, "wire_version": 6, "abi_version": 2,
+        \\  "format": 1, "wire_version": 7, "abi_version": 2,
         \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
         \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface", "model_fingerprint": "00000000a11ce001",
         \\  "types": {

@@ -1320,6 +1320,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "go":
       if (msg.which === 0) return [model, Cmd.readFile(asciiBytes("a.bin"), { key: "r", ok: "loaded", err: "failed" })];
       if (msg.which === 1) return [model, Cmd.writeFile(asciiBytes("a.bin"), model.data, { key: "w", ok: "wrote", err: "failed" })];
+      if (msg.which === 14) return [model, Cmd.deleteFile(asciiBytes("a.bin"), { key: "x", ok: "wrote", err: "failed" })];
       if (msg.which === 2) return [model, Cmd.fetch({ url: asciiBytes("https://a.test"), method: "PUT", headers: { accept: "text/plain" }, body: model.data, timeoutMs: 1000 }, { ok: "fetched", err: "failed" })];
       if (msg.which === 3) return [model, Cmd.fetch({ url: model.data }, { key: "g", ok: "fetched", err: "failed" })];
       if (msg.which === 4) return [model, Cmd.clipboardWrite(model.data)];
