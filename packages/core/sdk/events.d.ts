@@ -46,6 +46,48 @@ export interface StatusItemDescriptor {
     readonly presentation: StatusItemPresentation;
     readonly items: readonly StatusItemMenuItem[];
 }
+export type WindowClosePolicy = "quit" | "hide";
+export type WindowTitlebarStyle = "standard" | "hidden_inset" | "hidden_inset_tall";
+export interface WindowDescriptorSpec {
+    readonly label: Uint8Array;
+    readonly canvasLabel: Uint8Array;
+    readonly title?: Uint8Array;
+    readonly width?: number;
+    readonly height?: number;
+    readonly x?: number | null;
+    readonly y?: number | null;
+    readonly resizable?: boolean;
+    readonly minWidth?: number;
+    readonly minHeight?: number;
+    readonly titlebar?: WindowTitlebarStyle;
+    readonly transparent?: boolean;
+    readonly alwaysOnTop?: boolean;
+    readonly clickThrough?: boolean;
+    readonly activateOnShow?: boolean;
+    readonly allowsFullscreen?: boolean;
+    readonly closePolicy?: WindowClosePolicy;
+    readonly onCloseCommand?: Uint8Array;
+}
+export interface WindowDescriptor {
+    readonly label: Uint8Array;
+    readonly canvasLabel: Uint8Array;
+    readonly title: Uint8Array;
+    readonly width: number;
+    readonly height: number;
+    readonly x: number | null;
+    readonly y: number | null;
+    readonly resizable: boolean;
+    readonly minWidth: number;
+    readonly minHeight: number;
+    readonly titlebar: WindowTitlebarStyle;
+    readonly transparent: boolean;
+    readonly alwaysOnTop: boolean;
+    readonly clickThrough: boolean;
+    readonly activateOnShow: boolean;
+    readonly allowsFullscreen: boolean;
+    readonly closePolicy: WindowClosePolicy;
+    readonly onCloseCommand: Uint8Array;
+}
 export interface ScrollState {
     readonly offsetX: number;
     readonly offsetY: number;

@@ -1266,6 +1266,33 @@ export function statusItems(model: Model): readonly StatusItemDescriptor[] { ret
   assert.ok(ruleIds(mutuallyExclusive).includes("NS1033"), `got ${ruleIds(mutuallyExclusive)}`);
 });
 
+test("NS1033 windows is the canonical model-declared secondary-window collection", () => {
+  const clean = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
+}
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const wrong = checkOnly(`
+export interface BadWindow { readonly label: Uint8Array; readonly closePolicy: boolean; }
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly BadWindow[] { return []; }
+`);
+  assert.ok(ruleIds(wrong).includes("NS1033"), `got ${ruleIds(wrong)}`);
+});
+
 test("NS1061: value-record aliases refuse the shapes value storage cannot carry", () => {
   // The model root is reference storage by contract.
   const root = checkOnly(`

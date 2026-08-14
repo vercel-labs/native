@@ -874,7 +874,11 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 >
 > After feeding, drain with `try harness.runtime.dispatchPlatformEvent(app, .wake);` — results become Msgs through the same path live platforms use.
 
-## Secondary windows in Zig cores: model-declared (`windows_fn` + `window_view`)
+## Secondary windows
+
+In the default TypeScript path, export `windows(model): readonly WindowDescriptor[]` and put each possible window's Native markup at `src/windows/<label>.native`. Use `windowDescriptor` from `@native-sdk/core`; its `closePolicy` field accepts `"quit"` or `"hide"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`; a `"hide"` close preserves the window and view and dispatches no close command. The `ts-core` skill has the complete descriptor and example.
+
+### Zig cores: `windows_fn` + `window_view`
 
 Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is liveness); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring the window to really close it and release its retained views.
 

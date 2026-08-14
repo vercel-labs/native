@@ -213,6 +213,33 @@ For multiple items export `statusItems(model): readonly StatusItemDescriptor[]` 
 
 Commands are constructed inline in the return path and nowhere else (NS1017): never in the Model or a Msg, never in a local, never in a helper. This is what keeps effects inside the dispatch cycle and replay honest.
 
+### Model-declared secondary windows
+
+Export `windows(model): readonly WindowDescriptor[]` to derive the secondary windows that should exist from committed model state. Import `WindowDescriptor` from `@native-sdk/core/events`, and construct entries with `windowDescriptor` from `@native-sdk/core` so omitted fields receive the canonical defaults. Presence is liveness: adding a descriptor creates the window, removing it closes the window and releases its retained view.
+
+Each possible label has a statically compiled Native markup view at `src/windows/<label>.native`; for example descriptor label `settings` uses `src/windows/settings.native`. The descriptor's `canvasLabel` must be unique across the whole app. Both the main view and every open window view rebuild from the same model after a Msg, and the generated launcher hot-reloads secondary view files in Debug.
+
+```ts
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    title: asciiBytes("Settings"),
+    width: 420,
+    height: 240,
+    resizable: false,
+    closePolicy: "quit",
+    onCloseCommand: asciiBytes("app.settings-closed"),
+  })];
+}
+```
+
+`closePolicy` is `"quit"` by default. Under `"quit"`, a user close really closes the window and routes `onCloseCommand` through `commandMsg`; map it to the Msg that clears the model's open flag. If the model keeps declaring the label, source wins and the next reconciliation recreates it. Under `"hide"`, the same native window and view stay alive, no close command fires, and `Cmd.showWindow("settings")` reveals it. Stopping the declaration always performs a real reconcile close. The platform safeguards for `hide` are the same as manifest windows. Model-declared secondary windows are desktop-only.
+
 ### The init command
 
 `initialModel` may return the same pair to run a boot effect once at install, before the first view build — loading a store is the canonical use:
@@ -363,6 +390,7 @@ The generated wiring detects each channel from an export (export exists → wire
 
 - **`commandMsg(name: string): Msg | null`** — menus, shortcuts, and chrome tabs, by command id (string equality works on `string` values).
 - **`statusItem(model: Model): StatusItemState` / `statusItems(model: Model): readonly StatusItemDescriptor[]`** — one complete menu-bar item, or a stable-id collection: live icon/tooltip/visibility/click hooks, presentation, and dropdown. The generated launcher reconciles after committed updates; import the exact records from `@native-sdk/core/events`.
+- **`windows(model: Model): readonly WindowDescriptor[]`** — the model-declared secondary-window set. The launcher compiles `src/windows/<label>.native`, reconciles descriptor presence after committed updates, projects `closePolicy`, and routes a `.quit` `onCloseCommand` through `commandMsg`.
 - **`frameMsg(model: Model, frame: FrameEvent): Msg | null`** — presented frames. `FrameEvent` is exactly `{ width, height, timestampMs, intervalMs }` numbers (canvas points; fractional milliseconds). Return null for frames that change nothing — the idle law holds exactly when an idle app dispatches nothing (a frame arm that always returns a Msg would spin the loop at full frame rate). The installing frame is excluded; the first PRESENTED frame corrects any seeded value.
 - **`keyMsg(key: KeyEvent): Msg | null`** — the app-level key FALLBACK (a focused widget's own keys and editable text always win first). `KeyEvent` is exactly `{ key: string; shift: boolean; control: boolean; alt: boolean; super: boolean }`; the key NAME arrives lowercased (`key.key === "space"`).
 - **`pinchMsg(pinch: PinchEvent): Msg | null`** — the view-global trackpad pinch channel. `PinchEvent` carries `windowId`, `label`, begin/change/end `phase`, multiplicative `scale` delta, and the view-local `x`/`y` anchor.
@@ -411,7 +439,7 @@ Every diagnostic carries one of these IDs plus the fix and the why, and every ru
 - **NS1031 exported model helpers join the model's binding surface.** An exported single-Model-parameter helper becomes a Model declaration markup binds (`doneCount` → `{doneCount}`); two members with one binding name would be ambiguous — rename one.
 - **NS1032 viewUnbound names update-only model state.** `export const viewUnbound = [...] as const` entries must be string literals naming Model fields, exported model helpers, or Msg kinds — by their TypeScript spellings (`"nextId"`); anything else would silence nothing and hide a typo.
 - **NS1030 effect arguments respect the engine's limits.** A compile-time-knowable value outside an engine bound (a path literal over 1024 bytes, a URL literal over 2 KiB, more than 8 headers, a header block over 1 KiB, a delay literal outside 1ms..one year) stops the build instead of shipping a guaranteed runtime rejection. Dynamic values stay the engine's to validate — they surface through the `err` arm.
-- **NS1033 wiring channel exports match their host event shapes.** `frameMsg`/`keyMsg`/`pinchMsg`/`dropMsg` take their exact event records and return `Msg | null`; `appearanceMsg`/`chromeMsg` are string literals naming arms with those channels' record shapes; `envMsgs` entries carry `env` and a one-`Uint8Array`-field `msg` arm; `themePack`, `statusItem`, and `statusItems` return their exact model-derived shell shapes. The generated wiring builds these host values structurally from your declarations, so a wrong shape is taught here instead of surfacing as a Zig error inside generated code.
+- **NS1033 wiring channel exports match their host event shapes.** `frameMsg`/`keyMsg`/`pinchMsg`/`dropMsg` take their exact event records and return `Msg | null`; `appearanceMsg`/`chromeMsg` are string literals naming arms with those channels' record shapes; `envMsgs` entries carry `env` and a one-`Uint8Array`-field `msg` arm; `themePack`, `statusItem`, `statusItems`, and `windows` return their exact model-derived shell shapes. The generated wiring builds these host values structurally from your declarations, so a wrong shape is taught here instead of surfacing as a Zig error inside generated code.
 - **NS1034 core imports stay inside src/.** `../` escapes and absolute paths are rejected: the entry module's directory is the core's whole world - the build ships exactly that tree.
 - **NS1035 npm packages do not run inside a core.** No JS engine ships in the binary; vendor the logic under `src/` or make the import type-only.
 - **NS1036 core modules do not import in a cycle.** Runtime cycles only work through JS live-binding indirection; hoist shared declarations, or make the back-edge `import type` (which is exempt and idiomatic).
@@ -517,7 +545,7 @@ export function update(model: Model, msg: Msg): Model {
 
 ## Running a core as an app
 
-A `native init` app needs NONE of this section: the build detects `src/core.ts` and stages the wiring itself (a core exporting `commandMsg(name: string): Msg | null` automatically receives menu/shortcut/status-item command events as Msgs). A core can also export `themePack(model: Model): ThemePack`, with `export type ThemePack = "house" | "geist"`, to select the built-in pack from live model state, and either `statusItem(model): StatusItemState` or `statusItems(model): readonly StatusItemDescriptor[]` to own the menu-bar surface. The adapter wires these as `theme_fn` and the matching singular/collection status seam. The section below is for hand-Zig wiring — embedding a core in an existing Zig app or customizing the UiApp surface.
+A `native init` app needs NONE of this section: the build detects `src/core.ts` and stages the wiring itself (a core exporting `commandMsg(name: string): Msg | null` automatically receives menu/shortcut/status-item/window-close command events as Msgs). A core can also export `themePack(model: Model): ThemePack`, either status-item helper, and `windows(model): readonly WindowDescriptor[]`; the adapter wires the matching UiApp seams, while the generated launcher supplies secondary views from `src/windows/<label>.native`. The section below is for hand-Zig wiring — embedding a core in an existing Zig app or customizing the UiApp surface.
 
 The compiled core runs as a full desktop app through `native_sdk.TsUiApp(core)` — the committed TS model IS the app model, no shim, no glue:
 

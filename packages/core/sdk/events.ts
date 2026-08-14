@@ -112,6 +112,60 @@ export interface StatusItemDescriptor {
   readonly items: readonly StatusItemMenuItem[];
 }
 
+/// What the user's close affordance does for a model-declared secondary
+/// window. `quit` really closes it and routes `onCloseCommand`; `hide` keeps
+/// the native window and view tree alive for `Cmd.showWindow(label)`.
+export type WindowClosePolicy = "quit" | "hide";
+
+export type WindowTitlebarStyle = "standard" | "hidden_inset" | "hidden_inset_tall";
+
+/// Author-facing input to `windowDescriptor`; omitted fields receive the
+/// same defaults as UiApp.WindowDescriptor.
+export interface WindowDescriptorSpec {
+  readonly label: Uint8Array;
+  readonly canvasLabel: Uint8Array;
+  readonly title?: Uint8Array;
+  readonly width?: number;
+  readonly height?: number;
+  readonly x?: number | null;
+  readonly y?: number | null;
+  readonly resizable?: boolean;
+  readonly minWidth?: number;
+  readonly minHeight?: number;
+  readonly titlebar?: WindowTitlebarStyle;
+  readonly transparent?: boolean;
+  readonly alwaysOnTop?: boolean;
+  readonly clickThrough?: boolean;
+  readonly activateOnShow?: boolean;
+  readonly allowsFullscreen?: boolean;
+  readonly closePolicy?: WindowClosePolicy;
+  readonly onCloseCommand?: Uint8Array;
+}
+
+/// One independently reconciled secondary window returned by
+/// `windows(model)`. The generated launcher compiles
+/// `src/windows/<label>.native` as its view; presence is liveness.
+export interface WindowDescriptor {
+  readonly label: Uint8Array;
+  readonly canvasLabel: Uint8Array;
+  readonly title: Uint8Array;
+  readonly width: number;
+  readonly height: number;
+  readonly x: number | null;
+  readonly y: number | null;
+  readonly resizable: boolean;
+  readonly minWidth: number;
+  readonly minHeight: number;
+  readonly titlebar: WindowTitlebarStyle;
+  readonly transparent: boolean;
+  readonly alwaysOnTop: boolean;
+  readonly clickThrough: boolean;
+  readonly activateOnShow: boolean;
+  readonly allowsFullscreen: boolean;
+  readonly closePolicy: WindowClosePolicy;
+  readonly onCloseCommand: Uint8Array;
+}
+
 /// The scroll-state mirror markup's `on-scroll` matches structurally: a
 /// record of exactly these eight numeric fields — the TWO-AXIS shape, one
 /// offset/velocity/viewport/content quartet per axis. Offsets and extents

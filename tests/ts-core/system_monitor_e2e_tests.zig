@@ -44,6 +44,8 @@ const Bridge = Adapter.Host;
 
 const app_markup = @embedFile("app.native");
 const CompiledAppView = canvas.CompiledMarkupView(core.Model, core.Msg, app_markup);
+const settings_markup = @embedFile("settings.native");
+const CompiledSettingsView = canvas.CompiledMarkupView(core.Model, core.Msg, settings_markup);
 
 // The Zig example's committed real captures (10 cores, 32 GiB) and its
 // constructed edge fixture — shared truth, staged beside this root.
@@ -82,6 +84,8 @@ const app_scene: native_sdk.ShellConfig = .{ .windows = &app_windows };
 
 /// TEST-ONLY command mapper (see the module comment).
 fn testCommand(name: []const u8) ?core.Msg {
+    if (std.mem.eql(u8, name, "monitor.settings")) return .open_settings;
+    if (std.mem.eql(u8, name, "monitor.settings.closed")) return .settings_closed;
     if (std.mem.eql(u8, name, "mon.pause")) return .toggle_sampling;
     if (std.mem.eql(u8, name, "mon.sort.cpu")) return .sort_cpu;
     if (std.mem.eql(u8, name, "mon.sort.mem")) return .sort_mem;
@@ -92,6 +96,11 @@ fn testCommand(name: []const u8) ?core.Msg {
     if (commandId(name, "mon.kill.")) |pid| return .{ .request_kill = pid };
     if (commandId(name, "mon.copy.")) |pid| return .{ .copy_name = pid };
     return null;
+}
+
+fn windowView(ui: *App.Ui, model: *const core.Model, label: []const u8) App.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, label, "settings"));
+    return CompiledSettingsView.build(ui, model);
 }
 
 fn commandId(name: []const u8, prefix: []const u8) ?i64 {
@@ -107,6 +116,7 @@ fn appOptions() App.Options {
         // The comptime-compiled engine over the example's shipping markup
         // — the whole view tier of the app under test.
         .view = CompiledAppView.build,
+        .window_view = windowView,
         .on_command = testCommand,
     };
 }
@@ -491,6 +501,36 @@ test "the sample cadence ticks, skips mid-flight, and pause reconciles the timer
     try std.testing.expect(h.hasText("ps failed (signaled)"));
     try h.spawnOutput(spawn_key_1, vm_stat_fixture, 0);
     try std.testing.expectEqual(@as(i64, 3), Bridge.model().samplesTaken);
+}
+
+test "the TypeScript monitor declares and closes its settings window" {
+    const h = try Harness.create();
+    defer h.destroy();
+
+    try h.menu("monitor.settings");
+    try std.testing.expect(Bridge.model().settingsOpen);
+    var buffer: [native_sdk.platform.max_windows]native_sdk.WindowInfo = undefined;
+    var settings_id: native_sdk.WindowId = 0;
+    for (h.harness.runtime.listWindows(&buffer)) |window| {
+        if (std.mem.eql(u8, window.label, "settings")) settings_id = window.id;
+    }
+    try std.testing.expect(settings_id != 0);
+    try std.testing.expectEqual(native_sdk.WindowClosePolicy.quit, h.harness.null_platform.closePolicyForWindow(settings_id).?);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = .{
+        .window_id = settings_id,
+        .label = "settings-canvas",
+        .size = geometry.SizeF.init(420, 76),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    _ = try h.harness.runtime.canvasWidgetLayout(settings_id, "settings-canvas");
+
+    const close = h.harness.null_platform.userCloseWindow(settings_id) orelse return error.TestUnexpectedResult;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, close);
+    try std.testing.expect(!Bridge.model().settingsOpen);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.window_slot_count);
 }
 
 // ------------------------------------------------------- search + sorting

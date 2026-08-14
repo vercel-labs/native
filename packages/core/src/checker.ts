@@ -506,6 +506,7 @@ export class SubsetChecker {
     this.checkThemePackHelper();
     this.checkStatusItemHelper();
     this.checkStatusItemsHelper();
+    this.checkWindowsHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -1108,6 +1109,84 @@ export class SubsetChecker {
     }
   }
 
+  /// `windows(model)` is the TypeScript launcher's model-declared secondary
+  /// window set. Keep the descriptor exact: the Zig adapter projects it into
+  /// UiApp.WindowDescriptor, including close-command routing and closePolicy.
+  private checkWindowsHelper(): void {
+    let decl: ts.FunctionDeclaration | null = null;
+    for (const stmt of this.entry.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === "windows" && hasExportModifier(stmt)) {
+        decl = stmt;
+        break;
+      }
+    }
+    if (decl === null) {
+      for (const binding of exportListBindings(this.tast, this.entry)) {
+        if (
+          binding.exportedName === "windows" &&
+          binding.target !== null &&
+          binding.target !== undefined &&
+          ts.isFunctionDeclaration(binding.target) &&
+          binding.target.getSourceFile() === this.entry
+        ) {
+          decl = binding.target;
+          break;
+        }
+      }
+    }
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(
+      (candidate) => candidate.name === "windows" && candidate.decl === decl,
+    );
+    if (helper === undefined || decl.type === undefined) {
+      this.report(
+        "NS1033",
+        "`windows` must be a single-Model-parameter helper with an explicit `readonly WindowDescriptor[]` return type.",
+        decl.name ?? decl,
+      );
+      return;
+    }
+    const returns = this.table.resolveTypeNode(decl.type);
+    const descriptorType = returns.k === "slice" && returns.elem.k === "struct" ? returns.elem : null;
+    const descriptor = descriptorType === null ? undefined : this.table.structs.get(descriptorType.name);
+    const names = descriptor?.fields.map((field) => field.tsName).sort() ?? [];
+    const field = (name: string) => descriptor?.fields.find((candidate) => candidate.tsName === name);
+    const numeric = (name: string): boolean => {
+      const candidate = field(name);
+      return candidate !== undefined && ["number", "i64", "f64", "numAlias"].includes(candidate.type.k);
+    };
+    const enumMembersAre = (name: string, expected: readonly string[]): boolean => {
+      const candidate = field(name);
+      if (candidate?.type.k !== "enum") return false;
+      const found = this.table.enums.get(candidate.type.name)?.members.slice().sort() ?? [];
+      return found.join(",") === expected.slice().sort().join(",");
+    };
+    const optionalNumeric = (name: string): boolean => {
+      const candidate = field(name);
+      return candidate?.type.k === "optional" && ["number", "i64", "f64", "numAlias"].includes(candidate.type.inner.k);
+    };
+    const valid =
+      names.join(",") === "activateOnShow,allowsFullscreen,alwaysOnTop,canvasLabel,clickThrough,closePolicy,height,label,minHeight,minWidth,onCloseCommand,resizable,title,titlebar,transparent,width,x,y" &&
+      field("label")?.type.k === "bytes" &&
+      field("canvasLabel")?.type.k === "bytes" &&
+      field("title")?.type.k === "bytes" &&
+      numeric("width") && numeric("height") && optionalNumeric("x") && optionalNumeric("y") &&
+      field("resizable")?.type.k === "bool" && numeric("minWidth") && numeric("minHeight") &&
+      enumMembersAre("titlebar", ["standard", "hidden_inset", "hidden_inset_tall"]) &&
+      field("transparent")?.type.k === "bool" && field("alwaysOnTop")?.type.k === "bool" &&
+      field("clickThrough")?.type.k === "bool" && field("activateOnShow")?.type.k === "bool" &&
+      field("allowsFullscreen")?.type.k === "bool" && enumMembersAre("closePolicy", ["quit", "hide"]) &&
+      field("onCloseCommand")?.type.k === "bytes";
+    if (!valid) {
+      const shape = descriptor?.fields.map((candidate) => `${candidate.tsName}:${candidate.type.k}${candidate.type.k === "optional" ? `(${candidate.type.inner.k}${candidate.type.inner.k === "union" ? `:${candidate.type.inner.name}` : ""})` : candidate.type.k === "enum" ? `:${candidate.type.name}` : ""}`).join(", ") ?? `missing descriptor (return=${returns.k}${returns.k === "slice" ? ` elem=${returns.elem.k}` : ""})`;
+      this.report(
+        "NS1033",
+        `\`windows\` must return \`readonly WindowDescriptor[]\`; import \`WindowDescriptor\` from \`@native-sdk/core/events\` and construct entries with \`windowDescriptor(...)\`. Resolved: ${shape}`,
+        decl.type,
+      );
+    }
+  }
+
   /// NS1032 — `export const viewUnbound = [...] as const`: the dead-state
   /// lint opt-out. Every entry must be a string literal naming a Model
   /// field, an exported model helper, or a Msg kind; the emitter routes the
@@ -1539,7 +1618,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem", "statusItems",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem", "statusItems", "windows",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

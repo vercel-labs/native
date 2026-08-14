@@ -65,6 +65,7 @@ pub const core = @import("core.zig");
 const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
 const relational_migrations = @import("migrations.zig");
+const window_views = @import("window_views.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -99,6 +100,10 @@ pub fn main(init: std.process.Init) !void {
         .theme = comptime runner.manifestThemePack(),
         .theme_accent = comptime runner.manifestThemeAccent(),
     };
+    if (comptime @hasDecl(core.Model, "windows")) {
+        options.window_view = window_views.build;
+        options.fragment_watch = .{ .fragments = &window_views.fragments, .io = init.io };
+    }
     if (comptime @hasDecl(core, "commandMsg")) {
         // Menus, shortcuts, and chrome tabs dispatch through the core's
         // exported command mapper.

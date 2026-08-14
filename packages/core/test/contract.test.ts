@@ -221,6 +221,22 @@ export function statusItems(model: Model): readonly StatusItemDescriptor[] { ret
   assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
 });
 
+test("windows is projected as a launcher-bound descriptor slice", () => {
+  const doc = contractOf(`
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { settingsOpen: boolean; }
+export type Msg = { kind: "open" } | { kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] { return []; }
+`);
+  const helpers = doc.model_helpers as { name: string; returns: unknown }[];
+  assert.deepEqual(helpers.map((helper) => helper.name), ["windows"]);
+  assert.deepEqual(doc.model_unbound, ["windows"]);
+  const structs = (doc.types as { structs: { name: string }[] }).structs.map((record) => record.name);
+  assert.ok(structs.includes("WindowDescriptor"), `structs: ${structs.join(", ")}`);
+});
+
 test("Cmd.fetch accepts a line-stream route with bytes and status arms", () => {
   const doc = contractOf(`
 import { Cmd, asciiBytes } from "@native-sdk/core";

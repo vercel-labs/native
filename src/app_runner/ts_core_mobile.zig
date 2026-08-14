@@ -90,6 +90,9 @@ pub fn initModel() Model {
 }
 
 pub fn mobileOptions() Adapter.Options {
+    if (comptime @hasDecl(core.Model, "windows")) {
+        @compileError("model-declared secondary windows are a desktop shell capability; omit windows(model) from mobile targets");
+    }
     var options: Adapter.Options = .{
         .name = manifest.name,
         .scene = mobile_scene,

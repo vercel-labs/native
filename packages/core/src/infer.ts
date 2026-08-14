@@ -549,6 +549,30 @@ export class IntInference {
           }
         }
       }
+      // `windows(model)` returns host-consumed geometry. Those number slots
+      // are canvas points, so whole-valued descriptors must not accidentally
+      // specialize the canonical WindowDescriptor fields to i64 — another
+      // model may return fractional positions or dimensions through the same
+      // SDK record. Mark the descriptor's immediate number fields as boundary
+      // values, exactly like a host-constructed event record in reverse.
+      if (stmt.name?.text === "windows" && stmt.type) {
+        const returned = this.table.resolveTypeNode(stmt.type);
+        if (returned.k === "slice" && returned.elem.k === "struct") {
+          const descriptor = this.table.structs.get(returned.elem.name);
+          if (descriptor) {
+            for (const f of descriptor.fields) {
+              const numeric = f.type.k === "number" || (f.type.k === "optional" && f.type.inner.k === "number");
+              if (!numeric) continue;
+              const slot = this.slots.get(f.decl);
+              if (slot) {
+                slot.external = true;
+                slot.hostBoundary = true;
+                slot.proven = false;
+              }
+            }
+          }
+        }
+      }
     }
   }
 

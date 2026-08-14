@@ -26,13 +26,13 @@ The end-to-end proof battery lives in the SDK repo (`tests/ts-core/system_monito
 - **`Sub.timer`** — the sampling cadence is declarative: `subscriptions(model)` returns the 2 s timer while the probe has answered and sampling is live; pause reconciles it away, resume re-arms it (and samples eagerly on the same dispatch).
 - **`Cmd.spawn` (collect mode)** — every sampler run delivers its whole stdout on the exit arm; a truncated block routes the err arm and never parses as whole.
 - **`Cmd.now`** — the applied sample's wall-clock stamp is a journaled clock read, so recorded sessions replay the same "sampled at" time.
+- **`windows(model)`** — the standard Settings command and primary+comma shortcut set model state, which declares `src/windows/settings.native`; its `.quit` close routes `monitor.settings.closed` through `commandMsg` and clears the declaration.
 
 ## Where this port still deliberately differs from the Zig system-monitor
 
 Every remaining divergence is a decided posture, listed here on purpose:
 
 - **The OS is probed at runtime, not switched at comptime.** A TS core has no comptime OS, so boot spawns `sysctl -n hw.ncpu hw.memsize`; a clean answer means macOS conventions (vm_stat), falling through to `nproc` means Linux (/proc/meminfo), and both failing is the honest "no sampler for this OS" state — the same empty state, discovered instead of compiled in. The probe also carries the host facts the Zig original fetched in its boot spawn.
-- **No settings window.** Model-declared secondary windows are a `windows_fn` (Zig wiring) channel; the three-file TS app has no wiring tier to declare one. Pause/resume — the settings window's one control — stays on the toolbar, and the `monitor.settings` shortcut is not registered.
 - **Theme comes from app.zon, not a tokens_fn.** The Zig original derives a custom teal/slate "ops room" token set; a TS app owns no tokens_fn, so this port keeps the house register (composed with the live system appearance — light/dark still follows the OS with no core code). Full brand-token fidelity is the register-token tier, out of the three-file shape by design.
 - **CPU numbers live in tenths of a percent, as integers.** The number tier splits integer and float domains, so `%cpu` parses to integer tenths (lossless for ps output, which prints one decimal) and the tile derives its display and sparkline fraction from them. A hypothetical tool printing more decimals would round at the second decimal where the Zig f32 parse would keep it; sort order can tie where sub-tenth values would have ordered.
 - **Display rounding is round-half-up.** `formatBytes` and the percent labels round with integer math; Zig's `{d:.1}`/`{d:.0}` can differ in the last digit on exact halfway ties, which the real samplers do not produce.

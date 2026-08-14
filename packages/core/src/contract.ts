@@ -463,6 +463,7 @@ class ContractEmitter {
     // making every app repeat it in `viewUnbound`.
     if (helperNames.includes("statusItem") && !model.includes("statusItem")) model.push("statusItem");
     if (helperNames.includes("statusItems") && !model.includes("statusItems")) model.push("statusItems");
+    if (helperNames.includes("windows") && !model.includes("windows")) model.push("windows");
     return { model, msg };
   }
 

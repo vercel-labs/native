@@ -12,8 +12,8 @@
 // as Zig) and driven through the real runtime by
 // tests/ts-core/host_e2e_tests.zig.
 
-import { Cmd, Sub, asciiBytes, utf8Bytes } from "@native-sdk/core";
-import { type AudioState, type StatusItemState } from "@native-sdk/core/events";
+import { Cmd, Sub, asciiBytes, utf8Bytes, windowDescriptor } from "@native-sdk/core";
+import { type AudioState, type StatusItemState, type WindowDescriptor } from "@native-sdk/core/events";
 
 export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 
@@ -97,6 +97,7 @@ export interface Model {
   readonly imgRejectAt: number;
   readonly fileTotal: number;
   readonly fileExists: boolean;
+  readonly settingsOpen: boolean;
 }
 
 export type Msg =
@@ -179,7 +180,9 @@ export type Msg =
   | { readonly kind: "credential_delete" }
   | { readonly kind: "open_pty" }
   | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number }
-  | { readonly kind: "store_scan_invalid" };
+  | { readonly kind: "store_scan_invalid" }
+  | { readonly kind: "open_settings" }
+  | { readonly kind: "close_settings" };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -231,6 +234,7 @@ export function initialModel(): [Model, Cmd<Msg>] {
       imgRejectAt: -1,
       fileTotal: 0,
       fileExists: false,
+      settingsOpen: false,
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -545,6 +549,10 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
     case "pty_evt":
       return [{ ...model, status: msg.key }, Cmd.none];
+    case "open_settings":
+      return [{ ...model, settingsOpen: true }, Cmd.none];
+    case "close_settings":
+      return [{ ...model, settingsOpen: false }, Cmd.none];
   }
 }
 
@@ -596,4 +604,18 @@ export function statusItem(model: Model): StatusItemState {
       },
     ],
   };
+}
+
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    title: asciiBytes("Settings"),
+    width: 320,
+    height: 240,
+    resizable: false,
+    closePolicy: model.polling ? "hide" : "quit",
+    onCloseCommand: asciiBytes("core.close-settings"),
+  })];
 }

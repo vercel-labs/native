@@ -31,7 +31,7 @@
 // says so instead of pretending (the same honest empty state, discovered at
 // runtime instead of compiled in).
 
-import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
+import { Cmd, Sub, asciiBytes, windowDescriptor } from "@native-sdk/core";
 import {
   applyTextInputEvent,
   clampedInsertEvent,
@@ -40,7 +40,7 @@ import {
 } from "@native-sdk/core/text";
 // The SDK-provided event records (the shapes markup and the wiring
 // channels match structurally — imported, so no in-file mirror can drift).
-import { type ChromeInsets, type ChromeButtons, type ScrollState } from "@native-sdk/core/events";
+import { type ChromeInsets, type ChromeButtons, type ScrollState, type WindowDescriptor } from "@native-sdk/core/events";
 import {
   concat2,
   concat3,
@@ -227,6 +227,7 @@ export interface Model {
   /// titlebar band.
   readonly chromeLeading: number;
   readonly headerHeight: number;
+  readonly settingsOpen: boolean;
 }
 
 // --------------------------------------------------------------------- msg
@@ -253,6 +254,8 @@ export type Msg =
   /// stays structurally distinct from the f64-classed tick timestamp.
   | { readonly kind: "stamped"; readonly stampedAt: number }
   | { readonly kind: "toggle_sampling" }
+  | { readonly kind: "open_settings" }
+  | { readonly kind: "settings_closed" }
   | { readonly kind: "search_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "table_scrolled"; readonly scroll: ScrollState }
   /// Sort chips: switch to the key, or flip direction when it is active.
@@ -287,6 +290,12 @@ export type Msg =
 /// Window-chrome geometry dispatches the named arm — delivered before the
 /// first view build and again when it changes (fullscreen zeroes it).
 export const chromeMsg = "chrome_changed";
+
+export function commandMsg(name: string): Msg | null {
+  if (name === "monitor.settings") return { kind: "open_settings" };
+  if (name === "monitor.settings.closed") return { kind: "settings_closed" };
+  return null;
+}
 
 /// Update-only state: host-fired Msg arms plus the model fields markup
 /// reads through the exported derived helpers instead of directly.
@@ -330,6 +339,7 @@ export const viewUnbound = [
   "noteClearsOnSample",
   "sampleGeneration",
   "noteStampGeneration",
+  "settingsOpen",
 ] as const;
 
 export function initialModel(): [Model, Cmd<Msg>] {
@@ -365,6 +375,7 @@ export function initialModel(): [Model, Cmd<Msg>] {
       noteStampGeneration: 0,
       chromeLeading: 0,
       headerHeight: HEADER_NATURAL_HEIGHT,
+      settingsOpen: false,
     },
     // The boot probe: macOS conventions first. A clean two-integer answer
     // selects vm_stat sampling and carries the core count + memory total;
@@ -846,6 +857,10 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
         ]),
       ];
     }
+    case "open_settings":
+      return [{ ...model, settingsOpen: true }, Cmd.none];
+    case "settings_closed":
+      return [{ ...model, settingsOpen: false }, Cmd.none];
     case "search_edit":
       return [{ ...model, search: searchApply(model.search, msg.edit) }, Cmd.none];
     case "table_scrolled":
@@ -929,4 +944,18 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
 export function subscriptions(model: Model): Sub<Msg> {
   if (model.phase !== "ready" || model.paused) return Sub.none;
   return Sub.timer("sample", SAMPLE_INTERVAL_MS, "tick");
+}
+
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    title: asciiBytes("Settings"),
+    width: 420,
+    height: 76,
+    resizable: false,
+    closePolicy: "quit",
+    onCloseCommand: asciiBytes("monitor.settings.closed"),
+  })];
 }

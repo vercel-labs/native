@@ -48,8 +48,11 @@
 //! `statusItem(model): StatusItemState` helper similarly owns one complete
 //! menu-bar item through `status_item_fn`; `statusItems(model)` owns a keyed
 //! collection through `status_items_fn`. Both keep shell, presentation, and
-//! menu live. In hand wiring, empty singular shell fields inherit the static
-//! `status_item` options. The two
+//! menu live. `windows(model): readonly WindowDescriptor[]` owns the
+//! model-declared secondary-window set through `windows_fn`; the launcher or
+//! hand wiring supplies the statically compiled `window_view` registry. In
+//! hand wiring, empty singular shell fields inherit the static `status_item`
+//! options. The two
 //! seams the core owns — `update_fx` and
 //! `init_fx` — are stamped by this adapter and must be left null.
 //!
@@ -327,6 +330,7 @@ pub fn TsUiApp(comptime core: type) type {
         var persist_options_store: ?PersistOptions = null;
         var host_call_mux_store: ?HostCallMux = null;
         var lifecycle_store: ?*const fn (event: runtime_core.LifecycleEvent) ?Msg = null;
+        var command_store: ?*const fn (name: []const u8) ?Msg = null;
         var lifecycle_flush_after_update = false;
 
         fn applyCoreOptions(core_options: CoreOptions) void {
@@ -360,6 +364,7 @@ pub fn TsUiApp(comptime core: type) type {
                 @panic("TsUiApp does not support Options.sync: a committed model cannot be mutated in place - echo widget state through on-change/on-scroll Msgs instead");
             }
             var stamped = options;
+            command_store = stamped.on_command;
             lifecycle_store = stamped.on_lifecycle;
             lifecycle_flush_after_update = false;
             stamped.on_lifecycle = lifecycleAdapter;
@@ -399,6 +404,16 @@ pub fn TsUiApp(comptime core: type) type {
                 }
                 comptime validateStatusItemsHelper();
                 stamped.status_items_fn = statusItemsAdapter;
+            }
+            if (comptime @hasDecl(Model, "windows")) {
+                if (options.windows_fn != null) {
+                    @panic("TsUiApp wires windows_fn from the core's windows helper - remove the wiring's windows_fn");
+                }
+                if (options.window_view == null) {
+                    @panic("TsUiApp windows(model) requires a window_view registry - default apps provide src/windows/<label>.native; hand wiring must set Options.window_view");
+                }
+                comptime validateWindowsHelper();
+                stamped.windows_fn = windowsAdapter;
             }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
@@ -563,6 +578,65 @@ pub fn TsUiApp(comptime core: type) type {
                 };
             }
             return scratch.status_items[0..raw_states.len];
+        }
+
+        fn windowsAdapter(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
+            const params = @typeInfo(@TypeOf(Model.windows)).@"fn".params;
+            const raw_windows = if (comptime params.len == 1)
+                model.windows()
+            else
+                model.windows(core.rt.frameAllocator());
+            if (raw_windows.len > scratch.windows.len) return scratch.windows[0..0];
+            for (raw_windows, 0..) |raw_window, index| {
+                const window = if (comptime @typeInfo(@TypeOf(raw_window)) == .pointer) raw_window.* else raw_window;
+                scratch.windows[index] = .{
+                    .label = window.label,
+                    .canvas_label = window.canvasLabel,
+                    .title = window.title,
+                    .width = statusItemFloat(window.width),
+                    .height = statusItemFloat(window.height),
+                    .x = optionalWindowFloat(window.x),
+                    .y = optionalWindowFloat(window.y),
+                    .resizable = window.resizable,
+                    .min_width = statusItemFloat(window.minWidth),
+                    .min_height = statusItemFloat(window.minHeight),
+                    .titlebar = windowTitlebar(window.titlebar),
+                    .transparent = window.transparent,
+                    .always_on_top = window.alwaysOnTop,
+                    .click_through = window.clickThrough,
+                    .activate_on_show = window.activateOnShow,
+                    .allows_fullscreen = window.allowsFullscreen,
+                    .close_policy = windowClosePolicy(window.closePolicy),
+                    .on_close = windowCloseMsg(window.onCloseCommand),
+                };
+            }
+            return scratch.windows[0..raw_windows.len];
+        }
+
+        fn optionalWindowFloat(value: anytype) ?f32 {
+            return if (value) |present| statusItemFloat(present) else null;
+        }
+
+        fn windowTitlebar(value: anytype) @import("app_manifest").WindowTitlebarStyle {
+            const Target = @import("app_manifest").WindowTitlebarStyle;
+            inline for (std.meta.fields(Target)) |field| {
+                if (std.mem.eql(u8, @tagName(value), field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn windowClosePolicy(value: anytype) @import("app_manifest").WindowClosePolicy {
+            const Target = @import("app_manifest").WindowClosePolicy;
+            inline for (std.meta.fields(Target)) |field| {
+                if (std.mem.eql(u8, @tagName(value), field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn windowCloseMsg(command: []const u8) ?Msg {
+            if (command.len == 0) return null;
+            const map = command_store orelse return null;
+            return map(command);
         }
 
         fn statusItemMenuItem(item: anytype) platform.TrayMenuItem {
@@ -785,6 +859,46 @@ pub fn TsUiApp(comptime core: type) type {
             {
                 @compileError(teaching);
             }
+        }
+
+        fn validateWindowsHelper() void {
+            const teaching = "TsUiApp: windows must be exported from core.ts as windows(model: Model): readonly WindowDescriptor[]; import WindowDescriptor from @native-sdk/core/events and construct entries with windowDescriptor(...)";
+            const helper_info = @typeInfo(@TypeOf(Model.windows));
+            if (helper_info != .@"fn") @compileError(teaching);
+            const function = helper_info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type == null or function.params[0].type.? != *const Model) @compileError(teaching);
+            if (function.params.len == 2) {
+                if (function.params[1].type == null or function.params[1].type.? != std.mem.Allocator or
+                    !@hasDecl(core, "rt") or !@hasDecl(core.rt, "frameAllocator")) @compileError(teaching);
+            }
+            const Return = function.return_type orelse @compileError(teaching);
+            const return_info = @typeInfo(Return);
+            if (return_info != .pointer or return_info.pointer.size != .slice or !return_info.pointer.is_const) @compileError(teaching);
+            const Window = statusItemRecordType(return_info.pointer.child, teaching);
+            const info = @typeInfo(Window).@"struct";
+            if (info.fields.len != 18 or !@hasField(Window, "label") or !@hasField(Window, "canvasLabel") or
+                !@hasField(Window, "title") or !@hasField(Window, "width") or !@hasField(Window, "height") or
+                !@hasField(Window, "x") or !@hasField(Window, "y") or !@hasField(Window, "resizable") or
+                !@hasField(Window, "minWidth") or !@hasField(Window, "minHeight") or !@hasField(Window, "titlebar") or
+                !@hasField(Window, "transparent") or !@hasField(Window, "alwaysOnTop") or !@hasField(Window, "clickThrough") or
+                !@hasField(Window, "activateOnShow") or !@hasField(Window, "allowsFullscreen") or
+                !@hasField(Window, "closePolicy") or !@hasField(Window, "onCloseCommand")) @compileError(teaching);
+            if (@FieldType(Window, "label") != []const u8 or @FieldType(Window, "canvasLabel") != []const u8 or
+                @FieldType(Window, "title") != []const u8 or !statusItemNumericType(@FieldType(Window, "width")) or
+                !statusItemNumericType(@FieldType(Window, "height")) or !optionalNumericType(@FieldType(Window, "x")) or
+                !optionalNumericType(@FieldType(Window, "y")) or @FieldType(Window, "resizable") != bool or
+                !statusItemNumericType(@FieldType(Window, "minWidth")) or !statusItemNumericType(@FieldType(Window, "minHeight")) or
+                !statusItemEnumType(@FieldType(Window, "titlebar"), &.{ "standard", "hidden_inset", "hidden_inset_tall" }) or
+                @FieldType(Window, "transparent") != bool or @FieldType(Window, "alwaysOnTop") != bool or
+                @FieldType(Window, "clickThrough") != bool or @FieldType(Window, "activateOnShow") != bool or
+                @FieldType(Window, "allowsFullscreen") != bool or
+                !statusItemEnumType(@FieldType(Window, "closePolicy"), &.{ "quit", "hide" }) or
+                @FieldType(Window, "onCloseCommand") != []const u8) @compileError(teaching);
+        }
+
+        fn optionalNumericType(comptime T: type) bool {
+            const info = @typeInfo(T);
+            return info == .optional and statusItemNumericType(info.optional.child);
         }
 
         fn statusItemNumericType(comptime T: type) bool {
