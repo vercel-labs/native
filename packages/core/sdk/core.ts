@@ -1631,9 +1631,9 @@ export const Cmd = {
     return { op: "stat_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
   },
 
-  /// Delete one file. The ok arm carries no payload. A missing file routes
-  /// the err arm with "not_found"; directories and other OS refusals route
-  /// "io_failed".
+  /// Delete one file. The ok arm carries no payload. A final symlink is
+  /// unlinked without deleting its target. A missing file routes the err arm
+  /// with "not_found"; directories and other OS refusals route "io_failed".
   deleteFile<M extends Msgish>(path: Uint8Array, route: WriteRoute<M>): Cmd<M> {
     return { op: "delete_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
   },

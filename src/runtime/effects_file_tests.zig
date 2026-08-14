@@ -478,6 +478,108 @@ test "real executor deletes a file and reports a later delete as not_found" {
     try std.testing.expectEqual(effects_mod.EffectFileOutcome.not_found, h.app_state.model.last_outcome.?);
 }
 
+test "delete unlinks a final symlink without deleting its target" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "app-data");
+    try tmp.dir.writeFile(io, .{ .sub_path = "app-data/target.bin", .data = "keep me" });
+    try tmp.dir.symLink(io, "target.bin", "app-data/alias.bin", .{});
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+
+    var root_buffer: [256]u8 = undefined;
+    var alias_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}/app-data", .{tmp.sub_path[0..]});
+    const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias.bin", .{root});
+    fx.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = true });
+    fx.deleteFile(.{ .key = 1, .path = alias, .on_result = Fx.fileMsg(.result) });
+    const result = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, result.outcome);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "app-data/alias.bin", .{ .follow_symlinks = false }));
+    const target = try tmp.dir.readFileAlloc(io, "app-data/target.bin", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("keep me", target);
+
+    try tmp.dir.symLink(io, "missing.bin", "app-data/dangling.bin", .{});
+    var dangling_buffer: [256]u8 = undefined;
+    const dangling = try std.fmt.bufPrint(&dangling_buffer, "{s}/dangling.bin", .{root});
+    fx.deleteFile(.{ .key = 2, .path = dangling, .on_result = Fx.fileMsg(.result) });
+    const dangling_result = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, dangling_result.outcome);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "app-data/dangling.bin", .{ .follow_symlinks = false }));
+}
+
+test "filesystem permission deletes an external symlink entry without following it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "target.bin", .data = "keep me too" });
+    try tmp.dir.symLink(io, "target.bin", "alias.bin", .{});
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindFileAccess(.{ .roots = &.{}, .permitted = true, .enforce = true });
+
+    var alias_buffer: [256]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&alias_buffer, ".zig-cache/tmp/{s}/alias.bin", .{tmp.sub_path[0..]});
+    fx.deleteFile(.{ .key = 1, .path = alias, .on_result = Fx.fileMsg(.result) });
+    const result = while (true) {
+        if (fx.takeMsg()) |msg| break msg.result;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    };
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, result.outcome);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "alias.bin", .{ .follow_symlinks = false }));
+    const target = try tmp.dir.readFileAlloc(io, "target.bin", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("keep me too", target);
+}
+
+test "an app-root symlink to an external target still requires filesystem permission" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "app-data");
+    try tmp.dir.createDirPath(io, "outside");
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside/target.bin", .data = "protected" });
+    try tmp.dir.symLink(io, "../outside/target.bin", "app-data/alias.bin", .{});
+
+    const TestMsg = union(enum) { result: effects_mod.EffectFileResult };
+    const Fx = effects_mod.Effects(TestMsg);
+    var fx = Fx.init(std.testing.allocator);
+    defer fx.deinit();
+
+    var root_buffer: [256]u8 = undefined;
+    var alias_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}/app-data", .{tmp.sub_path[0..]});
+    const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias.bin", .{root});
+    fx.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = true });
+    fx.deleteFile(.{ .key = 1, .path = alias, .on_result = Fx.fileMsg(.result) });
+
+    const result = fx.takeMsg().?.result;
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, result.outcome);
+    _ = try tmp.dir.statFile(io, "app-data/alias.bin", .{ .follow_symlinks = false });
+    const target = try tmp.dir.readFileAlloc(io, "outside/target.bin", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("protected", target);
+}
+
 test "real executor cuts over-bound reads with outcome truncated" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});

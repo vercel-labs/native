@@ -6294,15 +6294,13 @@ pub fn Effects(comptime Msg: type) type {
             if (self.file_access_binding == null) self.file_access_binding = binding;
         }
 
-        fn resolvedFileAccess(self: *Self, path: []const u8, create_parents: bool) ?file_access.Resolved {
+        fn resolvedFileAccess(self: *Self, path: []const u8, options: file_access.ResolveOptions) ?file_access.Resolved {
             const binding = self.file_access_binding orelse return .{
                 .path = self.allocator.dupe(u8, path) catch return null,
                 .decision = .allow,
             };
             const io = self.ensureIo() catch return null;
-            var resolved = file_access.resolveForOperation(self.allocator, io, binding, path, .{
-                .create_parents = create_parents,
-            }) catch return null;
+            var resolved = file_access.resolveForOperation(self.allocator, io, binding, path, options) catch return null;
             return switch (resolved.decision) {
                 .allow => resolved,
                 .reject => blk: {
@@ -7050,7 +7048,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .write, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
             self.startFile(options.key, .write, &access, options.bytes, options.on_result);
         }
 
@@ -7065,7 +7063,7 @@ pub fn Effects(comptime Msg: type) type {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
                 return self.rejectFile(options.key, .read, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .read, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{}) orelse return self.rejectFileExternal(options.key, .read, options.on_result);
             self.startFile(options.key, .read, &access, "", options.on_result);
         }
 
@@ -7078,7 +7076,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .append, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .append, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .append, options.on_result);
             self.startFile(options.key, .append, &access, options.bytes, options.on_result);
         }
 
@@ -7088,19 +7086,20 @@ pub fn Effects(comptime Msg: type) type {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
                 return self.rejectFile(options.key, .stat, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .stat, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{}) orelse return self.rejectFileExternal(options.key, .stat, options.on_result);
             self.startFile(options.key, .stat, &access, "", options.on_result);
         }
 
-        /// Delete one file. Absence is explicit (`.not_found`), while a
-        /// directory or another OS refusal is `.io_failed`. The operation
-        /// uses the same worker, key space, path policy, and exactly-one
-        /// result callback as the other one-shot file effects.
+        /// Delete one file. A final symlink is unlinked without deleting its
+        /// target. Absence is explicit (`.not_found`), while a directory or
+        /// another OS refusal is `.io_failed`. The operation uses the same
+        /// worker, key space, path policy, and exactly-one result callback as
+        /// the other one-shot file effects.
         pub fn deleteFile(self: *Self, options: DeleteFileOptions) void {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
                 return self.rejectFile(options.key, .delete, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .delete, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{ .preserve_final_component = true }) orelse return self.rejectFileExternal(options.key, .delete, options.on_result);
             self.startFile(options.key, .delete, &access, "", options.on_result);
         }
 
@@ -7123,7 +7122,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .read_stream, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .read_stream, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{}) orelse return self.rejectFileExternal(options.key, .read_stream, options.on_result);
             const access_io = self.ensureIo() catch unreachable;
             defer access.deinit(self.allocator, access_io);
             if (access.path.len > max_effect_file_path_bytes) return self.rejectFileExternal(options.key, .read_stream, options.on_result);
@@ -7161,7 +7160,7 @@ pub fn Effects(comptime Msg: type) type {
             {
                 return self.rejectFile(options.key, .write_stream_open, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
             const access_io = self.ensureIo() catch unreachable;
             defer access.deinit(self.allocator, access_io);
             if (access.path.len > max_effect_file_path_bytes) return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
