@@ -20,5 +20,17 @@
       <title>A duplicate link is dropped</title>
       <link>https://example.com/blog/typed-clients</link>
     </item>
+    <item>
+      <title>Service deadlines stay explicit</title>
+      <link>https://example.com/blog/service-deadlines</link>
+    </item>
+    <item>
+      <title>Cancellation crosses the boundary</title>
+      <link>https://example.com/blog/cancellation</link>
+    </item>
+    <item>
+      <title>Typed records reach the view</title>
+      <link>https://example.com/blog/typed-records</link>
+    </item>
   </channel>
 </rss>

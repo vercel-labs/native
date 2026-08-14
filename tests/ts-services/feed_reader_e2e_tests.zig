@@ -264,6 +264,14 @@ const Harness = struct {
     fn hasText(self: *Harness, text: []const u8) bool {
         return findTextIn(self.app_state.tree.?.root, text);
     }
+
+    fn findLabel(self: *Harness, label: []const u8) ?canvas.ObjectId {
+        return findLabelIn(self.app_state.tree.?.root, label);
+    }
+
+    fn findKindText(self: *Harness, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
+        return findKindTextIn(self.app_state.tree.?.root, kind, text);
+    }
 };
 
 fn findTextIn(widget: canvas.Widget, text: []const u8) bool {
@@ -272,6 +280,29 @@ fn findTextIn(widget: canvas.Widget, text: []const u8) bool {
         if (findTextIn(child, text)) return true;
     }
     return false;
+}
+
+fn findLabelIn(widget: canvas.Widget, label: []const u8) ?canvas.ObjectId {
+    if (std.mem.eql(u8, widget.semantics.label, label)) return widget.id;
+    for (widget.children) |child| {
+        if (findLabelIn(child, label)) |id| return id;
+    }
+    return null;
+}
+
+fn findKindTextIn(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
+    if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget.id;
+    for (widget.children) |child| {
+        if (findKindTextIn(child, kind, text)) |id| return id;
+    }
+    return null;
+}
+
+fn expectFeedViewportAboveActions(h: *Harness) !void {
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const feed = layout.findById(h.findLabel("Feed items").?).?.frame.normalized();
+    const actions = layout.findById(h.findKindText(.button, "Fetch feed").?).?.frame.normalized();
+    try std.testing.expect(feed.maxY() <= actions.y);
 }
 
 // ------------------------------------------------------------- the loop
@@ -304,15 +335,29 @@ test "refresh fetches the fixture feed and the service returns typed records" {
     const model = Bridge.model();
     try std.testing.expect(model.phase == .ready);
     try std.testing.expectEqualStrings("Native SDK Engineering", model.feedTitle);
-    // Four items discovered, the duplicate link dropped by the service's Map.
-    try std.testing.expectEqual(@as(usize, 3), model.items.len);
-    try std.testing.expectEqual(@as(@FieldType(core.Model, "totalItems"), 4), model.totalItems);
+    // Seven items discovered, the duplicate link dropped by the service's
+    // Map, and the six-item cap fills the scroll viewport.
+    try std.testing.expectEqual(@as(usize, 6), model.items.len);
+    try std.testing.expectEqual(@as(@FieldType(core.Model, "totalItems"), 7), model.totalItems);
     try std.testing.expectEqualStrings("Records & replay for services", model.items[0].title);
     try std.testing.expectEqualStrings("Typed clients from one contract", model.items[1].title);
     try std.testing.expectEqualStrings("Streaming chunks <in order>", model.items[2].title);
+    try std.testing.expectEqualStrings("Typed records reach the view", model.items[5].title);
     try std.testing.expectEqualStrings("https://example.com/blog/typed-clients", model.items[1].link);
     try std.testing.expect(h.hasText("Native SDK Engineering"));
-    try std.testing.expect(h.hasText("3 of 4 items"));
+    try std.testing.expect(h.hasText("6 of 7 items"));
+    try expectFeedViewportAboveActions(h);
+
+    // The declared minimum window remains honest: the results shrink into
+    // the scroll viewport instead of escaping the card into the actions.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(460, 320),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 2_000_000,
+    } });
+    try expectFeedViewportAboveActions(h);
 }
 
 test "a non-200 response lands in the failed state with its status" {

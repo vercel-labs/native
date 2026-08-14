@@ -19,16 +19,18 @@
         </column>
       </if>
       <if test="{ready}">
-        <column gap="10">
+        <column gap="10" grow="1">
           <text size="lg">{feedTitle}</text>
-          <column gap="8">
-            <for each="items" as="item">
-              <column gap="2">
-                <text wrap="true">{item.title}</text>
-                <text size="sm" foreground="text_muted" wrap="false">{item.link}</text>
-              </column>
-            </for>
-          </column>
+          <scroll grow="1" label="Feed items">
+            <column gap="8">
+              <for each="items" as="item">
+                <column gap="2">
+                  <text wrap="true">{item.title}</text>
+                  <text size="sm" foreground="text_muted" wrap="false">{item.link}</text>
+                </column>
+              </for>
+            </column>
+          </scroll>
         </column>
       </if>
     </column>
