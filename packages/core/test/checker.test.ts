@@ -1306,6 +1306,75 @@ export function windows(model: Model): readonly WindowDescriptor[] {
   assert.equal(dynamicLabel.ok, false);
   assert.match(dynamicLabel.diagnostics.map((d) => d.message).join("\n"), /static `asciiBytes/);
 
+  const spreadSpec = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  const common = { canvasLabel: asciiBytes("settings-canvas") };
+  return [windowDescriptor({ label: asciiBytes("settings"), ...common })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(spreadSpec.ok, false);
+  assert.match(spreadSpec.diagnostics.map((d) => d.message).join("\n"), /cannot spread fields after its literal label/);
+
+  const overwrittenLabel = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("missing") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  const base = windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+  return [{ ...base, label: model.label }];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(overwrittenLabel.ok, false);
+  assert.match(overwrittenLabel.diagnostics.map((d) => d.message).join("\n"), /flow directly from `windowDescriptor/);
+
+  const helperOverwrite = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("missing") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function unsafeWindow(model: Model): WindowDescriptor {
+  const base = windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+  return { ...base, label: model.label };
+}
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [unsafeWindow(model)];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(helperOverwrite.ok, false);
+  assert.match(helperOverwrite.diagnostics.map((d) => d.message).join("\n"), /flow directly from `windowDescriptor/);
+
+  const unrelatedConstructor = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("missing") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function unusedWindow(): WindowDescriptor {
+  return windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+}
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [{ ...unusedWindow(), label: model.label }];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(unrelatedConstructor.ok, false);
+  assert.match(unrelatedConstructor.diagnostics.map((d) => d.message).join("\n"), /flow directly from `windowDescriptor/);
+
   const factored = check(`
 import { asciiBytes, windowDescriptor } from "@native-sdk/core";
 import { type WindowDescriptor } from "@native-sdk/core/events";
@@ -1322,6 +1391,25 @@ export function windows(model: Model): readonly WindowDescriptor[] {
 }
 `, { windowViews: ["settings"] });
   assert.equal(factored.ok, true, factored.diagnostics.map((d) => d.message).join("\n"));
+
+  const constAlias = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  const common = { canvasLabel: asciiBytes("settings-canvas") };
+  const window = windowDescriptor({
+    ...common,
+    label: asciiBytes("settings"),
+  });
+  return [window];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(constAlias.ok, true, constAlias.diagnostics.map((d) => d.message).join("\n"));
 
   const namespaced = checkFiles({
     "core.ts": `

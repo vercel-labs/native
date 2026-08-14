@@ -1008,85 +1008,173 @@ export class SubsetChecker {
   private checkWindowViewRegistry(windowsDecl: ts.FunctionDeclaration): void {
     if (this.windowViews === undefined) return;
 
-    const calls: ts.CallExpression[] = [];
-    const visited = new Set<ts.FunctionDeclaration>();
-    const visitFunction = (fn: ts.FunctionDeclaration): void => {
-      if (visited.has(fn)) return;
-      visited.add(fn);
+    type ProducedKind = "collection" | "descriptor";
+    let sawConstructor = false;
+    let productionErrors = 0;
+    const validatingCollections = new Set<ts.FunctionDeclaration>();
+    const validatingDescriptors = new Set<ts.FunctionDeclaration>();
+    const validatedCollections = new Set<ts.FunctionDeclaration>();
+    const validatedDescriptors = new Set<ts.FunctionDeclaration>();
+
+    const unwrap = (expression: ts.Expression): ts.Expression => {
+      let current = expression;
+      while (
+        ts.isParenthesizedExpression(current) ||
+        ts.isAsExpression(current) ||
+        ts.isSatisfiesExpression(current) ||
+        ts.isNonNullExpression(current)
+      ) {
+        current = current.expression;
+      }
+      return current;
+    };
+
+    const reportProduction = (node: ts.Node, kind: ProducedKind): void => {
+      productionErrors += 1;
+      this.report(
+        "NS1033",
+        kind === "collection"
+          ? "Every value returned by `windows` must be an array literal of direct `windowDescriptor(...)` results (factored constructor helpers are fine); copied, spread, or mutable descriptor collections can replace the statically registered label."
+          : "Every window returned by `windows` must flow directly from `windowDescriptor({...})` (or a helper whose own returns do); copying, spreading, or rebuilding a descriptor can replace its statically registered label.",
+        node,
+      );
+    };
+
+    const appFunctionTarget = (call: ts.CallExpression): ts.FunctionDeclaration | null => {
+      if (!ts.isIdentifier(call.expression) && !ts.isPropertyAccessExpression(call.expression)) return null;
+      const target = this.tast.declarationOf(
+        ts.isIdentifier(call.expression) ? call.expression : call.expression.name,
+      );
+      return target && ts.isFunctionDeclaration(target) && this.fileSet.has(target.getSourceFile()) ? target : null;
+    };
+
+    const returnExpressions = (fn: ts.FunctionDeclaration): ts.Expression[] => {
+      const returns: ts.Expression[] = [];
       const visit = (node: ts.Node): void => {
-        if (ts.isCallExpression(node)) {
-          if (this.sdkRootFunctionName(node.expression) === "windowDescriptor") {
-            calls.push(node);
-          } else if (ts.isIdentifier(node.expression) || ts.isPropertyAccessExpression(node.expression)) {
-            // Follow app helpers reached from windows(), including helpers in
-            // imported core modules and namespace-import dot syntax. This
-            // keeps descriptor construction factored without letting an
-            // unrelated windowDescriptor call elsewhere create a false
-            // registry requirement.
-            const target = this.tast.declarationOf(
-              ts.isIdentifier(node.expression) ? node.expression : node.expression.name,
-            );
-            if (target && ts.isFunctionDeclaration(target) && this.fileSet.has(target.getSourceFile())) {
-              visitFunction(target);
-            }
-          }
-        }
-        // A hand-written WindowDescriptor object bypasses the constructor
-        // inventory. Reject it at its contextual type so every possible
-        // descriptor identity remains visible to the static registry proof.
-        if (ts.isObjectLiteralExpression(node)) {
-          const contextual = this.tast.contextualTypeOf(node);
-          if (contextual !== undefined && this.tast.typeToString(contextual) === "WindowDescriptor") {
-            this.report(
-              "NS1033",
-              "Construct model-declared windows with `windowDescriptor({...})`; direct `WindowDescriptor` objects hide their label from the generated view-registry check.",
-              node,
-            );
-          }
+        if (node !== fn && (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node))) return;
+        if (ts.isReturnStatement(node)) {
+          if (node.expression) returns.push(node.expression);
+          return;
         }
         ts.forEachChild(node, visit);
       };
-      visit(fn.body ?? fn);
+      if (fn.body) visit(fn.body);
+      return returns;
     };
-    visitFunction(windowsDecl);
 
-    if (calls.length === 0) {
-      this.report(
-        "NS1033",
-        "`windows` must construct each possible entry with `windowDescriptor({ label: asciiBytes(\"<label>\"), ... })` so the generated launcher can prove its `src/windows/<label>.native` view exists.",
-        windowsDecl.name ?? windowsDecl,
-      );
-      return;
-    }
-
-    for (const call of calls) {
+    const validateConstructor = (call: ts.CallExpression): void => {
+      sawConstructor = true;
       const spec = call.arguments[0];
-      const labelProp = spec && ts.isObjectLiteralExpression(spec)
-        ? spec.properties.find((prop): prop is ts.PropertyAssignment =>
-            ts.isPropertyAssignment(prop) &&
-            ((ts.isIdentifier(prop.name) && prop.name.text === "label") ||
-              (ts.isStringLiteral(prop.name) && prop.name.text === "label")))
-        : undefined;
+      if (!spec || !ts.isObjectLiteralExpression(unwrap(spec))) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A model-declared window must pass an inline object to `windowDescriptor`, with a static `label: asciiBytes(\"<label>\")` property selecting its compiled view.",
+          spec ?? call,
+        );
+        return;
+      }
+      const object = unwrap(spec) as ts.ObjectLiteralExpression;
+      const labelProp = object.properties.find((prop): prop is ts.PropertyAssignment =>
+        ts.isPropertyAssignment(prop) &&
+        ((ts.isIdentifier(prop.name) && prop.name.text === "label") ||
+          (ts.isStringLiteral(prop.name) && prop.name.text === "label")),
+      );
+      const labelIndex = labelProp === undefined ? -1 : object.properties.indexOf(labelProp);
+      if (object.properties.some((property, index) => ts.isSpreadAssignment(property) && index > labelIndex)) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A `windowDescriptor` spec cannot spread fields after its literal label: that spread can replace the identity after the registry check. Move the literal label after every spread.",
+          object,
+        );
+        return;
+      }
       const labelExpr = labelProp?.initializer;
       const labelArg = labelExpr && ts.isCallExpression(labelExpr) &&
           this.sdkRootFunctionName(labelExpr.expression) === "asciiBytes"
         ? labelExpr.arguments[0]
         : undefined;
       if (!labelArg || !ts.isStringLiteral(labelArg)) {
+        productionErrors += 1;
         this.report(
           "NS1033",
           "A model-declared window label must be a static `asciiBytes(\"<label>\")` property inside `windowDescriptor({...})`; that literal selects `src/windows/<label>.native` at build time.",
-          labelProp ?? spec ?? call,
+          labelProp ?? object,
         );
-        continue;
+        return;
       }
       if (!this.windowViews.has(labelArg.text)) {
+        productionErrors += 1;
         this.report(
           "NS1033",
           `Window label \`${labelArg.text}\` has no compiled view; add \`src/windows/${labelArg.text}.native\` or change the descriptor label to an existing root.`,
           labelArg,
         );
       }
+    };
+
+    const validateFunction = (fn: ts.FunctionDeclaration, kind: ProducedKind): void => {
+      const validating = kind === "collection" ? validatingCollections : validatingDescriptors;
+      const validated = kind === "collection" ? validatedCollections : validatedDescriptors;
+      if (validated.has(fn) || validating.has(fn)) return;
+      validating.add(fn);
+      const returns = returnExpressions(fn);
+      if (returns.length === 0) reportProduction(fn.name ?? fn, kind);
+      for (const expression of returns) validateExpression(expression, kind);
+      validating.delete(fn);
+      validated.add(fn);
+    };
+
+    const validateExpression = (raw: ts.Expression, kind: ProducedKind): void => {
+      const expression = unwrap(raw);
+      if (ts.isConditionalExpression(expression)) {
+        validateExpression(expression.whenTrue, kind);
+        validateExpression(expression.whenFalse, kind);
+        return;
+      }
+      if (kind === "collection" && ts.isArrayLiteralExpression(expression)) {
+        for (const element of expression.elements) {
+          if (ts.isSpreadElement(element)) validateExpression(element.expression, "collection");
+          else validateExpression(element, "descriptor");
+        }
+        return;
+      }
+      if (kind === "descriptor" && ts.isIdentifier(expression)) {
+        const declaration = this.tast.declarationOf(expression);
+        if (
+          declaration &&
+          ts.isVariableDeclaration(declaration) &&
+          declaration.initializer &&
+          ts.isVariableDeclarationList(declaration.parent) &&
+          (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+        ) {
+          validateExpression(declaration.initializer, "descriptor");
+          return;
+        }
+      }
+      if (ts.isCallExpression(expression)) {
+        if (kind === "descriptor" && this.sdkRootFunctionName(expression.expression) === "windowDescriptor") {
+          validateConstructor(expression);
+          return;
+        }
+        const helper = appFunctionTarget(expression);
+        if (helper) {
+          validateFunction(helper, kind);
+          return;
+        }
+      }
+      reportProduction(expression, kind);
+    };
+
+    validateFunction(windowsDecl, "collection");
+
+    if (!sawConstructor && productionErrors === 0) {
+      this.report(
+        "NS1033",
+        "`windows` must construct each possible entry with `windowDescriptor({ label: asciiBytes(\"<label>\"), ... })` so the generated launcher can prove its `src/windows/<label>.native` view exists.",
+        windowsDecl.name ?? windowsDecl,
+      );
     }
   }
 
