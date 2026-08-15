@@ -248,7 +248,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 info.stateDescription = widgetStateDescription(node)
             }
-            info.isCheckable = node.role == WIDGET_ROLE_CHECKBOX || node.role == WIDGET_ROLE_SWITCH
+            info.isCheckable = node.role == WIDGET_ROLE_CHECKBOX || node.role == WIDGET_ROLE_RADIO || node.role == WIDGET_ROLE_SWITCH
             info.isChecked = info.isCheckable && widgetValueSelected(node)
             info.isClickable = widgetSupportsAnyAction(node, WIDGET_ACTION_PRESS or WIDGET_ACTION_TOGGLE or WIDGET_ACTION_SELECT)
             info.isEditable = node.role == WIDGET_ROLE_TEXTBOX && (node.flags and WIDGET_FLAG_READ_ONLY) == 0
@@ -347,6 +347,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 WIDGET_ROLE_BUTTON, WIDGET_ROLE_MENUITEM -> "android.widget.Button"
                 WIDGET_ROLE_TEXTBOX -> "android.widget.EditText"
                 WIDGET_ROLE_CHECKBOX -> "android.widget.CheckBox"
+                WIDGET_ROLE_RADIO -> "android.widget.RadioButton"
+                WIDGET_ROLE_RADIOGROUP -> "android.widget.RadioGroup"
                 WIDGET_ROLE_SWITCH -> "android.widget.Switch"
                 WIDGET_ROLE_SLIDER -> "android.widget.SeekBar"
                 WIDGET_ROLE_PROGRESSBAR -> "android.widget.ProgressBar"
@@ -784,6 +786,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val WIDGET_ROLE_SWITCH = 17
         private const val WIDGET_ROLE_SLIDER = 18
         private const val WIDGET_ROLE_PROGRESSBAR = 19
+        private const val WIDGET_ROLE_RADIO = 20
+        private const val WIDGET_ROLE_RADIOGROUP = 21
         private const val WIDGET_FLAG_FOCUSED = 1 shl 0
         private const val WIDGET_FLAG_SELECTED = 1 shl 3
         private const val WIDGET_FLAG_DISABLED = 1 shl 4

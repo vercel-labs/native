@@ -196,7 +196,7 @@ Automation drives the native path honestly: snapshots list every widget's declar
 | `stack`, `panel`, `card` | overlay containers | children stack on top of each other — `gap` can never space them and is a validation error (put a `column`/`row` inside for flow) |
 | `scroll` | scroll_view | wrap multiple children in a `column` inside it |
 | `list`, `grid` | list, grid | vertical stack / cell grid |
-| `tabs`, `toggle-group`, `button-group`, `radio-group`, `breadcrumb`, `pagination` | row containers | children flow horizontally. A `radio-group` is also one logical `radiogroup`: descendant radios at any nesting depth share one Tab stop; arrows and Home/End move focus and selection; selecting one clears the rest of the nearest group scope |
+| `tabs`, `toggle-group`, `button-group`, `radio-group`, `breadcrumb`, `pagination` | row containers | children flow horizontally. Give every `radio-group` an accessible `label`; it is one logical `radiogroup`: descendant radios at any nesting depth share one Tab stop; arrows wrap while Home/End move to the edges, focus and selection move together, and selecting one clears the rest of the nearest group scope |
 | `table` > `table-row` > `table-cell` | table, data_row, data_cell | rows only inside a table, cells only inside a row (for/if wrappers are fine); cells are text leaves, dispatch with `on-press` |
 | `dropdown-menu` | dropdown_menu | vertical menu surface; children are `menu-item`s. `anchor="below\|above"` floats it against its PARENT's frame (see Pickers): late z-pass above the whole tree, window-clipped, auto-flipping at the window edges, zero flow space. Pair with `on-dismiss` |
 | `accordion` | accordion | header via `text` attr; children show while `selected`, dispatch `on-toggle` |

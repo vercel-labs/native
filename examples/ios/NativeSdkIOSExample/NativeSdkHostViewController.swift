@@ -439,7 +439,7 @@ final class NativeSdkHostViewController: UIViewController {
         switch node.role {
         case Int32(NATIVE_SDK_WIDGET_ROLE_BUTTON), Int32(NATIVE_SDK_WIDGET_ROLE_MENUITEM):
             traits.insert(.button)
-        case Int32(NATIVE_SDK_WIDGET_ROLE_CHECKBOX), Int32(NATIVE_SDK_WIDGET_ROLE_SWITCH), Int32(NATIVE_SDK_WIDGET_ROLE_TAB):
+        case Int32(NATIVE_SDK_WIDGET_ROLE_CHECKBOX), Int32(NATIVE_SDK_WIDGET_ROLE_RADIO), Int32(NATIVE_SDK_WIDGET_ROLE_SWITCH), Int32(NATIVE_SDK_WIDGET_ROLE_TAB):
             traits.insert(.button)
         case Int32(NATIVE_SDK_WIDGET_ROLE_SLIDER):
             traits.insert(.adjustable)

@@ -208,6 +208,7 @@ typedef enum {
 
 typedef struct {
     uint64_t id;
+    uint64_t parent_id;
     int role;
     const char *label;
     size_t label_len;

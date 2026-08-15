@@ -118,7 +118,7 @@
     },
     {
       "name": "radio-group",
-      "doc": "Logical radiogroup: descendant radios at any nesting depth share one Tab stop and selection; arrows plus Home/End move focus and selection across the scope."
+      "doc": "Logical radiogroup: give it an accessible label; descendant radios at any nesting depth share one Tab stop and selection, arrows wrap, and Home/End move to the scope edges."
     },
     {
       "name": "tabs",

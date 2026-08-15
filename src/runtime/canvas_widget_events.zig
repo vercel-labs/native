@@ -2701,8 +2701,33 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     }
                 }
                 const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
-                const target = self.views[index].canvasWidgetRovingTabTarget(current_id, direction) orelse return false;
-                const moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                var target = self.views[index].canvasWidgetRovingTabTarget(current_id, direction) orelse return false;
+                var moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                if (!moved and target.id != (current_id orelse 0)) {
+                    // A selected radio may be a valid LOGICAL group entry
+                    // while fully hidden by a fixed clip. The focus setter
+                    // first gave every runtime scroll ancestor a chance to
+                    // reveal it; if it is still unreachable, keep the group
+                    // in the Tab order through a visible radio. When the
+                    // entire group is clipped, continue the one-stop walk
+                    // from the failed entry to the next visible control.
+                    if (self.views[index].canvasWidgetNodeIndexById(target.id)) |target_index| {
+                        if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target_index)) |scope| {
+                            if (canvas_widget_runtime.canvasWidgetRovingTabVisibleEntryTarget(layout, scope)) |visible| {
+                                if (visible.id != target.id) {
+                                    target = visible;
+                                    moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                                }
+                            }
+                        }
+                    }
+                    if (!moved) {
+                        const fallback = self.views[index].canvasWidgetRovingTabTarget(target.id, direction) orelse return false;
+                        if (fallback.id == target.id) return false;
+                        target = fallback;
+                        moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                    }
+                }
                 if (moved and
                     (canvasWidgetTerminalOwnsTabInput(layout, target) or
                         canvasWidgetCodeEditorOwnsTabInput(layout, target)))

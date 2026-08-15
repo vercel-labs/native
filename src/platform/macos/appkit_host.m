@@ -472,6 +472,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) uint32_t actionFlags;
 @property(nonatomic, assign) BOOL canUndo;
 @property(nonatomic, assign) BOOL canRedo;
+@property(nonatomic, assign) NSRect surfaceFrame;
 - (BOOL)emitSetTextAccessibilityValue:(id)value;
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value;
 @end
@@ -667,6 +668,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) NSRange selectedTextRange;
 @property(nonatomic, assign) BOOL interpretedKeyEventEmittedInput;
 @property(nonatomic, strong) NSArray<NSAccessibilityElement *> *widgetAccessibilityElements;
+@property(nonatomic, strong) NSArray<NSAccessibilityElement *> *widgetAccessibilityRootElements;
 @property(nonatomic, strong) NSMutableArray<NativeSdkScrollDriverView *> *scrollDrivers;
 @property(nonatomic, assign) NSPoint wheelGesturePoint;
 @property(nonatomic, assign) BOOL wheelGestureActive;
@@ -745,7 +747,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)updateSurfaceTrackingArea;
 - (void)emitSelectAllTextInputCommand;
 - (void)emitTextInputEventWithKind:(NSInteger)kind text:(NSString *)text compositionCursor:(NSInteger)compositionCursor;
-- (NSAccessibilityElement *)focusedTextAccessibilityElement;
+- (NativeSdkWidgetAccessibilityElement *)focusedTextAccessibilityElement;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action text:(NSString *)text selectedRange:(NSRange)selectedRange hasSelectedRange:(BOOL)hasSelectedRange;
 - (void)setSurfaceCursor:(NSCursor *)cursor;
@@ -3754,7 +3756,7 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 }
 
 - (NSArray *)accessibilityChildren {
-    return self.widgetAccessibilityElements ?: @[];
+    return self.widgetAccessibilityRootElements ?: @[];
 }
 
 - (BOOL)isAvailable {
@@ -5614,11 +5616,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count {
     if (!nodes || count == 0) {
         self.widgetAccessibilityElements = @[];
+        self.widgetAccessibilityRootElements = @[];
         NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
         return;
     }
 
-    NSMutableArray<NSAccessibilityElement *> *elements = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *elements = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<NSNumber *> *parentIds = [NSMutableArray arrayWithCapacity:count];
+    NSMutableDictionary<NSNumber *, NativeSdkWidgetAccessibilityElement *> *elementsById = [NSMutableDictionary dictionaryWithCapacity:count];
     for (NSUInteger index = 0; index < count; index++) {
         const native_sdk_appkit_widget_accessibility_node_t node = nodes[index];
         NSString *label = NativeSdkStringFromBytes(node.label, node.label_len) ?: @"";
@@ -5629,7 +5634,6 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         element.surfaceView = self;
         element.widgetId = node.id;
         element.actionFlags = node.action_flags;
-        element.accessibilityParent = self;
         element.accessibilityRole = NativeSdkAccessibilityRoleForWidgetRole(node.role);
         element.accessibilityIdentifier = [NSString stringWithFormat:@"native-sdk-widget-%llu", node.id];
         element.accessibilityLabel = name;
@@ -5706,10 +5710,46 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             element.accessibilityValueDescription = [stateDescriptions componentsJoinedByString:@", "];
         }
         CGFloat nativeY = self.bounds.size.height - node.y - node.height;
-        element.accessibilityFrameInParentSpace = NSMakeRect(node.x, nativeY, node.width, node.height);
+        element.surfaceFrame = NSMakeRect(node.x, nativeY, node.width, node.height);
+        element.accessibilityFrameInParentSpace = element.surfaceFrame;
         [elements addObject:element];
+        [parentIds addObject:@(node.parent_id)];
+        [elementsById setObject:element forKey:@(node.id)];
+    }
+
+    NSMutableArray<NSAccessibilityElement *> *rootElements = [NSMutableArray arrayWithCapacity:count];
+    NSMutableDictionary<NSNumber *, NSMutableArray<NSAccessibilityElement *> *> *childrenByParentId = [NSMutableDictionary dictionaryWithCapacity:count];
+    for (NSUInteger index = 0; index < elements.count; index++) {
+        NativeSdkWidgetAccessibilityElement *element = elements[index];
+        NSNumber *parentId = parentIds[index];
+        NativeSdkWidgetAccessibilityElement *parent = parentId.unsignedLongLongValue == 0 ? nil : [elementsById objectForKey:parentId];
+        if (parent && parent != element) {
+            element.accessibilityParent = parent;
+            NSRect parentFrame = parent.surfaceFrame;
+            NSRect childFrame = element.surfaceFrame;
+            element.accessibilityFrameInParentSpace = NSMakeRect(
+                childFrame.origin.x - parentFrame.origin.x,
+                childFrame.origin.y - parentFrame.origin.y,
+                childFrame.size.width,
+                childFrame.size.height
+            );
+            NSMutableArray<NSAccessibilityElement *> *children = [childrenByParentId objectForKey:parentId];
+            if (!children) {
+                children = [NSMutableArray array];
+                [childrenByParentId setObject:children forKey:parentId];
+            }
+            [children addObject:element];
+        } else {
+            element.accessibilityParent = self;
+            [rootElements addObject:element];
+        }
+    }
+    for (NSNumber *parentId in childrenByParentId) {
+        NativeSdkWidgetAccessibilityElement *parent = [elementsById objectForKey:parentId];
+        parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];
     }
     self.widgetAccessibilityElements = elements;
+    self.widgetAccessibilityRootElements = rootElements;
     NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
 }
 
@@ -7084,10 +7124,10 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 }
 
 - (NSUInteger)characterIndexForPoint:(NSPoint)point {
-    NSAccessibilityElement *element = [self focusedTextAccessibilityElement];
+    NativeSdkWidgetAccessibilityElement *element = [self focusedTextAccessibilityElement];
     if (!element || !self.window) return 0;
 
-    NSRect frame = element.accessibilityFrameInParentSpace;
+    NSRect frame = element.surfaceFrame;
     if (NSIsEmptyRect(frame)) return 0;
 
     NSPoint windowPoint = [self.window convertPointFromScreen:point];
@@ -7102,10 +7142,10 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 }
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
-    NSAccessibilityElement *element = [self focusedTextAccessibilityElement];
+    NativeSdkWidgetAccessibilityElement *element = [self focusedTextAccessibilityElement];
     NSRect localRect = NSZeroRect;
     if (element) {
-        NSRect frame = element.accessibilityFrameInParentSpace;
+        NSRect frame = element.surfaceFrame;
         NSInteger characterCount = MAX(0, element.accessibilityNumberOfCharacters);
         NSUInteger location = range.location == NSNotFound ? 0 : MIN(range.location, (NSUInteger)characterCount);
         NSUInteger length = range.location == NSNotFound ? 0 : MIN(range.length, (NSUInteger)characterCount - location);
@@ -7128,8 +7168,8 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     return self.window ? [self.window convertRectToScreen:windowRect] : windowRect;
 }
 
-- (NSAccessibilityElement *)focusedTextAccessibilityElement {
-    for (NSAccessibilityElement *element in self.widgetAccessibilityElements ?: @[]) {
+- (NativeSdkWidgetAccessibilityElement *)focusedTextAccessibilityElement {
+    for (NativeSdkWidgetAccessibilityElement *element in self.widgetAccessibilityElements ?: @[]) {
         if (!element.accessibilityFocused) continue;
         if ([element.accessibilityRole isEqualToString:NSAccessibilityTextFieldRole]) return element;
     }

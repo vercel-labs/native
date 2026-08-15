@@ -337,6 +337,7 @@ const AppKitMessageDialogOpts = extern struct {
 
 const AppKitWidgetAccessibilityNode = extern struct {
     id: u64,
+    parent_id: u64,
     role: c_int,
     label: [*]const u8,
     label_len: usize,
@@ -1984,6 +1985,7 @@ fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform_mod.Widget
     for (snapshot.nodes, 0..) |node, index| {
         nodes[index] = .{
             .id = node.id,
+            .parent_id = node.parent_id orelse 0,
             .role = @intFromEnum(node.role),
             .label = node.label.ptr,
             .label_len = node.label.len,

@@ -1621,6 +1621,27 @@ pub fn canvasWidgetRovingTabEntryTarget(layout: canvas.WidgetLayoutTree, scope: 
     return first;
 }
 
+/// The group's best CURRENTLY VISIBLE Tab entry. The ordinary entry
+/// resolver above intentionally admits scroll-clipped logical targets so
+/// focus can reveal them. Callers use this narrower fallback only after a
+/// logical target could not be revealed (for example under a fixed
+/// `clip_content` card), keeping the group reachable without committing
+/// an invisible focus id.
+pub fn canvasWidgetRovingTabVisibleEntryTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
+    if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    const scope_depth = layout.nodes[scope.index].depth;
+    var first: ?canvas.WidgetFocusTarget = null;
+    var index = scope.index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
+        if (layout.nodes[index].widget.kind != .radio) continue;
+        if (canvasWidgetRadioGroupScopeIndex(layout, index) != scope.index) continue;
+        const target = layout.focusTargetById(layout.nodes[index].widget.id) orelse continue;
+        if (first == null) first = target;
+        if (canvasWidgetSelectableSelected(layout.nodes[index].widget)) return target;
+    }
+    return first;
+}
+
 pub fn canvasWidgetRadioGroupDirectionalFocusTarget(
     layout: canvas.WidgetLayoutTree,
     focused: canvas.WidgetFocusTarget,
@@ -1659,20 +1680,27 @@ fn canvasWidgetRadioGroupAdjacentRadio(
 ) ?canvas.WidgetFocusTarget {
     if (scope_index >= layout.nodes.len) return null;
     const scope_depth = layout.nodes[scope_index].depth;
+    var first: ?canvas.WidgetFocusTarget = null;
+    var last: ?canvas.WidgetFocusTarget = null;
     var previous: ?canvas.WidgetFocusTarget = null;
     var saw_focused = false;
     var index = scope_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
         if (index == focused_index) {
-            if (direction == .previous) return previous;
+            if (direction == .previous and previous != null) return previous;
             saw_focused = true;
             continue;
         }
         const target = canvasWidgetRadioGroupFocusTarget(layout, scope_index, index) orelse continue;
-        if (saw_focused) return target;
-        previous = target;
+        if (first == null) first = target;
+        last = target;
+        if (direction == .next and saw_focused) return target;
+        if (!saw_focused) previous = target;
     }
-    return null;
+    return switch (direction) {
+        .previous => last,
+        .next => first,
+    };
 }
 
 pub fn canvasWidgetHorizontalGroupDirection(direction: canvas.WidgetFocusDirection) ?CanvasWidgetGroupDirection {

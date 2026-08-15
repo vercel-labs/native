@@ -40,6 +40,30 @@ test "an unlabeled button is a missing-label finding; text or a label clears it"
     try std.testing.expectEqual(@as(usize, 0), clean.total);
 }
 
+test "a radio group needs its own accessible name" {
+    var nodes: [16]canvas.WidgetLayoutNode = undefined;
+    var storage: [8]a11y_audit.A11yAuditFinding = undefined;
+
+    const unnamed = Widget{ .kind = .column, .children = &.{
+        .{ .id = 2, .kind = .radio_group, .children = &.{
+            .{ .id = 3, .kind = .radio, .text = "Default" },
+            .{ .id = 4, .kind = .radio, .text = "Compact" },
+        } },
+    } };
+    const issues = try auditTree(unnamed, window, &nodes, &storage);
+    try std.testing.expectEqual(@as(usize, 1), issues.total);
+    try std.testing.expectEqual(a11y_audit.A11yAuditRuleKind.missing_label, issues.findings[0].rule);
+
+    const named = Widget{ .kind = .column, .children = &.{
+        .{ .id = 2, .kind = .radio_group, .semantics = .{ .label = "Density" }, .children = &.{
+            .{ .id = 3, .kind = .radio, .text = "Default" },
+            .{ .id = 4, .kind = .radio, .text = "Compact" },
+        } },
+    } };
+    const clean = try auditTree(named, window, &nodes, &storage);
+    try std.testing.expectEqual(@as(usize, 0), clean.total);
+}
+
 test "a text field's value is not its name; a placeholder or label is" {
     var nodes: [16]canvas.WidgetLayoutNode = undefined;
     var storage: [8]a11y_audit.A11yAuditFinding = undefined;

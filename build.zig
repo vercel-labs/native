@@ -1458,6 +1458,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkTextNavigationNeedsRawKeyEvent(event)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSEventModifierFlagCommand | NSEventModifierFlagOption" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-widget-accessibility-hierarchy", "Verify AppKit preserves retained-widget accessibility parentage", &.{
+        .{ .path = "src/platform/macos/appkit_host.h", .pattern = "uint64_t parent_id;" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = ".parent_id = node.parent_id orelse 0" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityParent = parent;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return self.widgetAccessibilityRootElements ?: @[];" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-appearance-bridge", "Verify AppKit reports system light and dark appearance changes", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "effectiveAppearance" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityDisplayShouldReduceMotion" },
@@ -1813,13 +1820,17 @@ pub fn build(b: *std.Build) void {
     });
     addFileContainsCheckStep(b, file_contains_checker, mobile_examples_step, "test-example-mobile-widget-abi", "Verify mobile examples use stable widget ABI lookups", &.{
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_viewport_state_t" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIOGROUP = 21" },
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_app_scroll" },
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_app_set_text_measure" },
+        .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIOGROUP = 21" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "native_sdk_app_set_text_measure" },
         .{ .path = "examples/mobile-canvas/ios/native_sdk_app.h", .pattern = "native_sdk_app_set_text_measure" },
         .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "native_sdk_app_widget_semantics_by_id" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIO" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "native_sdk_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "nativeScroll(nativeApp" },
+        .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "WIDGET_ROLE_RADIOGROUP -> \"android.widget.RadioGroup\"" },
         .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "nativeWidgetSemanticsByIdFields" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk_jni.c", .pattern = "native_sdk_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk_jni.c", .pattern = "native_sdk_app_scroll" },

@@ -140,12 +140,14 @@ fn frameHasArea(frame: geometry.RectF) bool {
 // ---------------------------------------------------------- missing label
 
 /// Roles whose announcement is useless without a name: the control set a
-/// screen reader user OPERATES. Text/status/group/image roles either
-/// carry their name as content or degrade without blocking (images are
-/// the markup lint's warning); progressbars are display-only.
+/// screen reader user OPERATES, plus a radiogroup whose name supplies the
+/// shared question for its otherwise individually named choices. Other
+/// text/status/group/image roles either carry their name as content or
+/// degrade without blocking (images are the markup lint's warning);
+/// progressbars are display-only.
 fn roleNeedsName(role: WidgetRole) bool {
     return switch (role) {
-        .button, .textbox, .checkbox, .radio, .switch_control, .slider, .menuitem, .tab, .link, .treeitem, .listitem => true,
+        .button, .textbox, .checkbox, .radio, .radiogroup, .switch_control, .slider, .menuitem, .tab, .link, .treeitem, .listitem => true,
         else => false,
     };
 }
