@@ -1481,6 +1481,73 @@ test "user scroll offsets survive rebuilds until the source offset changes" {
     try std.testing.expectEqual(@as(f32, 18), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(1).?.widget.value);
 }
 
+test "anchored surfaces relayout against restored scroll geometry across rebuilds" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-scroll-anchored-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 100),
+    });
+
+    const menu_items = [_]canvas.Widget{.{ .id = 5, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 0, 24), .text = "One" }};
+    const dropdown = canvas.Widget{
+        .id = 4,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 140, 50),
+        .layout = .{ .anchor = .{} },
+        .children = &menu_items,
+    };
+    const wrap_children = [_]canvas.Widget{
+        .{ .id = 3, .kind = .text, .text = "Files" },
+        dropdown,
+    };
+    const scroll_children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .stack, .frame = geometry.RectF.init(0, 140, 160, 28), .children = &wrap_children },
+        .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(0, 320, 160, 20) },
+    };
+    const source_root = canvas.Widget{ .id = 1, .kind = .scroll_view, .children = &scroll_children };
+
+    var nodes: [6]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(source_root, geometry.RectF.init(0, 0, 180, 100), &nodes));
+
+    // Bring the trigger near the top. The source rebuild still lays it at
+    // y=140 before the retained offset returns; the anchored pass must run
+    // again and place the full-height menu below the final y=10 trigger.
+    try harness.runtime.dispatchAutomationCommand(app, "widget-wheel canvas 1 130");
+    var rebuild_nodes: [6]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(source_root, geometry.RectF.init(0, 0, 180, 100), &rebuild_nodes));
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    var trigger = retained.findById(2).?.frame;
+    var surface = retained.findById(4).?.frame;
+    try std.testing.expectEqual(@as(f32, 10), trigger.y);
+    try std.testing.expectEqual(trigger.maxY() + 4, surface.y);
+    try std.testing.expectEqual(@as(f32, 50), surface.height);
+
+    // Move the trigger near the bottom and rebuild again. Now the final
+    // geometry must choose the other side and preserve the authored height.
+    try harness.runtime.dispatchAutomationCommand(app, "widget-wheel canvas 1 -60");
+    var flipped_nodes: [6]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(source_root, geometry.RectF.init(0, 0, 180, 100), &flipped_nodes));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    trigger = retained.findById(2).?.frame;
+    surface = retained.findById(4).?.frame;
+    try std.testing.expectEqual(@as(f32, 70), trigger.y);
+    try std.testing.expectEqual(trigger.y - 4 - surface.height, surface.y);
+    try std.testing.expectEqual(@as(f32, 50), surface.height);
+}
+
 test "engine wheel scrolls a windowed virtual list against its declared extent" {
     const TestApp = struct {
         fn app(self: *@This()) App {

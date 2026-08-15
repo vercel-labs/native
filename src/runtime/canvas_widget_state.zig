@@ -119,7 +119,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // the OS scroller's overscrolled offset instead of clamping it
             // and force-pushing the clamp into the live bounce (visible
             // jitter). Non-driver platforms clamp exactly as before.
-            canvas_widget_runtime.clampCanvasWidgetLayoutScrollOffsets(reconciled_nodes[0..reconciled_layout.nodes.len], null);
+            try canvas_widget_runtime.clampCanvasWidgetLayoutScrollOffsets(reconciled_nodes[0..reconciled_layout.nodes.len], null, tokens);
             // Runtime-owned tooltip visibility normalizes BEFORE the
             // diff: the retained tree carries the intent machine's
             // hidden stamps on anchored tooltips while the source

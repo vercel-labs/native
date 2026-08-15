@@ -1105,6 +1105,10 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
         previous_source_scroll_entries,
     );
     revealNewlySelectedTabs(previous, staged_nodes);
+    // Scroll restoration/clamping moved the trigger frames after the
+    // source layout's anchored pass. Re-run that pass against final
+    // geometry so flip, window clamp, and intrinsic size are all current.
+    try canvas.relayoutAnchoredChildren(staged_nodes, tokens);
 
     const index_scratch = canvas_widget_reconcile_index_scratch.get();
     index_scratch.controls.build(previous_control_states);
@@ -1151,7 +1155,7 @@ pub fn applyCanvasWidgetSourceScrollSemantics(
     }
 }
 
-pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState) void {
+pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState, tokens: canvas.DesignTokens) anyerror!void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view) continue;
         // Legacy virtualized containers are model-driven: the source
@@ -1234,6 +1238,7 @@ pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, st
             }
         }
     }
+    try canvas.relayoutAnchoredChildren(nodes, tokens);
 }
 
 pub fn clampCanvasWidgetLayoutTextOffsets(nodes: []canvas.WidgetLayoutNode, tokens: canvas.DesignTokens) void {

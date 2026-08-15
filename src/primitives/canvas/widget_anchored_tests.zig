@@ -182,6 +182,44 @@ test "leaf trigger kinds lay out their anchored children" {
     try std.testing.expect(layout.findById(4) != null);
 }
 
+test "anchored relayout recomputes placement from a translated trigger frame" {
+    const menu_items = [_]Widget{.{ .id = 5, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 0, 24), .text = "One" }};
+    const dropdown = Widget{
+        .id = 4,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 140, 50),
+        .layout = .{ .anchor = .{} },
+        .children = &menu_items,
+    };
+    const wrap_children = [_]Widget{
+        .{ .id = 3, .kind = .text, .text = "Files" },
+        dropdown,
+    };
+    const scroll_children = [_]Widget{
+        .{ .id = 2, .kind = .stack, .frame = geometry.RectF.init(0, 140, 160, 28), .children = &wrap_children },
+        .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(0, 320, 160, 20) },
+    };
+    const scroll = Widget{ .id = 1, .kind = .scroll_view, .children = &scroll_children };
+    var nodes: [6]WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 100), &nodes);
+
+    // Model the post-layout scroll restore: content moved, while the old
+    // anchored frame merely rode the translation and retained its stale
+    // pre-scroll clamp.
+    for (nodes[1..layout.nodes.len]) |*node| {
+        node.frame.y -= 130;
+        node.widget.frame = node.frame;
+    }
+    try canvas.relayoutAnchoredChildren(nodes[0..layout.nodes.len], .{});
+
+    const relaid = canvas.WidgetLayoutTree{ .nodes = nodes[0..layout.nodes.len] };
+    const trigger = relaid.findById(2).?.frame;
+    const surface = relaid.findById(4).?.frame;
+    try std.testing.expectEqual(@as(f32, 10), trigger.y);
+    try std.testing.expectEqual(trigger.maxY() + 4, surface.y);
+    try std.testing.expectEqual(@as(f32, 50), surface.height);
+}
+
 /// The shared fixture for z-order/clip tests: a scroll pane whose content
 /// holds the trigger + anchored dropdown, and a LATER sibling panel the
 /// dropdown overlaps. In-tree paint order would put the panel above the

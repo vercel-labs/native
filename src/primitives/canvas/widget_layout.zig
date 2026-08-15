@@ -326,6 +326,52 @@ fn layoutAnchoredChildren(
     }
 }
 
+/// Re-run every anchored-child pass IN PLACE after a runtime geometry
+/// reconciliation moved laid frames (retained scroll restoration, an
+/// engine clamp, or another post-layout adjustment). Each laid parent still
+/// carries its source children until adoption, so this recovers the authored
+/// surface size and re-applies flip/window clamping against the parent's
+/// FINAL frame instead of translating a surface that was clamped against a
+/// stale pre-reconcile anchor. The original layout already charged the node
+/// and anchored-surface budgets; this pass rewrites the same pre-order slots
+/// and allocates none.
+pub fn relayoutAnchoredChildren(output: []WidgetLayoutNode, tokens: DesignTokens) Error!void {
+    if (output.len == 0) return;
+    // The layout sequence puts a parent's anchored children after every
+    // in-flow descendant. Walk directly to those anchored roots instead of
+    // searching every parent's subtree: rebuilds with no open surface stay
+    // O(nodes), and an open surface pays only for the bounded anchored
+    // subtrees that are actually replayed.
+    var anchored_start: usize = 1;
+    while (anchored_start < output.len) {
+        const anchored = output[anchored_start];
+        if (anchored.widget.layout.anchor == null) {
+            anchored_start += 1;
+            continue;
+        }
+        const parent_index = anchored.parent_index orelse {
+            anchored_start += 1;
+            continue;
+        };
+        const parent = output[parent_index];
+        var len = anchored_start;
+        try layoutAnchoredChildren(
+            parent.widget.children,
+            windowControlsClearedContent(parent.frame, parent.widget, tokens),
+            parent_index,
+            parent.depth,
+            output,
+            &len,
+            tokens,
+        );
+        // Replaying one anchored root lays every anchored sibling belonging
+        // to that parent, plus any nested anchored descendants. Resume at
+        // the first untouched node. A malformed retained tree whose source
+        // has no matching anchored child still makes forward progress.
+        anchored_start = if (len > anchored_start) len else anchored_start + 1;
+    }
+}
+
 /// Resolved frame of an anchored floating widget: sized from its explicit
 /// frame or intrinsic content (`stretch` widens to at least the anchor's
 /// width), placed on the preferred side of the anchor rect — flipping to

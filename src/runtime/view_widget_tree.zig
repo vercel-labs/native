@@ -302,9 +302,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 self.widget_layout_node_count += 1;
             }
 
-            clampCanvasWidgetLayoutScrollOffsets(
+            try clampCanvasWidgetLayoutScrollOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
                 self.widget_scroll_states[0..self.widget_layout_node_count],
+                self.widget_tokens,
             );
             clampCanvasWidgetLayoutTextOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
