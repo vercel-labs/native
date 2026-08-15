@@ -4798,6 +4798,151 @@ test "declaredWidgetDragDropRecord accepts safe live drag fields and rejects uns
     }));
 }
 
+const PressModel = struct { rowId: i64 = 7 };
+
+const PressMsg = union(enum) {
+    // The authored payload plus the four booleans the runtime fills.
+    select: struct { id: i64, shift: bool, control: bool, alt: bool, super: bool },
+    // The payload-less form.
+    clear: struct { shift: bool, control: bool, alt: bool, super: bool },
+    // An ordinary arm, to prove the existing path is untouched.
+    plain: i64,
+};
+
+const press_markup_source =
+    \\<column>
+    \\  <button on-press="select:{rowId}">Select</button>
+    \\  <button on-press="clear">Clear</button>
+    \\  <button on-press="plain:{rowId}">Plain</button>
+    \\</column>
+;
+
+test "on-press fills a press arm's modifiers from the click and leaves other arms alone" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = PressModel{};
+
+    const PressMarkup = markup_view.MarkupView(PressModel, PressMsg);
+    var view = try PressMarkup.init(arena, press_markup_source);
+    var ui = canvas.Ui(PressMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const select_button = tree.root.children[0];
+    const clear_button = tree.root.children[1];
+    const plain_button = tree.root.children[2];
+
+    // The authored binding is in place and the modifiers start false, so a
+    // plain click behaves exactly as it did before this channel existed.
+    const plain_click = tree.msgForPointerClick(select_button.id, .up, 1).?;
+    try testing.expectEqual(@as(i64, 7), plain_click.select.id);
+    try testing.expect(!plain_click.select.shift);
+    try testing.expect(!plain_click.select.super);
+
+    // A modified click fills exactly what was held, and never disturbs the
+    // authored payload.
+    const modified = tree.msgForPointerClickModified(
+        select_button.id,
+        .up,
+        1,
+        .{ .shift = true, .super = true },
+    ).?;
+    try testing.expectEqual(@as(i64, 7), modified.select.id);
+    try testing.expect(modified.select.shift);
+    try testing.expect(modified.select.super);
+    try testing.expect(!modified.select.control);
+    try testing.expect(!modified.select.alt);
+
+    // The payload-less form carries modifiers alone.
+    const cleared = tree.msgForPointerClickModified(
+        clear_button.id,
+        .up,
+        1,
+        .{ .control = true },
+    ).?;
+    try testing.expect(cleared.clear.control);
+    try testing.expect(!cleared.clear.shift);
+
+    // An ordinary arm is untouched by the injector.
+    const plain = tree.msgForPointerClickModified(
+        plain_button.id,
+        .up,
+        1,
+        .{ .shift = true },
+    ).?;
+    try testing.expectEqual(@as(i64, 7), plain.plain);
+}
+
+test "declaredWidgetPressRecord accepts the modifier shapes and rejects near misses" {
+    // The payload-carrying form: four modifier booleans plus the one
+    // authored field, whatever the app named it.
+    try testing.expect(markup_view.declaredWidgetPressRecord(struct {
+        id: i64,
+        shift: bool,
+        control: bool,
+        alt: bool,
+        super: bool,
+    }));
+    // The payload-less form: modifiers only.
+    try testing.expect(markup_view.declaredWidgetPressRecord(struct {
+        shift: bool,
+        control: bool,
+        alt: bool,
+        super: bool,
+    }));
+    // A missing modifier is an ordinary record, not a press arm.
+    try testing.expect(!markup_view.declaredWidgetPressRecord(struct {
+        id: i64,
+        shift: bool,
+        control: bool,
+        alt: bool,
+    }));
+    // Modifiers must be booleans: a numeric near-miss would silently take
+    // the injection path and write the wrong type.
+    try testing.expect(!markup_view.declaredWidgetPressRecord(struct {
+        id: i64,
+        shift: u1,
+        control: bool,
+        alt: bool,
+        super: bool,
+    }));
+    // Two authored fields are ambiguous — which one does the binding fill?
+    try testing.expect(!markup_view.declaredWidgetPressRecord(struct {
+        id: i64,
+        other: i64,
+        shift: bool,
+        control: bool,
+        alt: bool,
+        super: bool,
+    }));
+    // The ordinary single-field payload keeps the path it has today.
+    try testing.expect(!markup_view.declaredWidgetPressRecord(struct { id: i64 }));
+}
+
+test "pressPayloadFieldName names the authored field and nothing else" {
+    try testing.expectEqualStrings("id", markup_view.pressPayloadFieldName(struct {
+        id: i64,
+        shift: bool,
+        control: bool,
+        alt: bool,
+        super: bool,
+    }).?);
+    // Field order does not decide it; the modifier vocabulary does.
+    try testing.expectEqualStrings("rowKey", markup_view.pressPayloadFieldName(struct {
+        shift: bool,
+        control: bool,
+        rowKey: []const u8,
+        alt: bool,
+        super: bool,
+    }).?);
+    try testing.expect(markup_view.pressPayloadFieldName(struct {
+        shift: bool,
+        control: bool,
+        alt: bool,
+        super: bool,
+    }) == null);
+}
+
 test "valueArmClass classifies exactly the value-carrying arm shapes" {
     try testing.expect(markup_view.valueArmClass(f32) == .identity);
     try testing.expect(markup_view.valueArmClass(f64) == .float);

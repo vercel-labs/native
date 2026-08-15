@@ -297,6 +297,51 @@ fn isDragPhaseNumber(comptime T: type) bool {
     };
 }
 
+/// The keyboard modifiers a press-carrying Msg arm declares. Named once
+/// so the predicate, the injector, and the contract all agree on the
+/// vocabulary.
+pub const press_modifier_field_names = [_][]const u8{ "shift", "control", "alt", "super" };
+
+/// A markup `on-press` / `on-double-press` Msg payload that also wants the
+/// modifiers held at click time. The authored binding fills its own field
+/// (`on-press="select:{row.id}"`); the runtime fills the four booleans, the
+/// way `on-drag` fills phase and geometry around an authored `sourceId`.
+///
+/// Shape: the four modifier booleans, plus AT MOST one other field — the
+/// authored payload, whatever the app named it. Zero other fields is the
+/// payload-less form (`on-press="clear"` on an arm that only wants to know
+/// which modifiers were down). Requiring the four names keeps this
+/// unambiguous against ordinary record payloads, and keeps a plain
+/// `{ id: number }` arm on exactly the path it takes today.
+pub fn declaredWidgetPressRecord(comptime T: type) bool {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |s| s,
+        else => return false,
+    };
+    if (info.fields.len != press_modifier_field_names.len and
+        info.fields.len != press_modifier_field_names.len + 1) return false;
+    inline for (press_modifier_field_names) |name| {
+        if (!@hasField(T, name)) return false;
+        if (@FieldType(T, name) != bool) return false;
+    }
+    return true;
+}
+
+/// The authored payload field of a press record, or null for the
+/// payload-less form. The press predicate has already established that at
+/// most one field falls outside the modifier vocabulary.
+pub fn pressPayloadFieldName(comptime T: type) ?[]const u8 {
+    const info = @typeInfo(T).@"struct";
+    inline for (info.fields) |field| {
+        comptime var is_modifier = false;
+        inline for (press_modifier_field_names) |name| {
+            if (comptime std.mem.eql(u8, field.name, name)) is_modifier = true;
+        }
+        if (!is_modifier) return field.name;
+    }
+    return null;
+}
+
 /// A mirror of the RETIRED one-axis scroll state — `{offset, velocity,
 /// viewport_extent, content_extent}` in either spelling. Recognized only
 /// to fail with a teaching that names the new per-axis fields, so an app

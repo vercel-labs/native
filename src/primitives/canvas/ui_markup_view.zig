@@ -2165,6 +2165,22 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                         }
                         return @unionInit(MsgT, field.name, {});
                     }
+                    // A press-modifier arm carries the four booleans the
+                    // runtime fills at dispatch, so the authored binding
+                    // sets its own field and the rest start false.
+                    if (comptime reflect.declaredWidgetPressRecord(field.type)) {
+                        var payload: field.type = std.mem.zeroes(field.type);
+                        if (comptime reflect.pressPayloadFieldName(field.type)) |payload_name| {
+                            if (expression.payload.len == 0) {
+                                return self.failMsg(node, "message requires a payload");
+                            }
+                            const bound = try self.evalBinding(scope, node, expression.payload, true);
+                            @field(payload, payload_name) = try self.coerce(@FieldType(field.type, payload_name), node, bound);
+                        } else if (expression.payload.len > 0) {
+                            return self.failMsg(node, "message does not take a payload");
+                        }
+                        return @unionInit(MsgT, field.name, payload);
+                    }
                     if (expression.payload.len == 0) {
                         return self.failMsg(node, "message requires a payload");
                     }
@@ -2647,6 +2663,8 @@ pub const declaredScrollStateRecord = reflect.declaredScrollStateRecord;
 pub const declaredTerminalStateRecord = reflect.declaredTerminalStateRecord;
 pub const declaredLegacyScrollStateRecord = reflect.declaredLegacyScrollStateRecord;
 pub const declaredWidgetDragDropRecord = reflect.declaredWidgetDragDropRecord;
+pub const declaredWidgetPressRecord = reflect.declaredWidgetPressRecord;
+pub const pressPayloadFieldName = reflect.pressPayloadFieldName;
 pub const valueArmClass = reflect.valueArmClass;
 pub const sliceElement = reflect.sliceElement;
 pub const isItemFn = reflect.isItemFn;

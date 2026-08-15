@@ -65,6 +65,7 @@ native automate screenshot inbox-canvas
 native automate screenshot inbox-canvas 2
 native automate widget-action canvas 2 press
 native automate widget-click canvas 3
+native automate widget-click canvas 3 cmd   # modified click: cmd, shift, cmd+shift
 native automate widget-hold canvas 3
 native automate widget-context-press canvas 3
 native automate widget-drag canvas 4 0.25 0.82

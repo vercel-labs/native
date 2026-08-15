@@ -2347,6 +2347,23 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 }
                 return @unionInit(MsgT, field.name, {});
             }
+            // A press-modifier arm carries the four booleans the runtime
+            // fills at dispatch, so the authored binding sets its own field
+            // and the rest start false.
+            if (comptime interpreter.declaredWidgetPressRecord(field.type)) {
+                const payload_name = comptime interpreter.pressPayloadFieldName(field.type);
+                comptime {
+                    if (payload_name == null and expression.payload.len > 0) fail(node, "message does not take a payload");
+                    if (payload_name != null and expression.payload.len == 0) fail(node, "message requires a payload");
+                }
+                var payload: field.type = std.mem.zeroes(field.type);
+                if (comptime payload_name) |name| {
+                    const press_variant = comptime pathVariant(node, entries, expression.payload, true);
+                    const press_value = bindingValue(node, entries, expression.payload, ui, model, scope, true);
+                    @field(payload, name) = coerce(@FieldType(field.type, name), node, press_variant, ui, press_value);
+                }
+                return @unionInit(MsgT, field.name, payload);
+            }
             comptime {
                 if (expression.payload.len == 0) fail(node, "message requires a payload");
             }

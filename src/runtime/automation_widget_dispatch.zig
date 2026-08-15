@@ -13,6 +13,7 @@ const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.z
 
 const AutomationWidgetAction = automation_commands.AutomationWidgetAction;
 const AutomationWidgetTarget = automation_commands.AutomationWidgetTarget;
+const AutomationWidgetClick = automation_commands.AutomationWidgetClick;
 const AutomationProvenanceTarget = automation_commands.AutomationProvenanceTarget;
 const AutomationWidgetWheel = automation_commands.AutomationWidgetWheel;
 const AutomationWidgetKey = automation_commands.AutomationWidgetKey;
@@ -63,7 +64,15 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             };
         }
 
-        pub fn dispatchAutomationWidgetClick(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
+        pub fn dispatchAutomationWidgetClick(self: *Runtime, app: runtime_api.App(Runtime), click: AutomationWidgetClick) anyerror!void {
+            const target = click.target;
+            const modifiers = platform.ShortcutModifiers{
+                .shift = click.modifiers.shift,
+                .control = click.modifiers.control,
+                .option = click.modifiers.option,
+                .command = click.modifiers.command,
+                .primary = click.modifiers.primary,
+            };
             const view_index = try automationWidgetTargetViewIndex(self, target);
             const point = try automationWidgetAimPoint(self, view_index, target.id);
             const window_id = self.views[view_index].window_id;
@@ -94,6 +103,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .x = point.x,
                 .y = point.y,
                 .button = 0,
+                .modifiers = modifiers,
             } });
             try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = window_id,
@@ -103,6 +113,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .x = point.x,
                 .y = point.y,
                 .button = 0,
+                .modifiers = modifiers,
             } });
             try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
             click_batch_active = false;
