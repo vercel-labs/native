@@ -352,6 +352,60 @@ test "escape from an unrelated focused widget falls back to the topmost mounted 
     try std.testing.expect(!fixture.app_state.model.switcher_open);
 }
 
+test "outside click dismisses an anchored surface opened from a NON-focusable trigger" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.text, "Files").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.switcher_open);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    try fixture.click(geometry.PointF.init(360, 280));
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.switcher_dismissals);
+    try std.testing.expect(!fixture.app_state.model.switcher_open);
+    try std.testing.expect(fixture.widgetIdByText(.menu_item, "Sibling") == null);
+}
+
+test "outside click falls back from unrelated focus to the mounted anchored surface" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.text, "Files").?;
+    try fixture.clickWidget(trigger_id);
+    const select_id = fixture.widgetIdByText(.select, "Repo").?;
+    var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} focus", .{ canvas_label, select_id });
+    try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, focus_command);
+    try std.testing.expectEqual(select_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    try fixture.click(geometry.PointF.init(360, 280));
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.switcher_dismissals);
+    try std.testing.expect(!fixture.app_state.model.switcher_open);
+}
+
+test "inside and trigger clicks do not outside-dismiss a non-focusable anchored surface" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.text, "Files").?;
+    try fixture.clickWidget(trigger_id);
+    const item_id = fixture.widgetIdByText(.menu_item, "Sibling").?;
+
+    // The menu item is inside the surface. Its ordinary Msg fires, but
+    // outside dismissal does not race it or close the surface.
+    try fixture.clickWidget(item_id);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.crumb_presses);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.switcher_dismissals);
+    try std.testing.expect(fixture.app_state.model.switcher_open);
+
+    // The trigger stack owns its toggle gesture: it closes exactly once,
+    // with no preceding dismissal Msg.
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(!fixture.app_state.model.switcher_open);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.switcher_dismissals);
+}
+
 test "anchored picker: click outside dismisses as a Msg; clicking the trigger toggles exactly once" {
     const fixture = try Fixture.create();
     defer fixture.destroy();

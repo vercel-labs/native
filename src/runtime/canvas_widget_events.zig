@@ -2526,7 +2526,6 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return 0;
             if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return 0;
             const focused_id = self.views[index].canvas_widget_focused_id;
-            if (focused_id == 0) return 0;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const dismissal = try self.views[index].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, pointer_event.route) orelse return 0;

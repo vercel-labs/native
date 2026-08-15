@@ -809,13 +809,19 @@ test "a declared context menu presents as the anchored fallback surface on prese
     try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
     try std.testing.expect(!try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
 
-    // Reopen and dismiss (Escape/outside-click/automation all land on
-    // the same dismissal machinery): the surface closes, no Msg fires.
+    // Reopen and click outside. The fallback was opened from a typically
+    // non-focusable secondary-click target, so no focused ancestry is
+    // available to find it; the whole-view anchored fallback must still
+    // dismiss it. Its internal open state closes and no app Msg fires.
     try harness.runtime.dispatchAutomationCommand(app, context_press);
-    const reopened = app_state.tree.?.context_menu_fallback orelse return error.TestUnexpectedResult;
-    var dismiss_buffer: [96]u8 = undefined;
-    const dismiss = try std.fmt.bufPrint(&dismiss_buffer, "widget-action {s} {d} dismiss", .{ canvas_label, reopened.surface_id });
-    try harness.runtime.dispatchAutomationCommand(app, dismiss);
+    _ = app_state.tree.?.context_menu_fallback orelse return error.TestUnexpectedResult;
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = 360,
+        .y = 280,
+    } });
     try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
     try std.testing.expect(!try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
     try std.testing.expectEqual(@as(u32, 1), app_state.model.deleted);

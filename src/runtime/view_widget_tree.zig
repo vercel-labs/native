@@ -553,8 +553,20 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// double-cover those and leave the menu beneath it floating
         /// after the user clicked away.
         pub fn dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId, route: []const canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetSurfaceDismissal {
-            const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .interactive) orelse return null;
+            const focused_surface_index = if (focused_id != 0)
+                if (self.canvasWidgetNodeIndexById(focused_id)) |focused_index|
+                    canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .interactive)
+                else
+                    null
+            else
+                null;
+            // A non-focusable trigger (text/icon/stack) can open an
+            // anchored menu while leaving no focus behind, and focus may
+            // also live in an unrelated branch. Match Escape's deliberate
+            // whole-view fallback, scoped to interactive surfaces so the
+            // tooltip intent machine keeps owning tooltip dismissal.
+            const surface_index = focused_surface_index orelse
+                canvasWidgetTopmostAnchoredSurfaceIndexInScope(self, .interactive) orelse return null;
             if (self.canvasWidgetRouteDescendsFromIndex(route, surface_index)) return null;
             // Clicking the ANCHOR region of an anchored surface (the
             // trigger, or the stack that wraps trigger + surface) is the
@@ -950,10 +962,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// subtrees are skipped: a surface inside a hidden branch is not
         /// on screen and must not swallow Escape.
         pub fn canvasWidgetTopmostAnchoredDismissibleIndex(self: *const RuntimeView) ?usize {
+            return canvasWidgetTopmostAnchoredSurfaceIndexInScope(self, .any);
+        }
+
+        fn canvasWidgetTopmostAnchoredSurfaceIndexInScope(self: *const RuntimeView, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             var found: ?usize = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
-                if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) continue;
+                if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (canvasWidgetNodeHiddenInTree(self, index)) continue;
                 found = index;
             }
