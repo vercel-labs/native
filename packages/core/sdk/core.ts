@@ -249,6 +249,9 @@
 //                                "Open" consequence; also restores a
 //                                minimized window. An unknown label is a
 //                                no-op.
+//   Cmd.navigateWebView(label, url)
+//                                navigate a declared child WebView in the
+//                                main window (fire-and-forget).
 //   Cmd.hideWindow(label)        order a live window out while retaining
 //                                its views; showWindow is the inverse.
 //   Cmd.setDockPresence(visible) show or remove the app from the macOS
@@ -1344,6 +1347,7 @@ export type Cmd<M extends Msgish> =
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
+  | { readonly op: "webview_navigate"; readonly label: string; readonly url: Uint8Array }
   | { readonly op: "window_hide"; readonly label: string }
   | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
@@ -1997,6 +2001,15 @@ export const Cmd = {
   /// labels are declarations.
   showWindow(label: string): Cmd<never> {
     return { op: "window_show", label };
+  },
+
+  /// Navigate a declared child WebView in the main window. The runtime
+  /// validates the label, rejects the main WebView, and applies the same
+  /// navigation origin policy used by declarative WebView updates. The
+  /// command is fire-and-forget; invalid or denied requests do not crash
+  /// the update loop. Passing the current URL again forces a reload.
+  navigateWebView(label: string, url: Uint8Array): Cmd<never> {
+    return { op: "webview_navigate", label, url };
   },
 
   /// Hide a live window without closing it. Its views and native identity
