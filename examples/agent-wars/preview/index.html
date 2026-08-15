@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent preview</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body, #preview { width: 100%; height: 100%; margin: 0; }
+      body { overflow: hidden; background: white; }
+      #empty {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 32px;
+        color: #737373;
+        font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        text-align: center;
+      }
+      iframe {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: white;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="preview"><div id="empty">The completed preview will appear here.</div></div>
+    <script>
+      (() => {
+        const slot = new URLSearchParams(location.search).get("slot") === "B" ? "B" : "A";
+        const baseUrl = `http://127.0.0.1:43110/preview/${slot}`;
+        const root = document.querySelector("#preview");
+        let displayedVersion = 0;
+        let loadingVersion = 0;
+
+        function showVersion(value) {
+          const version = Number(value);
+          if (!Number.isSafeInteger(version) || version <= displayedVersion || version === loadingVersion) return;
+
+          loadingVersion = version;
+          const frame = document.createElement("iframe");
+          frame.title = `Completed model ${slot} preview`;
+          frame.sandbox = "allow-scripts allow-forms allow-modals allow-popups";
+          frame.style.visibility = "hidden";
+          frame.src = `${baseUrl}/site?run=${version}`;
+          frame.addEventListener("load", () => {
+            frame.style.visibility = "visible";
+            root.replaceChildren(frame);
+            displayedVersion = version;
+            loadingVersion = 0;
+          }, { once: true });
+          root.append(frame);
+        }
+
+        async function checkVersion() {
+          try {
+            const response = await fetch(`${baseUrl}/version`, { cache: "no-store" });
+            if (response.ok) showVersion((await response.json()).version);
+          } catch {
+            // The bundled page starts before the coordinator and retries.
+          }
+        }
+
+        void checkVersion();
+        setInterval(checkVersion, 1000);
+      })();
+    </script>
+  </body>
+</html>

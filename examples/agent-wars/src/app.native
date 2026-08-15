@@ -1,0 +1,78 @@
+<!-- Agent Wars keeps all controls and progress native-rendered. The two child
+     WebViews occupy the fixed preview panel rectangles declared in app.zon;
+     the TypeScript core navigates them to the sidecar viewer when it starts. -->
+<column padding="16" gap="12" background="background">
+  <row height="64" gap="12" cross="stretch">
+    <textarea grow="1" text="{taskText}" placeholder="Describe the UI both models should build…" on-input="task_edit" on-submit="compare_or_stop" disabled="{runActive}" label="Shared task" />
+    <if test="{runActive}">
+      <button width="112" variant="destructive" on-press="compare_or_stop" disabled="{actionDisabled}" label="Stop comparison">Stop</button>
+    </if>
+    <else>
+      <button width="112" variant="primary" icon="play" on-press="compare_or_stop" disabled="{actionDisabled}" label="Compare models">Compare</button>
+    </else>
+  </row>
+
+  <row grow="1" gap="12">
+    <column grow="1" gap="8">
+      <stack height="36">
+        <combobox height="36" grow="1" text="{modelAText}" placeholder="provider/model" on-input="model_a_edit" on-press="open_a_picker" expanded="{aPickerOpen}" disabled="{runActive}" label="Model A" />
+        <if test="{aPickerOpen}">
+          <!-- Eight choices in two horizontal rows. The layout reserves the
+               64px below the field before the platform WebView starts, so
+               every item receives real pointer clicks. The editable field
+               accepts all other ids. -->
+          <dropdown-menu height="64" padding="0" gap="0" anchor="below" anchor-alignment="stretch" on-dismiss="close_a_picker" label="Model A options">
+            <row height="32" gap="0">
+              <for each="modelOptionsTop" as="option" key="id">
+                <menu-item grow="1" size="sm" on-press="pick_a:{option.id}">{option.label}</menu-item>
+              </for>
+            </row>
+            <row height="32" gap="0">
+              <for each="modelOptionsBottom" as="option" key="id">
+                <menu-item grow="1" size="sm" on-press="pick_a:{option.id}">{option.label}</menu-item>
+              </for>
+            </row>
+          </dropdown-menu>
+        </if>
+      </stack>
+      <row height="24" gap="7" cross="center" label="Model A status">
+        <if test="{aRunning}"><spinner width="15" height="15" label="Running" /></if>
+        <if test="{aReady}"><icon name="check-circle" width="15" height="15" foreground="success" /></if>
+        <if test="{aFailed}"><icon name="x-circle" width="15" height="15" foreground="destructive" /></if>
+        <if test="{aIdle}"><icon name="circle-dot" width="15" height="15" foreground="text_muted" /></if>
+        <text size="sm" foreground="text_muted">{aStatus}</text>
+      </row>
+      <spacer height="28" />
+      <panel grow="1" background="surface_subtle" border-color="border" radius="lg" label="Model A preview" />
+    </column>
+
+    <column grow="1" gap="8">
+      <stack height="36">
+        <combobox height="36" grow="1" text="{modelBText}" placeholder="provider/model" on-input="model_b_edit" on-press="open_b_picker" expanded="{bPickerOpen}" disabled="{runActive}" label="Model B" />
+        <if test="{bPickerOpen}">
+          <dropdown-menu height="64" padding="0" gap="0" anchor="below" anchor-alignment="stretch" on-dismiss="close_b_picker" label="Model B options">
+            <row height="32" gap="0">
+              <for each="modelOptionsTop" as="option" key="id">
+                <menu-item grow="1" size="sm" on-press="pick_b:{option.id}">{option.label}</menu-item>
+              </for>
+            </row>
+            <row height="32" gap="0">
+              <for each="modelOptionsBottom" as="option" key="id">
+                <menu-item grow="1" size="sm" on-press="pick_b:{option.id}">{option.label}</menu-item>
+              </for>
+            </row>
+          </dropdown-menu>
+        </if>
+      </stack>
+      <row height="24" gap="7" cross="center" label="Model B status">
+        <if test="{bRunning}"><spinner width="15" height="15" label="Running" /></if>
+        <if test="{bReady}"><icon name="check-circle" width="15" height="15" foreground="success" /></if>
+        <if test="{bFailed}"><icon name="x-circle" width="15" height="15" foreground="destructive" /></if>
+        <if test="{bIdle}"><icon name="circle-dot" width="15" height="15" foreground="text_muted" /></if>
+        <text size="sm" foreground="text_muted">{bStatus}</text>
+      </row>
+      <spacer height="28" />
+      <panel grow="1" background="surface_subtle" border-color="border" radius="lg" label="Model B preview" />
+    </column>
+  </row>
+</column>

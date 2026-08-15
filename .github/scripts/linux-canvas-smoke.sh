@@ -42,6 +42,14 @@ set -u
 # Accessibility is not what this smoke tests.
 export GTK_A11Y="${GTK_A11Y:-none}"
 
+# Allocate the display with xvfb-run when the runner does not provide one.
+# Re-exec the whole smoke script (rather than only the app) so the app,
+# xdotool, and xwininfo all use the same DISPLAY. This also avoids depending
+# on Xvfb's -displayfd support, which is not consistent across runner images.
+if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null 2>&1; then
+  exec xvfb-run -a --server-args="-screen 0 1280x800x24" "$0" "$@"
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 app_dir="$repo_root/examples/ui-inbox"
 snap="$app_dir/.zig-cache/native-sdk-automation/snapshot.txt"
@@ -128,18 +136,25 @@ assert_no_webkit() {
 echo "== native-only ELF audit ok"
 
 # ---- launch ---------------------------------------------------------------
-# The script owns its Xvfb (instead of wrapping the app in xvfb-run) so
-# the xdotool step below shares the app's display. -displayfd picks a
-# free display number, the modern equivalent of xvfb-run -a's probing.
-display_file="$(mktemp)"
-Xvfb -displayfd 4 -screen 0 1280x800x24 4>"$display_file" &
-xvfb_pid=$!
-for _ in $(seq 1 100); do
-  [ -s "$display_file" ] && break
-  sleep 0.1
-done
-[ -s "$display_file" ] || fail "Xvfb never reported a display number"
-export DISPLAY=":$(cat "$display_file")"
+# The normal CI path reaches this point with DISPLAY set by xvfb-run. Keep a
+# direct-Xvfb fallback for local environments that have Xvfb but not the
+# wrapper, while retaining the same display-sharing behavior.
+if [ -z "${DISPLAY:-}" ]; then
+  display_file="$(mktemp)"
+  xvfb_log="$(mktemp)"
+  Xvfb -displayfd 4 -screen 0 1280x800x24 4>"$display_file" 2>"$xvfb_log" &
+  xvfb_pid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$display_file" ] && break
+    sleep 0.1
+  done
+  if [ ! -s "$display_file" ]; then
+    echo "-- Xvfb stderr:"
+    sed 's/^/  /' "$xvfb_log" 2>/dev/null
+    fail "Xvfb never reported a display number"
+  fi
+  export DISPLAY=":$(cat "$display_file")"
+fi
 echo "== Xvfb on $DISPLAY"
 
 cd "$app_dir" || fail "missing $app_dir"
