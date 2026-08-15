@@ -329,13 +329,28 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         pub fn dispatchAutomationWidgetKeyInput(self: *Runtime, app: runtime_api.App(Runtime), key: AutomationWidgetKey) anyerror!void {
             const view_index = try automationGpuSurfaceViewIndexByLabel(self, key.view_label);
             try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
+            const timestamp_ns = automationInputTimestampNs();
             try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .kind = .key_down,
-                .timestamp_ns = automationInputTimestampNs(),
+                .timestamp_ns = timestamp_ns,
                 .key = key.key,
                 .text = key.text,
+                .modifiers = .{
+                    .shift = key.modifiers.shift,
+                    .control = key.modifiers.control,
+                    .option = key.modifiers.option,
+                    .command = key.modifiers.command,
+                    .primary = key.modifiers.primary,
+                },
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .key_up,
+                .timestamp_ns = timestamp_ns,
+                .key = key.key,
                 .modifiers = .{
                     .shift = key.modifiers.shift,
                     .control = key.modifiers.control,
