@@ -330,7 +330,18 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 .set_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_set_composition, action.text),
                 .commit_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_commit_composition, ""),
                 .cancel_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_cancel_composition, ""),
-                .select => try AutomationWidgetMethods(Runtime).selectAutomationCanvasWidget(self, index, action.id),
+                .select => {
+                    const node_index = self.views[index].canvasWidgetNodeIndexById(action.id) orelse return error.InvalidCommand;
+                    if (self.views[index].widget_layout_nodes[node_index].widget.kind == .radio) {
+                        // Radio selection is activation, not an echo-only
+                        // retained-state write: drive the same Space path
+                        // as keyboard and pointer input so a documented
+                        // `on_change` handler updates the app model too.
+                        try AutomationWidgetMethods(Runtime).dispatchAutomationWidgetKey(self, app, index, action.id, "space");
+                    } else {
+                        try AutomationWidgetMethods(Runtime).selectAutomationCanvasWidget(self, index, action.id);
+                    }
+                },
                 .drag => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetDrag(self, app, index, action.id, action.text),
                 .drop_files => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetFileDrop(self, app, index, action.id, action.text),
                 .dismiss => try AutomationWidgetMethods(Runtime).dismissAutomationCanvasWidget(self, app, index, action.id),

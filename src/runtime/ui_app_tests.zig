@@ -70,6 +70,43 @@ fn counterOptions() CounterApp.Options {
     };
 }
 
+const RadioModel = struct {
+    choice: u8 = 0,
+    change_count: u32 = 0,
+};
+
+const RadioMsg = union(enum) {
+    choose_first,
+    choose_second,
+};
+
+const RadioApp = ui_app_model.UiApp(RadioModel, RadioMsg);
+
+fn radioUpdate(model: *RadioModel, msg: RadioMsg) void {
+    model.choice = switch (msg) {
+        .choose_first => 0,
+        .choose_second => 1,
+    };
+    model.change_count += 1;
+}
+
+fn radioView(ui: *RadioApp.Ui, model: *const RadioModel) RadioApp.Ui.Node {
+    return ui.el(.radio_group, .{ .semantics = .{ .label = "Plan" } }, .{
+        ui.el(.radio, .{ .text = "Free", .checked = model.choice == 0, .on_change = .choose_first }, .{}),
+        ui.el(.radio, .{ .text = "Pro", .checked = model.choice == 1, .on_change = .choose_second }, .{}),
+    });
+}
+
+fn radioOptions() RadioApp.Options {
+    return .{
+        .name = "ui-app-radio",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = radioUpdate,
+        .view = radioView,
+    };
+}
+
 const software_counter_views = [_]app_manifest.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .software },
 };
@@ -2368,6 +2405,41 @@ fn installCounterApp(harness: anytype, app: core.App) !void {
         .timestamp_ns = 1_000_000,
         .nonblank = true,
     } });
+}
+
+test "radio accessibility selection dispatches change once per retained transition" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(RadioApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = RadioApp.init(std.heap.page_allocator, .{}, radioOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+
+    const pro_id = findWidgetIdByText(app_state.tree.?, .radio, "Pro").?;
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, canvas_label, .{
+        .id = pro_id,
+        .action = .select,
+    });
+    try std.testing.expectEqual(@as(u8, 1), app_state.model.choice);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.change_count);
+    try std.testing.expect((try harness.runtime.canvasWidgetLayout(1, canvas_label)).findById(pro_id).?.widget.state.selected);
+
+    // AX selection, pointer activation, and Space all still activate the
+    // radio, but an already-selected control has no new `on_change` edge.
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, canvas_label, .{
+        .id = pro_id,
+        .action = .select,
+    });
+    var command_buffer: [96]u8 = undefined;
+    const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, pro_id });
+    try harness.runtime.dispatchAutomationCommand(app, click);
+    try harness.runtime.dispatchAutomationCommand(app, "widget-key counter-canvas space");
+    try std.testing.expectEqual(@as(u8, 1), app_state.model.choice);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.change_count);
 }
 
 test "the fragment watch reloads a compiled fragment embedded in a Zig view" {

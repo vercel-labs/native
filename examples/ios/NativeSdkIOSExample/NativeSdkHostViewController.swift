@@ -359,16 +359,54 @@ final class NativeSdkHostViewController: UIViewController {
     private func refreshWidgetAccessibility() {
         let semantics = widgetSemanticsSnapshot()
         statusLabel.accessibilityValue = "Accessible items: \(semantics.count)"
-        widgetAccessibilityElements = semantics.map { node in
+        var elementsById: [UInt64: WidgetAccessibilityElement] = [:]
+        var nodesById: [UInt64: WidgetSemantics] = [:]
+        var elements: [WidgetAccessibilityElement] = []
+        elements.reserveCapacity(semantics.count)
+        for node in semantics {
             let element = WidgetAccessibilityElement(accessibilityContainer: webView, owner: self, node: node)
+            element.isAccessibilityElement = true
             element.accessibilityIdentifier = "native-sdk-widget-\(node.id)"
             element.accessibilityLabel = node.label.isEmpty ? node.text : node.label
             element.accessibilityValue = widgetAccessibilityValue(node)
             element.accessibilityFrameInContainerSpace = node.bounds
             element.accessibilityTraits = widgetAccessibilityTraits(node)
-            return element
+            elements.append(element)
+            elementsById[node.id] = element
+            nodesById[node.id] = node
         }
-        webView.accessibilityElements = widgetAccessibilityElements.isEmpty ? nil : widgetAccessibilityElements as [Any]
+
+        var roots: [WidgetAccessibilityElement] = []
+        var childrenByParentId: [UInt64: [WidgetAccessibilityElement]] = [:]
+        for (node, element) in zip(semantics, elements) {
+            guard node.parentId != 0,
+                  let parent = elementsById[node.parentId],
+                  let parentNode = nodesById[node.parentId] else {
+                roots.append(element)
+                continue
+            }
+            element.accessibilityContainer = parent
+            element.accessibilityFrameInContainerSpace = CGRect(
+                x: node.bounds.minX - parentNode.bounds.minX,
+                y: node.bounds.minY - parentNode.bounds.minY,
+                width: node.bounds.width,
+                height: node.bounds.height
+            )
+            childrenByParentId[node.parentId, default: []].append(element)
+        }
+        for (parentId, children) in childrenByParentId {
+            guard let parent = elementsById[parentId] else { continue }
+            parent.accessibilityElements = children as [Any]
+            parent.accessibilityContainerType = .semanticGroup
+            // A radiogroup is context for its descendants, not a separate
+            // stop that hides them. VoiceOver can now announce the group's
+            // label while navigating its individual radio buttons.
+            if nodesById[parentId]?.role == Int32(NATIVE_SDK_WIDGET_ROLE_RADIOGROUP) {
+                parent.isAccessibilityElement = false
+            }
+        }
+        widgetAccessibilityElements = elements.map { $0 as UIAccessibilityElement }
+        webView.accessibilityElements = roots.isEmpty ? nil : roots as [Any]
     }
 
     private func widgetAccessibilityValue(_ node: WidgetSemantics) -> String? {

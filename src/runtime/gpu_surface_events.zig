@@ -362,7 +362,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // activation (checkbox/toggle state), not only app Msgs and
                     // commands. Geometry controls applied their live resize on
                     // move; a terminal drag owes no release mutation.
-                    if (!widget_drag_terminal) try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event.*);
+                    if (!widget_drag_terminal) try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event);
                     try CanvasWidgetEventMethods().updateCanvasWidgetInteractionFromPointer(self, pointer_event.*);
                     // The text pass may stamp a caret/selection or clear
                     // edit onto the event for the app dispatch below.
@@ -494,7 +494,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // armed/shown tooltip before the control mutation and
                 // app dispatch observe the input.
                 try CanvasWidgetEventMethods().updateCanvasTooltipIntentForKeyboardActivation(self, keyboard_event.*);
-                try CanvasWidgetEventMethods().updateCanvasWidgetControlFromKeyboard(self, keyboard_event.*);
+                try CanvasWidgetEventMethods().updateCanvasWidgetControlFromKeyboard(self, keyboard_event);
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, keyboard_event);
             }
             // An IME sequence belongs to whoever it STARTED over: a

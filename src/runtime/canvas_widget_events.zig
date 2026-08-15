@@ -2450,7 +2450,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             return true;
         }
 
-        pub fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
+        pub fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: *CanvasWidgetPointerEvent) anyerror!void {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
 
@@ -2461,6 +2461,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // one gesture. For controls hit directly (checkbox, slider,
             // chip) both resolve to themselves — behavior is unchanged.
             const resolved_pressed_id = canvasWidgetResolvedPressedId(self, index, self.views[index].canvas_widget_pressed_id);
+            const radio_selection = pointer_event.pointer.phase == .up and resolved_pressed_id != 0 and radio: {
+                const hit = pointer_event.press_target orelse break :radio false;
+                break :radio hit.kind == .radio and
+                    hit.id == resolved_pressed_id and
+                    hit.bounds.normalized().containsPoint(pointer_event.pointer.point);
+            };
             const toggle_animation = self.views[index].canvasWidgetToggleAnimationForPointer(
                 pointer_event.pointer,
                 pointer_event.press_target,
@@ -2470,9 +2476,11 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 pointer_event.pointer,
                 pointer_event.press_target,
                 resolved_pressed_id,
-            ) orelse return;
+            );
+            if (radio_selection) pointer_event.pointer.radio_selection_changed = dirty != null;
+            const dirty_bounds = dirty orelse return;
             if (toggle_animation) |animation| try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).scheduleCanvasWidgetToggleAnimation(self, index, animation);
-            if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
+            if (canvasDirtyRegionForView(self.views[index].frame, dirty_bounds)) |dirty_region| {
                 self.invalidateFor(.state, dirty_region);
             } else {
                 self.invalidateFor(.state, self.views[index].frame);
@@ -2480,18 +2488,27 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
         }
 
-        pub fn updateCanvasWidgetControlFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
+        pub fn updateCanvasWidgetControlFromKeyboard(self: *Runtime, keyboard_event: *CanvasWidgetKeyboardEvent) anyerror!void {
             const index = runtimeFindViewIndex(self, keyboard_event.window_id, keyboard_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
             const target = keyboard_event.target orelse return;
 
+            const radio_selection = if (target.kind == .radio)
+                if (canvas.widgetKeyboardControlIntent(self.views[index].widget_layout_nodes[target.index].widget, keyboard_event.keyboard)) |intent|
+                    intent.kind == .select
+                else
+                    false
+            else
+                false;
             const toggle_animation = self.views[index].canvasWidgetToggleAnimationForKeyboard(target.id, keyboard_event.keyboard);
-            const dirty = try self.views[index].applyCanvasWidgetControlKeyboard(target.id, keyboard_event.keyboard) orelse return;
+            const dirty = try self.views[index].applyCanvasWidgetControlKeyboard(target.id, keyboard_event.keyboard);
+            if (radio_selection) keyboard_event.keyboard.radio_selection_changed = dirty != null;
+            const dirty_bounds = dirty orelse return;
             if (toggle_animation) |animation| try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).scheduleCanvasWidgetToggleAnimation(self, index, animation);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             if (target.kind == .scroll_view) try reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, null);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
-            if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
+            if (canvasDirtyRegionForView(self.views[index].frame, dirty_bounds)) |dirty_region| {
                 self.invalidateFor(.state, dirty_region);
             } else {
                 self.invalidateFor(.state, self.views[index].frame);

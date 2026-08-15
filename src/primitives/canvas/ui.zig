@@ -1409,6 +1409,10 @@ pub fn Ui(comptime Msg: type) type {
             /// widget resolves through the engine's semantic intent model
             /// (press, then toggle, then select) to the matching handler.
             pub fn msgForPointer(self: Tree, target_id: ObjectId, phase: canvas.WidgetPointerPhase) ?Msg {
+                return self.msgForPointerSelection(target_id, phase, null);
+            }
+
+            fn msgForPointerSelection(self: Tree, target_id: ObjectId, phase: canvas.WidgetPointerPhase, radio_selection_changed: ?bool) ?Msg {
                 if (phase != .up) return null;
                 const widget = self.findWidget(target_id) orelse return null;
                 // A radio press is selection, regardless of which legacy
@@ -1418,7 +1422,8 @@ pub fn Ui(comptime Msg: type) type {
                 // an explicitly stamped on_toggle action first.
                 if (widget.kind == .radio) {
                     const intent = canvas.widgetSemanticControlIntent(widget, .select) orelse return null;
-                    return self.msgForIntent(target_id, intent);
+                    _ = intent;
+                    return self.msgForRadioSelection(target_id, radio_selection_changed);
                 }
                 const semantic_actions = [_]canvas.WidgetSemanticAction{ .press, .toggle, .select };
                 for (semantic_actions) |action| {
@@ -1439,7 +1444,18 @@ pub fn Ui(comptime Msg: type) type {
                 if (phase == .up and click_count == 2) {
                     if (self.msgFor(target_id, .double_press)) |msg| return msg;
                 }
-                return self.msgForPointer(target_id, phase);
+                return self.msgForPointerSelection(target_id, phase, null);
+            }
+
+            /// Runtime pointer dispatch with the retained radio-selection
+            /// outcome preserved. Direct tests and consumers can keep using
+            /// `msgForPointerClick`; the runtime uses this form so reselecting
+            /// an already-checked radio does not synthesize `on_change`.
+            pub fn msgForPointerEvent(self: Tree, target_id: ObjectId, pointer: canvas.WidgetPointerEvent) ?Msg {
+                if (pointer.phase == .up and pointer.click_count == 2) {
+                    if (self.msgFor(target_id, .double_press)) |msg| return msg;
+                }
+                return self.msgForPointerSelection(target_id, pointer.phase, pointer.radio_selection_changed);
             }
 
             /// Typed dispatch for keyboard events: engine control intents
@@ -1465,6 +1481,10 @@ pub fn Ui(comptime Msg: type) type {
                     if (self.msgFor(target_id, .submit)) |msg| return msg;
                 }
                 if (canvas.widgetKeyboardControlIntent(widget, keyboard)) |intent| {
+                    if (widget.kind == .radio and intent.kind == .select) {
+                        if (self.msgForRadioSelection(target_id, keyboard.radio_selection_changed)) |msg| return msg;
+                        return null;
+                    }
                     if (self.msgForIntent(target_id, intent)) |msg| return msg;
                 }
                 if (isSubmitKeyboard(widget, keyboard)) {
@@ -1514,7 +1534,7 @@ pub fn Ui(comptime Msg: type) type {
                     // radio-group focus arrivals all resolve here.
                     .select => if (self.findWidget(id)) |widget|
                         if (widget.kind == .radio)
-                            self.msgFor(id, .change) orelse self.msgFor(id, .toggle) orelse self.msgFor(id, .press)
+                            self.msgForRadioSelection(id, null)
                         else
                             self.msgFor(id, .press)
                     else
@@ -1527,6 +1547,19 @@ pub fn Ui(comptime Msg: type) type {
                     },
                     .scroll_by, .scroll_to_start, .scroll_to_end => null,
                 };
+            }
+
+            fn msgForRadioSelection(self: Tree, id: ObjectId, stamped_changed: ?bool) ?Msg {
+                const widget = self.findWidget(id) orelse return null;
+                if (widget.kind != .radio) return null;
+                // Runtime input carries the exact retained mutation. A
+                // direct Tree consumer has no retained mirror, so derive
+                // the same ordinary case from the source snapshot.
+                const changed = stamped_changed orelse !(widget.state.selected or widget.value >= 0.5);
+                if (changed) {
+                    if (self.msgFor(id, .change)) |msg| return msg;
+                }
+                return self.msgFor(id, .toggle) orelse self.msgFor(id, .press);
             }
         };
 

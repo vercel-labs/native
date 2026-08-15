@@ -71,6 +71,13 @@ pub const WidgetPointerEvent = struct {
     /// Shift on pointer-down to extend from the existing selection
     /// anchor instead of replacing it with a collapsed caret.
     modifiers: WidgetKeyboardModifiers = .{},
+    /// Runtime-stamped outcome for a release that selected a radio:
+    /// true when retained selection actually changed, false when the
+    /// already-selected radio was activated again, null when this event
+    /// was not a radio selection (or never crossed the runtime seam).
+    /// Typed dispatch uses the stamp to keep `on_change` edge-triggered
+    /// while preserving the legacy toggle/press activation fallbacks.
+    radio_selection_changed: ?bool = null,
 };
 
 pub const WidgetKeyboardPhase = enum {
@@ -117,6 +124,12 @@ pub const WidgetKeyboardEvent = struct {
     /// only when the current radio was unchecked, avoiding duplicate
     /// change dispatches for Home-on-first / End-on-last.
     radio_group_selection: bool = false,
+    /// Runtime-stamped outcome for a radio select intent. Space/Enter and
+    /// radio-group navigation set this to the retained mutation result;
+    /// null means the event was not a radio selection (or was routed by a
+    /// direct Tree consumer). This keeps `on_change` tied to a transition,
+    /// not merely to an activation key.
+    radio_selection_changed: ?bool = null,
     edit: ?TextInputEvent = null,
     /// True when the runtime clamped a clipboard paste to fit capacity
     /// before building `edit`; apps that care about lost bytes must check

@@ -4983,7 +4983,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // `on_double_press` handler (falling back to the ordinary
             // press), while its first release already dispatched the
             // single press — select-then-act, the list convention.
-            if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
+            if (tree.msgForPointerEvent(target.id, pointer_event.pointer)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
         }

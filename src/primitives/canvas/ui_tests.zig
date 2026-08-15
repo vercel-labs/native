@@ -384,10 +384,12 @@ test "radio selection dispatches change then toggle then press on every input pa
         ui.el(.radio, .{ .text = "All", .on_change = .add, .on_toggle = .load_more }, .{}),
         ui.el(.radio, .{ .text = "Toggle fallback", .on_toggle = .load_more, .on_press = .add }, .{}),
         ui.el(.radio, .{ .text = "Press fallback", .on_press = .add }, .{}),
+        ui.el(.radio, .{ .text = "Selected", .checked = true, .on_change = .add, .on_press = .load_more }, .{}),
     }));
     const change_radio = tree.root.children[0];
     const toggle_radio = tree.root.children[1];
     const press_radio = tree.root.children[2];
+    const selected_radio = tree.root.children[3];
 
     try testing.expectEqual(Msg.add, tree.msgForPointer(change_radio.id, .up).?);
     try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{ .phase = .key_down, .key = "space" }).?);
@@ -401,6 +403,23 @@ test "radio selection dispatches change then toggle then press on every input pa
     }).?);
     try testing.expectEqual(Msg.load_more, tree.msgForPointer(toggle_radio.id, .up).?);
     try testing.expectEqual(Msg.add, tree.msgForPointer(press_radio.id, .up).?);
+
+    // `on_change` is an edge, not an activation alias. Direct tree
+    // consumers derive the result from source state; runtime events carry
+    // the retained mutation explicitly. Reselecting falls through to the
+    // historical activation handler when one exists.
+    try testing.expectEqual(Msg.load_more, tree.msgForPointer(selected_radio.id, .up).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(selected_radio.id, .{ .phase = .key_down, .key = "space" }).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForPointerEvent(change_radio.id, .{
+        .phase = .up,
+        .point = .{},
+        .radio_selection_changed = false,
+    }).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(selected_radio.id, .{
+        .phase = .key_down,
+        .key = "space",
+        .radio_selection_changed = true,
+    }).?);
 }
 
 test "textarea keyboard: the default and chat-composer Enter policies stay distinct" {
