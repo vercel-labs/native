@@ -649,6 +649,21 @@ test "runtime reconciles canvas control state across layout replacement" {
             .text = "Annual",
         },
     };
+    const nested_radio_a = [_]canvas.Widget{.{
+        .id = 18,
+        .kind = .radio,
+        .text = "Email",
+        .state = .{ .selected = true },
+    }};
+    const nested_radio_b = [_]canvas.Widget{.{
+        .id = 19,
+        .kind = .radio,
+        .text = "SMS",
+    }};
+    const nested_radio_rows = [_]canvas.Widget{
+        .{ .kind = .row, .children = &nested_radio_a },
+        .{ .kind = .column, .children = &nested_radio_b },
+    };
     const controls = [_]canvas.Widget{
         .{
             .id = 2,
@@ -696,8 +711,14 @@ test "runtime reconciles canvas control state across layout replacement" {
             .frame = geometry.RectF.init(150, 178, 160, 30),
             .children = &radio_items,
         },
+        .{
+            .id = 20,
+            .kind = .radio_group,
+            .frame = geometry.RectF.init(150, 140, 120, 30),
+            .children = &nested_radio_rows,
+        },
     };
-    var nodes: [20]canvas.WidgetLayoutNode = undefined;
+    var nodes: [24]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 280, 220), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
@@ -709,6 +730,7 @@ test "runtime reconciles canvas control state across layout replacement" {
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 12, .action = .select });
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 14, .action = .select });
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 17, .action = .select });
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 19, .action = .select });
 
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(2).?.widget.state.selected);
@@ -726,6 +748,8 @@ test "runtime reconciles canvas control state across layout replacement" {
     try std.testing.expect(retained.findById(14).?.widget.state.selected);
     try std.testing.expect(!retained.findById(16).?.widget.state.selected);
     try std.testing.expect(retained.findById(17).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(18).?.widget.state.selected);
+    try std.testing.expect(retained.findById(19).?.widget.state.selected);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
@@ -757,6 +781,12 @@ test "runtime reconciles canvas control state across layout replacement" {
     try std.testing.expectEqual(@as(f32, 0), retained.findById(16).?.widget.value);
     try std.testing.expect(retained.findById(17).?.widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.findById(17).?.widget.value);
+    // The unchanged source still declares 18 selected. Reconcile keeps
+    // the runtime selection on nested 19 until the source actually moves.
+    try std.testing.expect(!retained.findById(18).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(18).?.widget.value);
+    try std.testing.expect(retained.findById(19).?.widget.state.selected);
+    try std.testing.expectEqual(@as(f32, 1), retained.findById(19).?.widget.value);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 

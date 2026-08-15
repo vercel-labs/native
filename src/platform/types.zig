@@ -2353,6 +2353,7 @@ pub const WidgetAccessibilityRole = enum(c_int) {
     slider = 18,
     progressbar = 19,
     radio = 20,
+    radiogroup = 21,
 };
 
 pub const WidgetAccessibilityActions = struct {

@@ -283,6 +283,7 @@ pub fn mobileWidgetRole(role: canvas.WidgetRole) MobileWidgetRole {
         .tab => .tab,
         .checkbox => .checkbox,
         .radio => .radio,
+        .radiogroup => .radiogroup,
         .switch_control => .switch_control,
         .slider => .slider,
         .progressbar => .progressbar,

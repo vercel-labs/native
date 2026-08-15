@@ -9,6 +9,7 @@ const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.z
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
+const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 
 const canvasWidgetInputBatchesDisplayListRefresh = canvas_frame_helpers.canvasWidgetInputBatchesDisplayListRefresh;
 const gpuSurfaceFrameEventFromGpuFrame = canvas_frame_helpers.gpuSurfaceFrameEventFromGpuFrame;
@@ -448,6 +449,20 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // from "an arrow landed here in place".
             if (widget_keyboard_event) |*keyboard_event| {
                 keyboard_event.keyboard.focus_moved = widget_focus_moved;
+                // Only navigation resolved through a nearest radio-group
+                // scope selects the landed radio. Bare radios preserve
+                // their legacy focus-only spatial behavior, and Tab entry
+                // never synthesizes a selection.
+                const view_index = runtimeFindViewIndex(self, input_event.window_id, input_event.label).?;
+                keyboard_event.keyboard.radio_group_focus_moved = widget_focus_moved and
+                    keyboard_event.target != null and
+                    keyboard_event.target.?.kind == .radio and
+                    canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(
+                        self.views[view_index].widgetLayoutTree(),
+                        keyboard_event.target.?.index,
+                    ) != null and
+                    (canvas_widget_runtime.canvasWidgetGroupFocusEdgeFromInput(input_event) != null or
+                        canvas_widget_runtime.canvasWidgetSpatialFocusDirection(input_event) != null);
             }
             // Clipboard shortcuts resolve against the raw input (copy has
             // no routed target when a static text selection is live) and

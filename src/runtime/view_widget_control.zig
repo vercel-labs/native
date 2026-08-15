@@ -379,6 +379,24 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                     dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(row_index, node.frame));
                     changed = true;
                 }
+            } else if (selected and widget.kind == .radio) {
+                // A radio group is one logical selection scope even when
+                // layout containers wrap its radios. Nearest-ancestor
+                // resolution also isolates nested radio groups. A bare
+                // radio deliberately falls back to its direct parent.
+                const scope = canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), index);
+                const parent_index = self.widget_layout_nodes[index].parent_index;
+                for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, radio_index| {
+                    if (radio_index == index or node.widget.kind != .radio) continue;
+                    if (scope) |radio_group_index| {
+                        if (canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), radio_index) != radio_group_index) continue;
+                    } else if (node.parent_index != parent_index or canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), radio_index) != null) continue;
+                    if (!canvasWidgetSelectableSelected(node.widget)) continue;
+                    node.widget.state.selected = false;
+                    node.widget.value = 0;
+                    dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(radio_index, node.frame));
+                    changed = true;
+                }
             } else if (selected and canvasWidgetSelectionClearsSiblings(widget.kind)) {
                 const parent_index = self.widget_layout_nodes[index].parent_index;
                 for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, sibling_index| {

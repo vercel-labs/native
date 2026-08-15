@@ -375,6 +375,33 @@ test "tree keyboard navigation can select without dispatching pointer activation
     }).?);
 }
 
+test "radio selection dispatches change then toggle then press on every input path" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.el(.radio_group, .{}, .{
+        ui.el(.radio, .{ .text = "All", .on_change = .add, .on_toggle = .load_more }, .{}),
+        ui.el(.radio, .{ .text = "Toggle fallback", .on_toggle = .load_more, .on_press = .add }, .{}),
+        ui.el(.radio, .{ .text = "Press fallback", .on_press = .add }, .{}),
+    }));
+    const change_radio = tree.root.children[0];
+    const toggle_radio = tree.root.children[1];
+    const press_radio = tree.root.children[2];
+
+    try testing.expectEqual(Msg.add, tree.msgForPointer(change_radio.id, .up).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{ .phase = .key_down, .key = "space" }).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{ .phase = .key_down, .key = "enter" }).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{
+        .phase = .key_down,
+        .key = "arrowright",
+        .focus_moved = true,
+        .radio_group_focus_moved = true,
+    }).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForPointer(toggle_radio.id, .up).?);
+    try testing.expectEqual(Msg.add, tree.msgForPointer(press_radio.id, .up).?);
+}
+
 test "textarea keyboard: the default and chat-composer Enter policies stay distinct" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

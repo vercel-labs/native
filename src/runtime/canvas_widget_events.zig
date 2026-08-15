@@ -2701,10 +2701,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     }
                 }
                 const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
-                const target = if (current_id) |id|
-                    self.views[index].canvasWidgetScopedFocusTarget(id, direction) orelse layout.focusTarget(current_id, direction) orelse return false
-                else
-                    layout.focusTarget(current_id, direction) orelse return false;
+                const target = self.views[index].canvasWidgetRovingTabTarget(current_id, direction) orelse return false;
                 const moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
                 if (moved and
                     (canvasWidgetTerminalOwnsTabInput(layout, target) or

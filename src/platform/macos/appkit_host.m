@@ -267,6 +267,8 @@ static NSAccessibilityRole NativeSdkAccessibilityRoleForWidgetRole(NSInteger rol
             return NSAccessibilityCheckBoxRole;
         case NATIVE_SDK_APPKIT_WIDGET_ROLE_RADIO:
             return NSAccessibilityRadioButtonRole;
+        case NATIVE_SDK_APPKIT_WIDGET_ROLE_RADIOGROUP:
+            return NSAccessibilityRadioGroupRole;
         case NATIVE_SDK_APPKIT_WIDGET_ROLE_MENU:
             return NSAccessibilityMenuRole;
         case NATIVE_SDK_APPKIT_WIDGET_ROLE_MENUITEM:

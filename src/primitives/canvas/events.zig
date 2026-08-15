@@ -105,6 +105,10 @@ pub const WidgetKeyboardEvent = struct {
     /// it to tell "selection followed focus onto me" (dispatch select)
     /// from "an arrow landed on me in place" (collapse/expand intent).
     focus_moved: bool = false,
+    /// True when an arrow/Home/End move landed on a radio through its
+    /// nearest `radio_group` scope. Bare radios deliberately leave this
+    /// false: they retain their legacy focus-only spatial navigation.
+    radio_group_focus_moved: bool = false,
     edit: ?TextInputEvent = null,
     /// True when the runtime clamped a clipboard paste to fit capacity
     /// before building `edit`; apps that care about lost bytes must check
@@ -563,6 +567,9 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
     if (widget.semantics.role == .treeitem) {
         if (widgetTreeItemKeyboardControlIntent(widget, keyboard)) |intent| return intent;
     }
+    if (widget.kind == .radio) {
+        if (widgetRadioKeyboardControlIntent(widget, keyboard)) |intent| return intent;
+    }
     return switch (widget.kind) {
         .button, .icon_button => if (isWidgetActivationKey(keyboard.key))
             .{ .kind = .press, .actions = .{ .press = true } }
@@ -776,6 +783,28 @@ fn widgetTreeItemKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardE
         return .{ .kind = .toggle, .actions = .{ .toggle = true } };
     }
     return null;
+}
+
+/// A radio inside a `radio_group` follows focus for the group's
+/// Arrow/Home/End keymap. Space/Enter continue through the ordinary
+/// activation arm below; radios outside a group never receive the
+/// `radio_group_focus_moved` stamp and keep their old behavior.
+fn widgetRadioKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
+    if (!keyboard.radio_group_focus_moved) return null;
+    const navigation_key = std.ascii.eqlIgnoreCase(keyboard.key, "arrowup") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "home") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "end");
+    if (!navigation_key) return null;
+    return .{
+        .kind = .select,
+        .actions = .{
+            .select = true,
+            .press = widget.command.len > 0,
+        },
+    };
 }
 
 pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {

@@ -651,6 +651,61 @@ test "tree arrow navigation reveals and focuses rows below a scroll viewport" {
     try std.testing.expect(scrolled.findById(10).?.widget.value > 0);
 }
 
+test "radio-group arrow navigation reveals selects and focuses an offscreen nested radio" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 64),
+    });
+
+    const radios = [_]canvas.Widget{
+        .{ .id = 31, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "One", .state = .{ .selected = true } },
+        .{ .id = 32, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Two" },
+        .{ .id = 33, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Three" },
+        .{ .id = 34, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Four" },
+    };
+    const nested = [_]canvas.Widget{.{
+        .kind = .column,
+        .layout = .{ .gap = 2 },
+        .children = &radios,
+    }};
+    const group = canvas.Widget{
+        .id = 30,
+        .kind = .radio_group,
+        .frame = geometry.RectF.init(0, 0, 0, 118),
+        .children = &nested,
+    };
+    const root = canvas.Widget{ .id = 20, .kind = .scroll_view, .children = &.{group} };
+    var nodes: [10]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 64), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+    view.canvas_widget_focused_id = 31;
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+
+    try std.testing.expectEqual(@as(canvas.ObjectId, 34), view.canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 34), app_state.last_keyboard_target_id);
+    try std.testing.expect(app_state.last_keyboard_focus_moved);
+    const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const viewport = scrolled.findById(20).?.frame.normalized();
+    const focused = scrolled.findById(34).?.frame.normalized();
+    try std.testing.expect(focused.y >= viewport.y);
+    try std.testing.expect(focused.maxY() <= viewport.maxY());
+    try std.testing.expect(!scrolled.findById(31).?.widget.state.selected);
+    try std.testing.expect(scrolled.findById(34).?.widget.state.selected);
+}
+
 test "list arrow navigation reveals and focuses rows below a scroll viewport" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);

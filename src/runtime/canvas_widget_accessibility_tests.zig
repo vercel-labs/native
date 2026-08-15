@@ -699,16 +699,24 @@ test "runtime moves focus within house grouped component controls" {
         .{ .id = 41, .kind = .segmented_control, .text = "Open" },
         .{ .id = 42, .kind = .segmented_control, .text = "Closed" },
     };
-    const radio_buttons = [_]canvas.Widget{
-        .{ .id = 51, .kind = .radio, .text = "Card" },
+    const first_radio = [_]canvas.Widget{
+        .{ .id = 51, .kind = .radio, .text = "Card", .state = .{ .selected = true } },
+    };
+    const second_radio = [_]canvas.Widget{
         .{ .id = 52, .kind = .radio, .text = "List" },
+    };
+    // The rows are deliberate: radios need not be direct children of
+    // the radio group to share navigation, selection, or Tab behavior.
+    const radio_rows = [_]canvas.Widget{
+        .{ .kind = .row, .children = &first_radio },
+        .{ .kind = .column, .children = &second_radio },
     };
     const top_children = [_]canvas.Widget{
         .{ .id = 10, .kind = .button_group, .frame = geometry.RectF.init(12, 12, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &button_group_buttons },
         .{ .id = 20, .kind = .pagination, .frame = geometry.RectF.init(12, 56, 220, 34), .layout = builtinShadcnGroupLayout(), .children = &pagination_buttons },
         .{ .id = 30, .kind = .toggle_group, .frame = geometry.RectF.init(12, 100, 160, 34), .layout = builtinShadcnGroupLayout(), .children = &toggle_buttons },
         .{ .id = 40, .kind = .tabs, .frame = geometry.RectF.init(12, 144, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &tab_buttons },
-        .{ .id = 50, .kind = .radio_group, .frame = geometry.RectF.init(12, 188, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &radio_buttons },
+        .{ .id = 50, .kind = .radio_group, .frame = geometry.RectF.init(12, 188, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &radio_rows },
         .{ .id = 90, .kind = .button, .frame = geometry.RectF.init(248, 12, 84, 34), .text = "Alone" },
     };
     var nodes: [24]canvas.WidgetLayoutNode = undefined;
@@ -738,6 +746,45 @@ test "runtime moves focus within house grouped component controls" {
     harness.runtime.views[0].canvas_widget_focused_id = 51;
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
     try std.testing.expectEqual(@as(canvas.ObjectId, 52), harness.runtime.views[0].canvas_widget_focused_id);
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(51).?.widget.state.selected);
+    try std.testing.expect(retained.findById(52).?.widget.state.selected);
+    const group_semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    try std.testing.expectEqual(canvas.WidgetRole.radiogroup, canvasWidgetSemanticsById(group_semantics, 50).?.role);
+    const a11y_snapshot = harness.runtime.automationSnapshot("Widgets");
+    var a11y_buffer: [4096]u8 = undefined;
+    var a11y_writer = std.Io.Writer.fixed(&a11y_buffer);
+    try automation.snapshot.writeA11yText(a11y_snapshot, &a11y_writer);
+    try std.testing.expect(std.mem.indexOf(u8, a11y_writer.buffered(), "@w1/canvas#50 role=radiogroup") != null);
+
+    // Home/End walk the whole nearest group scope and selection follows.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "home" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 51), harness.runtime.views[0].canvas_widget_focused_id);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(51).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(52).?.widget.state.selected);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "end" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 52), harness.runtime.views[0].canvas_widget_focused_id);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(51).?.widget.state.selected);
+    try std.testing.expect(retained.findById(52).?.widget.state.selected);
+
+    // One Tab stop: entering lands on the selected radio, leaving skips
+    // the rest, and backward entry from below returns to that selection.
+    harness.runtime.views[0].canvas_widget_focused_id = 42;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 52), harness.runtime.views[0].canvas_widget_focused_id);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 90), harness.runtime.views[0].canvas_widget_focused_id);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .modifiers = .{ .shift = true } } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 52), harness.runtime.views[0].canvas_widget_focused_id);
+
+    // With no selected radio, group entry deterministically chooses the
+    // first focusable descendant instead.
+    _ = try runtimeViewSetCanvasWidgetSelected(&harness.runtime.views[0], 52, false);
+    harness.runtime.views[0].canvas_widget_focused_id = 42;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 51), harness.runtime.views[0].canvas_widget_focused_id);
 
     harness.runtime.views[0].canvas_widget_focused_id = 90;
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowleft" } });

@@ -991,6 +991,53 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.canvasWidgetFocusTargetInScope(surface_index, current_index, direction);
         }
 
+        /// Radio groups contribute one stop to the flat Tab order. From
+        /// outside, landing on any descendant radio retargets to the
+        /// selected radio (or first focusable radio); from inside, Tab
+        /// skips every remaining radio in that same nearest group scope.
+        /// Existing anchored-surface focus traps remain authoritative.
+        pub fn canvasWidgetRovingTabTarget(
+            self: *const RuntimeView,
+            current_id: ?canvas.ObjectId,
+            direction: canvas.WidgetFocusDirection,
+        ) ?canvas.WidgetFocusTarget {
+            const layout = self.widgetLayoutTree();
+            const current_scope = if (current_id) |id|
+                if (self.canvasWidgetNodeIndexById(id)) |index|
+                    canvas_widget_runtime.canvasWidgetRovingTabScope(layout, index)
+                else
+                    null
+            else
+                null;
+
+            var walk_id = current_id;
+            var attempts: usize = 0;
+            while (attempts <= self.widget_layout_node_count) : (attempts += 1) {
+                const target = if (walk_id) |id|
+                    self.canvasWidgetScopedFocusTarget(id, direction) orelse layout.focusTarget(walk_id, direction) orelse return null
+                else
+                    layout.focusTarget(null, direction) orelse return null;
+
+                if (current_scope) |scope| {
+                    if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target.index)) |target_scope| {
+                        if (target_scope.kind == scope.kind and target_scope.index == scope.index) {
+                            walk_id = target.id;
+                            continue;
+                        }
+                    }
+                }
+                if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target.index)) |target_scope| {
+                    return canvas_widget_runtime.canvasWidgetRovingTabEntryTarget(layout, target_scope) orelse target;
+                }
+                return target;
+            }
+
+            // A trapped surface whose only focusable composite is this
+            // radio group wraps onto the group's one entry stop.
+            if (current_scope) |scope| return canvas_widget_runtime.canvasWidgetRovingTabEntryTarget(layout, scope);
+            return null;
+        }
+
         pub fn canvasWidgetFocusTargetInScope(
             self: *const RuntimeView,
             surface_index: usize,

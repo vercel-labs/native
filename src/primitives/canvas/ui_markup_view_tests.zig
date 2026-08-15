@@ -2172,7 +2172,7 @@ pub const catalog_markup_source =
     \\    <combobox text="{query}" placeholder="Search fruit" on-input="query_edit" />
     \\  </row>
     \\  <radio-group gap="4">
-    \\    <radio checked="{bold}" on-toggle="toggle_bold" label="Bold" />
+    \\    <radio checked="{bold}" on-change="toggle_bold" label="Bold" />
     \\  </radio-group>
     \\  <accordion text="Details" selected="{details_open}" on-toggle="toggle_details" padding="8">
     \\    <text>More info</text>
@@ -2302,7 +2302,7 @@ pub fn handCatalogView(ui: *CatalogUi, model: *const CatalogModel) CatalogUi.Nod
             ui.el(.combobox, .{ .text = model.query, .placeholder = "Search fruit", .on_input = CatalogUi.inputMsg(.query_edit) }, .{}),
         }),
         ui.el(.radio_group, .{ .gap = 4 }, .{
-            ui.el(.radio, .{ .checked = model.bold, .on_toggle = .toggle_bold }, .{}),
+            ui.el(.radio, .{ .checked = model.bold, .on_change = .toggle_bold }, .{}),
         }),
         ui.el(.accordion, .{ .text = "Details", .selected = model.details_open, .on_toggle = .toggle_details, .padding = 8 }, .{
             ui.text(.{}, "More info"),

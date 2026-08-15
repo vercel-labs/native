@@ -683,12 +683,12 @@ pub const icon_names = [_][]const u8{
 /// std-only) with a lockstep test in ui_markup_view_tests.zig holding the
 /// mirror equal to the live enum.
 pub const role_names = [_][]const u8{
-    "none",      "group",       "text",     "link",   "image",
-    "button",    "textbox",     "tooltip",  "dialog", "menu",
-    "menuitem",  "list",        "listitem", "row",    "grid",
-    "gridcell",  "tab",         "checkbox", "radio",  "switch_control",
-    "slider",    "progressbar", "chart",    "tree",   "treeitem",
-    "separator",
+    "none",           "group",     "text",        "link",   "image",
+    "button",         "textbox",   "tooltip",     "dialog", "menu",
+    "menuitem",       "list",      "listitem",    "row",    "grid",
+    "gridcell",       "tab",       "checkbox",    "radio",  "radiogroup",
+    "switch_control", "slider",    "progressbar", "chart",  "tree",
+    "treeitem",       "separator",
 };
 
 /// Roles that promise CHILD STRUCTURE to assistive tech (rows, items,
@@ -696,7 +696,7 @@ pub const role_names = [_][]const u8{
 /// cannot hold element children (see `elementHoldsChildren`) is role
 /// misuse the registry can see: the promise can never be kept.
 pub const container_role_names = [_][]const u8{
-    "tree", "list", "menu", "grid", "row", "dialog",
+    "tree", "list", "menu", "grid", "row", "dialog", "radiogroup",
 };
 
 /// Whether markup can put element children inside this element: text

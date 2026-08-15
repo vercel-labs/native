@@ -651,6 +651,12 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
             .layout = .{ .gap = 2 },
             .children = &grid_rows,
         },
+        .{
+            .id = 14,
+            .kind = .radio_group,
+            .frame = geometry.RectF.init(12, 148, 120, 28),
+            .semantics = .{ .label = "Density" },
+        },
     };
     var nodes: [16]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{
@@ -661,7 +667,7 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     }, geometry.RectF.init(0, 0, 320, 180), &nodes);
     _ = try self.embedded.runtime.setCanvasWidgetLayout(1, mobile_gpu_surface_label, layout);
 
-    try std.testing.expectEqual(@as(usize, 13), native_sdk_app_widget_semantics_count(app));
+    try std.testing.expectEqual(@as(usize, 14), native_sdk_app_widget_semantics_count(app));
 
     var root_node: MobileWidgetSemantics = .{};
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_widget_semantics_at(app, 0, &root_node));
@@ -736,6 +742,10 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     try std.testing.expectEqual(@as(isize, 1), status_cell.grid_row_count);
     try std.testing.expectEqual(@as(isize, 2), status_cell.grid_column_count);
     try std.testing.expect((status_cell.actions & @intFromEnum(MobileWidgetAction.select)) != 0);
+
+    const radio_group_node = try mobileWidgetSemanticsByIdForTest(app, 14);
+    try std.testing.expectEqual(@intFromEnum(MobileWidgetRole.radiogroup), radio_group_node.role);
+    try std.testing.expectEqualStrings("Density", radio_group_node.label.?[0..radio_group_node.label_len]);
 
     var text_geometry: MobileWidgetTextGeometry = .{};
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_widget_text_geometry(app, 3, &text_geometry));

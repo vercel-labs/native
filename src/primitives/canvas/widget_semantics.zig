@@ -114,7 +114,8 @@ fn nearestSemanticParent(stack: []const ?usize) ?usize {
 pub fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
-        .stack, .row, .column, .grid, .scroll_view, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .panel => .group,
+        .stack, .row, .column, .grid, .scroll_view, .breadcrumb, .button_group, .pagination, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .panel => .group,
+        .radio_group => .radiogroup,
         .data_grid, .table => .grid,
         .data_row => .row,
         .dialog, .drawer, .sheet, .popover => .dialog,

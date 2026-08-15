@@ -1411,6 +1411,15 @@ pub fn Ui(comptime Msg: type) type {
             pub fn msgForPointer(self: Tree, target_id: ObjectId, phase: canvas.WidgetPointerPhase) ?Msg {
                 if (phase != .up) return null;
                 const widget = self.findWidget(target_id) orelse return null;
+                // A radio press is selection, regardless of which legacy
+                // handlers are also bound. Resolve it through the same
+                // canonical order as keyboard and a11y selection before
+                // the generic press/toggle/select action walk can choose
+                // an explicitly stamped on_toggle action first.
+                if (widget.kind == .radio) {
+                    const intent = canvas.widgetSemanticControlIntent(widget, .select) orelse return null;
+                    return self.msgForIntent(target_id, intent);
+                }
                 const semantic_actions = [_]canvas.WidgetSemanticAction{ .press, .toggle, .select };
                 for (semantic_actions) |action| {
                     const intent = canvas.widgetSemanticControlIntent(widget, action) orelse continue;
@@ -1498,7 +1507,18 @@ pub fn Ui(comptime Msg: type) type {
                 return switch (intent.kind) {
                     .press => self.msgFor(id, .press),
                     .toggle => self.msgFor(id, .toggle),
-                    .select => self.msgFor(id, .press),
+                    // Radio selection has one canonical handler order on
+                    // every input path: on_change, then the historical
+                    // on_toggle markup convention, then on_press for
+                    // backwards compatibility. Pointer, Space/Enter, and
+                    // radio-group focus arrivals all resolve here.
+                    .select => if (self.findWidget(id)) |widget|
+                        if (widget.kind == .radio)
+                            self.msgFor(id, .change) orelse self.msgFor(id, .toggle) orelse self.msgFor(id, .press)
+                        else
+                            self.msgFor(id, .press)
+                    else
+                        null,
                     .set_value => blk: {
                         if (intent.value) |value| {
                             if (self.msgForValue(id, value)) |msg| break :blk msg;

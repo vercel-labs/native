@@ -577,6 +577,8 @@ pub const WidgetRole = enum {
     tab,
     checkbox,
     radio,
+    /// A single-choice group containing descendant radio controls.
+    radiogroup,
     switch_control,
     slider,
     progressbar,
@@ -743,7 +745,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .input => builtinComponent(.input, .input, .textbox, false),
         .pagination => builtinComponent(.pagination, .pagination, .group, true),
         .progress => builtinComponent(.progress, .progress, .progressbar, false),
-        .radio_group => builtinComponent(.radio_group, .radio_group, .group, true),
+        .radio_group => builtinComponent(.radio_group, .radio_group, .radiogroup, true),
         .resizable => builtinComponent(.resizable, .resizable, .group, true),
         .select => builtinComponent(.select, .select, .button, true),
         .separator => builtinComponent(.separator, .separator, .none, false),

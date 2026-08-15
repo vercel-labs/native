@@ -475,6 +475,20 @@ test "widget keyboard control intents map activation keys" {
     try std.testing.expect(radio.actions.press);
     try std.testing.expect(!radio.actions.toggle);
 
+    const grouped_radio_move = widgetKeyboardControlIntent(.{ .kind = .radio, .text = "Annual" }, .{
+        .phase = .key_down,
+        .key = "arrowright",
+        .focus_moved = true,
+        .radio_group_focus_moved = true,
+    }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.select, grouped_radio_move.kind);
+    try std.testing.expect(grouped_radio_move.actions.select);
+    try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .radio, .text = "Bare" }, .{
+        .phase = .key_down,
+        .key = "arrowright",
+        .focus_moved = true,
+    }) == null);
+
     try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_down, .key = "enter", .modifiers = .{ .super = true } }) == null);
     try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save", .state = .{ .disabled = true } }, .{ .phase = .key_down, .key = "enter" }) == null);
     try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_up, .key = "enter" }) == null);

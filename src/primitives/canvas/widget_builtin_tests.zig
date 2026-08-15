@@ -2201,7 +2201,7 @@ test "built-in component factory applies house composite defaults" {
         try std.testing.expectEqual(widget_kind, component.kind);
         try std.testing.expectEqual(gap, component.layout.gap);
         try std.testing.expectEqual(WidgetCrossAlignment.center, component.layout.cross_alignment);
-        try std.testing.expectEqual(WidgetRole.group, component.semantics.role);
+        try std.testing.expectEqual(if (kind == .radio_group) WidgetRole.radiogroup else WidgetRole.group, component.semantics.role);
     }
 
     // The house TabsList: a muted rounded container hugging its
