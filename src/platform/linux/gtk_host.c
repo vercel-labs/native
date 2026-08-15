@@ -229,6 +229,7 @@ typedef struct native_sdk_gtk_native_view {
     double gpu_emitted_scale;
     int gpu_nonblank;
     uint32_t gpu_sample_color;
+    gulong gpu_scale_notify_id;
     int gpu_pointer_down;
     double gpu_pointer_x;
     double gpu_pointer_y;
@@ -1046,6 +1047,30 @@ static int native_sdk_gpu_surface_sync_geometry(native_sdk_gtk_native_view_t *vi
     return 1;
 }
 
+/* Fractional-scale-aware surface scale. GDK 4.12+ reports the exact
+ * fractional scale (1.5 on a 150% output) via gdk_surface_get_scale;
+ * gtk_widget_get_scale_factor rounds to the integer wl_output scale,
+ * which makes the canvas render at 2x while the compositor displays
+ * 1.5x — a resampling mismatch that softens/jags every curve. */
+static double native_sdk_gtk_fractional_scale(GtkWidget *widget) {
+    if (!widget) return 1.0;
+    GtkWidget *root = GTK_WIDGET(gtk_widget_get_root(widget));
+    GdkSurface *surface = (root && GTK_IS_NATIVE(root)) ? gtk_native_get_surface(GTK_NATIVE(root)) : NULL;
+#if defined(GDK_VERSION_4_12)
+    if (surface) return gdk_surface_get_scale(surface);
+#endif
+    return (double)gtk_widget_get_scale_factor(widget);
+}
+
+/* Scale of an already-resolved surface: the exact fractional value on
+ * GDK >= 4.12, the integer factor otherwise. */
+static double native_sdk_gtk_surface_scale(GdkSurface *surface) {
+#if defined(GDK_VERSION_4_12)
+    if (surface) return gdk_surface_get_scale(surface);
+#endif
+    return surface ? (double)gdk_surface_get_scale_factor(surface) : 1.0;
+}
+
 /* notify::scale-factor on the drawing area (e.g. the window moved to a
  * monitor with a different device scale): report the new scale immediately
  * instead of waiting for the next frame tick, so the runtime can rebuild its
@@ -1058,7 +1083,7 @@ static void native_sdk_gpu_surface_scale_changed(GObject *object, GParamSpec *ps
     const double width = native_sdk_gpu_surface_width(view);
     const double height = native_sdk_gpu_surface_height(view);
     if (width <= 0 || height <= 0) return;
-    const double scale = (double)gtk_widget_get_scale_factor(view->widget);
+    const double scale = native_sdk_gtk_fractional_scale(view->widget);
     if (native_sdk_gpu_surface_sync_geometry(view, width, height, scale)) {
         gtk_widget_queue_draw(view->widget);
     }
@@ -1098,7 +1123,7 @@ static void native_sdk_gpu_surface_emit_frame(native_sdk_gtk_native_view_t *view
 
     const double width = native_sdk_gpu_surface_width(view);
     const double height = native_sdk_gpu_surface_height(view);
-    const double scale = (double)gtk_widget_get_scale_factor(view->widget);
+    const double scale = native_sdk_gtk_fractional_scale(view->widget);
     if (width <= 0 || height <= 0) return;
 
     (void)native_sdk_gpu_surface_sync_geometry(view, width, height, scale);
@@ -1208,9 +1233,18 @@ static void native_sdk_gpu_surface_resized(GtkDrawingArea *area, int width, int 
     const double logical_width = native_sdk_gpu_surface_width(view);
     const double logical_height = native_sdk_gpu_surface_height(view);
     if (logical_width <= 0 || logical_height <= 0) return;
-    const double scale = (double)gtk_widget_get_scale_factor(view->widget);
+    const double scale = native_sdk_gtk_fractional_scale(view->widget);
     if (native_sdk_gpu_surface_sync_geometry(view, logical_width, logical_height, scale)) {
         gtk_widget_queue_draw(view->widget);
+    }
+    /* Fractional scale changes (window moved to an output with a
+     * different 150%-style scale) fire notify::scale on the surface,
+     * not the widget's integer scale-factor. Harmless if the property
+     * is absent; the notify path re-syncs geometry with the new scale. */
+    GtkWidget *root = GTK_WIDGET(gtk_widget_get_root(view->widget));
+    GdkSurface *surface = (root && GTK_IS_NATIVE(root)) ? gtk_native_get_surface(GTK_NATIVE(root)) : NULL;
+    if (surface && view->gpu_scale_notify_id == 0) {
+        view->gpu_scale_notify_id = g_signal_connect(surface, "notify::scale", G_CALLBACK(native_sdk_gpu_surface_scale_changed), view);
     }
 }
 
@@ -1233,7 +1267,7 @@ static void native_sdk_gpu_surface_draw(GtkDrawingArea *area, cairo_t *cr, int w
         const double device_scale_x = (double)view->gpu_buf_width / (double)width;
         const double device_scale_y = (double)view->gpu_buf_height / (double)height;
         cairo_surface_set_device_scale(surface, device_scale_x, device_scale_y);
-        const double widget_scale = (double)gtk_widget_get_scale_factor(GTK_WIDGET(area));
+        const double widget_scale = native_sdk_gtk_fractional_scale(GTK_WIDGET(area));
         const int exact = device_scale_x == widget_scale && device_scale_y == widget_scale;
         cairo_set_source_surface(cr, surface, 0, 0);
         cairo_pattern_set_filter(cairo_get_source(cr), exact ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_BILINEAR);
@@ -1635,6 +1669,15 @@ static void native_sdk_teardown_gpu_surface_view(native_sdk_gtk_native_view_t *v
     if (view->widget && view->kind == NATIVE_SDK_GTK_VIEW_GPU_SURFACE) {
         gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(view->widget), NULL, NULL, NULL);
         g_signal_handlers_disconnect_by_data(view->widget, view);
+    }
+    if (view->gpu_scale_notify_id != 0) {
+        /* The surface outlives the view (it belongs to the window), so a
+         * handler connected there must be disconnected explicitly before
+         * the view memory goes away. */
+        GtkWidget *root = view->widget ? GTK_WIDGET(gtk_widget_get_root(view->widget)) : NULL;
+        GdkSurface *surface = (root && GTK_IS_NATIVE(root)) ? gtk_native_get_surface(GTK_NATIVE(root)) : NULL;
+        if (surface) g_signal_handler_disconnect(surface, view->gpu_scale_notify_id);
+        view->gpu_scale_notify_id = 0;
     }
     if (view->gpu_im_context) {
         g_signal_handlers_disconnect_by_data(view->gpu_im_context, view);
@@ -2509,7 +2552,7 @@ static void native_sdk_emit_window_frame(native_sdk_gtk_host_t *host, native_sdk
     int w = 0, h = 0;
     native_sdk_window_content_size(win, &w, &h);
     GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
-    double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
+    double scale = native_sdk_gtk_surface_scale(surface);
     int focused = gtk_window_is_active(win->gtk_window) ? 1 : 0;
     native_sdk_emit(host, (native_sdk_gtk_event_t){
         .kind = NATIVE_SDK_GTK_EVENT_WINDOW_FRAME,
@@ -2532,7 +2575,7 @@ static void native_sdk_emit_resize(native_sdk_gtk_host_t *host, native_sdk_gtk_w
     int w = 0, h = 0;
     native_sdk_window_content_size(win, &w, &h);
     GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
-    double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
+    double scale = native_sdk_gtk_surface_scale(surface);
     native_sdk_emit(host, (native_sdk_gtk_event_t){
         .kind = NATIVE_SDK_GTK_EVENT_RESIZE,
         .window_id = win->id,
@@ -2677,7 +2720,7 @@ static gboolean native_sdk_frame_tick(gpointer data) {
         const double w = (double)gtk_widget_get_width(GTK_WIDGET(win->gtk_window));
         const double h = (double)gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
         GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
-        const double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
+        const double scale = native_sdk_gtk_surface_scale(surface);
         if (w > 0 && h > 0 && (w != win->emitted_width || h != win->emitted_height || scale != win->emitted_scale)) {
             win->emitted_width = w;
             win->emitted_height = h;
