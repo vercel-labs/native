@@ -991,11 +991,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.canvasWidgetFocusTargetInScope(surface_index, current_index, direction);
         }
 
-        /// Radio groups contribute one stop to the flat Tab order. From
-        /// outside, landing on any descendant radio retargets to the
-        /// selected radio (or first focusable radio); from inside, Tab
-        /// skips every remaining radio in that same nearest group scope.
-        /// Existing anchored-surface focus traps remain authoritative.
+        /// Radio groups contribute one stop to the flat Tab order. The
+        /// first currently reachable radio fixes that stop's authored
+        /// position; entering retargets to the selected radio (or first
+        /// focusable radio), while leaving resumes from the fixed stop.
+        /// That distinction keeps nested/interleaved scopes ordered even
+        /// when an outer group's selected radio appears after an inner
+        /// group. Existing anchored-surface focus traps remain authoritative.
         pub fn canvasWidgetRovingTabTarget(
             self: *const RuntimeView,
             current_id: ?canvas.ObjectId,
@@ -1011,6 +1013,11 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 null;
 
             var walk_id = current_id;
+            if (current_scope) |scope| {
+                if (canvas_widget_runtime.canvasWidgetRovingTabStopTarget(layout, scope)) |stop| {
+                    walk_id = stop.id;
+                }
+            }
             var attempts: usize = 0;
             while (attempts <= self.widget_layout_node_count) : (attempts += 1) {
                 const target = if (walk_id) |id|
@@ -1018,15 +1025,25 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 else
                     layout.focusTarget(null, direction) orelse return null;
 
-                if (current_scope) |scope| {
-                    if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target.index)) |target_scope| {
+                if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target.index)) |target_scope| {
+                    // Radios after the first visible member do not create
+                    // extra flat-order stops. This also prevents a later
+                    // outer-group radio from retargeting backward across a
+                    // nested group's stop and forming a Tab cycle.
+                    const target_stop = canvas_widget_runtime.canvasWidgetRovingTabStopTarget(layout, target_scope) orelse {
+                        walk_id = target.id;
+                        continue;
+                    };
+                    if (target.id != target_stop.id) {
+                        walk_id = target.id;
+                        continue;
+                    }
+                    if (current_scope) |scope| {
                         if (target_scope.kind == scope.kind and target_scope.index == scope.index) {
                             walk_id = target.id;
                             continue;
                         }
                     }
-                }
-                if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target.index)) |target_scope| {
                     return canvas_widget_runtime.canvasWidgetRovingTabEntryTarget(layout, target_scope) orelse target;
                 }
                 return target;

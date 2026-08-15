@@ -1621,6 +1621,23 @@ pub fn canvasWidgetRovingTabEntryTarget(layout: canvas.WidgetLayoutTree, scope: 
     return first;
 }
 
+/// The flat Tab order position occupied by a radio-group scope. It is
+/// deliberately the first CURRENTLY VISIBLE radio in authored order,
+/// rather than the selected entry: selection may live after another
+/// nested radio group (or an ordinary control) and must not move this
+/// composite's position around those intervening Tab stops.
+pub fn canvasWidgetRovingTabStopTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
+    if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    const scope_depth = layout.nodes[scope.index].depth;
+    var index = scope.index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
+        if (layout.nodes[index].widget.kind != .radio) continue;
+        if (canvasWidgetRadioGroupScopeIndex(layout, index) != scope.index) continue;
+        if (layout.focusTargetById(layout.nodes[index].widget.id)) |target| return target;
+    }
+    return null;
+}
+
 /// The group's best CURRENTLY VISIBLE Tab entry. The ordinary entry
 /// resolver above intentionally admits scroll-clipped logical targets so
 /// focus can reveal them. Callers use this narrower fallback only after a

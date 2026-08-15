@@ -2765,6 +2765,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
                 }
                 const target = canvasWidgetGroupFocusEdgeTarget(layout, focused, edge) orelse return false;
+                if (focused.kind == .radio and canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, focused.index) != null) {
+                    const retry_direction: canvas.WidgetFocusDirection = switch (edge) {
+                        .first => .right,
+                        .last => .left,
+                    };
+                    return try setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
+                        self,
+                        index,
+                        current_id,
+                        target,
+                        retry_direction,
+                        preserve_focus_visible,
+                    );
+                }
                 return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             const direction = canvasWidgetSpatialFocusDirection(input_event) orelse return false;
@@ -2790,6 +2804,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             if (canvasWidgetGroupDirectionalFocusTarget(layout, focused, direction)) |target| {
+                if (focused.kind == .radio and canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, focused.index) != null) {
+                    return try setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
+                        self,
+                        index,
+                        current_id,
+                        target,
+                        direction,
+                        preserve_focus_visible,
+                    );
+                }
                 return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             const target = layout.focusTarget(focused_id, direction) orelse return false;
@@ -2801,6 +2825,37 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             try setCanvasWidgetFocusFromKeyboardWithVisibility(self, view_index, target_id, focus_visible);
             const previous = previous_id orelse 0;
             return target_id != 0 and target_id != previous and self.views[view_index].canvas_widget_focused_id == target_id;
+        }
+
+        /// Logical radio traversal admits scroll-clipped targets so the
+        /// focus setter can reveal them. A fixed clip cannot be scrolled;
+        /// after such a candidate stays unreachable, continue around the
+        /// same nearest group until a visible radio accepts focus or the
+        /// bounded walk returns to its starting point.
+        fn setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
+            self: *Runtime,
+            view_index: usize,
+            previous_id: ?canvas.ObjectId,
+            initial_target: canvas.WidgetFocusTarget,
+            direction: canvas.WidgetFocusDirection,
+            focus_visible: bool,
+        ) anyerror!bool {
+            const previous = previous_id orelse 0;
+            var target = initial_target;
+            var attempts: usize = 0;
+            while (attempts < self.views[view_index].widget_layout_node_count) : (attempts += 1) {
+                if (target.id == 0 or target.id == previous) return false;
+                if (try setCanvasWidgetFocusFromKeyboardMoved(self, view_index, previous_id, target.id, focus_visible)) return true;
+
+                const next = canvas_widget_runtime.canvasWidgetRadioGroupDirectionalFocusTarget(
+                    self.views[view_index].widgetLayoutTree(),
+                    target,
+                    direction,
+                ) orelse return false;
+                if (next.id == target.id or next.id == initial_target.id) return false;
+                target = next;
+            }
+            return false;
         }
 
         pub fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
