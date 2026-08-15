@@ -5,6 +5,9 @@
     .version = "0.1.0",
     .platforms = .{"macos"},
     .capabilities = .{ "native_views", "gpu_surfaces", "tray", "persist" },
+    // Launch as an Accessory app. The activation policy is selected before
+    // the startup window exists, so no Dock tile or cmd+Tab entry flashes.
+    .dock_visible = false,
     .persist = .{
         .version = 1,
         .restore = .{
@@ -22,11 +25,14 @@
                 .height = 260,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
+                // A true menu-bar app starts behind its status item. The
+                // tray's Open Player command is the initial reveal path.
+                .initially_hidden = true,
                 // The menu-bar-app shape: the red close button HIDES the
                 // window and the app keeps running behind its status
-                // item; the tray "Open Player" row (fx.showWindow) and
-                // the Dock reopen bring it back, and only the tray
-                // "Quit" row (fx.quitApp) or cmd+Q actually quits.
+                // item; the tray "Open Player" row (Cmd.showWindow)
+                // brings it back, and only the tray
+                // "Quit" row (Cmd.quitApp) or cmd+Q actually quits.
                 .close_policy = "hide",
                 .views = .{
                     .{ .label = "player-canvas", .kind = "gpu_surface", .fill = true, .role = "Menu bar player", .accessibility_label = "Menu bar player", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },

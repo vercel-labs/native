@@ -12,6 +12,7 @@ const std = @import("std");
 const effects_mod = @import("effects.zig");
 const runtime_clock = @import("clock.zig");
 const ts_core_host = @import("ts_core_host.zig");
+const platform = @import("../platform/root.zig");
 
 // ------------------------------------------------------ the mini core
 //
@@ -338,6 +339,7 @@ const mini_core = struct {
         open_save_sink, // 102: write_file_stream "save" -> wrote/failed
         write_save_chunk, // 103: write_file_chunk "save" -> wrote/failed
         close_save_sink, // 104: write_file_close "save" -> wrote/failed
+        dock_on, // 105: dock_presence true
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -686,6 +688,7 @@ const mini_core = struct {
             .open_win => return .{ .model = model, .cmd = cmdWindowShow("player") },
             .hide_win => return .{ .model = model, .cmd = cmdWindowHide("player") },
             .dock_off => return .{ .model = model, .cmd = cmdDockPresence(false) },
+            .dock_on => return .{ .model = model, .cmd = cmdDockPresence(true) },
             .quit_app => return .{ .model = model, .cmd = cmdQuitApp() },
             .open_chan => return .{ .model = model, .cmd = cmdChannelOpen(41, 47) },
             .close_chan => return .{ .model = model, .cmd = cmdChannelClose(41) },
@@ -2840,6 +2843,50 @@ test "window verbs bridge to the effects channel's label-addressed verbs" {
     // Fire-and-forget: neither verb parked a keyed effect or dispatched
     // a result Msg of its own — only init's boot request is pending.
     try std.testing.expectEqual(boot_pending, fx.pendingHostCount());
+}
+
+test "an accessory launch composes with a TypeScript dock-presence promotion" {
+    var null_platform = platform.NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Menu Bar",
+        .dock_visible = false,
+    });
+    try std.testing.expect(!null_platform.dock_visible);
+
+    const Actions = struct {
+        fn window(_: *anyopaque, _: []const u8) bool {
+            return true;
+        }
+
+        fn dock(context: *anyopaque, visible: bool) bool {
+            const host: *platform.NullPlatform = @ptrCast(@alignCast(context));
+            host.platform().services.setDockPresence(visible) catch return false;
+            return true;
+        }
+
+        fn quit(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+    fx.bindWindowActions(.{
+        .context = &null_platform,
+        .close_fn = Actions.window,
+        .minimize_fn = Actions.window,
+        .hide_fn = Actions.window,
+        .show_fn = Actions.window,
+        .dock_presence_fn = Actions.dock,
+        .quit_fn = Actions.quit,
+    });
+    fx.executor = .real;
+
+    Host.dispatch(fx, .dock_on);
+    try std.testing.expect(fx.windowActionState().dock_visible);
+    try std.testing.expectEqual(@as(u32, 1), fx.windowActionState().dock_presence_count);
+    try std.testing.expect(null_platform.dock_visible);
+    try std.testing.expectEqual(@as(u32, 1), null_platform.dock_presence_count);
 }
 
 test "a channel opens, posts route the five-field arm by name, and close retires the key" {

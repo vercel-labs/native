@@ -79,6 +79,7 @@ pub const RunOptions = struct {
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
             .declares_tray = manifestDeclaresTrayCapability(),
+            .dock_visible = manifestDockVisible(),
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
@@ -445,6 +446,17 @@ fn manifestDeclaresTrayCapability() bool {
         if (comptime std.mem.eql(u8, name, "tray")) return true;
     }
     return false;
+}
+
+/// Initial Dock/app-switcher presence. The validation is repeated at
+/// comptime so a custom/ejected build cannot bypass the same safety
+/// rule as `native validate` and strand an accessory app with no tray.
+fn manifestDockVisible() bool {
+    const visible = if (comptime @hasField(@TypeOf(app_manifest), "dock_visible")) app_manifest.dock_visible else true;
+    if (comptime !visible and !manifestDeclaresTrayCapability()) {
+        @compileError("app.zon dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to .capabilities and install a status item, or keep dock_visible = true (the default)");
+    }
+    return visible;
 }
 
 /// Whether app.zon declares the Tier-2 record store. This is comptime so

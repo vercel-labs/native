@@ -105,6 +105,22 @@ test "valid minimal manifest" {
     try validateManifest(manifest);
 }
 
+test "accessory startup requires the tray capability" {
+    const tray_capabilities = [_]Capability{.tray};
+    try validateManifest(.{
+        .identity = .{ .id = "com.example.menu", .name = "menu" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .capabilities = &tray_capabilities,
+        .dock_visible = false,
+    });
+
+    try std.testing.expectError(error.MissingTrayCapability, validateManifest(.{
+        .identity = .{ .id = "com.example.stranded", .name = "stranded" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .dock_visible = false,
+    }));
+}
+
 test "manifest validates shell windows and views" {
     const shell_views = [_]ShellView{
         .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = 44, .role = "toolbar" },

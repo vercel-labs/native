@@ -22,6 +22,7 @@ pub const Metadata = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    dock_visible: bool = true,
     persist: ?PersistMetadata = null,
     service_packages: []const ServicePackageMetadata = &.{},
     /// Which carrier runs src/services operations: "auto", "in_process",
@@ -554,6 +555,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .version = parseVersion(metadata.version) catch return .{ .ok = false, .message = "app.zon version is invalid" },
         .permissions = permissions,
         .capabilities = capabilities,
+        .dock_visible = metadata.dock_visible,
         .persist = persist,
         .bridge = .{ .commands = bridge_commands },
         .frontend = frontend,
@@ -573,6 +575,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     app_manifest.validateManifest(manifest) catch |err| return .{
         .ok = false,
         .message = switch (err) {
+            error.MissingTrayCapability => "app.zon dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to .capabilities and install a status item, or keep dock_visible = true (the default)",
             error.WebViewLayerConflict => web_layer_conflict_message,
             else => "manifest fields failed semantic validation",
         },
@@ -591,7 +594,7 @@ fn zonParseFailureMessage(allocator: std.mem.Allocator, source: []const u8) ?[]c
     const source_z = scratch.dupeZ(u8, source) catch return null;
     var diag: std.zon.parse.Diagnostics = .{};
     defer diag.deinit(scratch);
-    @setEvalBranchQuota(2000);
+    @setEvalBranchQuota(4000);
     if (std.zon.parse.fromSliceAlloc(RawManifest, scratch, source_z, &diag, .{})) |_| {
         return null;
     } else |_| {
@@ -614,7 +617,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
     defer arena.deinit();
     const scratch = arena.allocator();
     const source_z = try scratch.dupeZ(u8, source);
-    @setEvalBranchQuota(2000);
+    @setEvalBranchQuota(4000);
     const raw = try std.zon.parse.fromSliceAlloc(RawManifest, scratch, source_z, null, .{});
     return .{
         .id = try allocator.dupe(u8, raw.id),
@@ -628,6 +631,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .platforms = try duplicateStringList(allocator, raw.platforms),
         .permissions = try duplicateStringList(allocator, raw.permissions),
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
+        .dock_visible = raw.dock_visible,
         .persist = try duplicateRawPersist(allocator, raw.persist),
         .service_packages = try duplicateRawServicePackages(allocator, raw.service_packages),
         .service_carrier = try allocator.dupe(u8, raw.service_carrier),
@@ -2507,6 +2511,30 @@ test "manifest metadata parser reads identity version and lists" {
     });
 }
 
+test "manifest parser reads dock visibility and defaults it to visible" {
+    const accessory = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.menu",
+        \\  .name = "menu",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"tray"},
+        \\  .dock_visible = false,
+        \\}
+    );
+    defer accessory.deinit(std.testing.allocator);
+    try std.testing.expect(!accessory.dock_visible);
+
+    const regular = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.regular",
+        \\  .name = "regular",
+        \\  .version = "1.0.0",
+        \\}
+    );
+    defer regular.deinit(std.testing.allocator);
+    try std.testing.expect(regular.dock_visible);
+}
+
 test "manifest metadata parser carries model persistence configuration" {
     const metadata = try parseText(std.testing.allocator,
         \\.{
@@ -3268,6 +3296,38 @@ test "validate rejects a web-declaring manifest that excludes the web layer" {
     const invalid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
     try std.testing.expect(!invalid.ok);
     try std.testing.expect(std.mem.indexOf(u8, invalid.message, "webview_layer is invalid") != null);
+}
+
+test "validate rejects accessory startup without a tray capability" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-accessory-tray";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.accessory",
+        \\  .name = "accessory",
+        \\  .version = "1.0.0",
+        \\  .dock_visible = false,
+        \\}
+    });
+
+    const invalid = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!invalid.ok);
+    try std.testing.expect(std.mem.indexOf(u8, invalid.message, "dock_visible = false requires the \"tray\" capability") != null);
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.accessory",
+        \\  .name = "accessory",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"tray"},
+        \\  .dock_visible = false,
+        \\}
+    });
+    const valid = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(valid.ok);
 }
 
 test "manifest validates the theme pack name" {

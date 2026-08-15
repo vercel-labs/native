@@ -74,6 +74,7 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateIcons(manifest.icons);
     try validatePermissions(manifest.permissions);
     try validateCapabilities(manifest.capabilities);
+    try validateDockVisibility(manifest.dock_visible, manifest.capabilities);
     try validatePersist(manifest.persist, manifest.capabilities);
     try validateBridge(manifest.bridge);
     if (manifest.frontend) |frontend| try validateFrontend(frontend);
@@ -542,6 +543,17 @@ pub fn validateCapabilities(capabilities: []const Capability) ValidationError!vo
             }
         }
     }
+}
+
+/// An accessory app has no Dock or app-switcher route back to its
+/// windows. Require the status-item capability as the explicit re-show
+/// affordance instead of allowing an app to strand itself invisibly.
+pub fn validateDockVisibility(dock_visible: bool, capabilities: []const Capability) ValidationError!void {
+    if (dock_visible) return;
+    for (capabilities) |capability| {
+        if (capability == .tray) return;
+    }
+    return error.MissingTrayCapability;
 }
 
 pub fn validatePersist(config: ?types.PersistConfig, capabilities: []const Capability) ValidationError!void {

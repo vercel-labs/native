@@ -649,7 +649,7 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription title:(NSString *)title width:(double)width height:(double)height;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title width:(double)width height:(double)height;
 - (void)configureApplication;
 - (void)buildMenuBar;
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
@@ -852,13 +852,14 @@ static const char *NativeSdkCefBridgeScript() {
 
 @implementation NativeSdkChromiumHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription title:(NSString *)title width:(double)width height:(double)height {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title width:(double)width height:(double)height {
     self = [super init];
     if (!self) return nil;
 
     [NativeSdkChromiumApplication sharedApplication];
     ensureCefInitialized();
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    NSApplicationActivationPolicy policy = dockVisible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
+    [NSApp setActivationPolicy:policy];
     self.appName = appName.length > 0 ? appName : @"native-sdk";
     self.displayName = displayName.length > 0 ? displayName : self.appName;
     self.appVersion = version ?: @"";
@@ -2328,7 +2329,7 @@ static void NativeSdkApplyOverlayWindowFlags(NativeSdkChromiumHost *host, uint64
     }
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     @autoreleasepool {
         // A windowed CEF child cannot paint transparent pixels into its
         // parent NSWindow. Refuse instead of accepting a flag that leaves
@@ -2355,7 +2356,7 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *versionString = [[NSString alloc] initWithBytes:version length:version_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *aboutDescriptionString = [[NSString alloc] initWithBytes:about_description length:about_description_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *titleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
-        NativeSdkChromiumHost *host = [[NativeSdkChromiumHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString title:titleString width:width height:height];
+        NativeSdkChromiumHost *host = [[NativeSdkChromiumHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString dockVisible:(dock_visible != 0) title:titleString width:width height:height];
         if (restore_frame) {
             [host.window setFrame:NativeSdkConstrainFrame(NSMakeRect(x, y, width, height)) display:NO];
         }

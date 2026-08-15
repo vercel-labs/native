@@ -105,6 +105,7 @@ pub const validateUrl = validation.validateUrl;
 pub const validateIcons = validation.validateIcons;
 pub const validatePermissions = validation.validatePermissions;
 pub const validateCapabilities = validation.validateCapabilities;
+pub const validateDockVisibility = validation.validateDockVisibility;
 pub const validatePersist = validation.validatePersist;
 pub const validateBridge = validation.validateBridge;
 pub const validateFrontend = validation.validateFrontend;

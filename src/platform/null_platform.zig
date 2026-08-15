@@ -802,7 +802,12 @@ pub const NullPlatform = struct {
     }
 
     pub fn initWithOptions(surface_value: Surface, web_engine: WebEngine, app_info: AppInfo) NullPlatform {
-        return .{ .surface_value = surface_value, .web_engine = web_engine, .app_info = app_info };
+        return .{
+            .surface_value = surface_value,
+            .web_engine = web_engine,
+            .app_info = app_info,
+            .dock_visible = app_info.dock_visible,
+        };
     }
 
     /// Heap-allocate the wrapper (process allocator) and initialize it

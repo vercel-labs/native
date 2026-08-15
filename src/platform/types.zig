@@ -1263,9 +1263,14 @@ pub const AppInfo = struct {
     /// built-in re-show affordance: hiding a window on windows removes
     /// its taskbar entry and windows has no dock-reopen path, so only a
     /// tray icon can bring the hidden window back. The Windows host
-    /// folds this into its `window_hide_on_close` answer; macOS ignores
-    /// it (the Dock reopen path always exists).
+    /// folds this into its `window_hide_on_close` answer. On macOS the
+    /// Dock is a reopen path only while `dock_visible` is true; manifest
+    /// validation therefore requires a tray for accessory startup.
     declares_tray: bool = false,
+    /// Initial Dock/app-switcher presence. The macOS hosts translate
+    /// false to Accessory before configuring the app or creating its
+    /// startup window; `setDockPresence` can change it later.
+    dock_visible: bool = true,
     window_title: []const u8 = "",
     bundle_id: []const u8 = "dev.native_sdk.app",
     icon_path: []const u8 = "",

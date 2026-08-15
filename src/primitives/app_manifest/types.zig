@@ -26,6 +26,7 @@ pub const ValidationError = error{
     InvalidTimeout,
     InvalidKeyword,
     MissingRequiredField,
+    MissingTrayCapability,
     WebViewLayerConflict,
     NoSpaceLeft,
 };
@@ -664,6 +665,10 @@ pub const Manifest = struct {
     icons: []const Icon = &.{},
     permissions: []const Permission = &.{},
     capabilities: []const Capability = &.{},
+    /// Whether the app starts with its ordinary desktop presence. On
+    /// macOS false selects Accessory before startup windows exist, so no
+    /// Dock tile flashes; other hosts currently ignore the field.
+    dock_visible: bool = true,
     persist: ?PersistConfig = null,
     bridge: BridgeConfig = .{},
     frontend: ?FrontendConfig = null,

@@ -378,8 +378,9 @@ typedef void (*native_sdk_appkit_bridge_callback_t)(void *context, uint64_t wind
 // About panel, which also shows version and about_description when
 // non-empty. has_web_content declares whether the app hosts a webview;
 // web-only default menu items (Reload, Toggle Web Inspector, Undo/Redo)
-// exist only when it is set.
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
+// exist only when it is set. dock_visible selects Regular (nonzero) or
+// Accessory (zero) before application configuration and window creation.
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
 void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host);
 // Adopt pre-rendered straight-alpha RGBA8 pixels as the Dock icon (and
 // the About panel copy). The pixels are copied before return, so the

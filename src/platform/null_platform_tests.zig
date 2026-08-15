@@ -187,6 +187,17 @@ test "null platform reports hidden startup state" {
     try std.testing.expectEqual(true, recorder.startup_hidden.?);
 }
 
+test "null platform records accessory launch presence from app info" {
+    const null_platform = NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Menu Bar",
+        .dock_visible = false,
+    });
+
+    try std.testing.expect(!null_platform.app_info.dock_visible);
+    try std.testing.expect(!null_platform.dock_visible);
+    try std.testing.expectEqual(@as(u32, 0), null_platform.dock_presence_count);
+}
+
 test "null platform focus reveals a hidden window" {
     var null_platform = NullPlatform.init(.{});
     const services = null_platform.platform().services;

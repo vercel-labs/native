@@ -10,6 +10,11 @@ pub const RawManifest = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    /// Whether the app launches with a Dock/app-switcher presence on
+    /// macOS. False selects the accessory activation policy before any
+    /// startup window is created; the runtime dock-presence command may
+    /// still promote or demote the app later.
+    dock_visible: bool = true,
     persist: ?RawPersist = null,
     service_packages: []const RawServicePackage = &.{},
     /// Which carrier runs src/services operations: "auto" (the default child

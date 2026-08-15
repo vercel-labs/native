@@ -2089,7 +2089,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    // mismatch here is not proof the app declares no web use.
         \\    const fallback: AppManifestBuildConfig = .{ .web_declaration = "an app.zon this build graph could not parse" };
         \\    const source: [:0]const u8 = @embedFile("app.zon");
-        \\    @setEvalBranchQuota(2000);
+        \\    @setEvalBranchQuota(4000);
         \\    const raw = std.zon.parse.fromSliceAlloc(InferenceManifest, b.allocator, source, null, .{ .ignore_unknown_fields = true }) catch return fallback;
         \\    var config: AppManifestBuildConfig = .{
         \\        .web_engine = parseWebEngine(raw.web_engine) orelse .system,
@@ -2346,6 +2346,7 @@ fn runnerZig() []const u8 {
     \\            .app_name = self.app_name,
     \\            .has_web_content = manifestHasWebContent(),
     \\            .declares_tray = manifestDeclaresTrayCapability(),
+    \\            .dock_visible = manifestDockVisible(),
     \\            .window_title = self.window_title,
     \\            .bundle_id = self.bundle_id,
     \\            .icon_path = self.icon_path,
@@ -2672,6 +2673,14 @@ fn runnerZig() []const u8 {
     \\        if (comptime std.mem.eql(u8, name, "tray")) return true;
     \\    }
     \\    return false;
+    \\}
+    \\
+    \\fn manifestDockVisible() bool {
+    \\    const visible = if (comptime @hasField(@TypeOf(app_manifest), "dock_visible")) app_manifest.dock_visible else true;
+    \\    if (comptime !visible and !manifestDeclaresTrayCapability()) {
+    \\        @compileError("app.zon dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to .capabilities and install a status item, or keep dock_visible = true (the default)");
+    \\    }
+    \\    return visible;
     \\}
     \\
     \\fn manifestDeclaresStore() bool {
@@ -4132,10 +4141,14 @@ test "writeDefaultApp emits Vite project files" {
     // The windows-conditional twin: `.hide` hides the taskbar entry and
     // windows has no dock-reopen path, so the declaration requires the
     // "tray" capability (the status item IS the re-show affordance).
-    // macOS stays exempt — the Dock reopen path always exists.
+    // macOS regular apps have the Dock reopen path; accessory apps are
+    // separately required to declare a tray by manifestDockVisible.
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "close_policy \\\"hide\\\" on windows requires the \\\"tray\\\" capability") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDeclaresTrayCapability()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".declares_tray = manifestDeclaresTrayCapability()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDockVisible()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".dock_visible = manifestDockVisible()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "dock_visible = false requires the \\\"tray\\\" capability") != null);
     // The scene-first twin: an app.zon that declares its one window under
     // `.shell.windows` (the default `native init` shape) hits the
     // windows.len == 0 branch, and the startup window's host-create state

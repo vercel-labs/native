@@ -1,5 +1,5 @@
-<!-- The window can disappear while this view's model keeps running: app.zon
-     declares close_policy="hide", and the status item can show it again. -->
+<!-- The app launches without a Dock tile and with this window hidden;
+     the status item is the open/show path for the whole lifecycle. -->
 <column gap="12" padding="16" background="background">
   <text size="lg">{trackTitle}</text>
   <text foreground="text_muted">{playbackState}</text>
@@ -8,5 +8,5 @@
     <button on-press="next_track">Next</button>
   </row>
   <spacer grow="1" />
-  <status-bar>Closing this window hides it — the menu-bar extra keeps running.</status-bar>
+  <status-bar>No Dock tile — closing hides this window behind the menu-bar extra.</status-bar>
 </column>
