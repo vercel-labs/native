@@ -396,7 +396,8 @@ test "radio selection dispatches change then toggle then press on every input pa
         .phase = .key_down,
         .key = "arrowright",
         .focus_moved = true,
-        .radio_group_focus_moved = true,
+        .radio_group_navigation = true,
+        .radio_group_selection = true,
     }).?);
     try testing.expectEqual(Msg.load_more, tree.msgForPointer(toggle_radio.id, .up).?);
     try testing.expectEqual(Msg.add, tree.msgForPointer(press_radio.id, .up).?);

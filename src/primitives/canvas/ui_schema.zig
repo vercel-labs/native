@@ -145,12 +145,16 @@ pub const EventInfo = struct {
 /// - `image`: pictorial content. An unnamed image degrades (announced as
 ///   an unnamed image) but does not block, so a missing alt-equivalent
 ///   label is a WARNING; an explicit `label=""` marks it decorative.
+/// - `radiogroup`: a single-choice container whose label supplies the
+///   shared question for its individually named choices. Only a nonblank
+///   `label` names the group; a missing one is an ERROR.
 /// - `none`: layout, decoration, and content whose name IS its text.
 pub const A11yNameRule = enum {
     none,
     control,
     editable,
     image,
+    radiogroup,
 };
 
 pub const ElementInfo = struct {
@@ -221,7 +225,7 @@ pub const elements = [_]ElementInfo{
     .{ .code = 11, .name = "breadcrumb", .widget_kind = "breadcrumb", .hit_target = false },
     .{ .code = 12, .name = "button-group", .widget_kind = "button_group", .hit_target = false },
     .{ .code = 13, .name = "pagination", .widget_kind = "pagination", .hit_target = false },
-    .{ .code = 14, .name = "radio-group", .widget_kind = "radio_group", .hit_target = false },
+    .{ .code = 14, .name = "radio-group", .widget_kind = "radio_group", .hit_target = false, .a11y_name = .radiogroup },
     .{ .code = 15, .name = "tabs", .widget_kind = "tabs", .hit_target = false },
     .{ .code = 16, .name = "toggle-group", .widget_kind = "toggle_group", .hit_target = false },
     // Vertical containers.

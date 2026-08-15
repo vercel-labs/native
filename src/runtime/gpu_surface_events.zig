@@ -449,20 +449,28 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // from "an arrow landed here in place".
             if (widget_keyboard_event) |*keyboard_event| {
                 keyboard_event.keyboard.focus_moved = widget_focus_moved;
-                // Only navigation resolved through a nearest radio-group
-                // scope selects the landed radio. Bare radios preserve
-                // their legacy focus-only spatial behavior, and Tab entry
-                // never synthesizes a selection.
+                // Nearest-radio-group navigation owns its key even when
+                // Home/End names the current edge or a one-member group
+                // wraps in place. Selection is a separate stamp: a real
+                // focus move selects the landed radio, and an in-place
+                // move selects only an unchecked current radio. Bare
+                // radios preserve their legacy focus-only spatial
+                // behavior, and Tab entry never synthesizes a selection.
                 const view_index = runtimeFindViewIndex(self, input_event.window_id, input_event.label).?;
-                keyboard_event.keyboard.radio_group_focus_moved = widget_focus_moved and
-                    keyboard_event.target != null and
-                    keyboard_event.target.?.kind == .radio and
-                    canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(
-                        self.views[view_index].widgetLayoutTree(),
-                        keyboard_event.target.?.index,
-                    ) != null and
-                    (canvas_widget_runtime.canvasWidgetGroupFocusEdgeFromInput(input_event) != null or
-                        canvas_widget_runtime.canvasWidgetSpatialFocusDirection(input_event) != null);
+                const layout = self.views[view_index].widgetLayoutTree();
+                const radio_group_navigation = navigation: {
+                    const target = keyboard_event.target orelse break :navigation false;
+                    if (target.kind != .radio) break :navigation false;
+                    if (canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, target.index) == null) break :navigation false;
+                    break :navigation canvas_widget_runtime.canvasWidgetGroupFocusEdgeFromInput(input_event) != null or
+                        canvas_widget_runtime.canvasWidgetSpatialFocusDirection(input_event) != null;
+                };
+                keyboard_event.keyboard.radio_group_navigation = radio_group_navigation;
+                if (radio_group_navigation) {
+                    const target = keyboard_event.target.?;
+                    keyboard_event.keyboard.radio_group_selection = widget_focus_moved or
+                        !canvas_widget_runtime.canvasWidgetSelectableSelected(layout.nodes[target.index].widget);
+                }
             }
             // Clipboard shortcuts resolve against the raw input (copy has
             // no routed target when a static text selection is live) and

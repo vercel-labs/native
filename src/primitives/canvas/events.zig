@@ -105,10 +105,18 @@ pub const WidgetKeyboardEvent = struct {
     /// it to tell "selection followed focus onto me" (dispatch select)
     /// from "an arrow landed on me in place" (collapse/expand intent).
     focus_moved: bool = false,
-    /// True when an arrow/Home/End move landed on a radio through its
-    /// nearest `radio_group` scope. Bare radios deliberately leave this
-    /// false: they retain their legacy focus-only spatial navigation.
-    radio_group_focus_moved: bool = false,
+    /// True when the nearest `radio_group` scope owns this
+    /// Arrow/Home/End key. Unlike `focus_moved`, this stays true when the
+    /// target is already at the requested edge or is the group's only
+    /// focusable radio, so the key cannot leak to an app-level fallback.
+    /// Bare radios deliberately leave this false: they retain their
+    /// legacy focus-only spatial navigation.
+    radio_group_navigation: bool = false,
+    /// Whether this radio-group navigation should select the routed
+    /// target. A real focus move always selects; an in-place move selects
+    /// only when the current radio was unchecked, avoiding duplicate
+    /// change dispatches for Home-on-first / End-on-last.
+    radio_group_selection: bool = false,
     edit: ?TextInputEvent = null,
     /// True when the runtime clamped a clipboard paste to fit capacity
     /// before building `edit`; apps that care about lost bytes must check
@@ -788,9 +796,9 @@ fn widgetTreeItemKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardE
 /// A radio inside a `radio_group` follows focus for the group's
 /// Arrow/Home/End keymap. Space/Enter continue through the ordinary
 /// activation arm below; radios outside a group never receive the
-/// `radio_group_focus_moved` stamp and keep their old behavior.
+/// `radio_group_selection` stamp and keep their old behavior.
 fn widgetRadioKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
-    if (!keyboard.radio_group_focus_moved) return null;
+    if (!keyboard.radio_group_selection) return null;
     const navigation_key = std.ascii.eqlIgnoreCase(keyboard.key, "arrowup") or
         std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown") or
         std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or

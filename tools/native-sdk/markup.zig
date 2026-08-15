@@ -449,6 +449,7 @@ fn isA11yErrorMessage(message: []const u8) bool {
         ui_markup.a11y_unlabeled_control_message,
         ui_markup.a11y_icon_only_message,
         ui_markup.a11y_unlabeled_editable_message,
+        ui_markup.a11y_unlabeled_radiogroup_message,
         ui_markup.a11y_unknown_role_message,
         ui_markup.a11y_container_role_message,
     };
@@ -634,8 +635,8 @@ fn usage() void {
         \\bundled face renders as tofu boxes on reference paths - the error
         \\names the character; register a covering font and bind the text
         \\from the model, or use icons or plain words), and accessibility
-        \\(unnamed interactive controls, icon-only controls without labels,
-        \\and role misuse are errors - a screen reader user is blocked;
+        \\(unnamed interactive controls or radiogroups, icon-only controls
+        \\without labels, and role misuse are errors - a screen reader user is blocked;
         \\unnamed images and redundant labels are warnings).
         \\
         \\Inside an app directory with a fresh zig-out/model-contract.zon

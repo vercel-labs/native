@@ -474,7 +474,7 @@ test "a dead handler on a non-hit-target element reports the attribute position"
     try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try fixed_parser.parse()));
 }
 
-test "the a11y lint: unnamed controls, icon-only controls, and unnamed text entry are errors" {
+test "the a11y lint: unnamed controls, radiogroups, and text entry are errors" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -490,6 +490,11 @@ test "the a11y lint: unnamed controls, icon-only controls, and unnamed text entr
         // not a name (hearing the content does not say what to type).
         .{ .source = "<row>\n  <text-field on-input=\"draft\" />\n</row>", .message = markup.a11y_unlabeled_editable_message },
         .{ .source = "<row>\n  <input text=\"{query}\" on-input=\"draft\" />\n</row>", .message = markup.a11y_unlabeled_editable_message },
+        // A radio group's individually named choices do not name their
+        // shared question. The built-in element and a literal role
+        // override both require their own label.
+        .{ .source = "<radio-group>\n  <radio label=\"Default\" />\n</radio-group>", .message = markup.a11y_unlabeled_radiogroup_message },
+        .{ .source = "<row role=\"radiogroup\">\n  <radio label=\"Default\" />\n</row>", .message = markup.a11y_unlabeled_radiogroup_message },
         // A blank label is not a name on a control (unlike an image,
         // where the empty label is the decorative opt-out).
         .{ .source = "<row>\n  <checkbox label=\" \" on-toggle=\"select\" />\n</row>", .message = markup.a11y_unlabeled_control_message },
@@ -514,6 +519,8 @@ test "the a11y lint: unnamed controls, icon-only controls, and unnamed text entr
         "<row>\n  <textarea label=\"Body\" on-input=\"draft\" />\n</row>",
         "<row>\n  <select on-press=\"open\">Newest first</select>\n</row>",
         "<row>\n  <select text=\"{choice}\" on-press=\"open\"/>\n</row>",
+        "<radio-group label=\"Density\">\n  <radio label=\"Default\" />\n</radio-group>",
+        "<row role=\"radiogroup\" label=\"{question}\">\n  <radio label=\"Default\" />\n</row>",
     };
     for (clean) |source| {
         var parser = markup.Parser.init(arena, source);

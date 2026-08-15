@@ -479,10 +479,16 @@ test "widget keyboard control intents map activation keys" {
         .phase = .key_down,
         .key = "arrowright",
         .focus_moved = true,
-        .radio_group_focus_moved = true,
+        .radio_group_navigation = true,
+        .radio_group_selection = true,
     }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.select, grouped_radio_move.kind);
     try std.testing.expect(grouped_radio_move.actions.select);
+    try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .radio, .text = "Annual", .state = .{ .selected = true } }, .{
+        .phase = .key_down,
+        .key = "home",
+        .radio_group_navigation = true,
+    }) == null);
     try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .radio, .text = "Bare" }, .{
         .phase = .key_down,
         .key = "arrowright",

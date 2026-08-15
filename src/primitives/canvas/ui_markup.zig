@@ -1419,7 +1419,7 @@ pub fn dismissEventElement(name: []const u8) bool {
 // operated blind; a role that cannot mean what it says lies to the
 // bridge), and a WARNING when the experience degrades but remains
 // navigable (an unnamed image, a label duplicating the text it shadows).
-// Which elements are controls/editables/images is registry data
+// Which elements are controls/editables/radiogroups/images is registry data
 // (`schema.ElementInfo.a11y_name`); the judgment about name sources and
 // severities lives here. Both engines and the validator call the same
 // predicates, so the lint cannot drift between check time and build time.
@@ -1429,6 +1429,8 @@ pub const a11y_unlabeled_control_message = "this control has no accessible name 
 pub const a11y_icon_only_message = "icon-only control: the icon name is a drawing instruction, not a label - a screen reader announces an unnamed control; add label=\"...\" naming the action (e.g. <button icon=\"trash\" label=\"Delete\"/>)";
 
 pub const a11y_unlabeled_editable_message = "this text control has no accessible name - a screen reader user cannot tell what to type; add label=\"...\" (or placeholder=\"...\", which the accessibility bridges announce as the fallback name)";
+
+pub const a11y_unlabeled_radiogroup_message = "this radiogroup has no accessible name - a screen reader announces the choices without their shared question; add label=\"...\" naming the shared choice";
 
 pub const a11y_unknown_role_message = "unknown role: role takes a canvas.WidgetRole name (button, link, tree, treeitem, list, listitem, tab, checkbox, ...)";
 
@@ -1445,6 +1447,13 @@ pub const a11y_redundant_label_message = "this label duplicates the element's te
 /// the validator and both engines; comptime-callable.
 pub fn a11yNameError(node: MarkupNode) ?[]const u8 {
     const entry = schema.elementByName(node.name) orelse return null;
+    // A literal role override can create a radiogroup on any container;
+    // enforce the role's name contract in addition to the element-kind
+    // registry. Dynamic roles resolve at runtime, where the tree audit
+    // applies the same requirement to the effective semantic role.
+    if (nodeHasLiteralRole(node, "radiogroup") and !attrNonBlank(node, "label")) {
+        return a11y_unlabeled_radiogroup_message;
+    }
     switch (entry.a11y_name) {
         .none, .image => return null,
         .control => {
@@ -1462,7 +1471,20 @@ pub fn a11yNameError(node: MarkupNode) ?[]const u8 {
             if (entry.takes_text and a11yNodeHasName(node)) return null;
             return a11y_unlabeled_editable_message;
         },
+        .radiogroup => {
+            if (attrNonBlank(node, "label")) return null;
+            return a11y_unlabeled_radiogroup_message;
+        },
     }
+}
+
+fn nodeHasLiteralRole(node: MarkupNode, role: []const u8) bool {
+    const value = node.attr("role") orelse return false;
+    const expression = parseAttrExpression(value) orelse return false;
+    return switch (expression) {
+        .literal => |literal| std.mem.eql(u8, literal, role),
+        else => false,
+    };
 }
 
 /// The role-misuse ERROR for an element node: an unknown literal role, or
@@ -1645,7 +1667,7 @@ fn collectNodeA11yWarnings(node: MarkupNode, storage: []MarkupErrorInfo, len: *u
 
 /// The a11y ERRORS for a document, all of them: the same findings
 /// `validate` fails on one at a time (unnamed controls, icon-only
-/// controls, unnamed text entry, and role misuse), collected per node so
+/// controls, unnamed text entry/radiogroups, and role misuse), collected per node so
 /// a checker can report every offender in one pass instead of one per
 /// re-run. Positions match `validate`'s emission exactly: the element
 /// for name errors, the role attribute for role errors.

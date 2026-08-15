@@ -5829,6 +5829,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             }
                             return;
                         }
+                        // A radio group owns Arrow/Home/End even when the
+                        // requested target is already focused and selected.
+                        // That in-place case deliberately has no selection
+                        // intent (and therefore no duplicate on-change), but
+                        // it must still stop before the app-level key map.
+                        if (keyboard_event.keyboard.radio_group_navigation) return;
                     }
                 }
             }

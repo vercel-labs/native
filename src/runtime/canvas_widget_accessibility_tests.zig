@@ -663,8 +663,32 @@ test "runtime moves focused grouped canvas controls with arrow keys" {
 
 test "runtime moves focus within house grouped component controls" {
     const TestApp = struct {
+        radio_group_navigation: bool = false,
+        radio_group_selection: bool = false,
+
         fn app(self: *@This()) App {
-            return .{ .context = self, .name = "gpu-widget-house-group-navigation", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+            return .{
+                .context = self,
+                .name = "gpu-widget-house-group-navigation",
+                .source = platform.WebViewSource.html("<h1>Hello</h1>"),
+                .event_fn = event,
+            };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.target) |target| {
+                        if (target.kind == .radio) {
+                            self.radio_group_navigation = keyboard_event.keyboard.radio_group_navigation;
+                            self.radio_group_selection = keyboard_event.keyboard.radio_group_selection;
+                        }
+                    }
+                },
+                else => {},
+            }
         }
     };
 
@@ -716,7 +740,7 @@ test "runtime moves focus within house grouped component controls" {
         .{ .id = 20, .kind = .pagination, .frame = geometry.RectF.init(12, 56, 220, 34), .layout = builtinShadcnGroupLayout(), .children = &pagination_buttons },
         .{ .id = 30, .kind = .toggle_group, .frame = geometry.RectF.init(12, 100, 160, 34), .layout = builtinShadcnGroupLayout(), .children = &toggle_buttons },
         .{ .id = 40, .kind = .tabs, .frame = geometry.RectF.init(12, 144, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &tab_buttons },
-        .{ .id = 50, .kind = .radio_group, .frame = geometry.RectF.init(12, 188, 180, 34), .layout = builtinShadcnGroupLayout(), .children = &radio_rows },
+        .{ .id = 50, .kind = .radio_group, .frame = geometry.RectF.init(12, 188, 180, 34), .layout = builtinShadcnGroupLayout(), .semantics = .{ .label = "View" }, .children = &radio_rows },
         .{ .id = 90, .kind = .button, .frame = geometry.RectF.init(248, 12, 84, 34), .text = "Alone" },
     };
     var nodes: [24]canvas.WidgetLayoutNode = undefined;
@@ -743,10 +767,25 @@ test "runtime moves focus within house grouped component controls" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
     try std.testing.expectEqual(@as(canvas.ObjectId, 42), harness.runtime.views[0].canvas_widget_focused_id);
 
+    // An unchecked radio already at Home is still selected, even though
+    // focus stays in place. A second Home is owned by the group but does
+    // not request selection again (and therefore cannot re-fire change).
+    _ = try runtimeViewSetCanvasWidgetSelected(&harness.runtime.views[0], 51, false);
     harness.runtime.views[0].canvas_widget_focused_id = 51;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "home" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 51), harness.runtime.views[0].canvas_widget_focused_id);
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(51).?.widget.state.selected);
+    try std.testing.expect(app_state.radio_group_navigation);
+    try std.testing.expect(app_state.radio_group_selection);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "home" } });
+    try std.testing.expect(app_state.radio_group_navigation);
+    try std.testing.expect(!app_state.radio_group_selection);
+
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
     try std.testing.expectEqual(@as(canvas.ObjectId, 52), harness.runtime.views[0].canvas_widget_focused_id);
-    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(!retained.findById(51).?.widget.state.selected);
     try std.testing.expect(retained.findById(52).?.widget.state.selected);
     const group_semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
