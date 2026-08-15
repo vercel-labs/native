@@ -737,6 +737,10 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
     defer allocator.free(url_types);
     const privacy_descriptions = try macosPrivacyUsageDescriptions(allocator, metadata);
     defer allocator.free(privacy_descriptions);
+    const launch_policy = if (!metadata.dock_visible)
+        "  <key>LSUIElement</key>\n  <true/>\n"
+    else
+        "";
     // The About panel's bottom line in packaged bundles: the manifest
     // description rides NSHumanReadableCopyright, the plist key the
     // standard About panel renders as its footer text — the same line
@@ -773,11 +777,11 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\  <string>{s}</string>
         \\  <key>CFBundleVersion</key>
         \\  <string>{s}</string>
-        \\{s}{s}{s}{s}
+        \\{s}{s}{s}{s}{s}
         \\</dict>
         \\</plist>
         \\
-    , .{ bundle_id, display_name, display_name, executable, icon, version, version, about_line, privacy_descriptions, document_types, url_types });
+    , .{ bundle_id, display_name, display_name, executable, icon, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
 }
 
 fn metadataHasPermission(metadata: manifest_tool.Metadata, name: []const u8) bool {
@@ -3184,6 +3188,23 @@ test "plist capture usage descriptions follow manifest permissions" {
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSMicrophoneUsageDescription") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSAudioCaptureUsageDescription") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSScreenCaptureUsageDescription") == null);
+}
+
+test "plist launch policy follows dock visibility" {
+    const accessory: manifest_tool.Metadata = .{
+        .id = "dev.example.menu",
+        .name = "menu",
+        .version = "1.0.0",
+        .dock_visible = false,
+    };
+    const accessory_plist = try macosInfoPlist(std.testing.allocator, accessory, "menu");
+    defer std.testing.allocator.free(accessory_plist);
+    try std.testing.expect(std.mem.indexOf(u8, accessory_plist, "<key>LSUIElement</key>\n  <true/>") != null);
+
+    const regular: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" };
+    const regular_plist = try macosInfoPlist(std.testing.allocator, regular, "demo");
+    defer std.testing.allocator.free(regular_plist);
+    try std.testing.expect(std.mem.indexOf(u8, regular_plist, "LSUIElement") == null);
 }
 
 test "plist template includes document and URL registrations" {

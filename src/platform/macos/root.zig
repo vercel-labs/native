@@ -2785,6 +2785,9 @@ test "both mac hosts apply launch dock presence before configuring the app" {
         const create_at = std.mem.indexOf(u8, init_tail, "[self createWindowWithId:1") orelse return error.TestExpectedEqual;
         try std.testing.expect(policy_at < configure_at);
         try std.testing.expect(policy_at < create_at);
+        if (std.mem.indexOf(u8, init_tail, "ensureCefInitialized();")) |cef_init_at| {
+            try std.testing.expect(policy_at < cef_init_at);
+        }
         try std.testing.expect(std.mem.indexOf(u8, host_source, "int has_web_content, int dock_visible") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "dockVisible:(dock_visible != 0)") != null);
     }

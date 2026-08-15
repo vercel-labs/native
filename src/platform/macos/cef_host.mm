@@ -857,9 +857,9 @@ static const char *NativeSdkCefBridgeScript() {
     if (!self) return nil;
 
     [NativeSdkChromiumApplication sharedApplication];
-    ensureCefInitialized();
     NSApplicationActivationPolicy policy = dockVisible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
     [NSApp setActivationPolicy:policy];
+    ensureCefInitialized();
     self.appName = appName.length > 0 ? appName : @"native-sdk";
     self.displayName = displayName.length > 0 ? displayName : self.appName;
     self.appVersion = version ?: @"";

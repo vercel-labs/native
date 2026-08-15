@@ -1476,7 +1476,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    app_mod.addImport("native_sdk", native_sdk_mod);
         \\    app_mod.addImport("runner", runner_mod);
         \\    if (app_config.sqlite_capability) addSqliteEngine(b, app_mod, native_sdk_path);
-        \\    addMacosPrivacyInfoPlist(b, app_mod, target, app_config);
+        \\    addMacosInfoPlist(b, app_mod, target, app_config);
         \\    const exe = b.addExecutable(.{
         \\        .name = app_exe_name,
         \\        .root_module = app_mod,
@@ -1542,7 +1542,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        package_app_mod.addImport("native_sdk", package_sdk_mod);
         \\        package_app_mod.addImport("runner", package_runner_mod);
         \\        if (app_config.sqlite_capability) addSqliteEngine(b, package_app_mod, native_sdk_path);
-        \\        addMacosPrivacyInfoPlist(b, package_app_mod, target, app_config);
+        \\        addMacosInfoPlist(b, package_app_mod, target, app_config);
         \\        const built = b.addExecutable(.{
         \\            .name = app_exe_name,
         \\            .root_module = package_app_mod,
@@ -1614,14 +1614,18 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    return if (target.result.cpu.arch == .x86_64) true else null;
         \\}
         \\
-        \\/// Bare Mach-O dev executables have no bundle Info.plist. Embed the
-        \\/// capture usage strings derived from app.zon so macOS can present
-        \\/// consent instead of terminating the process. Packaged apps also
-        \\/// receive the richer external plist from the package command.
-        \\fn addMacosPrivacyInfoPlist(b: *std.Build, app_mod: *std.Build.Module, target: std.Build.ResolvedTarget, config: AppManifestBuildConfig) void {
+        \\/// Bare Mach-O dev executables have no bundle Info.plist. Embed launch
+        \\/// policy plus capture usage strings so LaunchServices starts accessory
+        \\/// apps without a transient Dock tile and macOS can present consent.
+        \\/// Packaged apps receive the richer external plist from the package command.
+        \\fn addMacosInfoPlist(b: *std.Build, app_mod: *std.Build.Module, target: std.Build.ResolvedTarget, config: AppManifestBuildConfig) void {
         \\    if (target.result.os.tag != .macos) return;
-        \\    if (!config.microphone_permission and !config.system_audio_permission) return;
+        \\    if (config.dock_visible and !config.microphone_permission and !config.system_audio_permission) return;
         \\
+        \\    const launch_policy = if (!config.dock_visible)
+        \\        "  <key>LSUIElement</key>\\n  <true/>\\n"
+        \\    else
+        \\        "";
         \\    const microphone = if (config.microphone_permission)
         \\        "  <key>NSMicrophoneUsageDescription</key>\\n  <string>This app captures microphone audio when you start recording.</string>\\n"
         \\    else
@@ -1632,11 +1636,11 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    else
         \\        "";
         \\    const source = b.fmt(
-        \\        \\#define NATIVE_SDK_INFO_PLIST "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" "<plist version=\"1.0\">\n<dict>\n{s}{s}</dict>\n</plist>\n"
+        \\        \\#define NATIVE_SDK_INFO_PLIST "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" "<plist version=\"1.0\">\n<dict>\n{s}{s}{s}</dict>\n</plist>\n"
         \\        \\__attribute__((used, section("__TEXT,__info_plist")))
         \\        \\static const unsigned char native_sdk_info_plist[sizeof(NATIVE_SDK_INFO_PLIST) - 1] = NATIVE_SDK_INFO_PLIST;
         \\        \\
-        \\    , .{ microphone, system_audio });
+        \\    , .{ launch_policy, microphone, system_audio });
         \\    const generated = b.addWriteFiles().add("native_sdk_macos_info_plist.c", source);
         \\    app_mod.addCSourceFile(.{ .file = generated, .flags = &.{} });
         \\}
@@ -2041,6 +2045,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    cef_dir: []const u8 = "third_party/cef/macos",
         \\    cef_auto_install: bool = false,
         \\    webview_layer: WebLayerOption = .auto,
+        \\    dock_visible: bool = true,
         \\    microphone_permission: bool = false,
         \\    system_audio_permission: bool = false,
         \\    sqlite_capability: bool = false,
@@ -2058,6 +2063,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\const InferenceManifest = struct {
         \\    capabilities: []const []const u8 = &.{},
         \\    permissions: []const []const u8 = &.{},
+        \\    dock_visible: bool = true,
         \\    web_engine: []const u8 = "system",
         \\    webview_layer: []const u8 = "auto",
         \\    cef: struct {
@@ -2096,6 +2102,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        .cef_dir = raw.cef.dir,
         \\        .cef_auto_install = raw.cef.auto_install,
         \\        .webview_layer = parseWebLayer(raw.webview_layer) orelse @panic("app.zon .webview_layer must be \"auto\", \"include\", or \"exclude\""),
+        \\        .dock_visible = raw.dock_visible,
         \\        .microphone_permission = hasManifestPermission(raw.permissions, "microphone"),
         \\        .system_audio_permission = hasManifestPermission(raw.permissions, "system_audio"),
         \\        .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
@@ -4056,7 +4063,10 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "runner_mod.addImport(\"relational_migrations\", migrations_mod)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSMicrophoneUsageDescription") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "NSAudioCaptureUsageDescription") != null);
-    try std.testing.expect(std.mem.count(u8, build_zig_text, "addMacosPrivacyInfoPlist(b, ") == 2);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "dock_visible: bool = true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".dock_visible = raw.dock_visible") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "LSUIElement") != null);
+    try std.testing.expect(std.mem.count(u8, build_zig_text, "addMacosInfoPlist(b, ") == 2);
     // The generated graph carries the whole web-layer feature: the
     // override option, the app.zon inference with its conflict panic,
     // the option handed to the runner, and the conditional WebView2
