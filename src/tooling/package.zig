@@ -197,6 +197,15 @@ pub fn artifactName(buffer: []u8, metadata: manifest_tool.Metadata, target: Pack
 }
 
 pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
+    // Keep the manifest's accessory-app safety invariant at the artifact
+    // boundary too. CLI package verbs and direct callers receive Metadata,
+    // not the typed manifest that `native validate` checks, so without this
+    // guard they could emit LSUIElement=true for an app with no status-item
+    // route back to its hidden windows.
+    if (!options.metadata.dock_visible and !metadataHasCapability(options.metadata, "tray")) {
+        std.debug.print("error: app.zon dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to .capabilities and install a status item, or keep dock_visible = true (the default)\n", .{});
+        return error.MissingTrayCapability;
+    }
     // The package boundary of the reject-conflicts contract: an exclude
     // (from `--web-layer` or app.zon) against declared web content — or
     // against a resolved Chromium engine — never becomes an artifact.
@@ -231,6 +240,13 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         }
     }
     return stats;
+}
+
+fn metadataHasCapability(metadata: manifest_tool.Metadata, name: []const u8) bool {
+    for (metadata.capabilities) |capability| {
+        if (std.mem.eql(u8, capability, name)) return true;
+    }
+    return false;
 }
 
 fn validateWebEngineTarget(target: PackageTarget, web_engine: WebEngine) !void {
@@ -3205,6 +3221,25 @@ test "plist launch policy follows dock visibility" {
     const regular_plist = try macosInfoPlist(std.testing.allocator, regular, "demo");
     defer std.testing.allocator.free(regular_plist);
     try std.testing.expect(std.mem.indexOf(u8, regular_plist, "LSUIElement") == null);
+}
+
+test "package rejects accessory startup without a tray before staging an artifact" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-accessory-tray";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+
+    try std.testing.expectError(error.MissingTrayCapability, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = .{
+            .id = "dev.example.stranded",
+            .name = "stranded",
+            .version = "1.0.0",
+            .dock_visible = false,
+        },
+        .target = .macos,
+        .output_path = root ++ "/Stranded.app",
+    }));
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(std.testing.io, root ++ "/Stranded.app", .{}));
 }
 
 test "plist template includes document and URL registrations" {
