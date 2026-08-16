@@ -1750,11 +1750,13 @@ test "widget emitter applies button variants" {
     try emitWidgetTree(&builder, .{ .id = 23, .kind = .button, .frame = geometry.RectF.init(0, 120, 120, 32), .text = "Ghost", .variant = .ghost }, tokens);
     try emitWidgetTree(&builder, .{ .id = 24, .kind = .button, .frame = geometry.RectF.init(0, 160, 120, 32), .text = "Delete", .variant = .destructive }, tokens);
 
-    // Every variant is FLAT (no shadow command): 5 x (fill + border +
-    // label). Destructive is the quiet red chip — the destructive hue
-    // as a 10% wash under destructive-red text, borderless.
+    // Every variant is FLAT (no shadow command): primary, secondary, and
+    // outline each emit fill + border + label; borderless ghost and
+    // destructive each emit only fill + label. Destructive is the quiet
+    // red chip — the destructive hue as a 10% wash under destructive-red
+    // text. No dead zero-width stroke commands enter the list.
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 15), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 13), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
@@ -1775,19 +1777,13 @@ test "widget emitter applies button variants" {
         .fill_rounded_rect => |fill| try expectFillColor(transparentColor(), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[10]) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[12]) {
+    try std.testing.expect(display_list.findCommandById(widgetPartId(23, 2)) == null);
+    switch (display_list.commands[11]) {
         .fill_rounded_rect => |fill| try expectFillColor(colorWithAlpha(tokens.colors.destructive, 0.10), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[13]) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[14]) {
+    try std.testing.expect(display_list.findCommandById(widgetPartId(24, 2)) == null);
+    switch (display_list.commands[12]) {
         .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.destructive, text.color),
         else => return error.TestUnexpectedResult,
     }

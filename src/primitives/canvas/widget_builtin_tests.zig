@@ -772,7 +772,7 @@ test "disabled filled buttons match their reference edge treatment" {
     // the fill and fallback edge are each washed to half strength, their
     // overlap becomes darker and invents an outline around the disabled
     // control. Destructive is already the quiet borderless chip, so its
-    // edge stays at width 0 in both states.
+    // edge emits no command in either state.
     const tokens = DesignTokens{};
     const button = Widget{
         .id = 71,
@@ -820,10 +820,7 @@ test "disabled filled buttons match their reference edge treatment" {
     var chip_commands: [8]CanvasCommand = undefined;
     var chip_builder = Builder.init(&chip_commands);
     try emitWidgetTree(&chip_builder, chip, tokens);
-    switch (chip_builder.displayList().findCommandById(widgetPartId(71, 2)).?.command) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
+    try std.testing.expect(chip_builder.displayList().findCommandById(widgetPartId(71, 2)) == null);
 }
 
 test "geist disabled buttons use the reference swap and tertiary registers" {
@@ -1123,11 +1120,8 @@ test "detached button groups render chip members with the group table and the me
     // No seam clips anywhere: a chip has no shared boundary.
     try std.testing.expect(list.findCommandById(widgetPartId(2, 0)) == null);
     try std.testing.expect(list.findCommandById(widgetPartId(3, 0)) == null);
-    // The chips are borderless: the border stroke carries zero width.
-    switch (list.findCommandById(widgetPartId(2, 2)).?.command) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
+    // The chips are borderless: no dead zero-width stroke command.
+    try std.testing.expect(list.findCommandById(widgetPartId(2, 2)) == null);
     // Knockout ink on the selected label, the stated rest ink elsewhere.
     switch (list.findCommandById(widgetPartId(2, 4)).?.command) {
         .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(255, 255, 255), text.color),
@@ -3362,7 +3356,10 @@ test "built-in component primitive widgets render distinct house chrome" {
     try layout.emitDisplayList(&builder, .{});
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
+    // Eight live commands: avatar fill/text/stroke, badge fill/text (its
+    // default zero-width edge emits nothing), separator, skeleton, and
+    // spinner. This count deliberately excludes dead rasterizer work.
+    try std.testing.expectEqual(@as(usize, 8), display_list.commandCount());
     try std.testing.expect(display_list.commands[0] == .fill_rounded_rect);
     switch (display_list.commands[1]) {
         .draw_text => |text| try std.testing.expectEqualStrings("NS", text.text),
@@ -3373,16 +3370,16 @@ test "built-in component primitive widgets render distinct house chrome" {
         .fill_rounded_rect => |fill| try expectFillColor(ColorTokens.light().accent, fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[5]) {
+    switch (display_list.commands[4]) {
         .draw_text => |text| try std.testing.expectEqualStrings("Beta", text.text),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(display_list.commands[6] == .fill_rect);
-    try std.testing.expect(display_list.commands[7] == .fill_rounded_rect);
+    try std.testing.expect(display_list.commands[5] == .fill_rect);
+    try std.testing.expect(display_list.commands[6] == .fill_rounded_rect);
     // The spinner (house arc register): ONE stroked arc in the page
     // ink — no track — with the stroke scaling at 1/12 of the box
     // (28px box -> 2.333px stroke).
-    switch (display_list.commands[8]) {
+    switch (display_list.commands[7]) {
         .stroke_path => |arc| {
             try expectFillColor(ColorTokens.light().text, arc.stroke.fill);
             try std.testing.expectApproxEqAbs(@as(f32, 28.0 * 2.0 / 24.0), arc.stroke.width, 0.001);

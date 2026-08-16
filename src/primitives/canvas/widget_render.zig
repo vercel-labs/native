@@ -3020,15 +3020,18 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
         .radius = radius,
         .fill = colorFill(badgeBackgroundColor(widget, tokens, visual)),
     });
-    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
-        .id = widgetPartId(widget.id, 2),
-        .rect = widget.frame,
-        .radius = radius,
-        .stroke = .{
-            .fill = colorFill(badgeBorderColor(widget, tokens, visual)),
-            .width = badgeStrokeWidth(widget, tokens, visual),
-        },
-    }));
+    const stroke_width = badgeStrokeWidth(widget, tokens, visual);
+    if (stroke_width > 0) {
+        try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+            .id = widgetPartId(widget.id, 2),
+            .rect = widget.frame,
+            .radius = radius,
+            .stroke = .{
+                .fill = colorFill(badgeBorderColor(widget, tokens, visual)),
+                .width = stroke_width,
+            },
+        }));
+    }
     const content_color = badgeTextColor(widget, tokens, visual);
     // Inline vector icon: icon-only badges center it (the stepper's
     // completed check, status chips); icon + text draws it before the

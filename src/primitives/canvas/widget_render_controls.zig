@@ -301,6 +301,7 @@ fn buttonGroupSegmentRadius(widget: Widget, visual: ControlVisualTokens, tokens:
 /// freed by the retired button shadow.
 fn emitButtonBorder(builder: *Builder, widget: Widget, tokens: DesignTokens, radius: Radius) Error!void {
     const stroke_width = buttonStrokeWidth(widget, tokens);
+    if (stroke_width <= 0) return;
     const border = snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
