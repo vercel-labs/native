@@ -187,6 +187,48 @@ test "null platform reports hidden startup state" {
     try std.testing.expectEqual(true, recorder.startup_hidden.?);
 }
 
+test "null platform captures fresh restored and explicit placement independently" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    _ = try services.createWindow(.{
+        .id = 1,
+        .label = "fresh",
+        .restore_state = true,
+        .initial_placement = .default,
+    });
+    _ = try services.createWindow(.{
+        .id = 2,
+        .label = "restored",
+        .initial_placement = .restored,
+    });
+    _ = try services.createWindow(.{
+        .id = 3,
+        .label = "explicit",
+        .default_frame = geometry.RectF.init(80, 120, 640, 480),
+        .initial_placement = .explicit,
+        .restore_policy = .center_on_primary,
+    });
+
+    try std.testing.expectEqual(types.WindowInitialPlacement.default, null_platform.window_placement[0]);
+    try std.testing.expectEqual(types.WindowInitialPlacement.restored, null_platform.window_placement[1]);
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, null_platform.window_placement[2]);
+    try std.testing.expectEqual(types.WindowRestorePolicy.center_on_primary, null_platform.window_restore_policy[2]);
+}
+
+test "window option conversion preserves legacy nonzero origins as explicit" {
+    const runtime_options: types.WindowCreateOptions = .{
+        .default_frame = geometry.RectF.init(32, 48, 640, 480),
+    };
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, runtime_options.windowOptions(7, "runtime").initial_placement);
+
+    const app_info: types.AppInfo = .{
+        .main_window = .{ .default_frame = geometry.RectF.init(64, 96, 720, 480) },
+    };
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, app_info.resolvedMainWindow().initial_placement);
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, app_info.resolvedStartupWindow(0).initial_placement);
+}
+
 test "null platform records accessory launch presence from app info" {
     const null_platform = NullPlatform.initWithOptions(.{}, .system, .{
         .app_name = "Menu Bar",

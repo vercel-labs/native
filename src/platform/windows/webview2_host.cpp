@@ -6125,8 +6125,10 @@ size_t native_sdk_windows_clipboard_read_data(Host *host, const char *mime_type,
 int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
-Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
+Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     (void)restore_frame;
+    (void)initial_placement;
+    (void)restore_policy;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
     controls.dwICC = ICC_PROGRESS_CLASS | ICC_TAB_CLASSES;
@@ -6555,8 +6557,10 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
     }
 }
 
-int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
+int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     (void)restore_frame;
+    (void)initial_placement;
+    (void)restore_policy;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
     window.id = window_id;

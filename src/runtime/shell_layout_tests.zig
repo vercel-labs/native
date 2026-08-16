@@ -278,6 +278,18 @@ test "runtime materializes manifest shell windows into laid out views" {
     const window = try harness.runtime.createShellWindow(shell_window, platform.WebViewSource.html("<h1>Shell</h1>"));
     try std.testing.expectEqual(@as(platform.WindowId, 2), window.id);
     try std.testing.expectEqualStrings("shell", window.label);
+    try std.testing.expectEqual(platform.WindowInitialPlacement.default, harness.null_platform.window_placement[1]);
+    try std.testing.expectEqual(platform.WindowRestorePolicy.center_on_primary, harness.null_platform.window_restore_policy[1]);
+
+    const positioned = try harness.runtime.createShellWindow(.{
+        .label = "positioned",
+        .x = 96,
+        .y = 144,
+        .views = &.{},
+    }, platform.WebViewSource.html("<h1>Positioned</h1>"));
+    try std.testing.expectEqual(@as(f32, 96), positioned.frame.x);
+    try std.testing.expectEqual(@as(f32, 144), positioned.frame.y);
+    try std.testing.expectEqual(platform.WindowInitialPlacement.explicit, harness.null_platform.window_placement[2]);
 
     var views_buffer: [13]platform.ViewInfo = undefined;
     const views = harness.runtime.listViews(window.id, &views_buffer);

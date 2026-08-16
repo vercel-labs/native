@@ -19,7 +19,6 @@
                 .height = 760,
                 .min_width = 640,
                 .min_height = 620,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{
                     .{ .label = "memo-canvas", .kind = "gpu_surface", .fill = true, .role = "Voice memo canvas", .accessibility_label = "Voice Memo recorder", .gpu_backend = "software", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },

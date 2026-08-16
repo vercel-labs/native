@@ -207,6 +207,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (@hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y")) .explicit else .default,
     };
 }
 
@@ -509,12 +510,17 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
             if (!window.restore_state) continue;
             if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
                 window.default_frame = saved.frame;
-                if (index == 0) app_info.main_window.default_frame = saved.frame;
+                window.initial_placement = .restored;
+                if (index == 0) {
+                    app_info.main_window.default_frame = saved.frame;
+                    app_info.main_window.initial_placement = .restored;
+                }
             }
         }
     } else if (app_info.main_window.restore_state) {
         if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
             app_info.main_window.default_frame = saved.frame;
+            app_info.main_window.initial_placement = .restored;
         }
     }
     return store;

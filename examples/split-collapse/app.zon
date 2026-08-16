@@ -14,7 +14,6 @@
                 .title = "Split Collapse",
                 .width = 800,
                 .height = 520,
-                .restore_state = false,
                 .views = .{
                     .{ .label = "split-canvas", .kind = "gpu_surface", .fill = true, .role = "Split canvas", .accessibility_label = "Split collapse", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
                 },

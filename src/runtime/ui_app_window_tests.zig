@@ -20,6 +20,7 @@ const settings_window_label = "settings";
 
 const PanelModel = struct {
     settings_open: bool = false,
+    position_settings: bool = true,
     transparent_settings: bool = false,
     bumps: u32 = 0,
     user_closes: u32 = 0,
@@ -60,6 +61,8 @@ fn panelWindows(model: *const PanelModel, scratch: *PanelApp.WindowsScratch) []c
             .title = "Settings",
             .width = 320,
             .height = 240,
+            .x = if (model.position_settings) 84 else null,
+            .y = if (model.position_settings) 126 else null,
             .min_width = 280,
             .min_height = 200,
             .titlebar = if (model.transparent_settings) .chromeless else .standard,
@@ -191,6 +194,9 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
             if (window.id != info.id) continue;
             try std.testing.expectEqual(@as(f32, 280), null_platform.window_min_width[index]);
             try std.testing.expectEqual(@as(f32, 200), null_platform.window_min_height[index]);
+            try std.testing.expectEqual(support.platform.WindowInitialPlacement.explicit, null_platform.window_placement[index]);
+            try std.testing.expectEqual(@as(f32, 84), window.frame.x);
+            try std.testing.expectEqual(@as(f32, 126), window.frame.y);
             found = true;
         }
         try std.testing.expect(found);
@@ -226,11 +232,17 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
     const closed = fixture.settingsWindowInfo();
     try std.testing.expect(closed == null or !closed.?.open);
 
-    // Reopen under the SAME label: the closed slot released it.
+    // Reopen under the SAME label without an authored origin: the closed slot
+    // released it, and a descriptor with no x/y takes default host placement.
+    fixture.app_state.model.position_settings = false;
     try fixture.clickSettingsButton();
     try std.testing.expect(fixture.app_state.model.settings_open);
     const reopened = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
     try std.testing.expect(reopened.open);
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id != reopened.id) continue;
+        try std.testing.expectEqual(support.platform.WindowInitialPlacement.default, fixture.harness.null_platform.window_placement[index]);
+    }
 }
 
 test "a transparent descriptor selects premultiplied canvas alpha and an alpha-zero clear" {

@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const native_sdk = @import("native_sdk");
 const app_manifest = @import("app_manifest_zon");
 const built_relational_migrations = @import("relational_migrations");
+const window_placement = @import("window_placement.zig");
 const manifest_shortcuts = if (@hasField(@TypeOf(app_manifest), "shortcuts")) app_manifest.shortcuts else .{};
 const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
 
@@ -49,6 +50,8 @@ pub const RunOptions = struct {
     icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,
+    restore_policy: native_sdk.WindowRestorePolicy = .clamp_to_visible_screen,
+    initial_placement: native_sdk.WindowInitialPlacement = .default,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -89,6 +92,8 @@ pub const RunOptions = struct {
                 .title = self.window_title,
                 .default_frame = self.default_frame,
                 .restore_state = self.restore_state,
+                .restore_policy = self.restore_policy,
+                .initial_placement = self.initial_placement,
             },
         };
         const windows = manifestWindowOptions(buffers);
@@ -106,6 +111,8 @@ pub const RunOptions = struct {
             // never flashes a blank window.
             info.main_window.titlebar = manifestShellStartupTitlebar();
             info.main_window.resizable = manifestShellStartupResizable();
+            info.main_window.restore_policy = manifestShellStartupRestorePolicy();
+            info.main_window.initial_placement = manifestShellStartupInitialPlacement();
             info.main_window.show = manifestShellStartupShowMode();
             info.main_window.transparent = manifestShellStartupBool("transparent", false);
             info.main_window.always_on_top = manifestShellStartupBool("always_on_top", false);
@@ -177,6 +184,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (windowHasExplicitOrigin(window)) .explicit else .default,
         .titlebar = windowTitlebarStyle(window),
         .show = if (windowBool(window, "initially_hidden", false)) .hidden else .immediate,
         .transparent = windowBool(window, "transparent", false),
@@ -410,6 +418,26 @@ fn windowRestorePolicy(comptime window: anytype) native_sdk.WindowRestorePolicy 
     if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     @compileError("unknown app.zon window restore_policy");
+}
+
+fn windowHasExplicitOrigin(comptime window: anytype) bool {
+    return @hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y");
+}
+
+fn manifestShellStartupRestorePolicy() native_sdk.WindowRestorePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .clamp_to_visible_screen;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .clamp_to_visible_screen;
+    if (comptime shell.windows.len == 0) return .clamp_to_visible_screen;
+    return windowRestorePolicy(shell.windows[0]);
+}
+
+fn manifestShellStartupInitialPlacement() native_sdk.WindowInitialPlacement {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .default;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .default;
+    if (comptime shell.windows.len == 0) return .default;
+    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else .default;
 }
 
 /// What the window's close affordance does, from app.zon. `.hide` is
@@ -1081,15 +1109,15 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
         const restored_windows = buffers.restored_windows[0..app_info.windows.len];
         for (restored_windows, 0..) |*window, index| {
             if (!window.restore_state) continue;
-            if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
-                window.default_frame = saved.frame;
-                if (index == 0) app_info.main_window.default_frame = saved.frame;
+            if (window_placement.applySavedWindow(window, store.loadWindow(window.label, &buffers.read) catch null)) {
+                if (index == 0) {
+                    app_info.main_window.default_frame = window.default_frame;
+                    app_info.main_window.initial_placement = .restored;
+                }
             }
         }
     } else if (app_info.main_window.restore_state) {
-        if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
-            app_info.main_window.default_frame = saved.frame;
-        }
+        _ = window_placement.applySavedWindow(&app_info.main_window, store.loadWindow(app_info.main_window.label, &buffers.read) catch null);
     }
     return store;
 }

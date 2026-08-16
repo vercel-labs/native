@@ -21,7 +21,6 @@
                 .height = 640,
                 .min_width = 560,
                 .min_height = 420,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .titlebar = "hidden_inset_tall",
                 .views = .{

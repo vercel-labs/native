@@ -464,6 +464,16 @@ pub const WindowRestorePolicy = enum {
     center_on_primary,
 };
 
+/// Why the host is receiving the window's initial frame. Persistence policy
+/// (`restore_state`) is deliberately separate: only the state-store loader can
+/// say `.restored`, while an authored x/y origin says `.explicit`; every other
+/// fresh window uses `.default` platform placement.
+pub const WindowInitialPlacement = enum {
+    restored,
+    explicit,
+    default,
+};
+
 /// How the window draws its titlebar chrome.
 /// `.hidden_inset` is the modern editor-app shape: content extends under a
 /// transparent titlebar with the title hidden (macOS:
@@ -621,6 +631,7 @@ pub const WindowOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    initial_placement: WindowInitialPlacement = .default,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
     /// Make the top-level window and its rendering surface alpha-capable.
@@ -715,6 +726,7 @@ pub const WindowCreateOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    initial_placement: WindowInitialPlacement = .default,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
     transparent: bool = false,
@@ -739,6 +751,15 @@ pub const WindowCreateOptions = struct {
             .resizable = self.resizable,
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
+            // Preserve the historical direct-runtime shape where a non-zero
+            // `default_frame` origin meant explicit placement. Callers that
+            // intentionally need the visible-screen origin can state
+            // `.explicit`; optional-origin APIs already do so even at 0,0.
+            .initial_placement = if (self.initial_placement == .default and
+                (self.default_frame.x != 0 or self.default_frame.y != 0))
+                .explicit
+            else
+                self.initial_placement,
             .titlebar = self.titlebar,
             .show = self.show,
             .transparent = self.transparent,
@@ -1294,6 +1315,7 @@ pub const AppInfo = struct {
     pub fn resolvedMainWindow(self: AppInfo) WindowOptions {
         var window = self.main_window;
         if (window.title.len == 0) window.title = self.resolvedWindowTitle();
+        inferLegacyExplicitOrigin(&window);
         return window;
     }
 
@@ -1308,7 +1330,16 @@ pub const AppInfo = struct {
         }
         if (window.label.len == 0) window.label = if (index == 0) "main" else "window";
         if (window.title.len == 0) window.title = self.resolvedWindowTitle();
+        inferLegacyExplicitOrigin(&window);
         return window;
+    }
+
+    fn inferLegacyExplicitOrigin(window: *WindowOptions) void {
+        if (window.initial_placement == .default and
+            (window.default_frame.x != 0 or window.default_frame.y != 0))
+        {
+            window.initial_placement = .explicit;
+        }
     }
 };
 

@@ -214,6 +214,7 @@ pub const WindowCreateOptions = platform.WindowCreateOptions;
 pub const WindowInfo = platform.WindowInfo;
 pub const WindowState = platform.WindowState;
 pub const WindowRestorePolicy = platform.WindowRestorePolicy;
+pub const WindowInitialPlacement = platform.WindowInitialPlacement;
 pub const WindowTitlebarStyle = platform.WindowTitlebarStyle;
 pub const WindowChrome = platform.WindowChrome;
 pub const FormFactor = platform.FormFactor;

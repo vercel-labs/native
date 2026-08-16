@@ -23,7 +23,6 @@
                 .title = "Menu Bar Player",
                 .width = 420,
                 .height = 260,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 // A true menu-bar app starts behind its status item. The
                 // tray's Open Player command is the initial reveal path.

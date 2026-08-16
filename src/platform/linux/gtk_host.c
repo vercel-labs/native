@@ -408,6 +408,8 @@ struct native_sdk_gtk_host {
     char *window_label;
     double init_x, init_y, init_width, init_height;
     int restore_frame;
+    int initial_placement;
+    int restore_policy;
     /* Startup-window options applied when on_activate creates @w1 (the
      * window does not exist yet when the host is created). */
     int init_resizable;
@@ -3108,7 +3110,7 @@ static void native_sdk_ensure_transparent_css(native_sdk_gtk_host_t *host) {
     host->transparent_css_provider = provider;
 }
 
-static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
+static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     if (native_sdk_find_window(host, window_id)) return NULL;
 
     int slot = -1;
@@ -3127,8 +3129,10 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     memset(win, 0, sizeof(*win));
     win->id = window_id;
     win->host = host;
-    win->x = restore_frame ? x : 0;
-    win->y = restore_frame ? y : 0;
+    (void)restore_frame;
+    (void)restore_policy;
+    win->x = initial_placement != 2 ? x : 0;
+    win->y = initial_placement != 2 ? y : 0;
     win->label = native_sdk_strndup(label && label[0] ? label : "main", strlen(label && label[0] ? label : "main"));
     win->title = native_sdk_strndup(title && title[0] ? title : host->app_name, strlen(title && title[0] ? title : host->app_name));
     win->transparent = (window_flags & (1u << 0)) != 0;
@@ -3257,7 +3261,8 @@ static void on_activate(GtkApplication *app, gpointer data) {
         host->init_x, host->init_y,
         host->init_width > 0 ? host->init_width : 720,
         host->init_height > 0 ? host->init_height : 480,
-        host->restore_frame, host->init_resizable, host->init_titlebar_style,
+        host->restore_frame, host->initial_placement, host->restore_policy,
+        host->init_resizable, host->init_titlebar_style,
         host->init_min_width, host->init_min_height,
         host->init_show_policy, host->init_window_flags);
     if (!win) return;
@@ -3281,7 +3286,8 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     const char *icon_path, size_t icon_path_len,
     const char *window_label, size_t window_label_len,
     double x, double y, double width, double height,
-    int restore_frame, int resizable, int titlebar_style,
+    int restore_frame, int initial_placement, int restore_policy,
+    int resizable, int titlebar_style,
     double min_width, double min_height, int show_policy,
     uint32_t window_flags)
 {
@@ -3298,6 +3304,8 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     host->init_width = width;
     host->init_height = height;
     host->restore_frame = restore_frame;
+    host->initial_placement = initial_placement;
+    host->restore_policy = restore_policy;
     host->init_resizable = resizable;
     host->init_titlebar_style = titlebar_style;
     host->init_min_width = min_width;
@@ -3838,10 +3846,10 @@ void native_sdk_gtk_set_shortcuts(native_sdk_gtk_host_t *host, const char *const
     }
 }
 
-int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
+int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     char *title = window_title_len > 0 ? native_sdk_strndup(window_title, window_title_len) : NULL;
     char *label = window_label_len > 0 ? native_sdk_strndup(window_label, window_label_len) : NULL;
-    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, min_width, min_height, show_policy, window_flags);
+    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, initial_placement, restore_policy, resizable, titlebar_style, min_width, min_height, show_policy, window_flags);
     free(title);
     free(label);
     if (!win) return 0;

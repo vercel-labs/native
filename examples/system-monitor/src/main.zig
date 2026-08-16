@@ -85,7 +85,6 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     // sweep in tests.zig, which sweeps from exactly this floor.
     .min_width = window_min_width,
     .min_height = window_min_height,
-    .restore_state = false,
     // Tall hidden-inset titlebar (declared in app.zon too, which threads
     // it through the STARTUP window create): the header bar IS the
     // titlebar — it pads its leading edge past the traffic lights via
@@ -196,7 +195,6 @@ pub fn main(init: std.process.Init) !void {
         .window_title = "System Monitor",
         .bundle_id = "dev.native_sdk.system_monitor",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
         .js_window_api = false,
         .security = .{
             .permissions = &app_permissions,

@@ -16,7 +16,6 @@
                 .height = 480,
                 .min_width = 520,
                 .min_height = 360,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{
                     .{ .label = "record-store-canvas", .kind = "gpu_surface", .fill = true, .role = "Record store example", .accessibility_label = "Record store example", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },

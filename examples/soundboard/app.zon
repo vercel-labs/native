@@ -25,7 +25,6 @@
                 // instead of clipping the grid.
                 .min_width = 1056,
                 .min_height = 600,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .titlebar = "hidden_inset_tall",
                 .views = .{

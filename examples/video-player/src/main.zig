@@ -31,7 +31,6 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Video Player",
     .width = window_width,
     .height = window_height,
-    .restore_state = false,
     .views = &shell_views,
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
@@ -361,7 +360,6 @@ pub fn main(init: std.process.Init) !void {
         .window_title = "Video Player",
         .bundle_id = "dev.native_sdk.video_player",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
         .js_window_api = false,
         .security = .{
             .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app" } },

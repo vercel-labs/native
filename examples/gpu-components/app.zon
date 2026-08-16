@@ -16,7 +16,6 @@
                 .height = 760,
                 .min_width = 760,
                 .min_height = 520,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{
                     .{ .label = "components-canvas", .kind = "gpu_surface", .fill = true, .min_width = 640, .role = "Native component gallery", .accessibility_label = "Interactive Native component gallery", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },

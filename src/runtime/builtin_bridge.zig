@@ -244,8 +244,10 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             const title = jsonStringField(payload, "title", &storage) orelse "";
             const width = jsonNumberField(payload, "width") orelse 720;
             const height = jsonNumberField(payload, "height") orelse 480;
-            const x = jsonNumberField(payload, "x") orelse 0;
-            const y = jsonNumberField(payload, "y") orelse 0;
+            const requested_x = jsonNumberField(payload, "x");
+            const requested_y = jsonNumberField(payload, "y");
+            const x = requested_x orelse 0;
+            const y = requested_y orelse 0;
             const source = if (jsonStringField(payload, "url", &storage)) |url| platform.WebViewSource.url(url) else null;
             const titlebar = if (jsonStringField(payload, "titlebar", &storage)) |value|
                 windowTitlebarStyleFromString(value) orelse return error.InvalidWindowOptions
@@ -256,6 +258,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
                 .title = title,
                 .default_frame = geometry.RectF.init(x, y, width, height),
                 .restore_state = jsonBoolField(payload, "restoreState") orelse true,
+                .initial_placement = if (requested_x != null or requested_y != null) .explicit else .default,
                 .titlebar = titlebar,
                 .transparent = jsonBoolField(payload, "transparent") orelse false,
                 .always_on_top = jsonBoolField(payload, "alwaysOnTop") orelse false,

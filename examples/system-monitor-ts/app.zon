@@ -25,7 +25,6 @@
                 // begin (the Zig original's rule).
                 .min_width = 1144,
                 .min_height = 720,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 // The header bar IS the titlebar: the core's chromeMsg
                 // channel delivers the band geometry, and the header row

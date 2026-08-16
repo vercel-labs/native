@@ -66,7 +66,6 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     // styles instead, which keep the real OS buttons.
     .resizable = false,
     .titlebar = .chromeless,
-    .restore_state = false,
     .views = &shell_views,
 }};
 pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
@@ -320,7 +319,6 @@ pub fn main(init: std.process.Init) !void {
         .window_title = "Native SDK Deck",
         .bundle_id = "dev.native_sdk.deck",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
         .js_window_api = false,
         .security = .{
             .permissions = &app_permissions,

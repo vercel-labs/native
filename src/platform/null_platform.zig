@@ -76,6 +76,7 @@ const validateMenus = types.validateMenus;
 const validateMenuItem = types.validateMenuItem;
 const isValidShortcutKey = types.isValidShortcutKey;
 const WindowRestorePolicy = types.WindowRestorePolicy;
+const WindowInitialPlacement = types.WindowInitialPlacement;
 const WindowOptions = types.WindowOptions;
 const WindowState = types.WindowState;
 const WindowInfo = types.WindowInfo;
@@ -377,6 +378,10 @@ pub const NullPlatform = struct {
     /// like `windows` — same seam-regression purpose as
     /// `window_resizable` (the startup create used to hardcode it).
     window_titlebar: [max_windows]WindowTitlebarStyle = [_]WindowTitlebarStyle{.standard} ** max_windows,
+    /// Captured independently from `restore_state`: persistence opt-in does
+    /// not mean a frame was actually found and restored.
+    window_placement: [max_windows]WindowInitialPlacement = [_]WindowInitialPlacement{.default} ** max_windows,
+    window_restore_policy: [max_windows]WindowRestorePolicy = [_]WindowRestorePolicy{.clamp_to_visible_screen} ** max_windows,
     window_transparent: [max_windows]bool = [_]bool{false} ** max_windows,
     window_always_on_top: [max_windows]bool = [_]bool{false} ** max_windows,
     window_click_through: [max_windows]bool = [_]bool{false} ** max_windows,
@@ -1157,6 +1162,8 @@ pub const NullPlatform = struct {
         self.windows[self.window_count] = info;
         self.window_resizable[self.window_count] = options.resizable;
         self.window_titlebar[self.window_count] = options.titlebar;
+        self.window_placement[self.window_count] = options.initial_placement;
+        self.window_restore_policy[self.window_count] = options.restore_policy;
         self.window_transparent[self.window_count] = options.transparent;
         self.window_always_on_top[self.window_count] = options.always_on_top;
         self.window_click_through[self.window_count] = options.click_through;
@@ -2962,6 +2969,8 @@ pub const NullPlatform = struct {
             self.windows[cursor] = self.windows[cursor + 1];
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
             self.window_titlebar[cursor] = self.window_titlebar[cursor + 1];
+            self.window_placement[cursor] = self.window_placement[cursor + 1];
+            self.window_restore_policy[cursor] = self.window_restore_policy[cursor + 1];
             self.window_transparent[cursor] = self.window_transparent[cursor + 1];
             self.window_always_on_top[cursor] = self.window_always_on_top[cursor + 1];
             self.window_click_through[cursor] = self.window_click_through[cursor + 1];

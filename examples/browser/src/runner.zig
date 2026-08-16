@@ -118,6 +118,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (@hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y")) .explicit else .default,
     };
 }
 

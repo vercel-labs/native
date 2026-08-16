@@ -8,13 +8,14 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "My App",
     .width = 480,
     .height = 320,
-    .restore_state = false,
     .views = &shell_views,
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 ```
 
 The first scene window adopts the startup window; additional scene windows are created through the window service. Secondary windows can also be created imperatively from Zig — or, in apps that [embed web content](/docs/frontend), from trusted JavaScript.
+
+Fresh windows use three-way placement. A successful state-store lookup restores the saved frame. Otherwise, an authored `x` or `y` places the window at that origin (constrained to a visible screen on macOS). With neither saved state nor an explicit origin, macOS centers the main window; secondary windows cascade under the default `clamp_to_visible_screen` policy, while `center_on_primary` keeps them centered. `restore_state = true` is only the persistence opt-in—it no longer makes a first launch look like a restored frame at `(0, 0)`.
 
 ## Overlay windows
 
@@ -35,7 +36,6 @@ const overlay: native_sdk.ShellWindow = .{
     .always_on_top = true,
     .click_through = true,
     .activate_on_show = false,
-    .restore_state = false,
     .views = &.{.{
         .label = "overlay-canvas",
         .kind = .gpu_surface,
@@ -68,6 +68,7 @@ const info = try runtime.createWindow(.{
     .label = "tools",
     .title = "Tools",
     .default_frame = native_sdk.geometry.RectF.init(80, 80, 420, 320),
+    .initial_placement = .explicit,
 });
 try runtime.focusWindow(info.id);
 ```

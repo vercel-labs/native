@@ -244,6 +244,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .resizable = shell_window.resizable,
                 .restore_state = shell_window.restore_state,
                 .restore_policy = shellRestorePolicy(shell_window.restore_policy),
+                .initial_placement = if (shell_window.x != null or shell_window.y != null) .explicit else .default,
                 .titlebar = shell_layout.shellTitlebarStyle(shell_window.titlebar),
                 .show = shell_layout.shellWindowShowMode(shell_window),
                 .transparent = shell_window.transparent,

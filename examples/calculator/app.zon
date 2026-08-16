@@ -18,7 +18,6 @@
                 .width = 320,
                 .height = 490,
                 .resizable = false,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .titlebar = "hidden_inset",
                 .views = .{

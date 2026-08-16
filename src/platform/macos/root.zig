@@ -159,7 +159,7 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, dock_visible: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) ?*AppKitHost;
+extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, dock_visible: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) ?*AppKitHost;
 extern fn native_sdk_appkit_destroy(host: *AppKitHost) void;
 extern fn native_sdk_appkit_set_dock_icon_rgba(host: *AppKitHost, pixels: [*]const u8, width: usize, height: usize) void;
 extern fn native_sdk_appkit_set_dock_icon_file(host: *AppKitHost, path: [*]const u8, path_len: usize) void;
@@ -177,7 +177,7 @@ extern fn native_sdk_appkit_set_security_policy(host: *AppKitHost, allowed_origi
 extern fn native_sdk_appkit_set_menus(host: *AppKitHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
 extern fn native_sdk_appkit_request_frame(host: *AppKitHost) void;
-extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) c_int;
+extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) c_int;
 extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
@@ -629,7 +629,7 @@ pub const MacPlatform = struct {
         // the classic load byte-for-byte.
         const dock_icon = planDockIcon(app_info.icon_path);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
-        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
         switch (dock_icon) {
             .host_file => {},
             .masked_render => spawnDevDockIconRender(host, app_info.icon_path),
@@ -1264,6 +1264,21 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
     };
 }
 
+fn initialPlacementInt(placement: platform_mod.WindowInitialPlacement) c_int {
+    return switch (placement) {
+        .restored => 0,
+        .explicit => 1,
+        .default => 2,
+    };
+}
+
+fn restorePolicyInt(policy: platform_mod.WindowRestorePolicy) c_int {
+    return switch (policy) {
+        .clamp_to_visible_screen => 0,
+        .center_on_primary => 1,
+    };
+}
+
 fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
@@ -1318,13 +1333,16 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     try refuseUnsupportedTransparentWindow(self.web_engine, options);
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
+    if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, initialPlacementInt(options.initial_placement), restorePolicyInt(options.restore_policy), if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
     applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     applyWindowClosePolicy(self.host, options.id, options.close_policy);
     return .{
         .id = options.id,
         .label = options.label,
         .title = title,
+        // Placement can alter the origin synchronously in AppKit; the host's
+        // window_frame_changed event reports that actual frame immediately
+        // after startup/create and replaces this requested-frame placeholder.
         .frame = frame,
         .scale_factor = 1,
         .open = true,
@@ -2747,11 +2765,22 @@ test "mac unrestored secondary windows cascade within the active screen" {
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSWindow *referenceWindow = NSApp.keyWindow ?: self.window;") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMinX(referenceFrame) + 24.0") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMaxY(referenceFrame) - 24.0") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "if (!makeMain && referenceWindow)") != null);
+        // Only fresh/default windows under the default clamp policy cascade.
+        // center_on_primary deliberately keeps the preceding center placement.
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "if (restorePolicy == 0 && !makeMain && referenceWindow)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSRect visibleFrame = referenceScreen.visibleFrame;") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMaxX(visibleFrame) - NSWidth(cascadedFrame)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMaxY(visibleFrame) - NSHeight(cascadedFrame)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:cascadedFrame display:NO]") != null);
+    }
+}
+
+test "both mac hosts distinguish restored explicit and default placement" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "initialPlacement != 2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "if (initialPlacement == 2)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window center]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "restorePolicy == 0 && !makeMain && referenceWindow") != null);
     }
 }
 

@@ -17,7 +17,6 @@
                 // (toolbar + hero rail + tiles + forecast form).
                 .min_width = 1080,
                 .min_height = 640,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .titlebar = "hidden_inset_tall",
                 .views = .{

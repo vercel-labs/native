@@ -206,6 +206,9 @@ pub fn build(b: *std.Build) void {
         else
             sqliteCompileFlags(),
     });
+    const app_runner_window_placement_mod = module(b, target, optimize, "src/app_runner/window_placement.zig");
+    app_runner_window_placement_mod.addImport("native_sdk", desktop_mod);
+    const app_runner_window_placement_tests = testArtifact(b, app_runner_window_placement_mod);
     desktop_mod.link_libc = true;
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
@@ -593,6 +596,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(platform_info_tests).step);
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
+    test_step.dependOn(&b.addRunArtifact(app_runner_window_placement_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);
@@ -823,6 +827,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },
         .{ .path = "build/app.zig", .pattern = "test_step.dependOn(&analysis_obj.step);" },
         .{ .path = "src/runtime/ui_app.zig", .pattern = "has no default value - give every Model field a default" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-owned-runner-window-placement", "Verify owned example runners preserve explicit origins and distinguish successful state restoration", &.{
+        .{ .path = "examples/hello/src/runner.zig", .pattern = ".initial_placement = if (@hasField(@TypeOf(window), \"x\") or @hasField(@TypeOf(window), \"y\")) .explicit else .default" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "window.initial_placement = .restored;" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "app_info.main_window.initial_placement = .restored;" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-bridge-view-selector-helpers", "Verify injected view helpers accept string selectors", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "viewSelectorPayload(options)" },
@@ -1487,6 +1496,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-diagnostics", "Run diagnostics module tests", diagnostics_tests);
     addTestStep(b, "test-platform-info", "Run platform info module tests", platform_info_tests);
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
+    addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
