@@ -46,7 +46,6 @@ const nextWidgetLayoutPaintChild = widget_tree.nextWidgetLayoutPaintChild;
 const widgetTransform = widget_tree.widgetTransform;
 const widgetClipsContent = widget_tree.widgetClipsContent;
 const booleanControlSelected = widget_access.booleanControlSelected;
-const widgetIsHitTarget = widget_access.isHitTarget;
 const widgetPlaceholder = widget_text_input.widgetPlaceholder;
 const widgetTextInputSize = widget_text_input.widgetTextInputSize;
 const widgetTextInputLayoutOptions = widget_text_input.widgetTextInputLayoutOptions;
@@ -946,10 +945,25 @@ fn emitWidgetLayoutNodeContent(
 /// ladder as a list row over its full hit frame; an authored background is
 /// its rest fill. Non-actionable containers paint only that authored fill.
 fn emitLayoutContainerBackground(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const background = if (widgetIsHitTarget(widget))
-        listItemFillColor(widget, tokens, widget.state)
-    else
-        widget.style.background orelse return;
+    const actions = widget.semantics.actions;
+    const actionable = widget.id != 0 and !widget.state.disabled and
+        (actions.press or actions.toggle or actions.drag);
+    if (!actionable) {
+        const background = widget.style.background orelse return;
+        if (background.a <= 0) return;
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = Radius.all(nonNegative(widget.style.radius orelse 0)),
+            .fill = colorFill(background),
+        });
+        return;
+    }
+    // The common rest-state actionable container with no authored fill
+    // emits nothing. Avoid the token ladder on every structural row in a
+    // full rebuild; only live feedback or authored chrome needs it.
+    if (widget.style.background == null and !widget.state.selected and !widget.state.pressed and !widget_render_style.washHovered(widget)) return;
+    const background = listItemFillColor(widget, tokens, widget.state);
     if (background.a <= 0) return;
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
