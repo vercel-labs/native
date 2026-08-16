@@ -1042,9 +1042,8 @@ pub const Widget = struct {
     layer: ?i32 = null,
     /// Modal surfaces (dialog/drawer/sheet) paint a token-driven scrim
     /// (dim + backdrop blur) across the whole tree behind them. False
-    /// opts a surface out — for embedding one as an inline PREVIEW
-    /// (a component catalog card, a docs specimen) where it is not
-    /// actually modal. Ignored on every other kind.
+    /// opts out of the scrim for a non-modal specimen; placement remains
+    /// root-relative. Ignored on every other kind.
     scrim: bool = true,
     state: WidgetState = .{},
     layout: WidgetLayoutStyle = .{},
@@ -1212,8 +1211,8 @@ pub const BuiltinComponentOptions = struct {
     text_composition: ?TextRange = null,
     value: f32 = 0,
     layer: ?i32 = null,
-    /// See `Widget.scrim`: false embeds a modal surface as an inline
-    /// preview without the behind-it dim + blur.
+    /// See `Widget.scrim`: false keeps root-relative placement but omits
+    /// the behind-it dim + blur.
     scrim: bool = true,
     state: WidgetState = .{},
     layout: WidgetLayoutStyle = .{},

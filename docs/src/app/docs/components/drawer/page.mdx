@@ -3,9 +3,9 @@ import { AttrTable } from "@/components/attr-table";
 
 # Drawer
 
-A side-anchored surface with the same contract as [dialog](/docs/components/dialog): rendered in place, title via the `text` attribute, visibility model-owned behind an `if`, and `on-dismiss` dispatched on Escape or click-outside so `update` clears the open flag. As with the dialog, the title chrome is engine-drawn and children stack over the full content box, so lead the body column with a fixed-height spacer. For the bottom-edge variant, see [sheet](/docs/components/sheet).
+A bottom-edge surface with the same contract as [dialog](/docs/components/dialog): it spans the root view width and pins to the root bottom, regardless of which container declares it. The title comes from the `text` attribute, visibility is model-owned behind an `if`, and `on-dismiss` dispatches on Escape or click-outside so `update` clears the open flag. As with the dialog, the title chrome is engine-drawn and children stack over the full content box, so lead the body column with a fixed-height spacer. For the right-edge variant, see [sheet](/docs/components/sheet).
 
-<ComponentPreview name="drawer" alt="A drawer surface rendered by the engine" caption="a side drawer with a title and stacked controls" />
+<ComponentPreview name="drawer" alt="A drawer surface rendered by the engine" caption="a bottom drawer with a title and stacked controls" />
 
 ## Markup
 
@@ -13,7 +13,7 @@ A side-anchored surface with the same contract as [dialog](/docs/components/dial
 <column padding="24">
   <button variant="outline" icon="menu" on-press="open_filters">Filters</button>
   <if test="{filters_open}">
-    <drawer text="Filters" width="260" padding="24" on-dismiss="close_filters">
+    <drawer text="Filters" height="260" padding="24" on-dismiss="close_filters">
       <column gap="12">
         <spacer height="34"></spacer>
         <checkbox checked="{only_unread}" on-toggle="toggle_unread">Only unread</checkbox>
@@ -31,7 +31,7 @@ In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically
 
 ```zig
 // Rendered only while model.filters_open is true; on_dismiss clears it in update.
-ui.el(.drawer, .{ .text = "Filters", .width = 260, .padding = 24, .on_dismiss = .close_filters }, .{
+ui.el(.drawer, .{ .text = "Filters", .height = 260, .padding = 24, .on_dismiss = .close_filters }, .{
     ui.column(.{ .gap = 12 }, .{
         ui.column(.{ .height = 34 }, .{}), // clears the engine-drawn title line
         ui.checkbox(.{ .text = "Only unread", .checked = model.only_unread, .on_toggle = .toggle_unread }),

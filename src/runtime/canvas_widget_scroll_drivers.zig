@@ -238,16 +238,16 @@ pub fn canvasWidgetScrollDriverEligible(node: canvas.WidgetLayoutNode) bool {
 ///   - ITSELF (a directly anchored scroll region is its own surface);
 ///   - its own subtree (a scroll region inside an open popover or
 ///     modal is above the surface, not beneath it);
-///   - a driver whose anchored ROOT paints LATER in the floating pass
-///     (anchored surfaces paint in tree order above all in-flow
+///   - a driver whose window-level ROOT paints LATER in the floating pass
+///     (window-level surfaces paint in tree order above all in-flow
 ///     content, so a scroll region inside the topmost of two
 ///     overlapping popovers sits above the lower one).
 fn driverOccluderMask(view: anytype, driver_node: usize, occluder_nodes: []const usize) u32 {
-    const driver_anchor_root = anchoredRootIndex(view, driver_node);
+    const driver_window_root = windowSurfaceRootIndex(view, driver_node);
     var mask: u32 = 0;
     for (occluder_nodes, 0..) |occluder_node, bit| {
         if (occluder_node == driver_node) continue;
-        if (driver_anchor_root) |root| {
+        if (driver_window_root) |root| {
             if (occluder_node == root) continue;
             if (root > occluder_node) continue;
         }
@@ -268,12 +268,12 @@ fn transformedOccluderFrame(node: canvas.WidgetLayoutNode) geometry.RectF {
     return transform.transformRect(frame).normalized();
 }
 
-/// The nearest self-or-ancestor node that is an anchored floating root,
+/// The nearest self-or-ancestor node that is a window-level surface root,
 /// or null for in-flow content.
-fn anchoredRootIndex(view: anytype, node_index: usize) ?usize {
+fn windowSurfaceRootIndex(view: anytype, node_index: usize) ?usize {
     var current: ?usize = node_index;
     while (current) |index| {
-        if (view.widget_layout_nodes[index].widget.layout.anchor != null) return index;
+        if (canvas.widgetEscapesAncestorClips(view.widget_layout_nodes[index].widget)) return index;
         current = view.widget_layout_nodes[index].parent_index;
     }
     return null;

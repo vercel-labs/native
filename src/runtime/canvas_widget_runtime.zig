@@ -490,9 +490,9 @@ pub fn canvasWidgetLayoutNodeFrameVisible(layout: canvas.WidgetLayoutTree, node_
     if (frame.isEmpty()) return false;
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clip regions (they
-        // render in the hoisted window-level pass).
-        if (canvas.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        // Window-level surfaces render in the hoisted pass and escape
+        // ancestor clip regions.
+        if (canvas.widgetEscapesAncestorClips(layout.nodes[current].widget)) return true;
         const index = layout.nodes[current].parent_index orelse return true;
         if (index >= layout.nodes.len) return true;
         const ancestor = layout.nodes[index];
@@ -510,9 +510,9 @@ pub fn canvasWidgetLayoutNodeClippedBounds(layout: canvas.WidgetLayoutTree, node
 
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clip regions, so
-        // dirty bounds under them clip to the window only.
-        if (canvas.widgetIsAnchored(layout.nodes[current].widget)) break;
+        // Window-level surfaces escape ancestor clip regions, so dirty
+        // bounds under them clip to the window only.
+        if (canvas.widgetEscapesAncestorClips(layout.nodes[current].widget)) break;
         const index = layout.nodes[current].parent_index orelse break;
         if (index >= layout.nodes.len) return null;
         const ancestor = layout.nodes[index];
@@ -1278,6 +1278,10 @@ pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutN
     var bottom = viewport.maxY();
     var index = scroll_index + 1;
     while (index < nodes.len and nodes[index].depth > scroll_depth) {
+        if (canvas.widgetIsRootRelativeModal(nodes[index].widget)) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
         // A subtree anchored DIRECTLY to the scroll region stays
         // stationary while content scrolls (its anchor base never
         // moves), so `frame + offset` is not a content-space position
@@ -1301,7 +1305,7 @@ pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutN
 /// content pins to the viewport width. Three subtree exclusions keep the
 /// range honest — each names blank space the user could otherwise scroll
 /// to (or live content they otherwise could not reach):
-///   - ANCHORED floating subtrees are out of flow and window-clipped;
+///   - WINDOW-LEVEL floating subtrees are out of flow and window-clipped;
 ///     an open dropdown to the right of the viewport is not content;
 ///   - a NESTED CLIP SCOPE (scroll view, `clip_content` surface,
 ///     virtualized container) bounds its own children — its frame is
@@ -1320,7 +1324,7 @@ pub fn canvasWidgetLayoutScrollContentExtentX(nodes: []const canvas.WidgetLayout
     var index = scroll_index + 1;
     while (index < nodes.len and nodes[index].depth > scroll_depth) {
         const node = nodes[index];
-        if (node.widget.layout.anchor != null) {
+        if (canvas.widgetEscapesAncestorClips(node.widget)) {
             index = skipCanvasWidgetSubtree(nodes, index);
             continue;
         }
@@ -1346,18 +1350,21 @@ fn skipCanvasWidgetSubtree(nodes: []const canvas.WidgetLayoutNode, index: usize)
     return next;
 }
 
-/// Scrolled content carries its descendants — including floating
-/// surfaces anchored to widgets INSIDE it — but a surface anchored to
-/// the SCROLL REGION ITSELF stays put: its anchor base is the region's
-/// own frame, which never moves when the content under it does (the
-/// live-scroll translate applies the same rule).
+/// Scrolled content carries its descendants — including floating surfaces
+/// anchored to widgets INSIDE it — but root-relative modal surfaces never
+/// ride content, and a surface anchored to the SCROLL REGION ITSELF stays
+/// put: its anchor base is the region's own frame, which never moves when
+/// the content under it does (the live-scroll translate applies the same
+/// rule).
 pub fn translateCanvasWidgetLayoutScrollDescendants(nodes: []canvas.WidgetLayoutNode, scroll_index: usize, offset: geometry.OffsetF) void {
     if (scroll_index >= nodes.len) return;
     const scroll_depth = nodes[scroll_index].depth;
     var index = scroll_index + 1;
     while (index < nodes.len and nodes[index].depth > scroll_depth) {
         const node = nodes[index];
-        if (node.widget.layout.anchor != null and node.parent_index == scroll_index) {
+        if (canvas.widgetIsRootRelativeModal(node.widget) or
+            node.widget.layout.anchor != null and node.parent_index == scroll_index)
+        {
             index = skipCanvasWidgetSubtree(nodes, index);
             continue;
         }

@@ -1980,6 +1980,48 @@ test "a surface anchored to the scroll region itself never rides its content" {
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 72, 100, 30), retained.findById(3).?.frame);
 }
 
+test "a root-relative modal nested in a scroll region never rides its content" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-modal-scroll", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+
+    const nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 180, 72) }, .frame = geometry.RectF.init(0, 0, 180, 72), .depth = 0 },
+        .{ .widget = .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 180, 200) }, .frame = geometry.RectF.init(0, 0, 180, 200), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 3, .kind = .dialog, .frame = geometry.RectF.init(40, 16, 100, 40) }, .frame = geometry.RectF.init(40, 16, 100, 40), .depth = 2, .parent_index = 1 },
+    };
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = 1_000_000_000,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 24,
+    } });
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -24, 180, 200), retained.findById(2).?.frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(40, 16, 100, 40), retained.findById(3).?.frame);
+}
+
 test "assistive steps on a both-axes region page its live axis" {
     const TestApp = struct {
         fn app(self: *@This()) App {

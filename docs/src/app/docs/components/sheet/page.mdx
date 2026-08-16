@@ -3,9 +3,9 @@ import { AttrTable } from "@/components/attr-table";
 
 # Sheet
 
-A bottom-anchored surface with the same contract as [dialog](/docs/components/dialog) and [drawer](/docs/components/drawer): rendered in place, title via the `text` attribute, visibility model-owned behind an `if`, and `on-dismiss` dispatched on Escape or click-outside so `update` clears the open flag. The sheet rises from the bottom edge; size it with `height`. The title chrome is engine-drawn and children stack over the full content box, so lead the body column with a fixed-height spacer.
+A right-edge surface with the same contract as [dialog](/docs/components/dialog) and [drawer](/docs/components/drawer): it spans the root view height and pins to the root right, regardless of which container declares it. Visibility is model-owned behind an `if`, and `on-dismiss` dispatches on Escape or click-outside so `update` clears the open flag. Size the sheet with `width`. The title chrome is engine-drawn and children stack over the full content box, so lead the body column with a fixed-height spacer.
 
-<ComponentPreview name="sheet" alt="A sheet surface rendered by the engine" caption="a bottom sheet with a title, body text, and an action row" />
+<ComponentPreview name="sheet" alt="A sheet surface rendered by the engine" caption="a right-edge sheet with a title, body text, and an action row" />
 
 ## Markup
 
@@ -13,7 +13,7 @@ A bottom-anchored surface with the same contract as [dialog](/docs/components/di
 <column padding="24">
   <button variant="outline" icon="external-link" on-press="open_share">Share</button>
   <if test="{share_open}">
-    <sheet text="Share" height="190" padding="24" on-dismiss="close_share">
+    <sheet text="Share" width="320" padding="24" on-dismiss="close_share">
       <column gap="12">
         <spacer height="34"></spacer>
         <text wrap="true" foreground="text_muted">Anyone with the link can view this board.</text>
@@ -32,7 +32,7 @@ A bottom-anchored surface with the same contract as [dialog](/docs/components/di
 In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
-ui.el(.sheet, .{ .text = "Share", .height = 190, .padding = 24, .on_dismiss = .close_share }, .{
+ui.el(.sheet, .{ .text = "Share", .width = 320, .padding = 24, .on_dismiss = .close_share }, .{
     ui.column(.{ .gap = 12 }, .{
         ui.column(.{ .height = 34 }, .{}), // clears the engine-drawn title line
         ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),

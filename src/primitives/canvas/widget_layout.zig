@@ -58,7 +58,7 @@ pub const max_widget_depth: usize = 32;
 
 pub fn layoutWidgetDepth(
     widget: Widget,
-    frame: geometry.RectF,
+    proposed_frame: geometry.RectF,
     parent_index: ?usize,
     depth: usize,
     output: []WidgetLayoutNode,
@@ -69,6 +69,7 @@ pub fn layoutWidgetDepth(
     if (len.* >= output.len) return error.WidgetLayoutListFull;
 
     const index = len.*;
+    const frame = rootRelativeModalFrame(widget, proposed_frame, if (index == 0) proposed_frame else output[0].frame, tokens, depth);
     output[index] = .{
         .widget = widgetWithFrame(widget, frame),
         .frame = frame,
@@ -143,7 +144,17 @@ pub fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, tokens), index, depth + 1, output, len, tokens);
             }
         },
-        .stack, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
+        .stack, .bubble, .card, .resizable, .panel, .popover => {
+            for (widget.children) |child| {
+                if (child.layout.anchor != null) continue;
+                _ = try layoutWidgetDepth(child, stackChildFrame(content, child, tokens), index, depth + 1, output, len, tokens);
+            }
+        },
+        // Modal surfaces own root-relative geometry: the dialog centers,
+        // the drawer pins to the bottom edge, and the sheet pins right.
+        // Their content still uses the stacking-surface contract inside
+        // that resolved frame.
+        .dialog, .drawer, .sheet => {
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child, tokens), index, depth + 1, output, len, tokens);
@@ -173,6 +184,24 @@ pub fn layoutWidgetDepth(
     try layoutAnchoredChildren(widget.children, windowControlsClearedContent(frame, widget, tokens), index, depth, output, len, tokens);
 
     return index;
+}
+
+fn rootRelativeModalFrame(widget: Widget, proposed: geometry.RectF, root: geometry.RectF, tokens: DesignTokens, depth: usize) geometry.RectF {
+    const kind: widget_model.BuiltinComponentKind = switch (widget.kind) {
+        .dialog => .dialog,
+        .drawer => .drawer,
+        .sheet => .sheet,
+        else => return proposed,
+    };
+    const intrinsic = intrinsicWidgetSizeDepth(widget, tokens, depth);
+    const preferred = geometry.SizeF.init(
+        clampIntrinsicAxis(if (widget.frame.width > 0) widget.frame.width else intrinsic.width, widget.layout.min_size.width, widget.layout.max_size.width),
+        clampIntrinsicAxis(if (widget.frame.height > 0) widget.frame.height else intrinsic.height, widget.layout.min_size.height, widget.layout.max_size.height),
+    );
+    return widget_model.builtinSurfaceFrame(kind, .{
+        .bounds = root,
+        .preferred_size = preferred,
+    }) orelse proposed;
 }
 
 /// Lay a drag header's content out clear of the OS window-control
@@ -712,16 +741,15 @@ pub var test_axis_overflow_diagnostics: usize = 0;
 /// operating mode — the scroll exists precisely to reveal it — so the
 /// vertical overflow diagnostic must stay quiet there. The walk is the
 /// same rule the layout audit applies (`scopeScrollsVertically`), which
-/// is why the audit was already clean on these shapes. Anchored
-/// floating subtrees hoist out of every ancestor scope (window-clipped,
-/// not parent-clipped), so the walk stops at an anchor boundary just
-/// like the audit's clip-scope walk.
+/// is why the audit was already clean on these shapes. Window-level
+/// surfaces hoist out of every ancestor scope, so the walk stops at that
+/// boundary just like the audit's clip-scope walk.
 fn widgetInsideVerticalScrollScope(output: []const WidgetLayoutNode, parent_index: usize) bool {
     var current: ?usize = parent_index;
     while (current) |index| {
         const widget = output[index].widget;
         if ((widget.kind == .scroll_view and widget.scroll_axes.scrollsVertically()) or widget.layout.virtualized) return true;
-        if (widget.layout.anchor != null) return false;
+        if (widget_tree.widgetEscapesAncestorClips(widget)) return false;
         current = output[index].parent_index;
     }
     return false;
@@ -736,7 +764,7 @@ fn widgetInsideHorizontalScrollScope(output: []const WidgetLayoutNode, parent_in
     while (current) |index| {
         const widget = output[index].widget;
         if (widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized) return true;
-        if (widget.layout.anchor != null) return false;
+        if (widget_tree.widgetEscapesAncestorClips(widget)) return false;
         current = output[index].parent_index;
     }
     return false;

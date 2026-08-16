@@ -200,7 +200,7 @@
         <column>
           <button variant="outline" icon="menu" on-press="open_drawer">Open filters</button>
           <if test="{drawerOpen}">
-            <drawer text="Filters" width="280" padding="24" on-dismiss="close_drawer">
+            <drawer text="Filters" height="280" padding="24" on-dismiss="close_drawer">
               <column gap="12">
                 <spacer height="34" />
                 <checkbox checked="{onlyUnreadChecked}" on-toggle="toggle_only_unread" text="Only unread" />
@@ -304,7 +304,7 @@
         <column>
           <button variant="outline" icon="external-link" on-press="open_sheet">Open share sheet</button>
           <if test="{sheetOpen}">
-            <sheet text="Share" height="210" padding="24" on-dismiss="close_sheet">
+            <sheet text="Share" width="320" padding="24" on-dismiss="close_sheet">
               <column gap="12">
                 <spacer height="34" />
                 <text wrap="true" foreground="text_muted">Anyone with the link can view this component gallery.</text>

@@ -242,9 +242,9 @@ fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *Findi
     var scrolls_vertically = false;
     var scrolls_horizontally = false;
     while (true) {
-        // Anchored floating widgets escape every ancestor clip (the
-        // routing layer keeps focus targets inside open overlays live).
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return;
+        // Window-level surfaces escape every ancestor clip (the routing
+        // layer keeps focus targets inside them live).
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) return;
         const parent_index = layout.nodes[current].parent_index orelse return;
         const parent = layout.nodes[parent_index];
         if (widgetClipsForAudit(parent.widget)) {

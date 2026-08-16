@@ -165,7 +165,7 @@ pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: Des
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
     try emitWidgetLayoutClipEscapingMotions(builder, layout, tokens, state);
-    try emitWidgetLayoutAnchored(builder, layout, tokens, state);
+    try emitWidgetLayoutWindowSurfaces(builder, layout, tokens, state);
     try emitWidgetLayoutChartHoverDetails(builder, layout, tokens, state);
     try emitWidgetLayoutDragPreview(builder, layout, tokens, state);
 }
@@ -177,7 +177,7 @@ pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: Des
 /// ordinary tree walk and retain their scroll clipping.
 fn emitWidgetLayoutClipEscapingMotions(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     for (layout.nodes, 0..) |node, index| {
-        if (widget_tree.widgetIsAnchored(node.widget)) continue;
+        if (widget_tree.widgetEscapesAncestorClips(node.widget)) continue;
         if (!state.layoutMotionEscapesAncestorClips(node.widget.id)) continue;
         if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
         if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
@@ -257,9 +257,9 @@ pub fn widgetLayoutRootBounds(layout: anytype) ?geometry.RectF {
     return bounds;
 }
 
-/// Accumulated transform active while `node_index` emits. Anchored surfaces
-/// are hoisted into the late top-level pass, so their original ancestors do
-/// not contribute transforms there.
+/// Accumulated transform active while `node_index` emits. Window-level
+/// surfaces are hoisted into the late top-level pass, so their original
+/// ancestors do not contribute transforms there.
 fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine {
     if (node_index >= layout.nodes.len) return null;
     var indices: [widget_layout.max_widget_depth]usize = undefined;
@@ -269,7 +269,7 @@ fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine
         if (index >= layout.nodes.len or len >= indices.len) return null;
         indices[len] = index;
         len += 1;
-        if (widget_tree.widgetIsAnchored(layout.nodes[index].widget)) break;
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[index].widget)) break;
         current = layout.nodes[index].parent_index;
     }
 
@@ -304,7 +304,7 @@ fn widgetLayoutNodePresentationTransform(
         if (index >= layout.nodes.len or len >= indices.len) return null;
         indices[len] = index;
         len += 1;
-        if (widget_tree.widgetIsAnchored(layout.nodes[index].widget)) break;
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[index].widget)) break;
         current = layout.nodes[index].parent_index;
     }
 
@@ -324,11 +324,11 @@ fn widgetLayoutNodePresentationTransform(
 /// The transform stack a node inherits at its ordinary paint position. A
 /// drag preview is hoisted to the window-level late pass to escape clipping,
 /// so it must explicitly restore this stack before painting the source.
-/// Anchored nodes were already hoisted and therefore inherit no original
-/// ancestors there.
+/// Window-level nodes were already hoisted and therefore inherit no
+/// original ancestors there.
 fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize) ?Affine {
     if (node_index >= layout.nodes.len) return null;
-    if (widget_tree.widgetIsAnchored(layout.nodes[node_index].widget)) return Affine.identity();
+    if (widget_tree.widgetEscapesAncestorClips(layout.nodes[node_index].widget)) return Affine.identity();
     const parent_index = layout.nodes[node_index].parent_index orelse return Affine.identity();
     return widgetLayoutNodeEmissionTransform(layout, parent_index);
 }
@@ -363,7 +363,7 @@ fn widgetLayoutNodeVisibleBounds(
             state.drag_preview_id.? == current_widget.id;
         // Every late window-level pass escapes clips ABOVE its lifted root,
         // but nested clips inside that subtree still constrain descendants.
-        if (widget_tree.widgetIsAnchored(current_widget) or
+        if (widget_tree.widgetEscapesAncestorClips(current_widget) or
             is_drag_preview_root or
             has_layout_motion and state.layoutMotionEscapesAncestorClips(current_widget.id))
         {
@@ -388,15 +388,14 @@ fn widgetLayoutNodeVisibleBounds(
     return if (clipped.isEmpty()) null else clipped;
 }
 
-/// The late z-pass for anchored floating surfaces: they are skipped by
-/// the in-tree walk above and emitted here LAST, at the top level, so no
-/// ancestor scroll/clip region crops them (window-clipped, not
-/// parent-clipped) and they paint above everything in the tree. Node
-/// order is tree order, so a nested anchored surface (submenu) paints
-/// above the surface it hangs from. Ancestor hiding still applies.
-fn emitWidgetLayoutAnchored(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+/// The late z-pass for window-level surfaces: anchored overlays and
+/// root-relative modals are skipped by the in-tree walk and emitted here
+/// LAST, so ancestor scroll/clip regions cannot crop them. Node order is
+/// tree order, so nested floating surfaces preserve their structural z-order.
+/// Ancestor hiding still applies.
+fn emitWidgetLayoutWindowSurfaces(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     for (layout.nodes, 0..) |node, index| {
-        if (!widget_tree.widgetIsAnchored(node.widget)) continue;
+        if (!widget_tree.widgetEscapesAncestorClips(node.widget)) continue;
         if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
         // A floating surface anchored inside a concealed disclosure
         // subtree stays down with its anchor — concealed content is
@@ -693,9 +692,9 @@ fn emitWidgetLayoutChildren(
     var previous: ?WidgetPaintOrder = null;
     while (emitted < child_count) : (emitted += 1) {
         const child_index = nextWidgetLayoutPaintChild(layout, parent_index, tokens, previous) orelse return;
-        // Anchored floating children paint in the late z-pass
-        // (`emitWidgetLayoutAnchored`), never in tree position.
-        if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget) and
+        // Window-level surfaces paint in the late z-pass
+        // (`emitWidgetLayoutWindowSurfaces`), never in tree position.
+        if (!widget_tree.widgetEscapesAncestorClips(layout.nodes[child_index].widget) and
             !state.layoutMotionEscapesAncestorClips(layout.nodes[child_index].widget.id))
         {
             const segment = if (group_index) |index|

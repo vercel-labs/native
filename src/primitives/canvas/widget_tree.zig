@@ -17,10 +17,25 @@ pub const WidgetPaintOrder = struct {
 pub fn widgetPaintLayer(widget: Widget, tokens: DesignTokens) i32 {
     if (widget.layer) |layer| return layer;
     return switch (widget.kind) {
-        .popover, .menu_surface, .dropdown_menu => tokens.layer.overlay,
+        .dialog, .drawer, .sheet, .popover, .menu_surface, .dropdown_menu => tokens.layer.overlay,
         .tooltip => tokens.layer.floating,
         else => tokens.layer.base,
     };
+}
+
+/// Modal surfaces are placed in layout-root coordinates and never ride an
+/// ancestor scroll region's content translation.
+pub fn widgetIsRootRelativeModal(widget: Widget) bool {
+    return switch (widget.kind) {
+        .dialog, .drawer, .sheet => true,
+        else => false,
+    };
+}
+
+/// Surfaces whose layout, paint, routing, and visibility are resolved at
+/// the window level rather than through their authored ancestor clips.
+pub fn widgetEscapesAncestorClips(widget: Widget) bool {
+    return widgetIsAnchored(widget) or widgetIsRootRelativeModal(widget);
 }
 
 pub fn nextWidgetPaintChild(children: []const Widget, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
@@ -186,16 +201,22 @@ pub fn widgetKindDisclosureAnimated(kind: widget_model.WidgetKind) bool {
 const disclosure_settle_slack: f32 = 0.5;
 
 /// The bottom edge the disclosure widget's content REACHES: the deepest
-/// maxY among its in-flow children's subtrees. Anchored children float
-/// outside the flow (window-positioned) and never count.
+/// maxY among its in-flow children's subtrees. Window-level surfaces float
+/// outside the flow and never count.
 pub fn disclosureContentBottom(layout: anytype, node_index: usize) f32 {
     const node = layout.nodes[node_index];
     var bottom = -std.math.inf(f32);
     var index = node_index + 1;
-    while (index < layout.nodes.len and layout.nodes[index].depth > node.depth) : (index += 1) {
+    while (index < layout.nodes.len and layout.nodes[index].depth > node.depth) {
         const child = layout.nodes[index];
-        if (widgetIsAnchored(child.widget)) continue;
+        if (widgetEscapesAncestorClips(child.widget)) {
+            const subtree_depth = child.depth;
+            index += 1;
+            while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}
+            continue;
+        }
         bottom = @max(bottom, child.frame.normalized().maxY());
+        index += 1;
     }
     return bottom;
 }

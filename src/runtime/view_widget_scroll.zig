@@ -393,9 +393,9 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 if (ancestor_index >= self.widget_layout_node_count) break;
                 const ancestor = self.widget_layout_nodes[ancestor_index];
 
-                // Anchored surfaces escape ancestor clips rather than
+                // Window-level surfaces escape ancestor clips rather than
                 // scrolling with their source branch.
-                if (canvas.widgetIsAnchored(ancestor.widget)) break;
+                if (canvas.widgetEscapesAncestorClips(ancestor.widget)) break;
 
                 if (canvasWidgetScrollableKind(ancestor.widget.kind) and ancestor.widget.kind != .textarea) {
                     const viewport = ancestor.frame.inset(ancestor.widget.layout.padding).normalized();
@@ -540,15 +540,18 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
         /// Scrolled content carries its descendants — INCLUDING floating
         /// surfaces anchored to widgets inside it (their anchor bases
-        /// moved) — but a surface anchored to the SCROLL REGION ITSELF
-        /// stays put: its anchor base is the region's own frame, which
-        /// never moves when the content under it does.
+        /// moved) — but root-relative modal surfaces never ride content,
+        /// and a surface anchored to the SCROLL REGION ITSELF stays put:
+        /// its anchor base is the region's own frame, which never moves
+        /// when the content under it does.
         pub fn translateCanvasWidgetScrollDescendants(self: *RuntimeView, scroll_index: usize, offset: geometry.OffsetF) void {
             const scroll_depth = self.widget_layout_nodes[scroll_index].depth;
             var index = scroll_index + 1;
             while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > scroll_depth) {
                 const node = self.widget_layout_nodes[index];
-                if (node.widget.layout.anchor != null and node.parent_index == scroll_index) {
+                if (canvas.widgetIsRootRelativeModal(node.widget) or
+                    node.widget.layout.anchor != null and node.parent_index == scroll_index)
+                {
                     const subtree_depth = node.depth;
                     index += 1;
                     while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > subtree_depth) : (index += 1) {}

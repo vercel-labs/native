@@ -520,6 +520,10 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
     var index = scroll_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) {
         const node = layout.nodes[index];
+        if (widget_tree.widgetIsRootRelativeModal(node.widget)) {
+            index = skipSubtree(layout, index);
+            continue;
+        }
         // A subtree anchored DIRECTLY to the scroll region stays
         // stationary under scrolling (its anchor base never moves), so
         // `frame + offset` is not a content-space position for it —
@@ -552,7 +556,7 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
 /// The horizontal content reach for a horizontal scroll view's
 /// semantics — the sideways mirror of `widgetScrollContentExtent`, with
 /// the honest-range exclusions the engine's clamp/driver walker applies
-/// (`canvasWidgetLayoutScrollContentExtentX`): anchored floating
+/// (`canvasWidgetLayoutScrollContentExtentX`): window-level floating
 /// subtrees are out of flow, a nested clip scope bounds its own
 /// children, and disclosure content counts only while settled open.
 fn widgetScrollContentExtentX(layout: anytype, scroll_index: usize, viewport: geometry.RectF) f32 {
@@ -563,7 +567,7 @@ fn widgetScrollContentExtentX(layout: anytype, scroll_index: usize, viewport: ge
     var index = scroll_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) {
         const node = layout.nodes[index];
-        if (node.widget.layout.anchor != null) {
+        if (widget_tree.widgetEscapesAncestorClips(node.widget)) {
             index = skipSubtree(layout, index);
             continue;
         }

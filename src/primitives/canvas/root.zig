@@ -780,6 +780,8 @@ pub const widgetWindowDragTargetIndexFromNode = @import("widget_routing.zig").wi
 /// stack-container list all derive from).
 pub const widgetKindStacksChildren = @import("widget_layout.zig").widgetKindStacksChildren;
 pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
+pub const widgetIsRootRelativeModal = @import("widget_tree.zig").widgetIsRootRelativeModal;
+pub const widgetEscapesAncestorClips = @import("widget_tree.zig").widgetEscapesAncestorClips;
 /// The runtime-scrolled virtual list predicate (widget_tree.zig): a
 /// virtualized scroll_view with a DECLARED total item count, whose
 /// scroll offset the runtime owns (engine scrolling + native drivers)

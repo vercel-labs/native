@@ -2758,10 +2758,13 @@ test "built-in modal surfaces render house chrome and semantics" {
     const root = Widget{ .kind = .stack, .children = &.{ backdrop, dialog, drawer, sheet } };
     var nodes: [5]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 920, 240), &nodes);
-    try std.testing.expectEqual(WidgetKind.panel, layout.hitTest(geometry.PointF.init(300, 220)).?.kind);
-    try std.testing.expectEqual(WidgetKind.dialog, layout.hitTest(geometry.PointF.init(12, 12)).?.kind);
-    try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(352, 12)).?.kind);
-    try std.testing.expectEqual(WidgetKind.sheet, layout.hitTest(geometry.PointF.init(652, 12)).?.kind);
+    // Modal placement is root-relative through the real layout pass:
+    // dialog centered, drawer full-width at the bottom, sheet full-height
+    // at the right. All three use the overlay layer above the backdrop.
+    try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(300, 220)).?.kind);
+    try std.testing.expectEqual(WidgetKind.dialog, layout.hitTest(geometry.PointF.init(310, 50)).?.kind);
+    try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(12, 100)).?.kind);
+    try std.testing.expectEqual(WidgetKind.sheet, layout.hitTest(geometry.PointF.init(800, 12)).?.kind);
 
     var semantics_buffer: [5]WidgetSemanticsNode = undefined;
     const semantics = try layout.collectSemantics(&semantics_buffer);

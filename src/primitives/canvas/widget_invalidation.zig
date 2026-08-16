@@ -609,9 +609,9 @@ fn widgetClippedDirtyBounds(layout: anytype, node_index: usize, bounds: ?geometr
     var clipped = (bounds orelse return null).normalized();
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clips (they render in
-        // the hoisted window-level pass), so their dirty bounds do too.
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) break;
+        // Window-level surfaces render in the hoisted pass, so their dirty
+        // bounds escape ancestor clips too.
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) break;
         const parent_index = layout.nodes[current].parent_index orelse break;
         if (parent_index >= layout.nodes.len) return null;
         const parent = layout.nodes[parent_index];

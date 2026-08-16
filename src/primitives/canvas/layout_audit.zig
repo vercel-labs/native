@@ -380,7 +380,7 @@ fn nodeIsOverlapCandidate(layout: WidgetLayoutTree, node_index: usize, parent_in
     const node = layout.nodes[node_index];
     if (node.parent_index != parent_index) return false;
     const widget = node.widget;
-    if (widget.layout.anchor != null) return false;
+    if (widget_tree.widgetEscapesAncestorClips(widget)) return false;
     if (widget.semantics.hidden) return false;
     if (widget.opacity <= 0) return false;
     if (!equality_model.affinesEqual(widget.transform, canvas.Affine.identity())) return false;
@@ -411,15 +411,15 @@ fn scopeScrollsHorizontally(widget: Widget) bool {
 }
 
 /// Nearest ancestor whose clip bounds this node: the first clipping
-/// ancestor, or the window (node 0's scope) when none clips. Anchored
-/// floating widgets hoist out of every ancestor clip and are clipped by
-/// the window alone, so the walk stops at an anchor boundary.
+/// ancestor, or the window (node 0's scope) when none clips. Window-level
+/// surfaces hoist out of every ancestor clip and are clipped by the window
+/// alone, so the walk stops at that boundary.
 fn clipScopeIndex(layout: WidgetLayoutTree, node_index: usize) ?usize {
-    if (layout.nodes[node_index].widget.layout.anchor != null) return null;
+    if (widget_tree.widgetEscapesAncestorClips(layout.nodes[node_index].widget)) return null;
     var current = layout.nodes[node_index].parent_index;
     while (current) |index| {
         if (widgetClipsForAudit(layout.nodes[index].widget)) return index;
-        if (layout.nodes[index].widget.layout.anchor != null) return null;
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[index].widget)) return null;
         current = layout.nodes[index].parent_index;
     }
     return null;

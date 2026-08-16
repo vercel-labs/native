@@ -1490,6 +1490,89 @@ test "horizontal scroll views draw the bottom-edge scrollbar and two-axis region
     try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 5)) != null);
 }
 
+test "modal surfaces resolve against root bounds through nested layout" {
+    const modal_children = [_]Widget{
+        .{ .id = 3, .kind = .dialog, .frame = geometry.RectF.init(7, 9, 240, 120) },
+        .{ .id = 4, .kind = .drawer, .frame = geometry.RectF.init(11, 13, 180, 100) },
+        .{ .id = 5, .kind = .sheet, .frame = geometry.RectF.init(17, 19, 160, 80) },
+    };
+    const nested = Widget{
+        .id = 2,
+        .kind = .stack,
+        .frame = geometry.RectF.init(30, 40, 200, 150),
+        .layout = .{ .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 } },
+        .children = &modal_children,
+    };
+    const root = Widget{ .id = 1, .kind = .stack, .children = &.{nested} };
+    const root_bounds = geometry.RectF.init(10, 20, 600, 400);
+    var nodes: [5]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, root_bounds, &nodes);
+
+    // The nested container's frame, padding, and child offsets have no say
+    // in modal placement: all three use the root bounds.
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(190, 160, 240, 120));
+    try expectLayoutFrame(layout, 4, geometry.RectF.init(10, 320, 600, 100));
+    try expectLayoutFrame(layout, 5, geometry.RectF.init(450, 20, 160, 400));
+
+    // The dialog's own scrim names the same root geometry its placement
+    // used, even though the surface was declared inside the padded stack.
+    var commands: [64]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    switch (builder.displayList().findCommandById(widgetPartId(3, 14)).?.command) {
+        .fill_rect => |fill| try expectRect(root_bounds, fill.rect),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "modal nested in a scroll viewport paints and routes at window level" {
+    const panel_children = [_]Widget{.{
+        .id = 4,
+        .kind = .dialog,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+    }};
+    const scroll_children = [_]Widget{.{
+        .id = 3,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 120, 200),
+        .children = &panel_children,
+    }};
+    const root_children = [_]Widget{.{
+        .id = 2,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(0, 0, 120, 80),
+        .children = &scroll_children,
+    }};
+    const root = Widget{ .id = 1, .kind = .stack, .children = &root_children };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 400, 300), &nodes);
+    try expectLayoutFrame(layout, 4, geometry.RectF.init(100, 100, 200, 100));
+
+    // This point is inside the dialog but below the scroll viewport. The
+    // modal's window-level hit pass must still win.
+    const hit = layout.hitTest(geometry.PointF.init(150, 120)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 4), hit.id);
+
+    // The modal chrome is emitted after the scroll viewport's clip closes.
+    var commands: [64]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    var clip_depth: usize = 0;
+    var saw_dialog_chrome = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .push_clip => clip_depth += 1,
+            .pop_clip => clip_depth -= 1,
+            else => {},
+        }
+        if (command.objectId() == widgetPartId(4, 1)) {
+            saw_dialog_chrome = true;
+            try std.testing.expectEqual(@as(usize, 0), clip_depth);
+        }
+    }
+    try std.testing.expect(saw_dialog_chrome);
+}
+
 test "a both-axes region whose content only overflows sideways reports horizontal scroll semantics" {
     // 500-wide content in a 200 x 100 both-axes viewport: no vertical
     // range, real horizontal range. The assistive node must read the
