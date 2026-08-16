@@ -258,8 +258,8 @@ pub fn decodeRgba8(bytes: []const u8, output: []u8) Error!Decoded {
 /// size. Downscaling uses deterministic integer box averages in sRGB space;
 /// the test/null codec values bounded repeatability over color-management
 /// fidelity (real hosts use their platform codecs' native thumbnail paths).
-pub fn decodeRgba8Fitted(bytes: []const u8, output: []u8, max_pixels: usize) Error!Decoded {
-    if (max_pixels == 0) return error.PngPixelBufferTooSmall;
+pub fn decodeRgba8Fitted(bytes: []const u8, output: []u8, max_pixels: usize, max_fitted_dimension: usize) Error!Decoded {
+    if (max_pixels == 0 or max_fitted_dimension == 0) return error.PngPixelBufferTooSmall;
     if (bytes.len < signature.len or !std.mem.eql(u8, bytes[0..signature.len], &signature)) return error.InvalidPng;
 
     var offset: usize = signature.len;
@@ -331,8 +331,10 @@ pub fn decodeRgba8Fitted(bytes: []const u8, output: []u8, max_pixels: usize) Err
     const source_pixels = std.math.mul(usize, width, height) catch return error.InvalidPngDimensions;
     var fitted_width = width;
     var fitted_height = height;
-    if (source_pixels > max_pixels) {
-        const scale = @sqrt(@as(f64, @floatFromInt(max_pixels)) / @as(f64, @floatFromInt(source_pixels)));
+    if (source_pixels > max_pixels or width > max_fitted_dimension or height > max_fitted_dimension) {
+        const area_scale = @sqrt(@as(f64, @floatFromInt(max_pixels)) / @as(f64, @floatFromInt(source_pixels)));
+        const axis_scale = @as(f64, @floatFromInt(max_fitted_dimension)) / @as(f64, @floatFromInt(@max(width, height)));
+        const scale = @min(1.0, @min(area_scale, axis_scale));
         fitted_width = @max(1, @as(usize, @intFromFloat(@floor(@as(f64, @floatFromInt(width)) * scale))));
         fitted_height = @max(1, @as(usize, @intFromFloat(@floor(@as(f64, @floatFromInt(height)) * scale))));
         while (fitted_width * fitted_height > max_pixels) {

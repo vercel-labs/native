@@ -3144,7 +3144,7 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
             }
             size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
             size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
-            if (source_width > 0 && source_height > 0 && source_width <= 8192 && source_height <= 8192) {
+            if (source_width > 0 && source_height > 0) {
                 const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
                 NSDictionary *thumbnail_options = @{
                     (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
@@ -3158,7 +3158,7 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
         if (!image) {
             NSImage *system_image = [[NSImage alloc] initWithData:data];
             NSSize size = system_image ? system_image.size : NSZeroSize;
-            if (size.width > 0 && size.height > 0 && size.width <= 8192 && size.height <= 8192) {
+            if (size.width > 0 && size.height > 0 && isfinite(size.width) && isfinite(size.height)) {
                 // Bound SVG rasterization before NSImage materializes the
                 // screen-scale representation; see the AppKit mirror.
                 const CGFloat max_raster_points = sqrt((CGFloat)max_pixels) / 2.0;
@@ -3172,7 +3172,7 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
 
         size_t width = CGImageGetWidth(image);
         size_t height = CGImageGetHeight(image);
-        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+        if (width == 0 || height == 0 || width > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
             CGImageRelease(image);
             return 0;
         }

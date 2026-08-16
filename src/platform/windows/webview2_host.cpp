@@ -6285,6 +6285,7 @@ void native_sdk_windows_request_frame(Host *host) {
 static const GUID kNativeSdkCLSID_WICImagingFactory = {0xcacaf262, 0x9370, 0x4615, {0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a}};
 static const GUID kNativeSdkIID_IWICImagingFactory = {0xec5ec8a9, 0xc395, 0x4314, {0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70}};
 static const GUID kNativeSdkGUID_WICPixelFormat32bppRGBA = {0xf5c7ad2d, 0x6a8d, 0x43dd, {0xa7, 0xa8, 0xa2, 0x99, 0x35, 0x26, 0x1a, 0xe9}};
+static constexpr size_t kNativeSdkMaxDecodedImageDimension = 8192;
 
 int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
@@ -6311,12 +6312,14 @@ int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint
         UINT frame_width = 0;
         UINT frame_height = 0;
         if (FAILED(frame->GetSize(&frame_width, &frame_height))) break;
-        if (frame_width == 0 || frame_height == 0 || frame_width > 8192 || frame_height > 8192) break;
+        if (frame_width == 0 || frame_height == 0) break;
         size_t width = frame_width;
         size_t height = frame_height;
         double source_pixels = static_cast<double>(width) * static_cast<double>(height);
-        if (source_pixels > static_cast<double>(max_pixels)) {
-            double scale = sqrt(static_cast<double>(max_pixels) / source_pixels);
+        if (source_pixels > static_cast<double>(max_pixels) || width > kNativeSdkMaxDecodedImageDimension || height > kNativeSdkMaxDecodedImageDimension) {
+            double area_scale = sqrt(static_cast<double>(max_pixels) / source_pixels);
+            double axis_scale = static_cast<double>(kNativeSdkMaxDecodedImageDimension) / static_cast<double>(std::max(width, height));
+            double scale = std::min(1.0, std::min(area_scale, axis_scale));
             width = std::max<size_t>(1, static_cast<size_t>(floor(static_cast<double>(width) * scale)));
             height = std::max<size_t>(1, static_cast<size_t>(floor(static_cast<double>(height) * scale)));
             while (width * height > max_pixels) {

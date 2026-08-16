@@ -980,7 +980,7 @@ static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uint
         size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
         size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
         CGImageRef image = NULL;
-        if (source_width > 0 && source_height > 0 && source_width <= 8192 && source_height <= 8192) {
+        if (source_width > 0 && source_height > 0) {
             const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
             NSDictionary *thumbnail_options = @{
                 (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
@@ -994,7 +994,7 @@ static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uint
 
         size_t width = CGImageGetWidth(image);
         size_t height = CGImageGetHeight(image);
-        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+        if (width == 0 || height == 0 || width > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
             CGImageRelease(image);
             return 0;
         }

@@ -207,6 +207,22 @@ test "registerCanvasImageBytes decodes through the platform seam" {
     try std.testing.expectError(error.InvalidImageId, harness.runtime.registerCanvasImageBytes(0, encoded));
 }
 
+test "direct encoded image registration enforces the source bound before decode" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    harness.null_platform.image_decode = true;
+
+    const oversized = try std.testing.allocator.alloc(u8, effects_mod.max_effect_image_source_bytes + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 0x5A);
+
+    try std.testing.expectError(error.ImageTooLarge, harness.runtime.registerCanvasImageBytes(9, oversized));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.image_decode_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasImageCount());
+}
+
 fn encodedPng(allocator: std.mem.Allocator, width: usize, height: usize, pixels: []const u8) ![]u8 {
     const capacity = try canvas.png.encodedRgba8ByteLen(width, height);
     const encoded = try allocator.alloc(u8, capacity);
@@ -280,13 +296,37 @@ test "null image codec uses exact integer area weights for fractional boxes" {
     const encoded = try encodedPng(std.testing.allocator, 3, 1, &pixels);
     defer std.testing.allocator.free(encoded);
     var output: [16]u8 = undefined;
-    const decoded = try canvas.png.decodeRgba8Fitted(encoded, &output, 2);
+    const decoded = try canvas.png.decodeRgba8Fitted(encoded, &output, 2, platform.max_decoded_image_dimension);
     try std.testing.expectEqual(@as(usize, 2), decoded.width);
     try std.testing.expectEqual(@as(usize, 1), decoded.height);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         20,  20,  20,  255,
         100, 100, 100, 255,
     }, decoded.rgba8);
+}
+
+test "null image codec fits a source panorama past the decoded-axis ceiling" {
+    const source_width = platform.max_decoded_image_dimension + 1;
+    const pixels = try std.testing.allocator.alloc(u8, source_width * 4);
+    defer std.testing.allocator.free(pixels);
+    var offset: usize = 0;
+    while (offset < pixels.len) : (offset += 4) pixels[offset..][0..4].* = .{ 41, 83, 127, 255 };
+
+    const encoded = try encodedPng(std.testing.allocator, source_width, 1, pixels);
+    defer std.testing.allocator.free(encoded);
+    const output = try std.testing.allocator.alloc(u8, platform.max_decoded_image_dimension * 4);
+    defer std.testing.allocator.free(output);
+
+    const decoded = try canvas.png.decodeRgba8Fitted(
+        encoded,
+        output,
+        platform.max_decoded_image_dimension,
+        platform.max_decoded_image_dimension,
+    );
+    try std.testing.expectEqual(platform.max_decoded_image_dimension, decoded.width);
+    try std.testing.expectEqual(@as(usize, 1), decoded.height);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 41, 83, 127, 255 }, decoded.rgba8[0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 41, 83, 127, 255 }, decoded.rgba8[decoded.rgba8.len - 4 ..]);
 }
 
 test "registerCanvasImageBytes refuses reserved media-surface ids before decoding" {

@@ -2424,7 +2424,7 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (!self.image_decode) return error.UnsupportedService;
         self.image_decode_count += 1;
-        const decoded = canvas.png.decodeRgba8Fitted(bytes, buffer, max_pixels) catch |err| return switch (err) {
+        const decoded = canvas.png.decodeRgba8Fitted(bytes, buffer, max_pixels, types.max_decoded_image_dimension) catch |err| return switch (err) {
             error.PngPixelBufferTooSmall => error.ImageTooLarge,
             else => error.ImageDecodeFailed,
         };

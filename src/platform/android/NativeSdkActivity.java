@@ -116,6 +116,7 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 public final class NativeSdkActivity extends Activity implements SurfaceHolder.Callback, Choreographer.FrameCallback {
+    private static final int MAX_DECODED_IMAGE_DIMENSION = 8192;
     private static final int TOUCH_MODE_IDLE = 0;
     // Touch down seen, under slop: undecided between tap / drag / scroll.
     private static final int TOUCH_MODE_PENDING = 1;
@@ -585,12 +586,14 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
         BitmapFactory.decodeByteArray(encoded, 0, encoded.length, options);
         int sourceWidth = options.outWidth;
         int sourceHeight = options.outHeight;
-        if (sourceWidth <= 0 || sourceHeight <= 0 || sourceWidth > 8192 || sourceHeight > 8192) return 0;
+        if (sourceWidth <= 0 || sourceHeight <= 0) return 0;
         long sourcePixels = (long)sourceWidth * sourceHeight;
         int targetWidth = sourceWidth;
         int targetHeight = sourceHeight;
-        if (sourcePixels > maxPixels) {
-            double scale = Math.sqrt((double)maxPixels / (double)sourcePixels);
+        if (sourcePixels > maxPixels || sourceWidth > MAX_DECODED_IMAGE_DIMENSION || sourceHeight > MAX_DECODED_IMAGE_DIMENSION) {
+            double areaScale = Math.sqrt((double)maxPixels / (double)sourcePixels);
+            double axisScale = (double)MAX_DECODED_IMAGE_DIMENSION / Math.max(sourceWidth, sourceHeight);
+            double scale = Math.min(1.0, Math.min(areaScale, axisScale));
             targetWidth = Math.max(1, (int)Math.floor(sourceWidth * scale));
             targetHeight = Math.max(1, (int)Math.floor(sourceHeight * scale));
             while ((long)targetWidth * targetHeight > maxPixels) {
@@ -627,7 +630,7 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
             long width = bitmap.getWidth();
             long height = bitmap.getHeight();
             // The dimension ceiling mirrors the iOS/macOS decode callback.
-            if (width <= 0 || height <= 0 || width > 8192 || height > 8192) return 0;
+            if (width <= 0 || height <= 0 || width > MAX_DECODED_IMAGE_DIMENSION || height > MAX_DECODED_IMAGE_DIMENSION) return 0;
             if (width != targetWidth || height != targetHeight) {
                 Bitmap fitted = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true);
                 bitmap.recycle();

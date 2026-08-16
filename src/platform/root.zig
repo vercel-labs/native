@@ -66,6 +66,7 @@ pub const max_widget_accessibility_nodes = types.max_widget_accessibility_nodes;
 pub const max_gpu_surface_packet_json_bytes = types.max_gpu_surface_packet_json_bytes;
 pub const max_gpu_surface_packet_binary_bytes = types.max_gpu_surface_packet_binary_bytes;
 pub const max_gpu_present_fallback_detail_bytes = types.max_gpu_present_fallback_detail_bytes;
+pub const max_decoded_image_dimension = types.max_decoded_image_dimension;
 pub const max_gpu_surface_image_pixel_bytes = types.max_gpu_surface_image_pixel_bytes;
 pub const max_gpu_surface_media_image_pixel_bytes = types.max_gpu_surface_media_image_pixel_bytes;
 pub const max_gpu_surface_font_bytes = types.max_gpu_surface_font_bytes;

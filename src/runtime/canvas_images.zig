@@ -156,8 +156,9 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// `error.UnsupportedService` (platform has no codec),
         /// `error.ImageDecodeFailed` (undecodable bytes),
         /// Encoded images decode aspect-preservingly to fit the runtime's
-        /// frozen slot budget; `error.ImageTooLarge` therefore means a
-        /// platform codec violated the decode cap, not an ordinary photo.
+        /// frozen slot budget. `error.ImageTooLarge` means the encoded source
+        /// exceeded the fixed image-source bound or a platform codec violated
+        /// the decode cap, not an ordinary photo whose pixels need fitting.
         /// `error.InvalidImageId` covers the same ids
         /// `registerCanvasImage` refuses (0 and the reserved
         /// media-surface namespace) and fires before any decode work.
@@ -169,6 +170,12 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             // gets `error.InvalidImageId`, not a codec error, and pays
             // no decode cost for it.
             if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
+            // Every encoded-registration entry point shares imageLoad's
+            // fixed source contract. Direct fx.registerImageBytes and
+            // Runtime.registerCanvasImageBytes calls must not hand an
+            // arbitrarily large allocation to a host codec merely because
+            // they bypassed the file/fetch executor.
+            if (bytes.len > effects_mod.max_effect_image_source_bytes) return error.ImageTooLarge;
             const scratch_len = self.max_image_pixel_bytes + self.max_image_pixel_bytes / 4;
             const scratch = try imageDecodeScratch(scratch_len);
             const decoded = try self.options.platform.services.decodeImage(bytes, scratch, self.max_image_pixel_bytes / 4);

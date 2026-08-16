@@ -1789,7 +1789,7 @@ test "image loads record into the blob store (deduplicated) and replay byte-iden
     try std.testing.expect(harness.runtime.registeredCanvasImage(23) == null);
 }
 
-test "raised-budget photo load records and replays identical registered dimensions and pixels" {
+test "raised-budget photo load replays recorded dimensions under a smaller current budget" {
     const gpa = std.testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
     defer std.heap.page_allocator.destroy(buffer);
@@ -1850,7 +1850,7 @@ test "raised-budget photo load records and replays identical registered dimensio
     const recorded_model = record_app.model;
     const recorded_fingerprint = record_harness.runtime.sessionStateFingerprint();
     const recorded_pixels = record_harness.runtime.registeredCanvasImages()[0].pixels;
-    const recorded_pixel_fingerprint = std.hash.Wyhash.hash(0, recorded_pixels);
+    const recorded_pixel_len = recorded_pixels.len;
     try std.testing.expectEqual(width, recorded_model.last_width);
     try std.testing.expectEqual(height, recorded_model.last_height);
     recorder.finish();
@@ -1862,7 +1862,6 @@ test "raised-budget photo load records and replays identical registered dimensio
     core.Runtime.initAt(&replay_harness.runtime, .{
         .platform = replay_harness.null_platform.platform(),
         .trace_sink = replay_harness.trace_sink.sink(),
-        .max_image_pixel_bytes = canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling,
         .environ = std.testing.environ,
     });
     replay_harness.runtime.dispatch_error_policy = .propagate;
@@ -1881,9 +1880,11 @@ test "raised-budget photo load records and replays identical registered dimensio
     try std.testing.expectEqualDeep(recorded_model, replay_app.model);
     try std.testing.expectEqual(recorded_fingerprint, replay_harness.runtime.sessionStateFingerprint());
     const replay_info = replay_harness.runtime.registeredCanvasImage(21).?;
-    try std.testing.expectEqual(width, replay_info.width);
-    try std.testing.expectEqual(height, replay_info.height);
-    try std.testing.expectEqual(recorded_pixel_fingerprint, std.hash.Wyhash.hash(0, replay_harness.runtime.registeredCanvasImages()[0].pixels));
+    try std.testing.expectEqual(recorded_model.last_width, replay_app.model.last_width);
+    try std.testing.expectEqual(recorded_model.last_height, replay_app.model.last_height);
+    try std.testing.expect(replay_info.width * replay_info.height * 4 <= replay_harness.runtime.max_image_pixel_bytes);
+    try std.testing.expect(replay_info.width < width or replay_info.height < height);
+    try std.testing.expect(recorded_pixel_len != replay_harness.runtime.registeredCanvasImages()[0].pixels.len);
 }
 
 /// Record the undelivered-window reference session: load id 21, feed
@@ -3178,10 +3179,18 @@ test "an image record claiming dimensions on a non-loaded outcome refuses replay
     try std.testing.expectError(error.ReplayDamagedRecord, result);
 }
 
-test "an image record claiming .loaded past the pixel budget refuses replay as damage" {
-    // 1024x1024 RGBA8 is 4 MiB - past the registered-image slot bound
-    // a live .loaded can never exceed.
-    const result = replayWithPatchedImageDims(.loaded, 1024, 1024);
+test "an image record claiming .loaded past the SDK ceiling refuses replay as damage" {
+    // 2048x2048 RGBA8 is 16 MiB - past the largest registered-image slot
+    // any conforming recording can accept.
+    const result = replayWithPatchedImageDims(.loaded, 2048, 2048);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record claiming .loaded past the decoded-axis ceiling refuses replay as damage" {
+    // Source metadata may exceed this ceiling, but every conforming host fits
+    // it before registration and therefore before these result dimensions are
+    // journaled.
+    const result = replayWithPatchedImageDims(.loaded, platform.max_decoded_image_dimension + 1, 1);
     try std.testing.expectError(error.ReplayDamagedRecord, result);
 }
 

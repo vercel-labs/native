@@ -399,10 +399,10 @@ const ImageAsset = struct {
     path: []const u8,
 };
 
-/// Encoded-size bound for one boot image: over-bound files skip their
-/// entry (the views keep the initials fallback) instead of holding the
-/// launch path hostage to a mis-sized asset.
-const max_boot_image_bytes: usize = 4 * 1024 * 1024;
+/// Boot images and runtime image loads share one encoded-source contract:
+/// over-bound files skip their entry (the views keep the initials fallback)
+/// instead of holding the launch path hostage to a mis-sized asset.
+const max_boot_image_bytes: usize = native_sdk.max_effect_image_source_bytes;
 
 fn manifestImages() []const ImageAsset {
     comptime {

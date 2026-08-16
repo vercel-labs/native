@@ -1242,6 +1242,36 @@ test "mac image decoder keeps ImageIO thumbnail rounding inside the pixel cap" {
     ));
     try std.testing.expect(decoded_width > 0 and decoded_height > 0);
     try std.testing.expect(decoded_width * decoded_height <= max_pixels);
+
+    // A source panorama may exceed the decoded-axis ceiling. The host must
+    // request a bounded thumbnail instead of rejecting the source metadata.
+    const panorama_width = platform_mod.max_decoded_image_dimension + 1;
+    const panorama_pixels = try std.testing.allocator.alloc(u8, panorama_width * 4);
+    defer std.testing.allocator.free(panorama_pixels);
+    offset = 0;
+    while (offset < panorama_pixels.len) : (offset += 4) {
+        panorama_pixels[offset..][0..4].* = .{ 47, 113, 191, 255 };
+    }
+    const panorama_encoded_len = try canvas.png.encodedRgba8ByteLen(panorama_width, 1);
+    const panorama_encoded = try std.testing.allocator.alloc(u8, panorama_encoded_len);
+    defer std.testing.allocator.free(panorama_encoded);
+    var panorama_writer = std.Io.Writer.fixed(panorama_encoded);
+    try canvas.png.writeRgba8(&panorama_writer, panorama_width, 1, panorama_pixels);
+
+    decoded_width = 0;
+    decoded_height = 0;
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_imageio_thumbnail_dimensions(
+        panorama_writer.buffered().ptr,
+        panorama_writer.buffered().len,
+        panorama_width,
+        1,
+        max_pixels,
+        &decoded_width,
+        &decoded_height,
+    ));
+    try std.testing.expect(decoded_width <= platform_mod.max_decoded_image_dimension);
+    try std.testing.expect(decoded_height > 0);
+    try std.testing.expect(decoded_width * decoded_height <= max_pixels);
 }
 
 fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {

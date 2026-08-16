@@ -303,6 +303,12 @@ pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
 /// packet present falls back because a command is not representable
 /// (fits every `CanvasCommand` tag name).
 pub const max_gpu_present_fallback_detail_bytes: usize = 32;
+/// Longest decoded-image side accepted by the registered-image codec seam.
+/// Source metadata may exceed this: conforming platform codecs combine this
+/// axis ceiling with the caller's `max_pixels` area target and downsample
+/// during decode. Keeping the decoded side bounded protects codec and GPU
+/// upload paths from pathological panoramas without refusing them outright.
+pub const max_decoded_image_dimension: usize = 8192;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
 /// matches the runtime registry's app-configurable ceiling
 /// (`canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling`).
@@ -2958,9 +2964,11 @@ pub const PlatformServices = struct {
     /// Implementations may use `buffer` as decode scratch, so callers size
     /// it for their pixel bound, not the exact image. `max_pixels` is a
     /// pixel-count cap, not a width/height box: codecs preserve aspect and
-    /// decode down when source pixels exceed it. Errors:
+    /// decode down when source pixels exceed it or either decoded side would
+    /// exceed `max_decoded_image_dimension`. Errors:
     /// `error.ImageDecodeFailed` for undecodable bytes,
-    /// `error.ImageTooLarge` when the decoded pixels do not fit `buffer`.
+    /// `error.ImageTooLarge` when the fitted pixels violate either bound or
+    /// do not fit `buffer`.
     /// Null on platforms without a codec (the null platform by default),
     /// which surfaces as `error.UnsupportedService`.
     decode_image_fn: ?*const fn (context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!DecodedImage = null,
@@ -3602,7 +3610,7 @@ pub const PlatformServices = struct {
         const decode_fn = self.decode_image_fn orelse return error.UnsupportedService;
         const decoded = try decode_fn(self.context, bytes, buffer, max_pixels);
         const pixels = std.math.mul(usize, decoded.width, decoded.height) catch return error.ImageTooLarge;
-        if (pixels > max_pixels) return error.ImageTooLarge;
+        if (decoded.width > max_decoded_image_dimension or decoded.height > max_decoded_image_dimension or pixels > max_pixels) return error.ImageTooLarge;
         return decoded;
     }
 };
