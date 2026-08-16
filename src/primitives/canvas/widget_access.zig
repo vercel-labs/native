@@ -174,15 +174,15 @@ pub fn widgetKindClaimsPress(kind: WidgetKind) bool {
 
 /// Whether a press gesture stops at this widget instead of falling
 /// through to the nearest claiming ancestor: an interactive kind
-/// (`widgetKindClaimsPress`), or ANY widget with a bound press/toggle
-/// handler (`on_press`/`on_toggle` stamp `semantics.actions`, and
+/// (`widgetKindClaimsPress`), or ANY widget with a bound press/toggle/drag
+/// handler (`on_press`/`on_toggle`/`on_drag` stamp `semantics.actions`, and
 /// engine-owned `command` dispatch only exists on kinds already claiming).
 /// Disabled widgets never claim — the hit test skips them too, so a press
 /// on a disabled control keeps today's behavior of landing on whatever is
 /// around it.
 pub fn widgetClaimsPress(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
-    if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
+    if (widget.semantics.actions.press or widget.semantics.actions.toggle or widget.semantics.actions.drag) return true;
     return widgetKindClaimsPress(widget.kind);
 }
 

@@ -132,7 +132,7 @@ fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
 /// claims presses (`widgetClaimsPress`). Plain text, icons, decorations,
 /// and layout containers let the press fall through; interactive kinds,
 /// editable text, scroll containers, overlay surfaces, and any widget
-/// with a bound press/toggle handler stop the walk. Returns null when
+/// with a bound press/toggle/drag handler stop the walk. Returns null when
 /// nothing on the path claims — the press dispatches to no one, exactly
 /// like a click on dead space.
 pub fn widgetPressTargetIndexFromNode(layout: anytype, node_index: usize) ?usize {

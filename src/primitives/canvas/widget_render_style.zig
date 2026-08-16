@@ -743,13 +743,15 @@ pub fn listItemFillColor(widget: Widget, tokens: DesignTokens, state: WidgetStat
 pub fn surfaceStateBackground(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
     const active = widget.state.pressed or widget.state.selected;
     const hovered = washHovered(widget);
-    const fallback = if (active)
-        tokens.colors.surface_pressed
-    else if (hovered)
-        tokens.colors.surface_subtle
-    else
-        tokens.colors.surface;
-    return widgetBackgroundColor(widget, buttonStateBackground(visual, active, hovered, fallback));
+    // A local background is an explicit all-state override. The theme
+    // table's background is only the REST rung: letting it participate in
+    // the state fallbacks would mask the standard subtle/pressed washes
+    // whenever a custom theme stated only its surface color.
+    if (widget.style.background) |background| return background;
+    if (widget.state.pressed) return visual.pressed_background orelse visual.active_background orelse visual.hover_background orelse tokens.colors.surface_pressed;
+    if (active) return visual.active_background orelse visual.hover_background orelse tokens.colors.surface_pressed;
+    if (hovered) return visual.hover_background orelse tokens.colors.surface_subtle;
+    return visual.background orelse tokens.colors.surface;
 }
 
 pub fn transparentColor() Color {

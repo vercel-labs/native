@@ -2071,6 +2071,47 @@ test "actionable layout containers paint the row hover and pressed ladder in bot
     }
 }
 
+test "drag-only layout containers own hover and pressed washes through child content" {
+    const tokens = DesignTokens{};
+    const label = [_]Widget{.{
+        .id = 79,
+        .kind = .text,
+        .text = "Drag me",
+    }};
+    const draggable = Widget{
+        .id = 78,
+        .kind = .row,
+        .frame = geometry.RectF.init(0, 0, 160, 40),
+        .semantics = .{ .actions = .{ .drag = true } },
+        .children = &label,
+    };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(draggable, draggable.frame, &nodes);
+    const label_node = layout.findById(79) orelse return error.TestUnexpectedResult;
+    const raw_hit = layout.hitTest(label_node.frame.center()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 79), raw_hit.id);
+    const hover_target = layout.hoverTargetForHit(raw_hit) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 78), hover_target.id);
+    const press_target = canvas.widgetPressTargetForHit(layout, raw_hit) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 78), press_target.id);
+
+    var hover_commands: [4]CanvasCommand = undefined;
+    var hover_builder = Builder.init(&hover_commands);
+    try layout.emitDisplayListWithState(&hover_builder, tokens, .{ .hovered_id = hover_target.id });
+    switch (hover_builder.displayList().findCommandById(widgetPartId(78, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var press_commands: [4]CanvasCommand = undefined;
+    var press_builder = Builder.init(&press_commands);
+    try layout.emitDisplayListWithState(&press_builder, tokens, .{ .pressed_id = press_target.id });
+    switch (press_builder.displayList().findCommandById(widgetPartId(78, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_pressed, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "an actionable container uses authored background only at rest" {
     const authored = Color.rgb8(28, 52, 76);
     const tokens = DesignTokens{};
@@ -2101,7 +2142,12 @@ test "an actionable container uses authored background only at rest" {
 }
 
 test "house alert card and panel surfaces have visible hover and pressed fallbacks" {
-    const tokens = DesignTokens{};
+    const themed_rest = Color.rgb8(28, 52, 76);
+    const tokens = DesignTokens{ .controls = .{
+        .alert = .{ .background = themed_rest },
+        .card = .{ .background = themed_rest },
+        .panel = .{ .background = themed_rest },
+    } };
     const cases = [_]struct { kind: WidgetKind, fill_slot: u4 }{
         .{ .kind = .alert, .fill_slot = 1 },
         .{ .kind = .card, .fill_slot = 1 },
@@ -2114,6 +2160,14 @@ test "house alert card and panel surfaces have visible hover and pressed fallbac
             .frame = geometry.RectF.init(0, 0, 160, 48),
             .semantics = .{ .actions = .{ .press = true } },
         };
+
+        var rest_commands: [8]CanvasCommand = undefined;
+        var rest_builder = Builder.init(&rest_commands);
+        try emitWidgetTree(&rest_builder, base, tokens);
+        switch (rest_builder.displayList().findCommandById(widgetPartId(76, case.fill_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(themed_rest, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
 
         var hovered = base;
         hovered.state.hovered = true;
