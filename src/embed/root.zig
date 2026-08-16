@@ -31,6 +31,7 @@ pub const UiAppHost = ui_host.UiAppHost;
 pub const UiAppHostWithRecordStore = ui_host.UiAppHostWithRecordStore;
 pub const UiAppHostWithStorage = ui_host.UiAppHostWithStorage;
 pub const UiAppHostWithStorageAndCredentials = ui_host.UiAppHostWithStorageAndCredentials;
+pub const UiAppHostWithStorageCredentialsAndImages = ui_host.UiAppHostWithStorageCredentialsAndImages;
 pub const mobile_shell_scene = ui_host.mobile_shell_scene;
 pub const MobileCApi = c_api.MobileCApi;
 pub const exportMobileCApi = c_api.exportMobileCApi;

@@ -8,6 +8,7 @@ const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 const runtime_effects = @import("effects.zig");
+const canvas_limits = @import("canvas_limits.zig");
 const runtime_session_record = @import("session_record.zig");
 const runtime_view = @import("view.zig");
 const security = @import("../security/root.zig");
@@ -480,6 +481,11 @@ pub const Options = struct {
     /// mutating `options.allocator` on a live runtime retargets
     /// nothing — pick the owning allocator here, before init.
     allocator: std.mem.Allocator = std.heap.page_allocator,
+    /// Runtime-frozen registered-image pixel budget. The standard app
+    /// runner reads this from app.zon's `.images.max_image_pixel_bytes`;
+    /// custom runners may set it directly. Storage remains lazy per used
+    /// slot, so raising the budget reserves nothing by itself.
+    max_image_pixel_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes,
     trace_sink: ?trace.Sink = null,
     log_path: ?[]const u8 = null,
     extensions: ?extensions.ModuleRegistry = null,

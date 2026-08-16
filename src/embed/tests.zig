@@ -2276,6 +2276,7 @@ fn recorderImageDecode(
     bytes_len: usize,
     pixels: ?[*]u8,
     pixels_len: usize,
+    max_pixels: usize,
     out_width: ?*usize,
     out_height: ?*usize,
 ) callconv(.c) c_int {
@@ -2283,6 +2284,7 @@ fn recorderImageDecode(
     recorder.decode_count += 1;
     recorder.last_bytes_len = conversions.copyInputText(&recorder.last_bytes, if (bytes) |value| value[0..bytes_len] else "");
     recorder.last_pixels_len = pixels_len;
+    _ = max_pixels;
     if (recorder.result != 1) return recorder.result;
     out_width.?.* = recorder.width;
     out_height.?.* = recorder.height;

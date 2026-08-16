@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("canvas");
 const app_manifest = @import("app_manifest");
 const runtime = @import("../runtime/root.zig");
+const canvas_limits = @import("../runtime/canvas_limits.zig");
 const platform = @import("../platform/root.zig");
 const automation = @import("../automation/root.zig");
 const types = @import("types.zig");
@@ -288,17 +289,19 @@ fn MobileImageBridge(comptime Host: type) type {
             return @alignCast(@fieldParentPtr("null_platform", null_platform));
         }
 
-        fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform.DecodedImage {
+        fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!platform.DecodedImage {
             const image = &hostFromContext(context).image;
             const decode_fn = image.service.decode orelse return error.UnsupportedService;
             var width: usize = 0;
             var height: usize = 0;
-            return switch (decode_fn(image.context, bytes.ptr, bytes.len, buffer.ptr, buffer.len, &width, &height)) {
+            return switch (decode_fn(image.context, bytes.ptr, bytes.len, buffer.ptr, buffer.len, max_pixels, &width, &height)) {
                 1 => {
                     if (width == 0 or height == 0) return error.ImageDecodeFailed;
                     const row_len = std.math.mul(usize, width, 4) catch return error.ImageDecodeFailed;
                     const byte_len = std.math.mul(usize, row_len, height) catch return error.ImageDecodeFailed;
                     if (byte_len > buffer.len) return error.ImageDecodeFailed;
+                    const pixel_count = std.math.mul(usize, width, height) catch return error.ImageDecodeFailed;
+                    if (pixel_count > max_pixels) return error.ImageTooLarge;
                     return .{ .width = width, .height = height, .rgba8 = buffer[0..byte_len] };
                 },
                 -1 => error.ImageTooLarge,
@@ -552,8 +555,12 @@ pub const EmbeddedApp = struct {
     }
 
     pub fn initInPlace(self: *EmbeddedApp, app: runtime.App, platform_value: platform.Platform) void {
+        self.initInPlaceWithImageBudget(app, platform_value, canvas_limits.max_registered_canvas_image_pixel_bytes);
+    }
+
+    pub fn initInPlaceWithImageBudget(self: *EmbeddedApp, app: runtime.App, platform_value: platform.Platform, max_image_pixel_bytes: usize) void {
         self.app = app;
-        runtime.Runtime.initAt(&self.runtime, .{ .platform = platform_value });
+        runtime.Runtime.initAt(&self.runtime, .{ .platform = platform_value, .max_image_pixel_bytes = max_image_pixel_bytes });
     }
 
     /// End of the embedded lifecycle, symmetric with `init`/`initInPlace`:

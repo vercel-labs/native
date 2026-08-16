@@ -16,6 +16,7 @@ pub const RawManifest = struct {
     /// still promote or demote the app later.
     dock_visible: bool = true,
     persist: ?RawPersist = null,
+    images: RawImages = .{},
     service_packages: []const RawServicePackage = &.{},
     /// Which carrier runs src/services operations: "auto" (the default child
     /// carrier), "in_process", or "child".
@@ -44,6 +45,10 @@ pub const RawManifest = struct {
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
     dmg: RawDmg = .{},
+};
+
+pub const RawImages = struct {
+    max_image_pixel_bytes: usize = 1024 * 1024,
 };
 
 pub const RawServicePackage = struct {

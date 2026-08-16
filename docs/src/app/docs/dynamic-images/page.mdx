@@ -93,7 +93,7 @@ Prefer **omitting** `cachePath` for URL sources: when the app wiring configures 
 Exactly one event arm dispatches per load — a five-field record matched by field name: `id`, `state`, `width`, `height`, `status`. `id` echoes the requested ImageId, so two loads in flight at once share one arm and still tell their results apart (that is what the example's `cover: msg.id` reads); `status` is the HTTP status for url loads that performed an exchange, and **0 when none occurred** — local paths and cache hits — so a `loaded` with status 0 is honest signal that the pixels came without a network round trip, never a fabricated 200; `loaded` means the pixels are registered and drawable; everything else names what actually happened:
 
 - **Source classes** — `not_found` (missing local file, no url), `io_failed` (a local read failure), `connect_failed` / `tls_failed` / `protocol_failed` / `timed_out` (the fetch taxonomy, on the fetch machinery's own timeout), `http_status` (a non-2xx answer, with the status carried through — an error page is not an image, so the body is discarded).
-- **Decode and registry classes** — the same errors the direct registration API raises: `decode_failed`, `unsupported` (a host without a codec), `too_large`, `registry_full`, and `alloc_failed` (the host refused the memory the registration needed — resource exhaustion, not corrupt bytes: the same source may load once memory frees, so it is never reported as `decode_failed`).
+- **Decode and registry classes** — `decode_failed`, `unsupported` (a host without a codec), `registry_full`, and `alloc_failed` (the host refused the memory the registration needed — resource exhaustion, not corrupt bytes: the same source may load once memory frees, so it is never reported as `decode_failed`). `too_large` normally means the encoded source exceeded 8 MiB; platform codecs fit decoded pixels to the app's declared target.
 - **Discipline classes** — `rejected` (an invalid id, no source at all, or a duplicate live id: one load per id at a time, the spawn rule — a load in flight is never replaced implicitly) and `cancelled` (`Cmd.imageCancel(id)` ended the load).
 
 `Cmd.imageCancel(id)` is the load's cancel — image loads are keyed by their numeric id, so the string-keyed `Cmd.cancel` never touches them. Cancel is **loud**, the spawn discipline: the one terminal still arrives, as the load's own event arm with state `cancelled`, and the id is free for a fresh load once it lands (a slow CDN fetch no longer pins its id against a retry). Aimed at an id with no live load it no-ops — whatever it targeted already delivered its terminal.
@@ -106,7 +106,17 @@ Unlike a load, unregister is **synchronous registry surgery, not an effect**: no
 
 ## Limits, honestly
 
-Decode limits are the registered-image limits, fixed and loud: **16 slots** of **1 MiB decoded pixels** each (512×512 RGBA8 — avatar and cover-art scale, not photo scale), with `Cmd.imageUnregister` releasing a slot when the app is done with an image. The encoded source is bounded at **1.25 MiB** from every source alike, and over-bound sources fail whole with `too_large` — never a silently cropped decode. Loaded pixels live in the existing registered-image storage; there is no separate pool to size. The framework bundles no codecs: bytes decode through CGImageSource on macOS, gdk-pixbuf on GTK, WIC on Windows, and the mobile hosts' embed image service — a host without one answers `unsupported`, never silence.
+The default is **16 slots** with a **1 MiB decoded-pixel target per slot**. That target is not a refusal: platform codecs decode photo-scale sources down, preserving aspect, until `width × height × 4` fits. A wide 1024×256 image already fits and stays that size; a 640×480 image registers at a smaller geometry, and the result's `width`/`height` report exactly what views draw. The encoded source has its own flat **8 MiB** bound; an over-bound source fails whole with `too_large`, never as truncated bytes.
+
+Image-centric apps can raise the target in `app.zon`, up to the hard 8 MiB ceiling:
+
+```zig
+.images = .{ .max_image_pixel_bytes = 8_388_608 },
+```
+
+The value is frozen at startup. Pixel blocks and decode scratch allocate lazily, so declaring a raise costs nothing until an image is used; each used registry slot is a whole-budget block, however, so filling all 16 slots at 8 MiB is a declared **128 MiB** high-water. The source bound stays 8 MiB regardless of this setting.
+
+This gives three clear tiers: decode-to-fit is the default for feeds, galleries, avatars, and covers; the manifest raise serves wallpaper and image-forward apps that want more display-scale detail; pixel-exact editing, source-resolution zoom, and gigapixel tiling belong in an app-owned `gpu_surface` or [media-surface producer](/docs/media-producers), not the registry. The framework still bundles no codecs: bytes decode through CGImageSource on Apple platforms, gdk-pixbuf on GTK, WIC on Windows, BitmapFactory on Android, and the embed image service — a host without one answers `unsupported`.
 
 For textures **produced** by your own renderer at video rates — a decoder, a camera, mpv — this is the wrong tool: that is the [media surface](/docs/media-producers)'s dynamic texture channel. `imageLoad` is for images that exist as encoded bytes somewhere and should become long-lived registered pixels.
 

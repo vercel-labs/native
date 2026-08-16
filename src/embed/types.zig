@@ -346,6 +346,7 @@ pub const MobileImageDecodeFn = *const fn (
     bytes_len: usize,
     pixels: ?[*]u8,
     pixels_len: usize,
+    max_pixels: usize,
     out_width: ?*usize,
     out_height: ?*usize,
 ) callconv(.c) c_int;

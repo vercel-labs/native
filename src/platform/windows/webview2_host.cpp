@@ -6286,10 +6286,10 @@ static const GUID kNativeSdkCLSID_WICImagingFactory = {0xcacaf262, 0x9370, 0x461
 static const GUID kNativeSdkIID_IWICImagingFactory = {0xec5ec8a9, 0xc395, 0x4314, {0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70}};
 static const GUID kNativeSdkGUID_WICPixelFormat32bppRGBA = {0xf5c7ad2d, 0x6a8d, 0x43dd, {0xa7, 0xa8, 0xa2, 0x99, 0x35, 0x26, 0x1a, 0xe9}};
 
-int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels || bytes_len > UINT32_MAX) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || bytes_len > UINT32_MAX || max_pixels == 0) return 0;
 
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bool uninitialize = SUCCEEDED(init); // S_FALSE still pairs with CoUninitialize.
@@ -6299,6 +6299,7 @@ int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint
     IWICStream *stream = nullptr;
     IWICBitmapDecoder *decoder = nullptr;
     IWICBitmapFrameDecode *frame = nullptr;
+    IWICBitmapScaler *scaler = nullptr;
     IWICFormatConverter *converter = nullptr;
     do {
         if (FAILED(CoCreateInstance(kNativeSdkCLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, kNativeSdkIID_IWICImagingFactory, reinterpret_cast<void **>(&factory)))) break;
@@ -6313,6 +6314,16 @@ int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint
         if (frame_width == 0 || frame_height == 0 || frame_width > 8192 || frame_height > 8192) break;
         size_t width = frame_width;
         size_t height = frame_height;
+        double source_pixels = static_cast<double>(width) * static_cast<double>(height);
+        if (source_pixels > static_cast<double>(max_pixels)) {
+            double scale = sqrt(static_cast<double>(max_pixels) / source_pixels);
+            width = std::max<size_t>(1, static_cast<size_t>(floor(static_cast<double>(width) * scale)));
+            height = std::max<size_t>(1, static_cast<size_t>(floor(static_cast<double>(height) * scale)));
+            while (width * height > max_pixels) {
+                if (width > 1 && (height == 1 || width > height)) width -= 1;
+                else height -= 1;
+            }
+        }
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
@@ -6322,12 +6333,19 @@ int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint
         }
 
         if (FAILED(factory->CreateFormatConverter(&converter))) break;
-        if (FAILED(converter->Initialize(frame, kNativeSdkGUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) break;
+        IWICBitmapSource *source_bitmap = frame;
+        if (width != frame_width || height != frame_height) {
+            if (FAILED(factory->CreateBitmapScaler(&scaler))) break;
+            if (FAILED(scaler->Initialize(frame, static_cast<UINT>(width), static_cast<UINT>(height), WICBitmapInterpolationModeFant))) break;
+            source_bitmap = scaler;
+        }
+        if (FAILED(converter->Initialize(source_bitmap, kNativeSdkGUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) break;
         if (FAILED(converter->CopyPixels(nullptr, static_cast<UINT>(width * 4), static_cast<UINT>(byte_len), pixels))) break;
         result = 1;
     } while (false);
 
     if (converter) converter->Release();
+    if (scaler) scaler->Release();
     if (frame) frame->Release();
     if (decoder) decoder->Release();
     if (stream) stream->Release();

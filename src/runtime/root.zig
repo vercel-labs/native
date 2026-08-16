@@ -143,6 +143,7 @@ pub const EffectImageOutcome = runtime_effects.EffectImageOutcome;
 pub const imageCachePath = runtime_effects.imageCachePath;
 pub const max_effect_image_path_bytes = runtime_effects.max_effect_image_path_bytes;
 pub const max_effect_image_bytes = runtime_effects.max_effect_image_bytes;
+pub const max_effect_image_source_bytes = runtime_effects.max_effect_image_source_bytes;
 pub const effect_image_blob_hash_len = runtime_effects.effect_image_blob_hash_len;
 pub const EffectChannelEvent = runtime_effects.EffectChannelEvent;
 pub const EffectChannelEventKind = runtime_effects.EffectChannelEventKind;
@@ -246,6 +247,7 @@ const runtime_canvas_images = @import("canvas_images.zig");
 pub const RegisteredCanvasImage = runtime_canvas_images.RegisteredCanvasImage;
 pub const max_registered_canvas_images = runtime_canvas_images.max_registered_canvas_images;
 pub const max_registered_canvas_image_pixel_bytes = runtime_canvas_images.max_registered_canvas_image_pixel_bytes;
+pub const max_registered_canvas_image_pixel_bytes_ceiling = runtime_canvas_images.max_registered_canvas_image_pixel_bytes_ceiling;
 
 // The media-surface producer channel (media_surface.zig): the handle
 // type `Runtime.acquireMediaSurfaceProducer` returns rides the public

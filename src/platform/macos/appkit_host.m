@@ -2540,16 +2540,40 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
 // CGBitmapContext can render into) and is un-premultiplied in place,
 // because the canvas image pipeline — the reference renderer and the
 // packet host's kCGImageAlphaLast upload — expects straight alpha.
-int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
         CGImageRef image = NULL;
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (source) {
-            image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+            CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+            int64_t source_width_value = 0;
+            int64_t source_height_value = 0;
+            if (properties) {
+                CFNumberRef width_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+                CFNumberRef height_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+                if (width_value) CFNumberGetValue(width_value, kCFNumberSInt64Type, &source_width_value);
+                if (height_value) CFNumberGetValue(height_value, kCFNumberSInt64Type, &source_height_value);
+                CFRelease(properties);
+            }
+            size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
+            size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
+            if (source_width > 0 && source_height > 0 && source_width <= 8192 && source_height <= 8192) {
+                double scale = 1.0;
+                double source_pixels = (double)source_width * (double)source_height;
+                if (source_pixels > (double)max_pixels) scale = sqrt((double)max_pixels / source_pixels);
+                size_t max_dimension = (size_t)floor((double)MAX(source_width, source_height) * scale);
+                if (max_dimension < 1) max_dimension = 1;
+                NSDictionary *thumbnail_options = @{
+                    (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                    (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
+                    (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+                };
+                image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)thumbnail_options);
+            }
             CFRelease(source);
         }
         if (!image) {
@@ -2561,7 +2585,7 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
                 // A 256pt square becomes at most the registry's 512px square
                 // on macOS's 2x displays instead of materializing an
                 // attacker-declared multi-hundred-megabyte bitmap first.
-                const CGFloat max_raster_points = 256.0;
+                const CGFloat max_raster_points = sqrt((CGFloat)max_pixels) / 2.0;
                 const CGFloat raster_scale = MIN(1.0, MIN(max_raster_points / size.width, max_raster_points / size.height));
                 NSRect proposed = NSMakeRect(0, 0, size.width * raster_scale, size.height * raster_scale);
                 CGImageRef rendered = [system_image CGImageForProposedRect:&proposed context:nil hints:nil];

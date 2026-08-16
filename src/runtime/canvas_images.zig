@@ -24,8 +24,9 @@
 //! re-upload without any explicit invalidation call.
 //!
 //! Capacities follow `canvas_limits`: `max_registered_canvas_images`
-//! slots of `max_registered_canvas_image_pixel_bytes` each, overflow is
-//! `error.ImageRegistryFull` / `error.ImageTooLarge` — never silent.
+//! slots of the runtime-frozen image budget (the 1 MiB default through
+//! the 8 MiB ceiling). Raw-pixel overflow is `error.ImageTooLarge`;
+//! encoded inputs decode-to-fit — never silent.
 
 const std = @import("std");
 const canvas = @import("canvas");
@@ -36,6 +37,7 @@ const runtime_media_surface = @import("media_surface.zig");
 
 pub const max_registered_canvas_images = canvas_limits.max_registered_canvas_images;
 pub const max_registered_canvas_image_pixel_bytes = canvas_limits.max_registered_canvas_image_pixel_bytes;
+pub const max_registered_canvas_image_pixel_bytes_ceiling = canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling;
 
 /// One registered image's metadata; pixels live in the runtime's slot
 /// buffer at the same index.
@@ -53,18 +55,24 @@ pub const RegisteredCanvasImage = struct {
     height: usize = 0,
 };
 
-/// Decode scratch for `registerCanvasImageBytes`. Sized past the slot
-/// bound because decoders may need in-buffer scratch beyond the tight
-/// pixel bytes (the null platform's strict PNG parser keeps one filter
-/// byte per row: raw stream <= pixels + pixels/4 since a row is at least
-/// 4 pixel bytes). Loop-thread only, like the frame scratch — and
-/// lazily heap-allocated per thread (1.25 MiB) on the first decode, so
-/// threads that never register image bytes never carry it in their
-/// static TLS block.
+/// Runtime-sized decode scratch for `registerCanvasImageBytes`. The TLS
+/// slot itself is one pointer; its backing grows lazily to the largest app
+/// budget used by this loop thread and lives for the thread's lifetime.
 const CanvasImageDecodeScratch = struct {
-    bytes: [max_registered_canvas_image_pixel_bytes + max_registered_canvas_image_pixel_bytes / 4]u8,
+    bytes: []u8 = &.{},
 };
 const canvas_image_decode_scratch = canvas.lazy_tls.LazyTls(CanvasImageDecodeScratch);
+
+fn imageDecodeScratch(required: usize) error{OutOfMemory}![]u8 {
+    const scratch = canvas_image_decode_scratch.get();
+    if (scratch.bytes.len < required) {
+        scratch.bytes = if (scratch.bytes.len == 0)
+            try std.heap.page_allocator.alloc(u8, required)
+        else
+            try std.heap.page_allocator.realloc(scratch.bytes, required);
+    }
+    return scratch.bytes[0..required];
+}
 
 pub fn RuntimeCanvasImages(comptime Runtime: type) type {
     return struct {
@@ -97,7 +105,7 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             const row_len = std.math.mul(usize, width, 4) catch return error.InvalidImageDimensions;
             const byte_len = std.math.mul(usize, row_len, height) catch return error.InvalidImageDimensions;
             if (rgba8.len != byte_len) return error.InvalidImageDimensions;
-            if (byte_len > max_registered_canvas_image_pixel_bytes) return error.ImageTooLarge;
+            if (byte_len > self.max_image_pixel_bytes) return error.ImageTooLarge;
 
             const index = findCanvasImageIndex(self, id) orelse blk: {
                 if (self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
@@ -119,7 +127,7 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
                 // failable step past validation and it runs BEFORE any
                 // registry mutation, so an OOM refusal leaves the
                 // registry exactly as it was and the caller can retry.
-                self.canvas_image_pixels[index] = try self.owned_allocator.alloc(u8, max_registered_canvas_image_pixel_bytes);
+                self.canvas_image_pixels[index] = try self.owned_allocator.alloc(u8, self.max_image_pixel_bytes);
             }
             @memcpy(self.canvas_image_pixels[index][0..byte_len], rgba8);
             self.canvas_image_entries[index] = .{
@@ -147,7 +155,9 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// id in the model. On top of `registerCanvasImage`'s errors:
         /// `error.UnsupportedService` (platform has no codec),
         /// `error.ImageDecodeFailed` (undecodable bytes),
-        /// `error.ImageTooLarge` (decoded pixels over the slot bound).
+        /// Encoded images decode aspect-preservingly to fit the runtime's
+        /// frozen slot budget; `error.ImageTooLarge` therefore means a
+        /// platform codec violated the decode cap, not an ordinary photo.
         /// `error.InvalidImageId` covers the same ids
         /// `registerCanvasImage` refuses (0 and the reserved
         /// media-surface namespace) and fires before any decode work.
@@ -159,8 +169,10 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             // gets `error.InvalidImageId`, not a codec error, and pays
             // no decode cost for it.
             if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
-            const decoded = try self.options.platform.services.decodeImage(bytes, &canvas_image_decode_scratch.get().bytes);
-            if (decoded.rgba8.len > max_registered_canvas_image_pixel_bytes) return error.ImageTooLarge;
+            const scratch_len = self.max_image_pixel_bytes + self.max_image_pixel_bytes / 4;
+            const scratch = try imageDecodeScratch(scratch_len);
+            const decoded = try self.options.platform.services.decodeImage(bytes, scratch, self.max_image_pixel_bytes / 4);
+            if (decoded.rgba8.len > self.max_image_pixel_bytes) return error.ImageTooLarge;
             try registerCanvasImage(self, id, decoded.width, decoded.height, decoded.rgba8);
             return .{ .width = decoded.width, .height = decoded.height };
         }

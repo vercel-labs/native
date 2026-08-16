@@ -88,6 +88,7 @@ const validateUrl = validation.validateUrl;
 const validateIcons = validation.validateIcons;
 const validatePermissions = validation.validatePermissions;
 const validateCapabilities = validation.validateCapabilities;
+const validateImages = validation.validateImages;
 const validateBridge = validation.validateBridge;
 const validateFrontend = validation.validateFrontend;
 const validateBridgeOrigin = validation.validateBridgeOrigin;
@@ -774,4 +775,11 @@ test "package metadata validation catches empty authors and invalid keywords" {
     try std.testing.expectError(error.InvalidKeyword, validatePackageMetadata(.{ .keywords = &.{""} }));
     try std.testing.expectError(error.InvalidKeyword, validatePackageMetadata(.{ .keywords = &.{"Bad"} }));
     try std.testing.expectError(error.InvalidUrl, validatePackageMetadata(.{ .repository = "ssh://example.com/repo" }));
+}
+
+test "registered-image manifest budget accepts the documented range only" {
+    try validateImages(.{});
+    try validateImages(.{ .max_image_pixel_bytes = 8 * 1024 * 1024 });
+    try std.testing.expectError(error.InvalidDimension, validateImages(.{ .max_image_pixel_bytes = 1024 * 1024 - 1 }));
+    try std.testing.expectError(error.InvalidDimension, validateImages(.{ .max_image_pixel_bytes = 8 * 1024 * 1024 + 1 }));
 }

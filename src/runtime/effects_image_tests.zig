@@ -294,6 +294,97 @@ test "fake executor records the whole load request shape and feeds bytes through
     try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingImageLoadCount());
 }
 
+test "photo-scale feed decodes to fit and reports registered geometry" {
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.executor = .fake;
+    test_path = "assets/photo.png";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+
+    const width: usize = 640;
+    const height: usize = 480;
+    const pixels = try std.testing.allocator.alloc(u8, width * height * 4);
+    defer std.testing.allocator.free(pixels);
+    var index: usize = 0;
+    while (index < pixels.len) : (index += 4) pixels[index..][0..4].* = .{ 24, 88, 176, 255 };
+    const encoded_len = try canvas.png.encodedRgba8ByteLen(width, height);
+    const encoded_buffer = try std.testing.allocator.alloc(u8, encoded_len);
+    defer std.testing.allocator.free(encoded_buffer);
+    var writer = std.Io.Writer.fixed(encoded_buffer);
+    try canvas.png.writeRgba8(&writer, width, height, pixels);
+
+    try h.app_state.effects.feedImageBytes(image_id, writer.buffered());
+    try h.drainWakes();
+    const result = h.app_state.model.last.?;
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, result.outcome);
+    try std.testing.expectEqual(@as(usize, 591), result.width);
+    try std.testing.expectEqual(@as(usize, 443), result.height);
+    try std.testing.expect(result.width * result.height * 4 <= h.harness.runtime.max_image_pixel_bytes);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0 / 3.0), @as(f64, @floatFromInt(result.width)) / @as(f64, @floatFromInt(result.height)), 0.01);
+    const registered = h.harness.runtime.registeredCanvasImage(image_id).?;
+    try std.testing.expectEqual(result.width, registered.width);
+    try std.testing.expectEqual(result.height, registered.height);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 24, 88, 176, 255 }, h.harness.runtime.registeredCanvasImages()[0].pixels[0..4]);
+}
+
+test "raised image budget loads a 1080p source without downscaling" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    core.Runtime.initAt(&harness.runtime, .{
+        .platform = harness.null_platform.platform(),
+        .trace_sink = harness.trace_sink.sink(),
+        .max_image_pixel_bytes = canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling,
+        .environ = std.testing.environ,
+    });
+    harness.runtime.dispatch_error_policy = .propagate;
+
+    const app_state = try std.testing.allocator.create(ImageApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ImageApp.init(std.heap.page_allocator, .{}, .{
+        .name = "effects-image-raised-budget",
+        .scene = image_scene,
+        .canvas_label = canvas_label,
+        .update_fx = imageUpdate,
+        .view = imageView,
+    });
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    test_path = "assets/wallpaper.png";
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    const width: usize = 1920;
+    const height: usize = 1080;
+    const pixels = try std.testing.allocator.alloc(u8, width * height * 4);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, 0x6D);
+    const encoded_len = try canvas.png.encodedRgba8ByteLen(width, height);
+    try std.testing.expect(encoded_len <= effects_mod.max_effect_image_source_bytes);
+    const encoded = try std.testing.allocator.alloc(u8, encoded_len);
+    defer std.testing.allocator.free(encoded);
+    var writer = std.Io.Writer.fixed(encoded);
+    try canvas.png.writeRgba8(&writer, width, height, pixels);
+    try app_state.effects.feedImageBytes(image_id, writer.buffered());
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+
+    const result = app_state.model.last.?;
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, result.outcome);
+    try std.testing.expectEqual(width, result.width);
+    try std.testing.expectEqual(height, result.height);
+    try std.testing.expectEqual(width, harness.runtime.registeredCanvasImage(image_id).?.width);
+}
+
 test "undecodable and oversized feeds fail with the registry's own classes" {
     var h = try Harness.create();
     defer h.destroy();

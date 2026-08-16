@@ -578,9 +578,32 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     // size[0]/size[1]), -1 when the decoded pixels do not fit the buffer,
     // 0 undecodable — the embed image service contract.
     @SuppressWarnings("unused") // called from android_host.c
-    int imageDecode(byte[] encoded, ByteBuffer pixels, long[] size) {
-        if (encoded == null || encoded.length == 0 || pixels == null || size == null || size.length < 2) return 0;
+    int imageDecode(byte[] encoded, ByteBuffer pixels, long maxPixels, long[] size) {
+        if (encoded == null || encoded.length == 0 || pixels == null || maxPixels <= 0 || size == null || size.length < 2) return 0;
         BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(encoded, 0, encoded.length, options);
+        int sourceWidth = options.outWidth;
+        int sourceHeight = options.outHeight;
+        if (sourceWidth <= 0 || sourceHeight <= 0 || sourceWidth > 8192 || sourceHeight > 8192) return 0;
+        long sourcePixels = (long)sourceWidth * sourceHeight;
+        int targetWidth = sourceWidth;
+        int targetHeight = sourceHeight;
+        if (sourcePixels > maxPixels) {
+            double scale = Math.sqrt((double)maxPixels / (double)sourcePixels);
+            targetWidth = Math.max(1, (int)Math.floor(sourceWidth * scale));
+            targetHeight = Math.max(1, (int)Math.floor(sourceHeight * scale));
+            while ((long)targetWidth * targetHeight > maxPixels) {
+                if (targetWidth > 1 && (targetHeight == 1 || targetWidth > targetHeight)) targetWidth--;
+                else targetHeight--;
+            }
+        }
+        int sampleSize = 1;
+        while (sampleSize <= (1 << 28)
+                && sourceWidth / (sampleSize << 1) >= targetWidth
+                && sourceHeight / (sampleSize << 1) >= targetHeight) sampleSize <<= 1;
+        options.inJustDecodeBounds = false;
+        options.inSampleSize = sampleSize;
         options.inPreferredConfig = Bitmap.Config.ARGB_8888;
         // Straight alpha, matching the desktop decoders: the canvas
         // pipeline un-premultiplies nothing downstream.
@@ -605,6 +628,14 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
             long height = bitmap.getHeight();
             // The dimension ceiling mirrors the iOS/macOS decode callback.
             if (width <= 0 || height <= 0 || width > 8192 || height > 8192) return 0;
+            if (width != targetWidth || height != targetHeight) {
+                Bitmap fitted = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true);
+                bitmap.recycle();
+                if (fitted == null) return 0;
+                bitmap = fitted;
+                width = targetWidth;
+                height = targetHeight;
+            }
             size[0] = width;
             size[1] = height;
             long byteLen = width * height * 4;

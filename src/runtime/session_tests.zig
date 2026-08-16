@@ -12,6 +12,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const canvas_limits = @import("canvas_limits.zig");
 const platform = @import("../platform/root.zig");
 const journal = @import("session_journal.zig");
 const session_record = @import("session_record.zig");
@@ -1786,6 +1787,103 @@ test "image loads record into the blob store (deduplicated) and replay byte-iden
     try std.testing.expectEqual(@as(usize, 5), replay_registered.height);
     try std.testing.expect(harness.runtime.registeredCanvasImage(22) != null);
     try std.testing.expect(harness.runtime.registeredCanvasImage(23) == null);
+}
+
+test "raised-budget photo load records and replays identical registered dimensions and pixels" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const record_harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer record_harness.destroy(gpa);
+    record_harness.null_platform.gpu_surfaces = true;
+    record_harness.null_platform.image_decode = true;
+    core.Runtime.initAt(&record_harness.runtime, .{
+        .platform = record_harness.null_platform.platform(),
+        .trace_sink = record_harness.trace_sink.sink(),
+        .max_image_pixel_bytes = canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling,
+        .environ = std.testing.environ,
+        .session_recorder = recorder,
+    });
+    record_harness.runtime.dispatch_error_policy = .propagate;
+
+    const record_app = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(record_app);
+    record_app.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer record_app.deinit();
+    record_app.effects.executor = .fake;
+    const record_runtime_app = record_app.app();
+    try record_harness.start(record_runtime_app);
+    try record_harness.runtime.dispatchPlatformEvent(record_runtime_app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+
+    const width: usize = 640;
+    const height: usize = 480;
+    const pixels = try gpa.alloc(u8, width * height * 4);
+    defer gpa.free(pixels);
+    var pixel_offset: usize = 0;
+    while (pixel_offset < pixels.len) : (pixel_offset += 4) pixels[pixel_offset..][0..4].* = .{ 31, 97, 211, 255 };
+    const encoded_len = try canvas.png.encodedRgba8ByteLen(width, height);
+    const encoded = try gpa.alloc(u8, encoded_len);
+    defer gpa.free(encoded);
+    var writer = std.Io.Writer.fixed(encoded);
+    try canvas.png.writeRgba8(&writer, width, height, pixels);
+
+    try record_harness.runtime.dispatchPlatformEvent(record_runtime_app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try record_app.effects.feedImageBytes(21, writer.buffered());
+    try record_harness.runtime.dispatchPlatformEvent(record_runtime_app, .wake);
+    try record_harness.runtime.dispatchPlatformEvent(record_runtime_app, .frame_requested);
+    const recorded_model = record_app.model;
+    const recorded_fingerprint = record_harness.runtime.sessionStateFingerprint();
+    const recorded_pixels = record_harness.runtime.registeredCanvasImages()[0].pixels;
+    const recorded_pixel_fingerprint = std.hash.Wyhash.hash(0, recorded_pixels);
+    try std.testing.expectEqual(width, recorded_model.last_width);
+    try std.testing.expectEqual(height, recorded_model.last_height);
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+
+    const replay_harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer replay_harness.destroy(gpa);
+    replay_harness.null_platform.gpu_surfaces = true;
+    core.Runtime.initAt(&replay_harness.runtime, .{
+        .platform = replay_harness.null_platform.platform(),
+        .trace_sink = replay_harness.trace_sink.sink(),
+        .max_image_pixel_bytes = canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling,
+        .environ = std.testing.environ,
+    });
+    replay_harness.runtime.dispatch_error_policy = .propagate;
+    platform.installHeadlessImageCodec("null", &replay_harness.null_platform, &replay_harness.runtime.options.platform.services);
+    const replay_app = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(replay_app);
+    replay_app.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer replay_app.deinit();
+
+    const report = try session_replay.replaySession(&replay_harness.runtime, replay_app.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqualDeep(recorded_model, replay_app.model);
+    try std.testing.expectEqual(recorded_fingerprint, replay_harness.runtime.sessionStateFingerprint());
+    const replay_info = replay_harness.runtime.registeredCanvasImage(21).?;
+    try std.testing.expectEqual(width, replay_info.width);
+    try std.testing.expectEqual(height, replay_info.height);
+    try std.testing.expectEqual(recorded_pixel_fingerprint, std.hash.Wyhash.hash(0, replay_harness.runtime.registeredCanvasImages()[0].pixels));
 }
 
 /// Record the undelivered-window reference session: load id 21, feed

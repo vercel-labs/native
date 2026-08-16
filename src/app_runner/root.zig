@@ -6,6 +6,12 @@ const built_relational_migrations = @import("relational_migrations");
 const manifest_shortcuts = if (@hasField(@TypeOf(app_manifest), "shortcuts")) app_manifest.shortcuts else .{};
 const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
 
+fn manifestImagePixelBudget() usize {
+    if (comptime !@hasField(@TypeOf(app_manifest), "images")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    if (comptime !@hasField(@TypeOf(app_manifest.images), "max_image_pixel_bytes")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    return app_manifest.images.max_image_pixel_bytes;
+}
+
 pub const app_assets = @import("app_assets.zig");
 
 pub const StdoutTraceSink = struct {
@@ -638,6 +644,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -706,6 +713,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -771,6 +779,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -835,6 +844,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -990,6 +1000,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     // the journal and restores nothing.
     native_sdk.Runtime.initAt(runtime, .{
         .platform = replay_platform,
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,

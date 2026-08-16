@@ -2956,12 +2956,14 @@ pub const PlatformServices = struct {
     /// framework bundles no image decoders: macOS decodes through
     /// CGImageSource (ImageIO), GTK through gdk-pixbuf, Win32 through WIC.
     /// Implementations may use `buffer` as decode scratch, so callers size
-    /// it for their pixel bound, not the exact image. Errors:
+    /// it for their pixel bound, not the exact image. `max_pixels` is a
+    /// pixel-count cap, not a width/height box: codecs preserve aspect and
+    /// decode down when source pixels exceed it. Errors:
     /// `error.ImageDecodeFailed` for undecodable bytes,
     /// `error.ImageTooLarge` when the decoded pixels do not fit `buffer`.
     /// Null on platforms without a codec (the null platform by default),
     /// which surfaces as `error.UnsupportedService`.
-    decode_image_fn: ?*const fn (context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!DecodedImage = null,
+    decode_image_fn: ?*const fn (context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!DecodedImage = null,
 
     pub fn readClipboard(self: PlatformServices, buffer: []u8) anyerror![]const u8 {
         const read_fn = self.read_clipboard_fn orelse return error.UnsupportedService;
@@ -3595,10 +3597,14 @@ pub const PlatformServices = struct {
 
     /// Decode encoded image bytes through the platform codec into
     /// straight-alpha RGBA8 (see `decode_image_fn`). Loop-thread only.
-    pub fn decodeImage(self: PlatformServices, bytes: []const u8, buffer: []u8) anyerror!DecodedImage {
+    pub fn decodeImage(self: PlatformServices, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!DecodedImage {
         if (bytes.len == 0) return error.ImageDecodeFailed;
+        if (max_pixels == 0) return error.ImageTooLarge;
         const decode_fn = self.decode_image_fn orelse return error.UnsupportedService;
-        return decode_fn(self.context, bytes, buffer);
+        const decoded = try decode_fn(self.context, bytes, buffer, max_pixels);
+        const pixels = std.math.mul(usize, decoded.width, decoded.height) catch return error.ImageTooLarge;
+        if (pixels > max_pixels) return error.ImageTooLarge;
+        return decoded;
     }
 };
 

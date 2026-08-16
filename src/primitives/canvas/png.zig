@@ -252,6 +252,142 @@ pub fn decodeRgba8(bytes: []const u8, output: []u8) Error!Decoded {
     return .{ .width = width, .height = height, .rgba8 = output[0 .. width * height * 4] };
 }
 
+/// Decode the strict writer subset while fitting its RGBA8 pixels inside a
+/// pixel-count budget. Stored-deflate bytes are addressed directly from the
+/// encoded stream, so an oversized source is never materialized at native
+/// size. Downscaling uses deterministic integer box averages in sRGB space;
+/// the test/null codec values bounded repeatability over color-management
+/// fidelity (real hosts use their platform codecs' native thumbnail paths).
+pub fn decodeRgba8Fitted(bytes: []const u8, output: []u8, max_pixels: usize) Error!Decoded {
+    if (max_pixels == 0) return error.PngPixelBufferTooSmall;
+    if (bytes.len < signature.len or !std.mem.eql(u8, bytes[0..signature.len], &signature)) return error.InvalidPng;
+
+    var offset: usize = signature.len;
+    var width: usize = 0;
+    var height: usize = 0;
+    var idat: ?[]const u8 = null;
+    var saw_iend = false;
+    while (offset < bytes.len) {
+        if (bytes.len - offset < chunk_overhead) return error.InvalidPng;
+        const data_len: usize = std.mem.readInt(u32, bytes[offset..][0..4], .big);
+        const chunk_type = bytes[offset + 4 .. offset + 8];
+        if (bytes.len - offset < chunk_overhead + data_len) return error.InvalidPng;
+        const data = bytes[offset + 8 .. offset + 8 + data_len];
+        const stored_crc = std.mem.readInt(u32, bytes[offset + 8 + data_len ..][0..4], .big);
+        var crc = std.hash.Crc32.init();
+        crc.update(chunk_type);
+        crc.update(data);
+        if (crc.final() != stored_crc) return error.InvalidPng;
+        offset += chunk_overhead + data_len;
+
+        if (std.mem.eql(u8, chunk_type, "IHDR")) {
+            if (width != 0 or data.len != 13) return error.InvalidPng;
+            width = std.mem.readInt(u32, data[0..4], .big);
+            height = std.mem.readInt(u32, data[4..8], .big);
+            try validateDimensions(width, height);
+            if (data[8] != 8 or data[9] != 6 or data[10] != 0 or data[11] != 0 or data[12] != 0) return error.UnsupportedPng;
+        } else if (std.mem.eql(u8, chunk_type, "IDAT")) {
+            if (width == 0 or idat != null) return error.UnsupportedPng;
+            idat = data;
+        } else if (std.mem.eql(u8, chunk_type, "IEND")) {
+            if (data.len != 0) return error.InvalidPng;
+            saw_iend = true;
+            break;
+        } else {
+            return error.UnsupportedPng;
+        }
+    }
+    if (!saw_iend) return error.InvalidPng;
+    const stream_data = idat orelse return error.InvalidPng;
+    if (stream_data.len < 6 or stream_data[0] != 0x78) return error.UnsupportedPng;
+    const expected_adler = std.mem.readInt(u32, stream_data[stream_data.len - 4 ..][0..4], .big);
+    const deflate = stream_data[2 .. stream_data.len - 4];
+    const raw_len = rawStreamLen(width, height);
+
+    // The strict writer emits canonical full-sized stored blocks. Validate
+    // that shape and the zlib checksum once, then rawByteAt below can map a
+    // raw offset to its encoded byte in O(1) without an allocation.
+    var compressed_offset: usize = 0;
+    var raw_offset: usize = 0;
+    var adler: std.hash.Adler32 = .{};
+    while (raw_offset < raw_len) {
+        if (deflate.len - compressed_offset < 5) return error.InvalidPng;
+        const header = deflate[compressed_offset];
+        if (header & 0xFE != 0) return error.UnsupportedPng;
+        const block_len: usize = std.mem.readInt(u16, deflate[compressed_offset + 1 ..][0..2], .little);
+        const block_nlen: usize = std.mem.readInt(u16, deflate[compressed_offset + 3 ..][0..2], .little);
+        const expected_len = @min(raw_len - raw_offset, max_stored_block_bytes);
+        if (block_len != expected_len or block_len ^ 0xFFFF != block_nlen) return error.UnsupportedPng;
+        if (deflate.len - compressed_offset < 5 + block_len) return error.InvalidPng;
+        const block = deflate[compressed_offset + 5 .. compressed_offset + 5 + block_len];
+        adler.update(block);
+        raw_offset += block_len;
+        compressed_offset += 5 + block_len;
+        const should_be_final = raw_offset == raw_len;
+        if ((header & 1 == 1) != should_be_final) return error.InvalidPng;
+    }
+    if (compressed_offset != deflate.len or adler.adler != expected_adler) return error.InvalidPng;
+
+    const source_pixels = std.math.mul(usize, width, height) catch return error.InvalidPngDimensions;
+    var fitted_width = width;
+    var fitted_height = height;
+    if (source_pixels > max_pixels) {
+        const scale = @sqrt(@as(f64, @floatFromInt(max_pixels)) / @as(f64, @floatFromInt(source_pixels)));
+        fitted_width = @max(1, @as(usize, @intFromFloat(@floor(@as(f64, @floatFromInt(width)) * scale))));
+        fitted_height = @max(1, @as(usize, @intFromFloat(@floor(@as(f64, @floatFromInt(height)) * scale))));
+        while (fitted_width * fitted_height > max_pixels) {
+            if (fitted_width > 1 and (fitted_height == 1 or fitted_width > fitted_height)) fitted_width -= 1 else fitted_height -= 1;
+        }
+    }
+    const fitted_byte_len = fitted_width * fitted_height * 4;
+    if (output.len < fitted_byte_len) return error.PngPixelBufferTooSmall;
+
+    const Reader = struct {
+        fn byteAt(data: []const u8, index: usize) u8 {
+            const block_index = index / max_stored_block_bytes;
+            const in_block = index % max_stored_block_bytes;
+            return data[block_index * (5 + max_stored_block_bytes) + 5 + in_block];
+        }
+    };
+    const source_row_len = rowByteLen(width);
+    var oy: usize = 0;
+    while (oy < fitted_height) : (oy += 1) {
+        const top: u64 = @as(u64, oy) * height;
+        const bottom: u64 = @as(u64, oy + 1) * height;
+        const sy0: usize = @intCast(top / fitted_height);
+        const sy1: usize = @intCast((bottom + fitted_height - 1) / fitted_height);
+        var ox: usize = 0;
+        while (ox < fitted_width) : (ox += 1) {
+            const left: u64 = @as(u64, ox) * width;
+            const right: u64 = @as(u64, ox + 1) * width;
+            const sx0: usize = @intCast(left / fitted_width);
+            const sx1: usize = @intCast((right + fitted_width - 1) / fitted_width);
+            var sums = [4]u64{ 0, 0, 0, 0 };
+            var weight_total: u64 = 0;
+            var sy = sy0;
+            while (sy < sy1) : (sy += 1) {
+                if (Reader.byteAt(deflate, sy * source_row_len) != 0) return error.UnsupportedPng;
+                const source_top: u64 = @as(u64, sy) * fitted_height;
+                const source_bottom: u64 = @as(u64, sy + 1) * fitted_height;
+                const weight_y = @min(bottom, source_bottom) - @max(top, source_top);
+                var sx = sx0;
+                while (sx < sx1) : (sx += 1) {
+                    const source_left: u64 = @as(u64, sx) * fitted_width;
+                    const source_right: u64 = @as(u64, sx + 1) * fitted_width;
+                    const weight_x = @min(right, source_right) - @max(left, source_left);
+                    const weight = weight_x * weight_y;
+                    const source = sy * source_row_len + 1 + sx * 4;
+                    inline for (0..4) |channel| sums[channel] += @as(u64, Reader.byteAt(deflate, source + channel)) * weight;
+                    weight_total += weight;
+                }
+            }
+            const destination = (oy * fitted_width + ox) * 4;
+            inline for (0..4) |channel| output[destination + channel] = @intCast((sums[channel] + weight_total / 2) / weight_total);
+        }
+    }
+    return .{ .width = fitted_width, .height = fitted_height, .rgba8 = output[0..fitted_byte_len] };
+}
+
 test "png writer emits signature and IHDR fields" {
     const width: usize = 3;
     const height: usize = 2;

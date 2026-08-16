@@ -109,8 +109,8 @@ test "registered images draw through the reference renderer screenshot" {
     // Raw RGBA fixture: 2x2 quadrant colors drawn with nearest sampling,
     // so each destination quadrant is one exact color.
     const fixture = [_]u8{
-        255, 0,   0,   255, 0,   255, 0,   255,
-        0,   0,   255, 255, 255, 255, 0,   255,
+        255, 0, 0,   255, 0,   255, 0, 255,
+        0,   0, 255, 255, 255, 255, 0, 255,
     };
     try harness.runtime.registerCanvasImage(42, 2, 2, &fixture);
 
@@ -205,6 +205,88 @@ test "registerCanvasImageBytes decodes through the platform seam" {
     try std.testing.expectError(error.ImageDecodeFailed, harness.runtime.registerCanvasImageBytes(10, "not an image"));
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.registeredCanvasImageCount());
     try std.testing.expectError(error.InvalidImageId, harness.runtime.registerCanvasImageBytes(0, encoded));
+}
+
+fn encodedPng(allocator: std.mem.Allocator, width: usize, height: usize, pixels: []const u8) ![]u8 {
+    const capacity = try canvas.png.encodedRgba8ByteLen(width, height);
+    const encoded = try allocator.alloc(u8, capacity);
+    errdefer allocator.free(encoded);
+    var writer = std.Io.Writer.fixed(encoded);
+    try canvas.png.writeRgba8(&writer, width, height, pixels);
+    return encoded[0..writer.buffered().len];
+}
+
+test "null image codec fits oversized photos deterministically and preserves in-budget geometry" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    harness.null_platform.image_decode = true;
+
+    // No-op below the budget.
+    const tiny_pixels = [_]u8{
+        1,  2,  3,  255, 4,  5,  6,  255, 7,  8,  9,  255,
+        10, 11, 12, 255, 13, 14, 15, 255, 16, 17, 18, 255,
+    };
+    const tiny_encoded = try encodedPng(std.testing.allocator, 3, 2, &tiny_pixels);
+    defer std.testing.allocator.free(tiny_encoded);
+    const tiny = try harness.runtime.registerCanvasImageBytes(20, tiny_encoded);
+    try std.testing.expectEqual(@as(usize, 3), tiny.width);
+    try std.testing.expectEqual(@as(usize, 2), tiny.height);
+    try std.testing.expectEqualSlices(u8, &tiny_pixels, registeredPixelsById(&harness.runtime, 20).?);
+
+    // A wide exact-boundary image remains 1024x256; this proves the cap is
+    // pixel count, not a 512x512 box.
+    const wide_pixels = try std.testing.allocator.alloc(u8, 1024 * 256 * 4);
+    defer std.testing.allocator.free(wide_pixels);
+    @memset(wide_pixels, 0x5A);
+    const wide_encoded = try encodedPng(std.testing.allocator, 1024, 256, wide_pixels);
+    defer std.testing.allocator.free(wide_encoded);
+    const wide = try harness.runtime.registerCanvasImageBytes(21, wide_encoded);
+    try std.testing.expectEqual(@as(usize, 1024), wide.width);
+    try std.testing.expectEqual(@as(usize, 256), wide.height);
+
+    // 1024x512 is over budget and fits to the exact null-codec target.
+    // Uniform source pixels make the integer box-average golden exact.
+    const photo_pixels = try std.testing.allocator.alloc(u8, 1024 * 512 * 4);
+    defer std.testing.allocator.free(photo_pixels);
+    var index: usize = 0;
+    while (index < photo_pixels.len) : (index += 4) {
+        photo_pixels[index..][0..4].* = .{ 17, 91, 203, 247 };
+    }
+    const photo_encoded = try encodedPng(std.testing.allocator, 1024, 512, photo_pixels);
+    defer std.testing.allocator.free(photo_encoded);
+    const first = try harness.runtime.registerCanvasImageBytes(22, photo_encoded);
+    try std.testing.expectEqual(@as(usize, 724), first.width);
+    try std.testing.expectEqual(@as(usize, 362), first.height);
+    try std.testing.expect(first.width * first.height * 4 <= harness.runtime.max_image_pixel_bytes);
+    const first_pixels = registeredPixelsById(&harness.runtime, 22).?;
+    const fingerprint = std.hash.Wyhash.hash(0, first_pixels);
+    var probe: usize = 0;
+    while (probe < @min(first_pixels.len, 4096)) : (probe += 4) {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 17, 91, 203, 247 }, first_pixels[probe..][0..4]);
+    }
+
+    const second = try harness.runtime.registerCanvasImageBytes(23, photo_encoded);
+    try std.testing.expectEqual(first.width, second.width);
+    try std.testing.expectEqual(first.height, second.height);
+    try std.testing.expectEqual(fingerprint, std.hash.Wyhash.hash(0, registeredPixelsById(&harness.runtime, 23).?));
+}
+
+test "null image codec uses exact integer area weights for fractional boxes" {
+    const pixels = [_]u8{
+        0, 0, 0, 255, 60, 60, 60, 255, 120, 120, 120, 255,
+    };
+    const encoded = try encodedPng(std.testing.allocator, 3, 1, &pixels);
+    defer std.testing.allocator.free(encoded);
+    var output: [16]u8 = undefined;
+    const decoded = try canvas.png.decodeRgba8Fitted(encoded, &output, 2);
+    try std.testing.expectEqual(@as(usize, 2), decoded.width);
+    try std.testing.expectEqual(@as(usize, 1), decoded.height);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        20,  20,  20,  255,
+        100, 100, 100, 255,
+    }, decoded.rgba8);
 }
 
 test "registerCanvasImageBytes refuses reserved media-surface ids before decoding" {
@@ -311,6 +393,28 @@ test "a fresh runtime allocates zero registered-image bytes until the first regi
     try harness.runtime.registerCanvasImage(3, 1, 1, &blue);
     try harness.runtime.registerCanvasImage(4, 1, 1, &red);
     try std.testing.expectEqual(@as(usize, 2), counting.allocations);
+}
+
+test "raised registered-image budget stays lazy and sizes each used slot" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    core.Runtime.initAt(&harness.runtime, .{
+        .platform = harness.null_platform.platform(),
+        .trace_sink = harness.trace_sink.sink(),
+        .allocator = counting.allocator(),
+        .max_image_pixel_bytes = canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling,
+        .environ = std.testing.environ,
+    });
+    harness.runtime.dispatch_error_policy = .propagate;
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+
+    const pixel = [_]u8{ 1, 2, 3, 255 };
+    try harness.runtime.registerCanvasImage(1, 1, 1, &pixel);
+    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
+    try std.testing.expectEqual(canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling, counting.allocated_bytes);
 }
 
 test "image slot buffer ownership freezes at init: a mutated options.allocator sees zero activity" {

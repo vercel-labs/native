@@ -977,17 +977,16 @@ pub fn imageCachePartialPath(buffer: []u8, cache_path: []const u8, generation: u
 /// `.rejected` image result Msg.
 pub const max_effect_image_path_bytes: usize = max_effect_file_path_bytes;
 
-/// Maximum ENCODED source bytes one `loadImage` accepts — from a local
-/// file, the URL cache, or the network alike. Sized past the decoded
-/// pixel bound (`canvas_limits.max_registered_canvas_image_pixel_bytes`)
-/// by the same 1/4 margin the decode scratch carries: an encoded stream
-/// larger than that cannot decode inside the registered-image budget on
-/// any host, so hauling more bytes would only defer the same
-/// `.too_large` answer. Unlike fetch bodies there is no truncated
-/// delivery — a cut image can never decode, so over-bound sources fail
-/// whole with `.too_large`, never arrive clipped.
-pub const max_effect_image_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes +
-    canvas_limits.max_registered_canvas_image_pixel_bytes / 4;
+/// Maximum ENCODED source bytes one `loadImage` accepts — independent of
+/// the decoded-pixel target now that codecs decode-to-fit. Eight MiB covers
+/// typical phone JPEG/HEIC photos while keeping costs fixed and loud: every
+/// in-flight load owns a transient `bound + 1` fetch/read buffer, recorded
+/// source bytes grow the session blob store, and URL cache entries may reach
+/// this size. Unlike fetch bodies there is no truncated delivery — a cut
+/// image can never decode, so over-bound sources fail whole with
+/// `.too_large`. The bound stays flat when an app raises its pixel budget.
+pub const max_effect_image_source_bytes: usize = 8 * 1024 * 1024;
+pub const max_effect_image_bytes: usize = max_effect_image_source_bytes;
 
 /// Bytes of an image effect result's content address in the session
 /// journal: the first half of the source bytes' SHA-256, the
@@ -1031,9 +1030,10 @@ pub const EffectImageOutcome = enum(u8) {
     http_status,
     /// `cancel(id)` ended the load before its result was delivered.
     cancelled,
-    /// The source bytes exceed `max_effect_image_bytes`, or the decoded
-    /// pixels exceed the registered-image slot bound
-    /// (`error.ImageTooLarge`) — one budget class either way.
+    /// The source bytes exceed `max_effect_image_source_bytes`. A conforming
+    /// codec fits decoded pixels to the app's registered-image budget;
+    /// `error.ImageTooLarge` is retained only as a defensive codec-contract
+    /// violation and maps here too.
     too_large,
     /// The host has no image codec (`error.UnsupportedService`), or no
     /// image registry is bound to this channel.

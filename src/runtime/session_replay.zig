@@ -28,7 +28,6 @@
 
 const std = @import("std");
 const canvas = @import("canvas");
-const canvas_limits = @import("canvas_limits.zig");
 const automation_protocol = @import("../automation/protocol.zig");
 const core = @import("core.zig");
 const journal = @import("session_journal.zig");
@@ -206,9 +205,9 @@ pub fn replaySession(
                 // Decoded dimensions obey the recorder the same way: a
                 // live `.loaded` journals only after the canvas registry
                 // accepted the pixels (nonzero width and height, and
-                // width * height * 4 bytes within
-                // `max_registered_canvas_image_pixel_bytes` — the same
-                // bound `registerCanvasImage` enforces), and every other
+                // width * height * 4 bytes within the runtime-frozen app
+                // image budget — the same bound `registerCanvasImage`
+                // enforces), and every other
                 // outcome journals 0x0. Refuse out-of-bound dims HERE:
                 // the fed values flow verbatim into the app's Msg — and,
                 // on the TS core host, through `@intCast` into
@@ -249,7 +248,7 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .image and imageDimsDamaged(effect)) {
+                if (effect.kind == .image and imageDimsDamaged(runtime, effect)) {
                     std.debug.print(
                         "replay refused after event {d}: image record for id {d} claims .{s} with dimensions {d}x{d} - a recorded .loaded always carries nonzero decoded dimensions within the registered-image pixel budget and every other outcome records 0x0, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.image_outcome), effect.image_width, effect.image_height },
@@ -748,14 +747,14 @@ fn videoLoadOutcomeDamaged(record: journal.EffectResultRecord) bool {
     return record.video_kind != .loaded and record.video_kind != .failed;
 }
 
-fn imageDimsDamaged(record: journal.EffectResultRecord) bool {
+fn imageDimsDamaged(runtime: *const core.Runtime, record: journal.EffectResultRecord) bool {
     if (record.image_outcome != .loaded) {
         return record.image_width != 0 or record.image_height != 0;
     }
     if (record.image_width == 0 or record.image_height == 0) return true;
     const pixels = std.math.mul(u64, record.image_width, record.image_height) catch return true;
     const pixel_bytes = std.math.mul(u64, pixels, 4) catch return true;
-    return pixel_bytes > canvas_limits.max_registered_canvas_image_pixel_bytes;
+    return pixel_bytes > runtime.max_image_pixel_bytes;
 }
 
 /// Journaled results that regenerate deterministically from the
