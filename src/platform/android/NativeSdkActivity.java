@@ -116,6 +116,7 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 public final class NativeSdkActivity extends Activity implements SurfaceHolder.Callback, Choreographer.FrameCallback {
+    private static final int MAX_DECODED_IMAGE_DIMENSION = 8192;
     private static final int TOUCH_MODE_IDLE = 0;
     // Touch down seen, under slop: undecided between tap / drag / scroll.
     private static final int TOUCH_MODE_PENDING = 1;
@@ -578,9 +579,42 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     // size[0]/size[1]), -1 when the decoded pixels do not fit the buffer,
     // 0 undecodable — the embed image service contract.
     @SuppressWarnings("unused") // called from android_host.c
-    int imageDecode(byte[] encoded, ByteBuffer pixels, long[] size) {
-        if (encoded == null || encoded.length == 0 || pixels == null || size == null || size.length < 2) return 0;
+    int imageDecode(byte[] encoded, ByteBuffer pixels, long maxPixels, long[] size) {
+        if (encoded == null || encoded.length == 0 || pixels == null || maxPixels <= 0 || size == null || size.length < 2) return 0;
         BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(encoded, 0, encoded.length, options);
+        int sourceWidth = options.outWidth;
+        int sourceHeight = options.outHeight;
+        if (sourceWidth <= 0 || sourceHeight <= 0) return 0;
+        long sourcePixels = (long)sourceWidth * sourceHeight;
+        int targetWidth = sourceWidth;
+        int targetHeight = sourceHeight;
+        if (sourcePixels > maxPixels || sourceWidth > MAX_DECODED_IMAGE_DIMENSION || sourceHeight > MAX_DECODED_IMAGE_DIMENSION) {
+            double areaScale = Math.sqrt((double)maxPixels / (double)sourcePixels);
+            double axisScale = (double)MAX_DECODED_IMAGE_DIMENSION / Math.max(sourceWidth, sourceHeight);
+            double scale = Math.min(1.0, Math.min(areaScale, axisScale));
+            targetWidth = Math.max(1, (int)Math.floor(sourceWidth * scale));
+            targetHeight = Math.max(1, (int)Math.floor(sourceHeight * scale));
+            while ((long)targetWidth * targetHeight > maxPixels) {
+                if (targetWidth > 1 && (targetHeight == 1 || targetWidth > targetHeight)) targetWidth--;
+                else targetHeight--;
+            }
+        }
+        int sampleSize = 1;
+        while (sampleSize <= (1 << 28)) {
+            int nextSampleSize = sampleSize << 1;
+            // BitmapFactory rounds a sampled dimension up rather than
+            // collapsing a one-pixel side to zero. Mirror that here so a
+            // panorama can still use the largest safe power-of-two decode
+            // sample before the exact resize below.
+            int sampledWidth = (sourceWidth - 1) / nextSampleSize + 1;
+            int sampledHeight = (sourceHeight - 1) / nextSampleSize + 1;
+            if (sampledWidth < targetWidth || sampledHeight < targetHeight) break;
+            sampleSize = nextSampleSize;
+        }
+        options.inJustDecodeBounds = false;
+        options.inSampleSize = sampleSize;
         options.inPreferredConfig = Bitmap.Config.ARGB_8888;
         // Straight alpha, matching the desktop decoders: the canvas
         // pipeline un-premultiplies nothing downstream.
@@ -603,8 +637,19 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
             }
             long width = bitmap.getWidth();
             long height = bitmap.getHeight();
-            // The dimension ceiling mirrors the iOS/macOS decode callback.
-            if (width <= 0 || height <= 0 || width > 8192 || height > 8192) return 0;
+            if (width <= 0 || height <= 0) return 0;
+            if (width != targetWidth || height != targetHeight) {
+                Bitmap fitted = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true);
+                bitmap.recycle();
+                if (fitted == null) return 0;
+                bitmap = fitted;
+                width = targetWidth;
+                height = targetHeight;
+            }
+            // Validate the final registered geometry, not BitmapFactory's
+            // intermediate power-of-two sample. In particular, 8193x1 must
+            // be allowed to reach the exact 8192x1 fit above.
+            if (width > MAX_DECODED_IMAGE_DIMENSION || height > MAX_DECODED_IMAGE_DIMENSION || width > maxPixels / height) return 0;
             size[0] = width;
             size[1] = height;
             long byteLen = width * height * 4;

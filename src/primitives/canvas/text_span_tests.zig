@@ -435,7 +435,7 @@ fn paragraphView(ui: *SpanUi) SpanUi.Node {
         .{ .text = "Read " },
         .{ .text = "the guide", .link = "https://example.com/guide" },
         .{ .text = " and " },
-        .{ .text = "the spec", .link = "https://example.com/spec" },
+        .{ .text = "the spec", .link = "https://example.com/spec", .underline = true },
     };
     return ui.column(.{ .gap = 8 }, .{
         ui.paragraph(.{ .on_link = SpanUi.linkMsg(.open) }, &spans),
@@ -502,7 +502,7 @@ test "link children get span-derived frames and are hit-testable" {
     try testing.expectEqual(paragraph.id, paragraph_hit.id);
 }
 
-test "span paragraphs emit one text command per run plus link underlines" {
+test "span underline decoration is independent from link behavior" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     var ui = SpanUi.init(arena_state.allocator());
@@ -532,7 +532,9 @@ test "span paragraphs emit one text command per run plus link underlines" {
     }
     // 4 spans on one wide line + the plain trailer text widget.
     try testing.expectEqual(@as(usize, 5), text_commands);
-    try testing.expectEqual(@as(usize, 2), underlines);
+    // Both links keep accent ink and link interaction, but only the second
+    // span explicitly opts into an underline.
+    try testing.expectEqual(@as(usize, 1), underlines);
     try testing.expectEqual(@as(usize, 2), accent_texts);
 }
 

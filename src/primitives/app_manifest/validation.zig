@@ -68,6 +68,9 @@ const UrlScheme = types.UrlScheme;
 const PackageMetadata = types.PackageMetadata;
 const UpdateConfig = types.UpdateConfig;
 const Manifest = types.Manifest;
+const ImagesConfig = types.ImagesConfig;
+const default_image_pixel_bytes: usize = 1024 * 1024;
+const max_image_pixel_bytes_ceiling: usize = 8 * 1024 * 1024;
 pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateIdentity(manifest.identity);
     try validateVersion(manifest.version);
@@ -76,6 +79,7 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateCapabilities(manifest.capabilities);
     try validateDockVisibility(manifest.dock_visible, manifest.capabilities);
     try validatePersist(manifest.persist, manifest.capabilities);
+    try validateImages(manifest.images);
     try validateBridge(manifest.bridge);
     if (manifest.frontend) |frontend| try validateFrontend(frontend);
     try validateSecurity(manifest.security);
@@ -91,6 +95,14 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateWebViewLayer(manifest);
     try validatePackageMetadata(manifest.package);
     try validateUpdates(manifest.updates);
+}
+
+pub fn validateImages(images: ImagesConfig) ValidationError!void {
+    if (images.max_image_pixel_bytes < default_image_pixel_bytes or
+        images.max_image_pixel_bytes > max_image_pixel_bytes_ceiling)
+    {
+        return error.InvalidDimension;
+    }
 }
 
 /// Whether the manifest declares web content — the shared declare-to-use

@@ -773,10 +773,11 @@ test "gpu surface image upload bounds are honest per id namespace" {
     defer std.testing.allocator.free(buffer);
     @memset(buffer, 128);
 
-    // Ordinary registered-image ids keep the registry's avatar-scale
-    // bound: exactly 1 MiB (512x512 RGBA8) passes, one pixel past it is
-    // an engine bug and refuses loudly.
-    try services.uploadGpuSurfaceImage(.{ .id = 7, .width = 512, .height = 512, .rgba8 = buffer[0..types.max_gpu_surface_image_pixel_bytes] });
+    // Ordinary registered-image ids accept the registry's configurable
+    // ceiling: exactly 8 MiB (2048x1024 RGBA8) passes, one pixel past it
+    // is an engine bug and refuses loudly. Apps on the default 1 MiB tier
+    // still refuse earlier, at registration.
+    try services.uploadGpuSurfaceImage(.{ .id = 7, .width = 2048, .height = 1024, .rgba8 = buffer[0..types.max_gpu_surface_image_pixel_bytes] });
     try std.testing.expectError(error.InvalidGpuSurfaceImage, services.uploadGpuSurfaceImage(.{
         .id = 7,
         .width = types.max_gpu_surface_image_pixel_bytes / 4 + 1,

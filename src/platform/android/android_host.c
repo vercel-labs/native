@@ -801,7 +801,7 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetCred
 // Returns 1 decoded (dimensions in out_width/out_height), -1 when the
 // decoded pixels do not fit pixels_len, 0 undecodable — the embed image
 // service contract (native_sdk_app.h).
-static int host_image_decode(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t *out_width, uintptr_t *out_height) {
+static int host_image_decode(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t max_pixels, uintptr_t *out_width, uintptr_t *out_height) {
     (void)context;
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
@@ -823,7 +823,7 @@ static int host_image_decode(void *context, const uint8_t *bytes, uintptr_t byte
         (*env)->DeleteLocalRef(env, encoded);
         return 0;
     }
-    jint result = (*env)->CallIntMethod(env, host_state.image_activity, host_state.image_decode_method, encoded, buffer, dims);
+    jint result = (*env)->CallIntMethod(env, host_state.image_activity, host_state.image_decode_method, encoded, buffer, (jlong)max_pixels, dims);
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
         result = 0;
@@ -847,7 +847,7 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSetImag
     if (host_state.image_activity) (*env)->DeleteGlobalRef(env, host_state.image_activity);
     host_state.image_activity = (*env)->NewGlobalRef(env, self);
     jclass cls = (*env)->GetObjectClass(env, self);
-    host_state.image_decode_method = (*env)->GetMethodID(env, cls, "imageDecode", "([BLjava/nio/ByteBuffer;[J)I");
+    host_state.image_decode_method = (*env)->GetMethodID(env, cls, "imageDecode", "([BLjava/nio/ByteBuffer;J[J)I");
     (*env)->DeleteLocalRef(env, cls);
     if (!host_state.image_activity || !host_state.image_decode_method) {
         NATIVE_SDK_LOGE("image_service registration failed");

@@ -2427,11 +2427,11 @@ pub const NullPlatform = struct {
     /// Deterministic decode seam for tests (see `image_decode`): parses
     /// the strict PNG subset the canvas writer emits. Off by default so
     /// the null platform models codec-less hosts.
-    fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!types.DecodedImage {
+    fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!types.DecodedImage {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (!self.image_decode) return error.UnsupportedService;
         self.image_decode_count += 1;
-        const decoded = canvas.png.decodeRgba8(bytes, buffer) catch |err| return switch (err) {
+        const decoded = canvas.png.decodeRgba8Fitted(bytes, buffer, max_pixels, types.max_decoded_image_dimension) catch |err| return switch (err) {
             error.PngPixelBufferTooSmall => error.ImageTooLarge,
             else => error.ImageDecodeFailed,
         };

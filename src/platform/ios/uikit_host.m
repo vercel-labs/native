@@ -102,11 +102,13 @@
 #import <Security/Security.h>
 
 #include <dlfcn.h>
+#include <math.h>
 #include <mach-o/dyld.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "native_sdk_app.h"
+#include "apple_image_fit.h"
 
 // ----------------------------------------------------------- credentials
 // Generic-password Keychain entries shared by the WebView bridge and core
@@ -956,29 +958,50 @@ static int NativeSdkAudioServiceSetVolume(void *context, double volume) {
 // because the canvas image pipeline expects straight alpha. Returns 1
 // decoded, -1 when the decoded pixels do not fit `pixels_len`, 0 for
 // undecodable bytes.
-static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t *out_width, uintptr_t *out_height) {
+static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t max_pixels, uintptr_t *out_width, uintptr_t *out_height) {
     (void)context;
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (!source) return 0;
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+        int64_t source_width_value = 0;
+        int64_t source_height_value = 0;
+        if (properties) {
+            CFNumberRef width_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+            CFNumberRef height_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+            if (width_value) CFNumberGetValue(width_value, kCFNumberSInt64Type, &source_width_value);
+            if (height_value) CFNumberGetValue(height_value, kCFNumberSInt64Type, &source_height_value);
+            CFRelease(properties);
+        }
+        size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
+        size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
+        CGImageRef image = NULL;
+        if (source_width > 0 && source_height > 0) {
+            const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
+            NSDictionary *thumbnail_options = @{
+                (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
+                (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+            };
+            image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)thumbnail_options);
+        }
         CFRelease(source);
         if (!image) return 0;
 
         size_t width = CGImageGetWidth(image);
         size_t height = CGImageGetHeight(image);
-        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+        if (width == 0 || height == 0 || width > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
             CGImageRelease(image);
             return 0;
         }
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
-        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+        if (width > max_pixels / height || byte_len / 4 / height != width || pixels_len < byte_len) {
             CGImageRelease(image);
             return -1;
         }

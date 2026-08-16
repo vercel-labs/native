@@ -1254,6 +1254,9 @@ pub const MobileLibOptions = struct {
     filesystem_permission: bool = false,
     /// Stable app identity used as the Keychain/Keystore service namespace.
     credentials_service: []const u8 = "dev.native_sdk.app",
+    /// Frozen registered-image pixel budget. Standard app builds infer it
+    /// from app.zon; low-level embedders default to the SDK's 1 MiB tier.
+    max_image_pixel_bytes: usize = 1024 * 1024,
     /// A TypeScript core's staged mobile wiring: set by `addAppArtifacts`
     /// when the tree carries src/core.ts. The `app` module roots at the
     /// staged mobile entry instead of `main`, and the compiled core (and
@@ -1318,6 +1321,7 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         mobile_options.addOption(bool, "credentials_permission", options.credentials_permission);
         mobile_options.addOption(bool, "filesystem_permission", options.filesystem_permission);
         mobile_options.addOption([]const u8, "credentials_service", options.credentials_service);
+        mobile_options.addOption(usize, "max_image_pixel_bytes", options.max_image_pixel_bytes);
         exports_mod.addImport("mobile_build_options", mobile_options.createModule());
         const migration_path = options.relational_migrations orelse dep.path("src/app_runner/no_migrations.zig");
         const migration_mod = b.createModule(.{ .root_source_file = migration_path, .target = target, .optimize = optimize });
@@ -1515,6 +1519,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .credentials_permission = app_config.credentials_permission,
             .filesystem_permission = app_config.filesystem_permission,
             .credentials_service = app_config.app_id,
+            .max_image_pixel_bytes = app_config.max_image_pixel_bytes,
             .ts_core = if (ts_stage) |stage| .{
                 .main_root = stage.mobile_root,
                 .archive = stage.archive,
@@ -2498,6 +2503,7 @@ const AppManifestBuildConfig = struct {
     credentials_capability: bool = false,
     credentials_permission: bool = false,
     filesystem_permission: bool = false,
+    max_image_pixel_bytes: usize = 1024 * 1024,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
@@ -2531,6 +2537,9 @@ const InferenceManifest = struct {
     persist: ?struct {
         version: u64,
     } = null,
+    images: struct {
+        max_image_pixel_bytes: usize = 1024 * 1024,
+    } = .{},
     service_packages: []const ServicePackageConfig = &.{},
     service_carrier: []const u8 = "auto",
     service_pool_size: u8 = 0,
@@ -2594,6 +2603,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .credentials_capability = hasManifestCapability(raw.capabilities, "credentials"),
         .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
         .filesystem_permission = hasManifestPermission(raw.permissions, "filesystem"),
+        .max_image_pixel_bytes = raw.images.max_image_pixel_bytes,
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };

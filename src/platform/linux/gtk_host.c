@@ -3483,13 +3483,38 @@ void native_sdk_gtk_request_frame(native_sdk_gtk_host_t *host) {
  * codec its loaders ship — the framework bundles none. Decoded rows are
  * repacked tightly (gdk-pixbuf rowstride may pad) as straight-alpha RGBA8,
  * the layout the canvas image pipeline expects. */
-int native_sdk_gtk_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+typedef struct {
+    size_t max_pixels;
+} native_sdk_image_fit_t;
+
+#define NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION 8192
+
+static void native_sdk_gtk_image_size_prepared(GdkPixbufLoader *loader, int width, int height, gpointer user_data) {
+    native_sdk_image_fit_t *fit = user_data;
+    if (!fit || fit->max_pixels == 0 || width <= 0 || height <= 0) return;
+    double source_pixels = (double)width * (double)height;
+    if (source_pixels <= (double)fit->max_pixels && width <= NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION && height <= NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) return;
+    double area_scale = sqrt((double)fit->max_pixels / source_pixels);
+    double axis_scale = (double)NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION / (double)MAX(width, height);
+    double scale = MIN(1.0, MIN(area_scale, axis_scale));
+    int fitted_width = MAX(1, (int)floor((double)width * scale));
+    int fitted_height = MAX(1, (int)floor((double)height * scale));
+    while ((size_t)fitted_width * (size_t)fitted_height > fit->max_pixels) {
+        if (fitted_width > 1 && (fitted_height == 1 || fitted_width > fitted_height)) fitted_width -= 1;
+        else fitted_height -= 1;
+    }
+    gdk_pixbuf_loader_set_size(loader, fitted_width, fitted_height);
+}
+
+int native_sdk_gtk_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
 
     GdkPixbufLoader *loader = gdk_pixbuf_loader_new();
     if (!loader) return 0;
+    native_sdk_image_fit_t fit = { .max_pixels = max_pixels };
+    g_signal_connect(loader, "size-prepared", G_CALLBACK(native_sdk_gtk_image_size_prepared), &fit);
     gboolean ok = gdk_pixbuf_loader_write(loader, bytes, bytes_len, NULL);
     ok = gdk_pixbuf_loader_close(loader, NULL) && ok;
     GdkPixbuf *decoded = ok ? gdk_pixbuf_loader_get_pixbuf(loader) : NULL;
@@ -3511,7 +3536,7 @@ int native_sdk_gtk_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t 
 
     int width_px = gdk_pixbuf_get_width(rgba);
     int height_px = gdk_pixbuf_get_height(rgba);
-    if (width_px <= 0 || height_px <= 0 || width_px > 8192 || height_px > 8192) {
+    if (width_px <= 0 || height_px <= 0 || width_px > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height_px > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
         g_object_unref(rgba);
         g_object_unref(loader);
         return 0;

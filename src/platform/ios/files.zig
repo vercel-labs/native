@@ -6,3 +6,4 @@
 
 pub const uikit_host_m = @embedFile("uikit_host.m");
 pub const native_sdk_app_h = @embedFile("native_sdk_app.h");
+pub const apple_image_fit_h = @embedFile("apple_image_fit.h");

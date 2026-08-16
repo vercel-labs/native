@@ -106,6 +106,30 @@ pub fn UiAppHostWithStorageAndCredentials(
     comptime filesystem_permitted: bool,
     comptime credentials_service: []const u8,
 ) type {
+    return UiAppHostWithStorageCredentialsAndImages(
+        AppDef,
+        record_store_enabled,
+        relational_store_enabled,
+        relational_migrations,
+        credentials_enabled,
+        credentials_permitted,
+        filesystem_permitted,
+        credentials_service,
+        1024 * 1024,
+    );
+}
+
+pub fn UiAppHostWithStorageCredentialsAndImages(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+    comptime credentials_enabled: bool,
+    comptime credentials_permitted: bool,
+    comptime filesystem_permitted: bool,
+    comptime credentials_service: []const u8,
+    comptime max_image_pixel_bytes: usize,
+) type {
     const features: runtime.UiAppFeatures = if (@hasDecl(AppDef, "features")) AppDef.features else .{};
     const RecordStoreType = if (record_store_enabled) runtime.RecordStore else void;
     const RelationalStoreType = if (relational_store_enabled) runtime.RelationalStore else void;
@@ -221,13 +245,13 @@ pub fn UiAppHostWithStorageAndCredentials(
             MobileUi.initInPlace(&self.ui, allocator, options);
             self.ui.model = AppDef.initModel();
             self.inner_app = self.ui.app();
-            self.embedded.initInPlace(.{
+            self.embedded.initInPlaceWithImageBudget(.{
                 .context = self,
                 .name = options.name,
                 .scene_fn = hostScene,
                 .event_fn = hostEvent,
                 .stop_fn = hostStop,
-            }, self.null_platform.platform());
+            }, self.null_platform.platform(), max_image_pixel_bytes);
             // The NullPlatform map is for native test only. Installed mobile
             // apps start with no backing until the UIKit/Android shim
             // registers its OS credential service.

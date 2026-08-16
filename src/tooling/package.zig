@@ -519,6 +519,7 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     try dir.createDirPath(io, "Host");
     try writeFile(dir, io, "Host/" ++ ios_tool.host_source_name, ios_tool.host_source);
     try writeFile(dir, io, "Host/" ++ ios_tool.host_header_name, ios_tool.host_header);
+    try writeFile(dir, io, "Host/" ++ ios_tool.host_image_fit_header_name, ios_tool.host_image_fit_header);
     const info_plist = try ios_tool.infoPlistAlloc(allocator, options.metadata);
     defer allocator.free(info_plist);
     try writeFile(dir, io, "Host/Info.plist", info_plist);
@@ -3042,6 +3043,14 @@ test "mobile package artifacts use manifest identity metadata" {
     const packaged_activity = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/Host/NativeSdkActivity.java");
     defer std.testing.allocator.free(packaged_activity);
     try std.testing.expectEqualStrings(android_tool.host_activity_source, packaged_activity);
+    // Decode-to-fit must use ceiling-rounded power-of-two samples for
+    // one-pixel panoramas, then enforce the axis cap only after the exact
+    // resize. Checking the emitted host pins both the source asset and the
+    // ordering that keeps an 8193x1 source loadable as 8192x1.
+    try std.testing.expect(std.mem.indexOf(u8, packaged_activity, "int sampledHeight = (sourceHeight - 1) / nextSampleSize + 1;") != null);
+    const exact_fit_index = std.mem.indexOf(u8, packaged_activity, "Bitmap fitted = Bitmap.createScaledBitmap") orelse return error.TestUnexpectedResult;
+    const final_cap_index = std.mem.indexOf(u8, packaged_activity, "if (width > MAX_DECODED_IMAGE_DIMENSION || height > MAX_DECODED_IMAGE_DIMENSION || width > maxPixels / height)") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(exact_fit_index < final_cap_index);
     const packaged_bridge = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/Host/android_host.c");
     defer std.testing.allocator.free(packaged_bridge);
     try std.testing.expectEqualStrings(android_tool.host_bridge_source, packaged_bridge);

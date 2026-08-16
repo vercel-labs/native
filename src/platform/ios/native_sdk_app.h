@@ -257,7 +257,7 @@ void native_sdk_app_audio_event(void *app, int kind, uint64_t position_ms, uint6
 // declines image decoding honestly and image/avatar widgets keep their
 // fallback.
 typedef struct native_sdk_image_service {
-  int (*decode)(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t *out_width, uintptr_t *out_height);
+  int (*decode)(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t max_pixels, uintptr_t *out_width, uintptr_t *out_height);
 } native_sdk_image_service_t;
 int native_sdk_app_set_image_service(void *app, const native_sdk_image_service_t *service, void *context);
 int native_sdk_app_set_automation_dir(void *app, const char *path, uintptr_t len);

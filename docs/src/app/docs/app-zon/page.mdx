@@ -167,6 +167,10 @@ A fuller manifest for an app that also [embeds web content](/docs/frontend) and 
       <td>Engine-owned Model snapshot config: monotonic <code>version</code>, optional <code>debounce_ms</code>, and the <code>restore</code> Msg routes (<code>ok</code>/<code>none</code>/<code>err</code>). Requires <code>"persist"</code> in capabilities — see <a href="/docs/persistence">Model Persistence</a></td>
     </tr>
     <tr>
+      <td><code>images</code></td>
+      <td>Optional registered-image budget: <code>.images = .&#123; .max_image_pixel_bytes = 8_388_608 &#125;</code>. The default is 1 MiB and accepted values are 1–8 MiB. Encoded photos decode aspect-preservingly to fit; storage is lazy per used slot, but 16 fully used 8 MiB slots are a declared 128 MiB high-water. See <a href="/docs/dynamic-images">Dynamic Images</a>.</td>
+    </tr>
+    <tr>
       <td><code>bridge</code></td>
       <td>Bridge command policies (see <a href="/docs/bridge">Bridge</a>)</td>
     </tr>

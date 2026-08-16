@@ -659,6 +659,13 @@ pub const PersistConfig = struct {
     restore: PersistRestore,
 };
 
+pub const ImagesConfig = struct {
+    /// Per-used-slot decoded RGBA8 budget. The default is 1 MiB; apps may
+    /// deliberately raise it through 8 MiB. Sixteen fully used slots at
+    /// the ceiling are a declared 128 MiB high-water mark.
+    max_image_pixel_bytes: usize = 1024 * 1024,
+};
+
 pub const Manifest = struct {
     identity: AppIdentity,
     version: Version,
@@ -670,6 +677,7 @@ pub const Manifest = struct {
     /// Dock tile flashes; other hosts currently ignore the field.
     dock_visible: bool = true,
     persist: ?PersistConfig = null,
+    images: ImagesConfig = .{},
     bridge: BridgeConfig = .{},
     frontend: ?FrontendConfig = null,
     security: SecurityConfig = .{},

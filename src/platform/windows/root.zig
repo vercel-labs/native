@@ -141,7 +141,7 @@ extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, 
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
 extern fn native_sdk_windows_wake(host: *WindowsHost) void;
 extern fn native_sdk_windows_request_frame(host: *WindowsHost) void;
-extern fn native_sdk_windows_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, out_width: *usize, out_height: *usize) c_int;
+extern fn native_sdk_windows_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, max_pixels: usize, out_width: *usize, out_height: *usize) c_int;
 extern fn native_sdk_windows_load_webview(host: *WindowsHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn native_sdk_windows_load_window_webview(host: *WindowsHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) c_int;
 extern fn native_sdk_windows_set_bridge_callback(host: *WindowsHost, callback: WindowsBridgeCallback, context: ?*anyopaque) void;
@@ -923,11 +923,11 @@ pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void 
 
 /// WIC-backed image decoding (PNG, JPEG, ... — every codec the OS
 /// ships) into straight-alpha RGBA8.
-fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform_mod.DecodedImage {
+fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!platform_mod.DecodedImage {
     _ = context;
     var width: usize = 0;
     var height: usize = 0;
-    return switch (native_sdk_windows_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, &width, &height)) {
+    return switch (native_sdk_windows_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, max_pixels, &width, &height)) {
         1 => .{ .width = width, .height = height, .rgba8 = buffer[0 .. width * height * 4] },
         -1 => error.ImageTooLarge,
         else => error.ImageDecodeFailed,

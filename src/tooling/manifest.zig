@@ -24,6 +24,7 @@ pub const Metadata = struct {
     capabilities: []const []const u8 = &.{},
     dock_visible: bool = true,
     persist: ?PersistMetadata = null,
+    images: ImagesMetadata = .{},
     service_packages: []const ServicePackageMetadata = &.{},
     /// Which carrier runs src/services operations: "auto", "in_process",
     /// or "child". Validated so a typo teaches at check time.
@@ -227,6 +228,10 @@ pub const PersistMetadata = struct {
     version: u64,
     debounce_ms: u32 = 500,
     restore: PersistRestoreMetadata,
+};
+
+pub const ImagesMetadata = struct {
+    max_image_pixel_bytes: usize = 1024 * 1024,
 };
 
 pub const PersistRestoreMetadata = struct {
@@ -496,6 +501,10 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app.zon capabilities are invalid" };
     defer allocator.free(capabilities);
     const persist = convertPersist(metadata.persist);
+    app_manifest.validateImages(.{ .max_image_pixel_bytes = metadata.images.max_image_pixel_bytes }) catch return .{
+        .ok = false,
+        .message = "app.zon images.max_image_pixel_bytes must be between 1048576 (the default) and 8388608 bytes; allocation is lazy once per used slot, up to 16 slots",
+    };
     if (!validServicePackages(metadata.service_packages)) return .{
         .ok = false,
         .message = "app.zon service_packages must use safe npm names, exact X.Y.Z versions, unique names, and lowercase SHA-256 content hashes",
@@ -557,6 +566,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .capabilities = capabilities,
         .dock_visible = metadata.dock_visible,
         .persist = persist,
+        .images = .{ .max_image_pixel_bytes = metadata.images.max_image_pixel_bytes },
         .bridge = .{ .commands = bridge_commands },
         .frontend = frontend,
         .security = security,
@@ -633,6 +643,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
         .dock_visible = raw.dock_visible,
         .persist = try duplicateRawPersist(allocator, raw.persist),
+        .images = .{ .max_image_pixel_bytes = raw.images.max_image_pixel_bytes },
         .service_packages = try duplicateRawServicePackages(allocator, raw.service_packages),
         .service_carrier = try allocator.dupe(u8, raw.service_carrier),
         .service_pool_size = if (raw.service_pool_size == 0) null else raw.service_pool_size,
@@ -2533,6 +2544,23 @@ test "manifest parser reads dock visibility and defaults it to visible" {
     );
     defer regular.deinit(std.testing.allocator);
     try std.testing.expect(regular.dock_visible);
+}
+
+test "manifest parser carries and validates registered-image budgets" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.photos",
+        \\  .name = "photos",
+        \\  .version = "1.0.0",
+        \\  .images = .{ .max_image_pixel_bytes = 8388608 },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), metadata.images.max_image_pixel_bytes);
+    try app_manifest.validateImages(.{ .max_image_pixel_bytes = metadata.images.max_image_pixel_bytes });
+
+    try std.testing.expectError(error.InvalidDimension, app_manifest.validateImages(.{ .max_image_pixel_bytes = 1048575 }));
+    try std.testing.expectError(error.InvalidDimension, app_manifest.validateImages(.{ .max_image_pixel_bytes = 8388609 }));
 }
 
 test "manifest metadata parser carries model persistence configuration" {

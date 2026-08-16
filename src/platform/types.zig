@@ -303,14 +303,20 @@ pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
 /// packet present falls back because a command is not representable
 /// (fits every `CanvasCommand` tag name).
 pub const max_gpu_present_fallback_detail_bytes: usize = 32;
+/// Longest decoded-image side accepted by the registered-image codec seam.
+/// Source metadata may exceed this: conforming platform codecs combine this
+/// axis ceiling with the caller's `max_pixels` area target and downsample
+/// during decode. Keeping the decoded side bounded protects codec and GPU
+/// upload paths from pathological panoramas without refusing them outright.
+pub const max_decoded_image_dimension: usize = 8192;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
-/// matches the runtime registry's per-slot bound
-/// (`canvas_limits.max_registered_canvas_image_pixel_bytes`). Applies to
-/// ORDINARY registered-image ids only: the registry refuses anything
-/// larger at registration, so an over-bound upload of a registered image
-/// can only be an engine bug and is refused loudly here rather than
-/// copied into host allocations.
-pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
+/// matches the runtime registry's app-configurable ceiling
+/// (`canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling`).
+/// Applies to ORDINARY registered-image ids only: the runtime's frozen
+/// app budget may be lower, but anything it accepts must remain uploadable
+/// on packet hosts. An upload past the SDK ceiling is still an engine bug
+/// and is refused loudly rather than copied into host allocations.
+pub const max_gpu_surface_image_pixel_bytes: usize = 8 * 1024 * 1024;
 /// Per-image bound for uploads in the media-surface texture namespace
 /// (ids with `canvas.media_surface_image_id_bit` set — producer-pushed
 /// dynamic textures, structurally disjoint from registered-image ids):
@@ -2987,12 +2993,16 @@ pub const PlatformServices = struct {
     /// framework bundles no image decoders: macOS decodes through
     /// CGImageSource (ImageIO), GTK through gdk-pixbuf, Win32 through WIC.
     /// Implementations may use `buffer` as decode scratch, so callers size
-    /// it for their pixel bound, not the exact image. Errors:
+    /// it for their pixel bound, not the exact image. `max_pixels` is a
+    /// pixel-count cap, not a width/height box: codecs preserve aspect and
+    /// decode down when source pixels exceed it or either decoded side would
+    /// exceed `max_decoded_image_dimension`. Errors:
     /// `error.ImageDecodeFailed` for undecodable bytes,
-    /// `error.ImageTooLarge` when the decoded pixels do not fit `buffer`.
+    /// `error.ImageTooLarge` when the fitted pixels violate either bound or
+    /// do not fit `buffer`.
     /// Null on platforms without a codec (the null platform by default),
     /// which surfaces as `error.UnsupportedService`.
-    decode_image_fn: ?*const fn (context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!DecodedImage = null,
+    decode_image_fn: ?*const fn (context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!DecodedImage = null,
 
     pub fn readClipboard(self: PlatformServices, buffer: []u8) anyerror![]const u8 {
         const read_fn = self.read_clipboard_fn orelse return error.UnsupportedService;
@@ -3578,11 +3588,10 @@ pub const PlatformServices = struct {
         // Two honest bounds, keyed by the id namespace: hosts copy every
         // upload into host-owned allocations (AppKit's NSData + NSImage
         // store), so each bound teaches the real cost of its id space.
-        // Ordinary registered images are avatar-scale by the registry's
-        // own slot bound; media-surface textures (the reserved high-bit
-        // namespace) are video-scale by the producer channel's frame
-        // budget — the bound the producer already enforced, so nothing a
-        // producer staged can fail here.
+        // Ordinary registered images use the registry's configurable
+        // ceiling; media-surface textures (the reserved high-bit namespace)
+        // use the producer channel's frame budget — the bound the producer
+        // already enforced, so nothing either source accepted can fail here.
         const bound = if ((image.id & canvas.media_surface_image_id_bit) != 0)
             max_gpu_surface_media_image_pixel_bytes
         else
@@ -3626,10 +3635,14 @@ pub const PlatformServices = struct {
 
     /// Decode encoded image bytes through the platform codec into
     /// straight-alpha RGBA8 (see `decode_image_fn`). Loop-thread only.
-    pub fn decodeImage(self: PlatformServices, bytes: []const u8, buffer: []u8) anyerror!DecodedImage {
+    pub fn decodeImage(self: PlatformServices, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!DecodedImage {
         if (bytes.len == 0) return error.ImageDecodeFailed;
+        if (max_pixels == 0) return error.ImageTooLarge;
         const decode_fn = self.decode_image_fn orelse return error.UnsupportedService;
-        return decode_fn(self.context, bytes, buffer);
+        const decoded = try decode_fn(self.context, bytes, buffer, max_pixels);
+        const pixels = std.math.mul(usize, decoded.width, decoded.height) catch return error.ImageTooLarge;
+        if (decoded.width > max_decoded_image_dimension or decoded.height > max_decoded_image_dimension or pixels > max_pixels) return error.ImageTooLarge;
+        return decoded;
     }
 };
 

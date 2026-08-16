@@ -4,9 +4,10 @@ const geometry = @import("geometry");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
+const canvas = @import("canvas");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
 // macOS mask/inset render so the Dock tile matches `native package`.
-const app_icon = @import("canvas").app_icon;
+const app_icon = canvas.app_icon;
 
 pub const Error = error{
     CallbackFailed,
@@ -153,6 +154,16 @@ const AppKitBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, we
 /// anything else one dropped frame.
 const AppKitVideoSinkPush = *const fn (context: ?*anyopaque, width: usize, height: usize, pixels: [*c]const u8, len: usize) callconv(.c) c_int;
 
+extern fn native_sdk_test_imageio_thumbnail_dimensions(
+    bytes: [*]const u8,
+    bytes_len: usize,
+    source_width: usize,
+    source_height: usize,
+    max_pixels: usize,
+    out_width: *usize,
+    out_height: *usize,
+) c_int;
+
 const shortcut_modifier_primary: u32 = 1 << 0;
 const shortcut_modifier_command: u32 = 1 << 1;
 const shortcut_modifier_control: u32 = 1 << 2;
@@ -244,7 +255,7 @@ extern fn native_sdk_appkit_measure_text_advances(font_id: u64, size: f64, text:
 extern fn native_sdk_appkit_register_font(font_id: u64, bytes: [*]const u8, bytes_len: usize, out_token: *u64) c_int;
 extern fn native_sdk_appkit_unregister_font(font_id: u64, token: u64) c_int;
 extern fn native_sdk_appkit_register_bundled_fonts() void;
-extern fn native_sdk_appkit_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, out_width: *usize, out_height: *usize) c_int;
+extern fn native_sdk_appkit_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, max_pixels: usize, out_width: *usize, out_height: *usize) c_int;
 extern fn native_sdk_appkit_clipboard_write(host: *AppKitHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_appkit_clipboard_read_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_clipboard_write_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, bytes: [*]const u8, bytes_len: usize) c_int;
@@ -1180,15 +1191,87 @@ fn measureTextAdvances(context: ?*anyopaque, font_id: u64, size: f32, text: []co
 
 /// System image decoding (ImageIO raster codecs plus NSImage's SVG
 /// rasterizer) into straight-alpha RGBA8.
-fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform_mod.DecodedImage {
+fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!platform_mod.DecodedImage {
     _ = context;
     var width: usize = 0;
     var height: usize = 0;
-    return switch (native_sdk_appkit_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, &width, &height)) {
+    return switch (native_sdk_appkit_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, max_pixels, &width, &height)) {
         1 => .{ .width = width, .height = height, .rgba8 = buffer[0 .. width * height * 4] },
         -1 => error.ImageTooLarge,
         else => error.ImageDecodeFailed,
     };
+}
+
+test "mac image decoder keeps ImageIO thumbnail rounding inside the pixel cap" {
+    // The Objective-C probe is compiled and linked only for macOS test
+    // artifacts (build.zig's target-gated image_fit_test.m source). Keep
+    // every other host from referencing its symbol at link time.
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // ImageIO derives the minor dimension from ThumbnailMaxPixelSize and
+    // rounds it. 537x503 at the default 262,144-pixel target used to ask
+    // for a 529px major side and return 529x496 = 262,384 pixels, which
+    // the runtime correctly rejected as ImageTooLarge. The host must leave
+    // enough headroom for that platform rounding before it asks ImageIO.
+    const source_width: usize = 537;
+    const source_height: usize = 503;
+    const source_pixels = try std.testing.allocator.alloc(u8, source_width * source_height * 4);
+    defer std.testing.allocator.free(source_pixels);
+    var offset: usize = 0;
+    while (offset < source_pixels.len) : (offset += 4) {
+        source_pixels[offset..][0..4].* = .{ 23, 91, 177, 255 };
+    }
+
+    const encoded_len = try canvas.png.encodedRgba8ByteLen(source_width, source_height);
+    const encoded = try std.testing.allocator.alloc(u8, encoded_len);
+    defer std.testing.allocator.free(encoded);
+    var writer = std.Io.Writer.fixed(encoded);
+    try canvas.png.writeRgba8(&writer, source_width, source_height, source_pixels);
+
+    const max_pixels: usize = 512 * 512;
+    var decoded_width: usize = 0;
+    var decoded_height: usize = 0;
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_imageio_thumbnail_dimensions(
+        writer.buffered().ptr,
+        writer.buffered().len,
+        source_width,
+        source_height,
+        max_pixels,
+        &decoded_width,
+        &decoded_height,
+    ));
+    try std.testing.expect(decoded_width > 0 and decoded_height > 0);
+    try std.testing.expect(decoded_width * decoded_height <= max_pixels);
+
+    // A source panorama may exceed the decoded-axis ceiling. The host must
+    // request a bounded thumbnail instead of rejecting the source metadata.
+    const panorama_width = platform_mod.max_decoded_image_dimension + 1;
+    const panorama_pixels = try std.testing.allocator.alloc(u8, panorama_width * 4);
+    defer std.testing.allocator.free(panorama_pixels);
+    offset = 0;
+    while (offset < panorama_pixels.len) : (offset += 4) {
+        panorama_pixels[offset..][0..4].* = .{ 47, 113, 191, 255 };
+    }
+    const panorama_encoded_len = try canvas.png.encodedRgba8ByteLen(panorama_width, 1);
+    const panorama_encoded = try std.testing.allocator.alloc(u8, panorama_encoded_len);
+    defer std.testing.allocator.free(panorama_encoded);
+    var panorama_writer = std.Io.Writer.fixed(panorama_encoded);
+    try canvas.png.writeRgba8(&panorama_writer, panorama_width, 1, panorama_pixels);
+
+    decoded_width = 0;
+    decoded_height = 0;
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_imageio_thumbnail_dimensions(
+        panorama_writer.buffered().ptr,
+        panorama_writer.buffered().len,
+        panorama_width,
+        1,
+        max_pixels,
+        &decoded_width,
+        &decoded_height,
+    ));
+    try std.testing.expect(decoded_width <= platform_mod.max_decoded_image_dimension);
+    try std.testing.expect(decoded_height > 0);
+    try std.testing.expect(decoded_width * decoded_height <= max_pixels);
 }
 
 fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {
@@ -2782,7 +2865,8 @@ test "both mac hosts distinguish restored explicit and default placement" {
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), primaryScreen)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrame(NSMakeRect(x, y, width, height))") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "return [NSScreen screens].firstObject ?: [NSScreen mainScreen]") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:restoredFrame display:NO]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window frameRectForContentRect:restoredContentFrame]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:restoredWindowFrame display:NO]") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO]") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "initialPlacement == 2 && restorePolicy == 0 && !makeMain && referenceWindow") != null);
     }

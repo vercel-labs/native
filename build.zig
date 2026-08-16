@@ -210,6 +210,16 @@ pub fn build(b: *std.Build) void {
     app_runner_window_placement_mod.addImport("native_sdk", desktop_mod);
     const app_runner_window_placement_tests = testArtifact(b, app_runner_window_placement_mod);
     desktop_mod.link_libc = true;
+    if (target.result.os.tag == .macos) {
+        const flags: []const []const u8 = if (b.sysroot) |sysroot|
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, b.fmt("-I{s}/usr/include", .{sysroot}) }
+        else
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+        desktop_mod.addCSourceFile(.{ .file = b.path("src/platform/macos/image_fit_test.m"), .flags = flags });
+        desktop_mod.linkFramework("Foundation", .{});
+        desktop_mod.linkFramework("ImageIO", .{});
+        desktop_mod.linkSystemLibrary("objc", .{});
+    }
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
     // Tier-5 crash battery: a child uses the public streamed sink, signals
@@ -837,11 +847,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);" },
         .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);" },
     });
-    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-window-placement-contracts", "Verify both macOS hosts use the primary display and restore persisted outer frames without titlebar growth", &.{
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-window-placement-contracts", "Verify both macOS hosts use the primary display and restore persisted content frames without titlebar growth", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return [NSScreen screens].firstObject ?: [NSScreen mainScreen];" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "return [NSScreen screens].firstObject ?: [NSScreen mainScreen];" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:restoredFrame display:NO];" },
-        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:restoredFrame display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window frameRectForContentRect:restoredContentFrame]" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window frameRectForContentRect:restoredContentFrame]" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:restoredWindowFrame display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:restoredWindowFrame display:NO];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "else if (initialPlacement == 1) {\n        // Fresh authored dimensions are content size" },
@@ -1748,6 +1760,7 @@ pub fn build(b: *std.Build) void {
         "examples/calculator/zig-out/package/test-ios-layout/calculator.xcodeproj/xcshareddata/xcschemes/calculator.xcscheme",
         "examples/calculator/zig-out/package/test-ios-layout/Host/uikit_host.m",
         "examples/calculator/zig-out/package/test-ios-layout/Host/native_sdk_app.h",
+        "examples/calculator/zig-out/package/test-ios-layout/Host/apple_image_fit.h",
         "examples/calculator/zig-out/package/test-ios-layout/Host/Info.plist",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/Contents.json",

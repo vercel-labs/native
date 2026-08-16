@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../ios/apple_image_fit.h"
+
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
@@ -32,6 +34,7 @@
 #endif
 
 @class NativeSdkChromiumHost;
+@class NativeSdkChromiumWindowDelegate;
 
 @interface NativeSdkChromiumApplication : NSApplication <CefAppProtocol>
 @property(nonatomic, assign) BOOL handlingSendEvent;
@@ -98,6 +101,7 @@ static NSScreen *NativeSdkScreenForFrame(NSRect frame);
 static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
 static NSRect NativeSdkConstrainFrame(NSRect frame);
 static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen);
+static void NativeSdkApplyHiddenInsetTitlebar(NSWindow *window, int titlebar_style, NativeSdkChromiumWindowDelegate *delegate);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
 static NSURL *NativeSdkAssetEntryFileURL(NSString *rootPath, NSString *entryPath);
 static NSString *NativeSdkSafeAssetPath(NSURL *url, NSString *entryPath);
@@ -700,11 +704,11 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy titlebarStyle:(int)titlebarStyle;
 - (void)configureApplication;
 - (void)buildMenuBar;
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
 - (void)orderWindowForImplicitShow:(uint64_t)windowId;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
@@ -903,7 +907,7 @@ static const char *NativeSdkCefBridgeScript() {
 
 @implementation NativeSdkChromiumHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy titlebarStyle:(int)titlebarStyle {
     self = [super init];
     if (!self) return nil;
 
@@ -948,7 +952,7 @@ static const char *NativeSdkCefBridgeScript() {
     self.externalLinkAction = 0;
     self.shortcuts = @[];
 
-    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:x y:y width:width height:height restoreFrame:restoreFrame initialPlacement:initialPlacement restorePolicy:restorePolicy resizable:YES windowFlags:0 makeMain:YES];
+    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:x y:y width:width height:height restoreFrame:restoreFrame initialPlacement:initialPlacement restorePolicy:restorePolicy resizable:YES titlebarStyle:titlebarStyle windowFlags:0 makeMain:YES];
     self.didShutdown = NO;
     self.pendingPreRunStop = NO;
     self.observesApplicationActivation = NO;
@@ -1065,7 +1069,7 @@ static const char *NativeSdkCefBridgeScript() {
     delete self.browsers;
 }
 
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {
     NSNumber *key = @(windowId);
     if (self.windows[key]) return NO;
 
@@ -1100,14 +1104,21 @@ static const char *NativeSdkCefBridgeScript() {
         [window standardWindowButton:NSWindowZoomButton].enabled = NO;
     }
     [window setTitle:title.length > 0 ? title : @"native-sdk"];
+    NativeSdkChromiumWindowDelegate *delegate = [[NativeSdkChromiumWindowDelegate alloc] init];
+    delegate.host = self;
+    delegate.windowId = windowId;
+    window.delegate = delegate;
+    // Install the final titlebar before converting persisted content
+    // geometry back to an outer frame; the conversion must include the
+    // actual chrome the window will keep.
+    NativeSdkApplyHiddenInsetTitlebar(window, titlebarStyle, delegate);
     if (restoredPlacement) {
-        NSRect restoredFrame = restorePolicy == 1
-            ? NativeSdkCenterFrameOnScreen(NSMakeRect(0, 0, width, height), primaryScreen)
-            : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
-        // Persisted geometry is NSWindow.frame, not a content rectangle.
-        // Using setFrame keeps the saved outer dimensions stable instead of
-        // adding non-client chrome on every relaunch.
-        [window setFrame:restoredFrame display:NO];
+        NSRect restoredContentFrame = NSMakeRect(x, y, width, height);
+        NSRect restoredWindowFrame = [window frameRectForContentRect:restoredContentFrame];
+        restoredWindowFrame = restorePolicy == 1
+            ? NativeSdkCenterFrameOnScreen(restoredWindowFrame, primaryScreen)
+            : NativeSdkConstrainFrame(restoredWindowFrame);
+        [window setFrame:restoredWindowFrame display:NO];
     } else if (initialPlacement == 1) {
         // AppKit adds titlebar chrome to the authored content rectangle;
         // constrain the completed OUTER frame so no chrome escapes the
@@ -1147,10 +1158,6 @@ static const char *NativeSdkCefBridgeScript() {
     browserContainer.layer.zPosition = 0;
     [stackRoot addSubview:browserContainer positioned:NSWindowAbove relativeTo:nil];
 
-    NativeSdkChromiumWindowDelegate *delegate = [[NativeSdkChromiumWindowDelegate alloc] init];
-    delegate.host = self;
-    delegate.windowId = windowId;
-    window.delegate = delegate;
     CefRefPtr<NativeSdkCefClient> client = new NativeSdkCefClient(self, windowId);
 
     self.windows[key] = window;
@@ -1499,7 +1506,12 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     NSString *label = self.windowLabels[@(windowId)] ?: @"";
-    NSRect frame = window.frame;
+    // The frame event's rect is the CONTENT rect in screen coordinates,
+    // never window.frame: consumers treat these numbers as content
+    // geometry (shell layout, the resize channel, window-state
+    // persistence, and the initWithContentRect: round-trip) — see the
+    // AppKit host's emitWindowFrameForWindowId:.
+    NSRect frame = [window contentRectForFrameRect:window.frame];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_WINDOW_FRAME,
         .window_id = windowId,
@@ -2426,11 +2438,10 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *versionString = [[NSString alloc] initWithBytes:version length:version_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *aboutDescriptionString = [[NSString alloc] initWithBytes:about_description length:about_description_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *titleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
-        NativeSdkChromiumHost *host = [[NativeSdkChromiumHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString dockVisible:(dock_visible != 0) title:titleString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy];
+        NativeSdkChromiumHost *host = [[NativeSdkChromiumHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString dockVisible:(dock_visible != 0) title:titleString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy titlebarStyle:titlebar_style];
         if (!resizable) {
             host.window.styleMask &= ~NSWindowStyleMaskResizable;
         }
-        NativeSdkApplyHiddenInsetTitlebar(host.window, titlebar_style, host.delegates[@1]);
         NativeSdkApplyOverlayWindowFlags(host, 1, window_flags);
         if (show_policy == 2) [host.policyHiddenWindows addObject:@1];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
@@ -2683,8 +2694,7 @@ int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t win
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"native-sdk";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
-    if (![object createWindowWithId:window_id title:titleString ?: @"native-sdk" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) windowFlags:window_flags makeMain:NO]) return 0;
-    NativeSdkApplyHiddenInsetTitlebar(object.windows[@(window_id)], titlebar_style, object.delegates[@(window_id)]);
+    if (![object createWindowWithId:window_id title:titleString ?: @"native-sdk" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style windowFlags:window_flags makeMain:NO]) return 0;
     // Apply chrome and overlay presentation while still hidden, then
     // reveal once so a secondary window cannot flash its default frame.
     if (show_policy == 2) {
@@ -3188,25 +3198,45 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
  * system SVG rasterizer, with no host state, so both engines decode
  * identically. See appkit_host.h for the pixel-format and return-value
  * contract. */
-int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
         CGImageRef image = NULL;
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (source) {
-            image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+            CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+            int64_t source_width_value = 0;
+            int64_t source_height_value = 0;
+            if (properties) {
+                CFNumberRef width_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+                CFNumberRef height_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+                if (width_value) CFNumberGetValue(width_value, kCFNumberSInt64Type, &source_width_value);
+                if (height_value) CFNumberGetValue(height_value, kCFNumberSInt64Type, &source_height_value);
+                CFRelease(properties);
+            }
+            size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
+            size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
+            if (source_width > 0 && source_height > 0) {
+                const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
+                NSDictionary *thumbnail_options = @{
+                    (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                    (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
+                    (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+                };
+                image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)thumbnail_options);
+            }
             CFRelease(source);
         }
         if (!image) {
             NSImage *system_image = [[NSImage alloc] initWithData:data];
             NSSize size = system_image ? system_image.size : NSZeroSize;
-            if (size.width > 0 && size.height > 0 && size.width <= 8192 && size.height <= 8192) {
+            if (size.width > 0 && size.height > 0 && isfinite(size.width) && isfinite(size.height)) {
                 // Bound SVG rasterization before NSImage materializes the
                 // screen-scale representation; see the AppKit mirror.
-                const CGFloat max_raster_points = 256.0;
+                const CGFloat max_raster_points = sqrt((CGFloat)max_pixels) / 2.0;
                 const CGFloat raster_scale = MIN(1.0, MIN(max_raster_points / size.width, max_raster_points / size.height));
                 NSRect proposed = NSMakeRect(0, 0, size.width * raster_scale, size.height * raster_scale);
                 CGImageRef rendered = [system_image CGImageForProposedRect:&proposed context:nil hints:nil];
@@ -3217,14 +3247,14 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
 
         size_t width = CGImageGetWidth(image);
         size_t height = CGImageGetHeight(image);
-        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+        if (width == 0 || height == 0 || width > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
             CGImageRelease(image);
             return 0;
         }
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
-        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+        if (width > max_pixels / height || byte_len / 4 / height != width || pixels_len < byte_len) {
             CGImageRelease(image);
             return -1;
         }

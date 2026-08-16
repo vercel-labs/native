@@ -614,7 +614,9 @@ export type VideoEventKind<M extends Msgish> = M extends Msgish
 /// live id), "not_found" (missing local file, no url), "io_failed" (a local
 /// read failure), "connect_failed"/"tls_failed"/"protocol_failed"/"timed_out"
 /// (the fetch taxonomy), "http_status" (a non-2xx answer; `status` carries
-/// it), "cancelled", "too_large" (source or decoded pixels over budget),
+/// it), "cancelled", "too_large" (the encoded source exceeds the fixed
+/// source bound; conforming codecs decode photo-scale pixels down to the
+/// app's registered-image budget),
 /// "unsupported" (no platform codec), "decode_failed", "registry_full", and
 /// "alloc_failed" (the host refused the memory the registration needed —
 /// resource exhaustion, not corrupt bytes: the same source may load once

@@ -199,6 +199,10 @@ pub const Runtime = struct {
     /// frees, the `deinit` frees) goes through this field, never
     /// through `options.allocator`.
     owned_allocator: std.mem.Allocator,
+    /// Registered-image budget captured at init. Decode, registration,
+    /// replay validation, slot reuse, and deinit all observe this one
+    /// app-fixed limit even if public `options` is later mutated.
+    max_image_pixel_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes,
     surface: platform.Surface,
     appearance: platform.Appearance = .{},
     windows: [platform.max_windows]RuntimeWindow = undefined,
@@ -505,10 +509,16 @@ pub const Runtime = struct {
             }
         }
         self.options = options;
+        if (options.max_image_pixel_bytes < canvas_limits.max_registered_canvas_image_pixel_bytes or
+            options.max_image_pixel_bytes > canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling)
+        {
+            @panic("max_image_pixel_bytes must be between 1 MiB and 8 MiB; declare app.zon .images.max_image_pixel_bytes within that range");
+        }
         // Freeze the ownership allocator now (see the field doc):
         // `options` stays publicly mutable, but the identity that owns
         // on-demand storage must not move under live allocations.
         self.owned_allocator = options.allocator;
+        self.max_image_pixel_bytes = options.max_image_pixel_bytes;
         self.surface = options.platform.surface();
         // The profile rings exceed the small-default copy bound above;
         // assign explicitly so the disabled state is never undefined.
