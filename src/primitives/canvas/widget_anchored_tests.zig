@@ -255,6 +255,47 @@ fn firstCommandIndexForWidget(list: canvas.DisplayList, widget_id: canvas.Object
     return null;
 }
 
+test "window-level modals paint and route above later anchored overlays" {
+    const dialog = Widget{
+        .id = 2,
+        .kind = .dialog,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+    };
+    const dropdown = Widget{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(100, 100) } },
+    };
+    // The dropdown mounts later and overlaps the centered dialog exactly.
+    // Modal token order, not raw node order, owns the window-level stack.
+    const root = Widget{ .id = 1, .kind = .stack, .children = &.{ dialog, dropdown } };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, window, &nodes);
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const list = builder.displayList();
+    const dialog_index = firstCommandIndexForWidget(list, 2) orelse return error.TestUnexpectedResult;
+    const dropdown_index = firstCommandIndexForWidget(list, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dialog_index > dropdown_index);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), layout.hitTest(geometry.PointF.init(150, 150)).?.id);
+
+    // An explicit layer remains the author-controlled escape hatch.
+    const elevated_dropdown = Widget{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+        .layer = 400,
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(100, 100) } },
+    };
+    const elevated_root = Widget{ .id = 1, .kind = .stack, .children = &.{ dialog, elevated_dropdown } };
+    var elevated_nodes: [4]WidgetLayoutNode = undefined;
+    const elevated = try canvas.layoutWidgetTree(elevated_root, window, &elevated_nodes);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), elevated.hitTest(geometry.PointF.init(150, 150)).?.id);
+}
+
 test "anchored surfaces render in a late z-pass above later siblings and outside ancestor clips" {
     var nodes: [8]WidgetLayoutNode = undefined;
     const layout = try buildOverlapFixture(&nodes);

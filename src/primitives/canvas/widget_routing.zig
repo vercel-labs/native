@@ -56,12 +56,14 @@ pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: Desi
 
 pub fn hitTestWidgetLayoutWithPolicy(layout: anytype, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
     // Window-level surfaces paint in the late z-pass — topmost — so they
-    // hit-test FIRST, in reverse tree order (a nested anchored submenu has
-    // a higher node index than the surface it hangs from).
-    var index = layout.nodes.len;
-    while (index > 0) {
-        index -= 1;
-        if (!widget_tree.widgetEscapesAncestorClips(layout.nodes[index].widget)) continue;
+    // hit-test FIRST, in reverse window-surface paint order.
+    const surface_count = widget_tree.widgetLayoutWindowSurfaceCount(layout);
+    var tested: usize = 0;
+    var previous: ?widget_tree.WidgetPaintOrder = null;
+    while (tested < surface_count) : (tested += 1) {
+        const index = widget_tree.previousWidgetLayoutWindowSurface(layout, tokens, previous) orelse break;
+        const node = layout.nodes[index];
+        previous = .{ .layer = widget_tree.widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
         if (isWidgetHiddenInAncestors(layout, index)) continue;
         if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
         if (hitTestWidgetLayoutNode(layout, index, point, tokens, policy)) |hit| return hit;

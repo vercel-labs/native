@@ -1525,6 +1525,53 @@ test "modal surfaces resolve against root bounds through nested layout" {
     }
 }
 
+test "a modal layout root retains viewport bounds for scrims and anchored children" {
+    const menu = Widget{
+        .id = 2,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 120, 100),
+        .layout = .{ .anchor = .{} },
+    };
+    const dialog = Widget{
+        .id = 1,
+        .kind = .dialog,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+        .children = &.{menu},
+    };
+    const viewport = geometry.RectF.init(10, 20, 600, 400);
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(dialog, viewport, &nodes);
+
+    const dialog_frame = layout.findById(1).?.frame;
+    try expectRect(geometry.RectF.init(190, 160, 240, 120), dialog_frame);
+    try expectRect(viewport, canvas.widgetLayoutRootBounds(layout).?);
+    // The menu clamps against the viewport, not the smaller dialog root.
+    const menu_frame = layout.findById(2).?.frame;
+    try std.testing.expectEqual(dialog_frame.maxY() + 4, menu_frame.y);
+    try std.testing.expectEqual(@as(f32, 100), menu_frame.height);
+
+    var commands: [32]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    switch (builder.displayList().findCommandById(widgetPartId(1, 14)).?.command) {
+        .fill_rect => |fill| try expectRect(viewport, fill.rect),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A viewport may resize around the same center, leaving the dialog's
+    // own frame unchanged. The separate root bounds still make that a full
+    // scrim invalidation.
+    var resized_nodes: [3]WidgetLayoutNode = undefined;
+    const resized_viewport = geometry.RectF.init(-40, 20, 700, 400);
+    const resized = try layoutWidgetTree(dialog, resized_viewport, &resized_nodes);
+    try expectRect(dialog_frame, resized.findById(1).?.frame);
+    var invalidations: [3]canvas.WidgetInvalidation = undefined;
+    const changes = try layout.diff(resized, &invalidations);
+    try std.testing.expectEqual(@as(usize, 1), changes.len);
+    try std.testing.expect(changes[0].layout_dirty);
+    try expectRect(geometry.RectF.unionWith(viewport, resized_viewport), changes[0].dirty_bounds.?);
+}
+
 test "modal nested in a scroll viewport paints and routes at window level" {
     const panel_children = [_]Widget{.{
         .id = 4,

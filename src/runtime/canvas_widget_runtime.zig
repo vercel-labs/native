@@ -224,8 +224,20 @@ pub fn restoreCanvasWidgetLayoutScrollOffsets(
     previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
     previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
 ) void {
+    restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(nodes, previous_runtime_offsets, previous_source_offsets, null);
+}
+
+fn restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
+    nodes: []canvas.WidgetLayoutNode,
+    previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
+    previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
+    anchored_depth: ?usize,
+) void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
+        if (anchored_depth) |depth| {
+            if (canvas.anchoredNestingDepth(nodes, index) != depth) continue;
+        }
         const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id) orelse continue;
         const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id) orelse continue;
         // Each axis reconciles on its own: a programmatic vertical
@@ -268,10 +280,14 @@ fn clampCanvasWidgetLayoutProgrammaticScrollOffsets(
     source: canvas.WidgetLayoutTree,
     previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
     previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
+    anchored_depth: ?usize,
 ) void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
         if (node.widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(node.widget)) continue;
+        if (anchored_depth) |depth| {
+            if (canvas.anchoredNestingDepth(nodes, index) != depth) continue;
+        }
 
         const source_node = source.findById(node.widget.id) orelse continue;
         const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id);
@@ -326,11 +342,14 @@ fn previousLayoutHasSelectedTab(previous: canvas.WidgetLayoutTree, id: canvas.Ob
 /// viewport. This runs after retained scroll restoration, against final layout
 /// frames, so an already-visible tab preserves the exact offset and a newly
 /// mounted native scroll driver never paints a speculative leading-edge jump.
-fn revealNewlySelectedTabs(previous: canvas.WidgetLayoutTree, nodes: []canvas.WidgetLayoutNode) void {
+fn revealNewlySelectedTabs(previous: canvas.WidgetLayoutTree, nodes: []canvas.WidgetLayoutNode, anchored_depth: ?usize) void {
     for (nodes, 0..) |tab_node, tab_index| {
         const tab = tab_node.widget;
         if (tab.semantics.role != .tab or !tab.state.selected) continue;
         if (tab.id != 0 and previousLayoutHasSelectedTab(previous, tab.id)) continue;
+        if (anchored_depth) |depth| {
+            if (canvas.anchoredNestingDepth(nodes, tab_index) != depth) continue;
+        }
 
         var ancestor = tab_node.parent_index;
         while (ancestor) |index| {
@@ -1031,11 +1050,19 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
         &text_len,
     );
 
-    // Split fractions reconcile FIRST, as a staged copy of the laid-out
-    // tree, so the per-node passes below see final geometry. Outer
-    // splits restore before nested ones (ascending node order), so a
-    // nested split re-laid (or slid) by its ancestor still restores its
-    // own fraction afterwards. Two restore shapes:
+    // Geometry reconciles in anchored-surface strata. The authored source
+    // layout is first finalized outside every surface, then direct anchored
+    // children are replayed against that final geometry. Runtime-owned
+    // scroll/split/tab state inside those surfaces is restored before their
+    // own nested surfaces replay, and so on. A surface replay can therefore
+    // recover authored intrinsic sizing without erasing already-finalized
+    // descendant state.
+    //
+    // Within each stratum split fractions reconcile FIRST, as a staged copy
+    // of the laid-out tree, so the per-node passes below see final geometry.
+    // Outer splits restore before nested ones (ascending node order), so a
+    // nested split re-laid (or slid) by its ancestor still restores its own
+    // fraction afterwards. Two restore shapes:
     //   - SETTLED runtime-owned fraction (a past drag, no tween in
     //     flight): re-run the split's child layout in place — content
     //     honestly wraps at the restored width;
@@ -1048,67 +1075,78 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     //     frame at a time (the disclosure doctrine, horizontal).
     const staged_nodes = node_buffer[0..next.nodes.len];
     @memcpy(staged_nodes, next.nodes);
-    for (staged_nodes, 0..) |node, index| {
-        if (node.widget.kind != .split or node.widget.id == 0) continue;
-        const tween_armed = objectIdInList(armed_split_tween_ids, node.widget.id);
-        const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id) orelse {
-            // A FRESH split (no retained fraction): a declared enter
-            // origin slides the first layout's boundary to the origin
-            // pose — children keep the declared value's (target) wrap —
-            // so the tween armed right after this reconcile eases it in
-            // instead of the mount popping to its value.
-            if (node.widget.resize_duration_ms != 0 and node.widget.resize_origin >= 0 and node.widget.children.len != 0) {
-                canvas.slideSplitChildren(node.frame, node.widget.resize_origin, index, staged_nodes);
+    const staged_root_bounds = next.root_bounds orelse if (staged_nodes.len > 0) staged_nodes[0].frame else geometry.RectF.init(0, 0, 0, 0);
+    const max_anchored_depth = canvas.maxAnchoredNestingDepth(staged_nodes);
+    var anchored_depth: usize = 0;
+    while (anchored_depth <= max_anchored_depth) : (anchored_depth += 1) {
+        for (staged_nodes, 0..) |node, index| {
+            if (node.widget.kind != .split or node.widget.id == 0) continue;
+            if (canvas.anchoredNestingDepth(staged_nodes, index) != anchored_depth) continue;
+            const tween_armed = objectIdInList(armed_split_tween_ids, node.widget.id);
+            const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id) orelse {
+                // A FRESH split (no retained fraction): a declared enter
+                // origin slides the first layout's boundary to the origin
+                // pose — children keep the declared value's (target) wrap —
+                // so the tween armed right after this reconcile eases it in
+                // instead of the mount popping to its value.
+                if (node.widget.resize_duration_ms != 0 and node.widget.resize_origin >= 0 and node.widget.children.len != 0) {
+                    canvas.slideSplitChildren(node.frame, node.widget.resize_origin, index, staged_nodes);
+                }
+                continue;
+            };
+            const previous_source = canvasWidgetSourceScrollById(previous_source_scroll_entries, node.widget.id) orelse continue;
+            // Source-wins: the runtime-owned fraction survives rebuilds only
+            // while the SOURCE fraction is unchanged; a source-side change
+            // (the model echoing or driving the fraction) wins — UNLESS the
+            // split declares a layout tween (`resize_duration_ms` nonzero)
+            // or one is already in flight: then the moved source value is a
+            // TARGET, the rendered fraction stays where it is, and the
+            // runtime's tween lowering (armed right after this reconcile
+            // lands, in setCanvasWidgetLayout) eases it there one presented
+            // frame at a time. Reduced motion still snaps: the tween
+            // lowering's snap path applies the target through this same
+            // mutation family in the same rebuild.
+            const source_moved = node.widget.value != previous_source;
+            if (source_moved and node.widget.resize_duration_ms == 0 and !tween_armed) continue;
+            if (node.widget.value == previous_runtime) continue;
+            staged_nodes[index].widget.value = previous_runtime;
+            // Retained trees clear children; a split without them keeps the
+            // value restore only (frames follow on the next full layout).
+            if (node.widget.children.len == 0) continue;
+            // A pressed divider is a live drag: its echo rebuilds must keep
+            // re-wrapping at the dragged width (the pinned drag behavior),
+            // so the slide shape only applies to tween-owned motion.
+            const dragging = pressed_split_id != 0 and node.widget.id == pressed_split_id;
+            if (!dragging and (tween_armed or (source_moved and node.widget.resize_duration_ms != 0))) {
+                canvas.slideSplitChildren(node.frame, previous_runtime, index, staged_nodes);
+            } else {
+                try canvas.relayoutSplitChildren(staged_nodes[index].widget, node.frame, index, node.depth, node_buffer, staged_root_bounds, tokens);
             }
-            continue;
-        };
-        const previous_source = canvasWidgetSourceScrollById(previous_source_scroll_entries, node.widget.id) orelse continue;
-        // Source-wins: the runtime-owned fraction survives rebuilds only
-        // while the SOURCE fraction is unchanged; a source-side change
-        // (the model echoing or driving the fraction) wins — UNLESS the
-        // split declares a layout tween (`resize_duration_ms` nonzero)
-        // or one is already in flight: then the moved source value is a
-        // TARGET, the rendered fraction stays where it is, and the
-        // runtime's tween lowering (armed right after this reconcile
-        // lands, in setCanvasWidgetLayout) eases it there one presented
-        // frame at a time. Reduced motion still snaps: the tween
-        // lowering's snap path applies the target through this same
-        // mutation family in the same rebuild.
-        const source_moved = node.widget.value != previous_source;
-        if (source_moved and node.widget.resize_duration_ms == 0 and !tween_armed) continue;
-        if (node.widget.value == previous_runtime) continue;
-        staged_nodes[index].widget.value = previous_runtime;
-        // Retained trees clear children; a split without them keeps the
-        // value restore only (frames follow on the next full layout).
-        if (node.widget.children.len == 0) continue;
-        // A pressed divider is a live drag: its echo rebuilds must keep
-        // re-wrapping at the dragged width (the pinned drag behavior),
-        // so the slide shape only applies to tween-owned motion.
-        const dragging = pressed_split_id != 0 and node.widget.id == pressed_split_id;
-        if (!dragging and (tween_armed or (source_moved and node.widget.resize_duration_ms != 0))) {
-            canvas.slideSplitChildren(node.frame, previous_runtime, index, staged_nodes);
-        } else {
-            try canvas.relayoutSplitChildren(staged_nodes[index].widget, node.frame, index, node.depth, node_buffer, tokens);
+        }
+
+        // Scroll restore is staged too (after splits, so translated frames
+        // are final geometry): the retained offset comes back WITH its
+        // descendants translated to match. Engine-side clamping happens at
+        // the caller AFTER native scroll drivers are stamped — a rebuild
+        // mid-rubber-band must not clamp an offset the OS scroller owns.
+        restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
+            staged_nodes,
+            previous_runtime_offsets,
+            previous_source_scroll_entries,
+            anchored_depth,
+        );
+        clampCanvasWidgetLayoutProgrammaticScrollOffsets(
+            staged_nodes,
+            next,
+            previous_runtime_offsets,
+            previous_source_scroll_entries,
+            anchored_depth,
+        );
+        revealNewlySelectedTabs(previous, staged_nodes, anchored_depth);
+        if (anchored_depth < max_anchored_depth) {
+            try canvas.relayoutAnchoredChildrenAtDepth(staged_nodes, staged_root_bounds, tokens, anchored_depth);
         }
     }
-
-    // Scroll restore is staged too (after splits, so translated frames
-    // are final geometry): the retained offset comes back WITH its
-    // descendants translated to match. Engine-side clamping happens at
-    // the caller AFTER native scroll drivers are stamped — a rebuild
-    // mid-rubber-band must not clamp an offset the OS scroller owns.
-    restoreCanvasWidgetLayoutScrollOffsets(staged_nodes, previous_runtime_offsets, previous_source_scroll_entries);
-    clampCanvasWidgetLayoutProgrammaticScrollOffsets(
-        staged_nodes,
-        next,
-        previous_runtime_offsets,
-        previous_source_scroll_entries,
-    );
-    revealNewlySelectedTabs(previous, staged_nodes);
-    // Scroll restoration/clamping moved the trigger frames after the
-    // source layout's anchored pass. Re-run that pass against final
-    // geometry so flip, window clamp, and intrinsic size are all current.
-    try canvas.relayoutAnchoredChildren(staged_nodes, tokens);
 
     const index_scratch = canvas_widget_reconcile_index_scratch.get();
     index_scratch.controls.build(previous_control_states);
@@ -1116,7 +1154,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     index_scratch.texts.build(previous_text_states);
     index_scratch.semantics.build(source_semantics);
 
-    const staged = canvas.WidgetLayoutTree{ .nodes = staged_nodes };
+    const staged = canvas.WidgetLayoutTree{ .nodes = staged_nodes, .root_bounds = next.root_bounds };
     for (staged_nodes, 0..) |node, index| {
         const text_copy = canvasWidgetLayoutNodeWithTextReconcileState(node, staged, index, &index_scratch.texts);
         const control_copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, staged, index, &index_scratch.controls, &index_scratch.source_controls);
@@ -1124,7 +1162,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     }
     const reconciled = node_buffer[0..next.nodes.len];
     clampCanvasWidgetLayoutTextOffsets(reconciled, tokens);
-    return .{ .nodes = reconciled };
+    return .{ .nodes = reconciled, .root_bounds = next.root_bounds };
 }
 
 pub fn canvasWidgetLayoutNodeWithSourceSemantics(
@@ -1155,7 +1193,24 @@ pub fn applyCanvasWidgetSourceScrollSemantics(
     }
 }
 
-pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState, tokens: canvas.DesignTokens) anyerror!void {
+pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState, root_bounds: ?geometry.RectF, tokens: canvas.DesignTokens) anyerror!void {
+    try clampCanvasWidgetLayoutScrollOffsetsImpl(nodes, states, root_bounds, tokens, true);
+}
+
+/// The staged rebuild reconcile already replayed anchored surfaces in
+/// top-down strata. Its final engine clamp must not replay them a second
+/// time: at this point their descendants carry restored runtime state.
+pub fn clampCanvasWidgetLayoutScrollOffsetsAfterReconcile(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState, root_bounds: ?geometry.RectF, tokens: canvas.DesignTokens) anyerror!void {
+    try clampCanvasWidgetLayoutScrollOffsetsImpl(nodes, states, root_bounds, tokens, false);
+}
+
+fn clampCanvasWidgetLayoutScrollOffsetsImpl(
+    nodes: []canvas.WidgetLayoutNode,
+    states: ?[]canvas.ScrollState,
+    root_bounds: ?geometry.RectF,
+    tokens: canvas.DesignTokens,
+    relayout_anchored: bool,
+) anyerror!void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view) continue;
         // Legacy virtualized containers are model-driven: the source
@@ -1238,7 +1293,9 @@ pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, st
             }
         }
     }
-    try canvas.relayoutAnchoredChildren(nodes, tokens);
+    if (relayout_anchored and nodes.len > 0) {
+        try canvas.relayoutAnchoredChildrenWithRootBounds(nodes, root_bounds orelse nodes[0].frame, tokens);
+    }
 }
 
 pub fn clampCanvasWidgetLayoutTextOffsets(nodes: []canvas.WidgetLayoutNode, tokens: canvas.DesignTokens) void {

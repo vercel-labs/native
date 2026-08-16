@@ -245,9 +245,14 @@ fn widgetLayoutDragPreviewTranslation(
     );
 }
 
-/// The union of the layout's root-node frames: the whole laid-out
-/// surface, which is what a modal scrim covers.
+/// The union of the layout's root bounds: the whole viewport that produced
+/// the roots, which is what a modal scrim covers. Layout-produced roots
+/// retain those bounds separately from their resolved frame so a root
+/// dialog can be centered without shrinking its own scrim to the dialog.
 pub fn widgetLayoutRootBounds(layout: anytype) ?geometry.RectF {
+    if (@hasField(@TypeOf(layout), "root_bounds")) {
+        if (layout.root_bounds) |root_bounds| return root_bounds.normalized();
+    }
     var bounds: ?geometry.RectF = null;
     for (layout.nodes) |node| {
         if (node.parent_index != null) continue;
@@ -390,12 +395,18 @@ fn widgetLayoutNodeVisibleBounds(
 
 /// The late z-pass for window-level surfaces: anchored overlays and
 /// root-relative modals are skipped by the in-tree walk and emitted here
-/// LAST, so ancestor scroll/clip regions cannot crop them. Node order is
-/// tree order, so nested floating surfaces preserve their structural z-order.
+/// LAST, so ancestor scroll/clip regions cannot crop them. Window-surface
+/// layers order the lifted roots; equal layers retain tree order, so nested
+/// floating surfaces preserve their structural z-order.
 /// Ancestor hiding still applies.
 fn emitWidgetLayoutWindowSurfaces(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
-    for (layout.nodes, 0..) |node, index| {
-        if (!widget_tree.widgetEscapesAncestorClips(node.widget)) continue;
+    const surface_count = widget_tree.widgetLayoutWindowSurfaceCount(layout);
+    var emitted: usize = 0;
+    var previous: ?widget_tree.WidgetPaintOrder = null;
+    while (emitted < surface_count) : (emitted += 1) {
+        const index = widget_tree.nextWidgetLayoutWindowSurface(layout, tokens, previous) orelse return;
+        const node = layout.nodes[index];
+        previous = .{ .layer = widget_tree.widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
         if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
         // A floating surface anchored inside a concealed disclosure
         // subtree stays down with its anchor — concealed content is

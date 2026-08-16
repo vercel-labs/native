@@ -60,6 +60,10 @@ pub const textGeometryForWidget = widget_text_input.textGeometryForWidget;
 
 pub const WidgetLayoutTree = struct {
     nodes: []const WidgetLayoutNode = &.{},
+    /// Viewport bounds that produced the layout. Kept on the tree instead
+    /// of every node so root-authored modals retain their window-space
+    /// contract without widening the hot node array.
+    root_bounds: ?geometry.RectF = null,
 
     pub fn nodeCount(self: WidgetLayoutTree) usize {
         return self.nodes.len;
@@ -201,9 +205,10 @@ pub fn layoutWidgetTree(widget: Widget, bounds: geometry.RectF, output: []Widget
 }
 
 pub fn layoutWidgetTreeWithTokens(widget: Widget, bounds: geometry.RectF, tokens: DesignTokens, output: []WidgetLayoutNode) Error!WidgetLayoutTree {
+    const root_bounds = bounds.normalized();
     var len: usize = 0;
-    _ = try widget_layout.layoutWidgetDepth(widget, bounds.normalized(), null, 0, output, &len, tokens);
-    return .{ .nodes = output[0..len] };
+    _ = try widget_layout.layoutWidgetDepth(widget, root_bounds, null, 0, output, &len, tokens);
+    return .{ .nodes = output[0..len], .root_bounds = root_bounds };
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {

@@ -95,7 +95,10 @@ fn validateWidgetLayoutPoolBudgets(
 pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
     return struct {
         pub fn widgetLayoutTree(self: *const RuntimeView) canvas.WidgetLayoutTree {
-            return .{ .nodes = self.widget_layout_nodes[0..self.widget_layout_node_count] };
+            return .{
+                .nodes = self.widget_layout_nodes[0..self.widget_layout_node_count],
+                .root_bounds = self.widget_layout_root_bounds,
+            };
         }
 
         pub fn widgetSemantics(self: *const RuntimeView) []const canvas.WidgetSemanticsNode {
@@ -194,6 +197,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
             if (anchored_count > canvas_limits.max_canvas_widget_anchored_per_view) return error.WidgetAnchoredSurfaceLimitReached;
             if (layout.nodes.len > 0 and layout.nodes.ptr == self.widget_layout_nodes[0..].ptr) {
+                self.widget_layout_root_bounds = layout.root_bounds;
                 self.widget_revision += 1;
                 self.canvas_widget_layout_adoptions +%= 1;
                 return;
@@ -285,6 +289,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.canvas_widget_layout_adoptions +%= 1;
             errdefer self.pruneCanvasWidgetHoverMsgChain();
             self.widget_layout_node_count = 0;
+            self.widget_layout_root_bounds = layout.root_bounds;
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;
             self.widget_span_len = 0;
@@ -305,6 +310,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             try clampCanvasWidgetLayoutScrollOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
                 self.widget_scroll_states[0..self.widget_layout_node_count],
+                self.widget_layout_root_bounds,
                 self.widget_tokens,
             );
             clampCanvasWidgetLayoutTextOffsets(

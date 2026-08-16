@@ -69,10 +69,14 @@ pub fn layoutWidgetDepth(
     if (len.* >= output.len) return error.WidgetLayoutListFull;
 
     const index = len.*;
-    const frame = rootRelativeModalFrame(widget, proposed_frame, if (index == 0) proposed_frame else output[0].frame, tokens, depth);
+    const root_bounds = if (index == 0) proposed_frame else output[0].frame;
+    const frame = rootRelativeModalFrame(widget, proposed_frame, root_bounds, tokens, depth);
     output[index] = .{
         .widget = widgetWithFrame(widget, frame),
-        .frame = frame,
+        // During the root's recursive layout its node frame carries the
+        // viewport so nested modals and anchors can resolve in window
+        // space. Restore the root's own resolved frame before returning.
+        .frame = if (index == 0) root_bounds else frame,
         .depth = depth,
         .parent_index = parent_index,
     };
@@ -181,7 +185,9 @@ pub fn layoutWidgetDepth(
     // collision scan counts anchored descendants too, so the remedy must
     // move them or the one retry is paid for nothing. Non-drag widgets
     // pass through untouched (menus and popovers anchor everywhere).
-    try layoutAnchoredChildren(widget.children, windowControlsClearedContent(frame, widget, tokens), index, depth, output, len, tokens);
+    try layoutAnchoredChildren(widget.children, windowControlsClearedContent(frame, widget, tokens), index, depth, output, len, root_bounds, tokens);
+
+    if (index == 0) output[index].frame = frame;
 
     return index;
 }
@@ -346,11 +352,12 @@ fn layoutAnchoredChildren(
     depth: usize,
     output: []WidgetLayoutNode,
     len: *usize,
+    root_bounds: geometry.RectF,
     tokens: DesignTokens,
 ) Error!void {
     for (children) |child| {
         const anchor = child.layout.anchor orelse continue;
-        const child_frame = anchoredWidgetFrame(child, anchor, anchor_rect, output[0].frame, tokens);
+        const child_frame = anchoredWidgetFrame(child, anchor, anchor_rect, root_bounds, tokens);
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
     }
 }
@@ -364,8 +371,40 @@ fn layoutAnchoredChildren(
 /// stale pre-reconcile anchor. The original layout already charged the node
 /// and anchored-surface budgets; this pass rewrites the same pre-order slots
 /// and allocates none.
-pub fn relayoutAnchoredChildren(output: []WidgetLayoutNode, tokens: DesignTokens) Error!void {
+pub fn anchoredNestingDepth(output: []const WidgetLayoutNode, node_index: usize) usize {
+    if (node_index >= output.len) return 0;
+    var count: usize = 0;
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= output.len) break;
+        if (widget_tree.widgetIsAnchored(output[index].widget)) count += 1;
+        current = output[index].parent_index;
+    }
+    return count;
+}
+
+pub fn maxAnchoredNestingDepth(output: []const WidgetLayoutNode) usize {
+    var max_depth: usize = 0;
+    for (output, 0..) |node, index| {
+        if (!widget_tree.widgetIsAnchored(node.widget)) continue;
+        max_depth = @max(max_depth, anchoredNestingDepth(output, index));
+    }
+    return max_depth;
+}
+
+/// Re-layout only the anchored roots whose authored parent lives in the
+/// requested anchored-surface stratum. Runtime reconciliation uses this
+/// top-down: finalize the outer geometry, replay its direct surfaces, then
+/// restore state inside those surfaces before replaying their nested ones.
+pub fn relayoutAnchoredChildrenAtDepth(output: []WidgetLayoutNode, root_bounds: geometry.RectF, tokens: DesignTokens, parent_anchored_depth: usize) Error!void {
     if (output.len == 0) return;
+    // Partial re-layout enters below the already-resolved root. Mirror the
+    // full layout's construction-time root frame so recursive modal and
+    // nested-anchor layout still reads the viewport, then restore the live
+    // root surface frame before returning.
+    const root_frame = output[0].frame;
+    output[0].frame = root_bounds;
+    defer output[0].frame = root_frame;
     // The layout sequence puts a parent's anchored children after every
     // in-flow descendant. Walk directly to those anchored roots instead of
     // searching every parent's subtree: rebuilds with no open surface stay
@@ -382,6 +421,10 @@ pub fn relayoutAnchoredChildren(output: []WidgetLayoutNode, tokens: DesignTokens
             anchored_start += 1;
             continue;
         };
+        if (anchoredNestingDepth(output, parent_index) != parent_anchored_depth) {
+            anchored_start += 1;
+            continue;
+        }
         const parent = output[parent_index];
         var len = anchored_start;
         try layoutAnchoredChildren(
@@ -391,6 +434,7 @@ pub fn relayoutAnchoredChildren(output: []WidgetLayoutNode, tokens: DesignTokens
             parent.depth,
             output,
             &len,
+            root_bounds,
             tokens,
         );
         // Replaying one anchored root lays every anchored sibling belonging
@@ -398,6 +442,19 @@ pub fn relayoutAnchoredChildren(output: []WidgetLayoutNode, tokens: DesignTokens
         // the first untouched node. A malformed retained tree whose source
         // has no matching anchored child still makes forward progress.
         anchored_start = if (len > anchored_start) len else anchored_start + 1;
+    }
+}
+
+pub fn relayoutAnchoredChildren(output: []WidgetLayoutNode, tokens: DesignTokens) Error!void {
+    if (output.len == 0) return;
+    try relayoutAnchoredChildrenWithRootBounds(output, output[0].frame, tokens);
+}
+
+pub fn relayoutAnchoredChildrenWithRootBounds(output: []WidgetLayoutNode, root_bounds: geometry.RectF, tokens: DesignTokens) Error!void {
+    const max_depth = maxAnchoredNestingDepth(output);
+    var parent_depth: usize = 0;
+    while (parent_depth < max_depth) : (parent_depth += 1) {
+        try relayoutAnchoredChildrenAtDepth(output, root_bounds, tokens, parent_depth);
     }
 }
 
@@ -1658,12 +1715,17 @@ pub fn relayoutSplitChildren(
     node_index: usize,
     depth: usize,
     output: []WidgetLayoutNode,
+    root_bounds: geometry.RectF,
     tokens: DesignTokens,
 ) Error!void {
+    if (output.len == 0) return;
+    const root_frame = output[0].frame;
+    output[0].frame = root_bounds;
+    defer output[0].frame = root_frame;
     var len: usize = node_index + 1;
     const content = frame.inset(widget.layout.padding);
     try layoutSplitChildren(widget, content, node_index, depth, output, &len, tokens);
-    try layoutAnchoredChildren(widget.children, frame, node_index, depth, output, &len, tokens);
+    try layoutAnchoredChildren(widget.children, frame, node_index, depth, output, &len, root_bounds, tokens);
 }
 
 /// Slide a laid split's pane boundary to `fraction` GEOMETRICALLY, over

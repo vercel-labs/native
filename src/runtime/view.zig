@@ -445,6 +445,7 @@ pub const RuntimeView = struct {
     canvas_frame_profile_dirty_ratio: f32 = 0,
     widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     widget_layout_node_count: usize = 0,
+    widget_layout_root_bounds: ?geometry.RectF = null,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     /// Fingerprint of the last accessibility tree actually handed to the

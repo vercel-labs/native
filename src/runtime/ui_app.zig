@@ -6028,8 +6028,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const tree = self.treeForViewLabel(drag_event.view_label);
             const live_template = if (tree) |value| value.msgFor(source.id, .drag) else null;
             const layout: ?canvas.WidgetLayoutTree = runtime.canvasWidgetLayout(drag_event.window_id, drag_event.view_label) catch null;
-            const live_view_size: ?geometry.SizeF = if (layout) |value| if (value.nodes.len > 0) blk: {
-                const root = value.nodes[0].frame.normalized();
+            const live_view_size: ?geometry.SizeF = if (layout) |value| if (canvas.widgetLayoutRootBounds(value)) |root_value| blk: {
+                const root = root_value.normalized();
                 break :blk geometry.SizeF.init(root.width, root.height);
             } else null else null;
 

@@ -158,15 +158,15 @@
     },
     {
       "name": "dialog",
-      "doc": "Modal dialog surface rendered in place; title via text, wrap in an if to show conditionally."
+      "doc": "Root-relative modal centered in the viewport and unaffected by ancestor scroll or clipping; title via text, wrap in an if to show conditionally."
     },
     {
       "name": "drawer",
-      "doc": "Drawer surface rendered in place; title via text, wrap in an if to show conditionally."
+      "doc": "Root-relative modal spanning the viewport width and docked to its bottom; title via text, wrap in an if to show conditionally."
     },
     {
       "name": "sheet",
-      "doc": "Sheet surface rendered in place; title via text, wrap in an if to show conditionally."
+      "doc": "Root-relative modal spanning the viewport height and docked to its right edge; title via text, wrap in an if to show conditionally."
     },
     {
       "name": "resizable",

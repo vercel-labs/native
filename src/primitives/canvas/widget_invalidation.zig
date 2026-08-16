@@ -93,6 +93,9 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
 }
 
 pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation) Error![]const WidgetInvalidation {
+    const previous_root_bounds = widget_render.widgetLayoutRootBounds(previous);
+    const next_root_bounds = widget_render.widgetLayoutRootBounds(next);
+    const root_bounds_dirty = !optionalRectsEqual(previous_root_bounds, next_root_bounds);
     // Id lookups ride the probe-table index whenever the trees are big
     // enough to be worth a table reset and fit its half-full bound;
     // otherwise the linear scans run as before. Same invalidations
@@ -132,7 +135,16 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
             continue;
         };
 
-        var change = widgetChange(previous_node, next_ref.node, previous_index, next_ref.index, tokens);
+        var change = widgetChange(
+            previous_node,
+            next_ref.node,
+            previous_index,
+            next_ref.index,
+            tokens,
+            root_bounds_dirty and previous_node.parent_index == null and next_ref.node.parent_index == null,
+            previous_root_bounds,
+            next_root_bounds,
+        );
         if (previous_node.widget.semantics.hidden != next_ref.node.widget.semantics.hidden) {
             change.dirty_bounds = unionOptionalBounds(
                 unionOptionalBounds(
@@ -266,13 +278,23 @@ fn terminalBindingClean(previous: widget_model.TerminalBinding, next: widget_mod
     return previous.grid == null and next.grid == null;
 }
 
-fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_index: usize, next_index: usize, tokens: DesignTokens) WidgetInvalidation {
+fn widgetChange(
+    previous: WidgetLayoutNode,
+    next: WidgetLayoutNode,
+    previous_index: usize,
+    next_index: usize,
+    tokens: DesignTokens,
+    root_bounds_dirty: bool,
+    previous_root_bounds: ?geometry.RectF,
+    next_root_bounds: ?geometry.RectF,
+) WidgetInvalidation {
     const previous_diff_lines = previous.widget.codeDiffLines();
     const next_diff_lines = next.widget.codeDiffLines();
     const layout_dirty =
         previous.widget.kind != next.widget.kind or
         previous.depth != next.depth or
         previous.parent_index != next.parent_index or
+        root_bounds_dirty or
         !rectsEqual(previous.frame, next.frame) or
         previous.widget.code_line_number_digits != next.widget.code_line_number_digits or
         !widgetLayoutStylesEqual(previous.widget.layout, next.widget.layout);
@@ -321,7 +343,12 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !widgetSemanticsEqual(previous.widget.semantics, next.widget.semantics);
     const paint_dirty = layout_dirty or content_dirty or visual_dirty or state_dirty or visibility_dirty or layer_dirty;
 
-    const dirty_bounds = if (layout_dirty or visibility_dirty or layer_dirty)
+    const dirty_bounds = if (root_bounds_dirty)
+        unionOptionalBounds(
+            unionOptionalBounds(widgetFullPaintBounds(previous, tokens), widgetFullPaintBounds(next, tokens)),
+            unionOptionalBounds(previous_root_bounds, next_root_bounds),
+        )
+    else if (layout_dirty or visibility_dirty or layer_dirty)
         unionOptionalBounds(widgetFullPaintBounds(previous, tokens), widgetFullPaintBounds(next, tokens))
     else if (paint_dirty)
         widgetPaintChangeBounds(previous.widget, next.widget, tokens)

@@ -980,7 +980,7 @@ fn buildDialog(ui: *Ui, model: *const SceneModel) Node {
 
 fn buildDrawer(ui: *Ui) Node {
     return tileStart(ui, .{
-        ui.el(.drawer, .{ .text = "Filters", .width = 260, .height = 230, .padding = 24 }, .{
+        ui.el(.drawer, .{ .text = "Filters", .height = 230, .padding = 24 }, .{
             ui.column(.{ .gap = 12 }, .{
                 surfaceTitleSpacer(ui),
                 ui.checkbox(.{ .text = "Only unread", .checked = true }),
@@ -993,7 +993,7 @@ fn buildDrawer(ui: *Ui) Node {
 
 fn buildSheet(ui: *Ui) Node {
     return tile(ui, .{
-        ui.el(.sheet, .{ .text = "Share", .width = 380, .height = 190, .padding = 24 }, .{
+        ui.el(.sheet, .{ .text = "Share", .width = 380, .padding = 24 }, .{
             ui.column(.{ .gap = 12 }, .{
                 surfaceTitleSpacer(ui),
                 ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),
@@ -1379,7 +1379,7 @@ fn buildDialogHero(ui: *Ui) Node {
 
 fn buildDrawerHero(ui: *Ui) Node {
     return heroTile(ui, .{
-        ui.el(.drawer, .{ .text = "Filters", .width = 220, .height = 155, .padding = 18 }, .{
+        ui.el(.drawer, .{ .text = "Filters", .height = 155, .padding = 18 }, .{
             ui.column(.{ .gap = 10 }, .{
                 surfaceTitleSpacer(ui),
                 ui.checkbox(.{ .text = "Only unread", .checked = true }),
@@ -1571,7 +1571,7 @@ fn buildSeparatorHero(ui: *Ui) Node {
 
 fn buildSheetHero(ui: *Ui) Node {
     return heroTile(ui, .{
-        ui.el(.sheet, .{ .text = "Share", .width = 300, .height = 158, .padding = 14 }, .{
+        ui.el(.sheet, .{ .text = "Share", .width = 300, .padding = 14 }, .{
             ui.column(.{ .gap = 10 }, .{
                 surfaceTitleSpacer(ui),
                 ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),

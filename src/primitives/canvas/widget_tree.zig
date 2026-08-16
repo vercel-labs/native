@@ -17,10 +17,24 @@ pub const WidgetPaintOrder = struct {
 pub fn widgetPaintLayer(widget: Widget, tokens: DesignTokens) i32 {
     if (widget.layer) |layer| return layer;
     return switch (widget.kind) {
-        .dialog, .drawer, .sheet, .popover, .menu_surface, .dropdown_menu => tokens.layer.overlay,
+        .dialog, .drawer, .sheet => tokens.layer.modal,
+        .popover, .menu_surface, .dropdown_menu => tokens.layer.overlay,
         .tooltip => tokens.layer.floating,
         else => tokens.layer.base,
     };
+}
+
+/// Window-surface ordering keeps anchored siblings in their established
+/// mount-order stack while lifting root-relative modals into the modal token
+/// stratum. An explicit widget layer always wins. Anchored tooltip/menu
+/// coexistence deliberately shares the overlay stratum here: their late-pass
+/// contract is last-mounted-on-top even though their ordinary in-tree token
+/// defaults differ.
+pub fn widgetWindowSurfaceLayer(widget: Widget, tokens: DesignTokens) i32 {
+    if (widget.layer) |layer| return layer;
+    if (widgetIsRootRelativeModal(widget)) return tokens.layer.modal;
+    if (widgetIsAnchored(widget)) return tokens.layer.overlay;
+    return widgetPaintLayer(widget, tokens);
 }
 
 /// Modal surfaces are placed in layout-root coordinates and never ride an
@@ -72,6 +86,36 @@ pub fn previousWidgetLayoutPaintChild(layout: anytype, parent_index: ?usize, tok
     for (layout.nodes, 0..) |node, index| {
         if (!optionalUsizeEqual(node.parent_index, parent_index)) continue;
         const order = WidgetPaintOrder{ .layer = widgetPaintLayer(node.widget, tokens), .index = index };
+        if (!widgetPaintOrderBefore(order, previous)) continue;
+        if (best == null or widgetPaintOrderLess(best.?, order)) best = order;
+    }
+    return if (best) |order| order.index else null;
+}
+
+pub inline fn widgetLayoutWindowSurfaceCount(layout: anytype) usize {
+    var count: usize = 0;
+    for (layout.nodes) |node| {
+        if (widgetEscapesAncestorClips(node.widget)) count += 1;
+    }
+    return count;
+}
+
+pub fn nextWidgetLayoutWindowSurface(layout: anytype, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
+    var best: ?WidgetPaintOrder = null;
+    for (layout.nodes, 0..) |node, index| {
+        if (!widgetEscapesAncestorClips(node.widget)) continue;
+        const order = WidgetPaintOrder{ .layer = widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
+        if (!widgetPaintOrderAfter(order, previous)) continue;
+        if (best == null or widgetPaintOrderLess(order, best.?)) best = order;
+    }
+    return if (best) |order| order.index else null;
+}
+
+pub fn previousWidgetLayoutWindowSurface(layout: anytype, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
+    var best: ?WidgetPaintOrder = null;
+    for (layout.nodes, 0..) |node, index| {
+        if (!widgetEscapesAncestorClips(node.widget)) continue;
+        const order = WidgetPaintOrder{ .layer = widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
         if (!widgetPaintOrderBefore(order, previous)) continue;
         if (best == null or widgetPaintOrderLess(best.?, order)) best = order;
     }

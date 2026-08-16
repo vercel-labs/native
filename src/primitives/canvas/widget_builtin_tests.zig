@@ -2760,7 +2760,7 @@ test "built-in modal surfaces render house chrome and semantics" {
     const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 920, 240), &nodes);
     // Modal placement is root-relative through the real layout pass:
     // dialog centered, drawer full-width at the bottom, sheet full-height
-    // at the right. All three use the overlay layer above the backdrop.
+    // at the right. All three use the modal layer above the backdrop.
     try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(300, 220)).?.kind);
     try std.testing.expectEqual(WidgetKind.dialog, layout.hitTest(geometry.PointF.init(310, 50)).?.kind);
     try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(12, 100)).?.kind);

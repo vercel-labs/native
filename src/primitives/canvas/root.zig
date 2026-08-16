@@ -801,6 +801,11 @@ pub const disclosureContentBottom = @import("widget_tree.zig").disclosureContent
 pub const isWidgetConcealedByDisclosure = @import("widget_tree.zig").isWidgetConcealedByDisclosure;
 pub const anchoredWidgetFrame = @import("widget_layout.zig").anchoredWidgetFrame;
 pub const relayoutAnchoredChildren = @import("widget_layout.zig").relayoutAnchoredChildren;
+pub const relayoutAnchoredChildrenWithRootBounds = @import("widget_layout.zig").relayoutAnchoredChildrenWithRootBounds;
+pub const relayoutAnchoredChildrenAtDepth = @import("widget_layout.zig").relayoutAnchoredChildrenAtDepth;
+pub const anchoredNestingDepth = @import("widget_layout.zig").anchoredNestingDepth;
+pub const maxAnchoredNestingDepth = @import("widget_layout.zig").maxAnchoredNestingDepth;
+pub const widgetLayoutRootBounds = @import("widget_render.zig").widgetLayoutRootBounds;
 /// Window-control reservation trigger (widget_layout.zig): true when a
 /// laid-out tree left drag-header CONTENT under the OS window-control
 /// cluster, so runtimes know to stamp `DesignTokens.window_controls`
