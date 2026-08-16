@@ -597,6 +597,73 @@ test "compact radio and switch chrome stays circular and disabled selection fill
         .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001),
         else => return error.TestUnexpectedResult,
     }
+    switch (toggle_builder.displayList().findCommandById(widgetPartId(68, 3)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "radio and switch shape overrides beat circular house fallbacks" {
+    const tokens = DesignTokens{
+        .controls = .{
+            .radio = .{ .radius = 5 },
+            .switch_control = .{ .radius = 4 },
+        },
+    };
+    const themed_radio = Widget{
+        .id = 70,
+        .kind = .radio,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+    };
+    var themed_radio_commands: [8]CanvasCommand = undefined;
+    var themed_radio_builder = Builder.init(&themed_radio_commands);
+    try emitWidgetTree(&themed_radio_builder, themed_radio, tokens);
+    switch (themed_radio_builder.displayList().findCommandById(widgetPartId(70, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(5), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const authored_radio = Widget{
+        .id = 72,
+        .kind = .radio,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+        .style = .{ .radius = 3 },
+    };
+    var authored_radio_commands: [8]CanvasCommand = undefined;
+    var authored_radio_builder = Builder.init(&authored_radio_commands);
+    try emitWidgetTree(&authored_radio_builder, authored_radio, tokens);
+    switch (authored_radio_builder.displayList().findCommandById(widgetPartId(72, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(3), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const toggle = Widget{
+        .id = 71,
+        .kind = .switch_control,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+    };
+    var toggle_commands: [8]CanvasCommand = undefined;
+    var toggle_builder = Builder.init(&toggle_commands);
+    try emitWidgetTree(&toggle_builder, toggle, tokens);
+    inline for (.{ @as(ObjectId, 1), @as(ObjectId, 3) }) |slot| {
+        switch (toggle_builder.displayList().findCommandById(widgetPartId(71, slot)).?.command) {
+            .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(4), fill.radius),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    var authored_toggle = toggle;
+    authored_toggle.id = 73;
+    authored_toggle.style.radius = 2;
+    var authored_toggle_commands: [8]CanvasCommand = undefined;
+    var authored_toggle_builder = Builder.init(&authored_toggle_commands);
+    try emitWidgetTree(&authored_toggle_builder, authored_toggle, tokens);
+    inline for (.{ @as(ObjectId, 1), @as(ObjectId, 3) }) |slot| {
+        switch (authored_toggle_builder.displayList().findCommandById(widgetPartId(73, slot)).?.command) {
+            .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(2), fill.radius),
+            else => return error.TestUnexpectedResult,
+        }
+    }
 }
 
 test "an off switch keeps authored track and thumb colors on separate channels" {

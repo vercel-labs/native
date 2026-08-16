@@ -54,11 +54,11 @@
     },
     {
       "name": "checkbox",
-      "doc": "Value control; bind checked, dispatch with on-toggle."
+      "doc": "Text-bearing value control; the visible label is text content (or text=), bind checked, dispatch with on-toggle."
     },
     {
       "name": "radio",
-      "doc": "Single-choice value control; bind checked or selected. Selection dispatches on-change when bound, then on-toggle, then on-press for compatibility."
+      "doc": "Text-bearing single-choice value control; the visible label is text content (or text=), bind checked or selected. Selection dispatches on-change when bound, then on-toggle, then on-press for compatibility."
     },
     {
       "name": "toggle",

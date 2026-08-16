@@ -1161,11 +1161,10 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
     const visual = selectionControlVisualTokens(widget, tokens);
     const circle = radioWidgetCircleRect(widget, tokens);
     const selected = booleanControlSelected(widget);
-    // The ring is a circle in every size register. The general control
-    // radius ladder subtracts two pixels at sm, which turns this square
-    // circle box into a rounded rectangle while the selected dot remains
-    // circular.
-    const radius = Radius.all(circle.height * 0.5);
+    // The house fallback is a circle in every size register. Explicit
+    // widget/theme radii still shape the control through the ordinary
+    // precedence ladder.
+    const radius = selectionShapeRadius(widget, visual, circle.height * 0.5);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = circle,
@@ -1207,9 +1206,9 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const visual = selectionControlVisualTokens(widget, tokens);
     const knob_inset = widgetSizedDensityValue(widget, tokens, 2);
     const track = toggleWidgetTrackRect(widget, tokens);
-    // The switch rail is a pill in every size register; applying the
-    // stepped control radius would flatten the ends at sm.
-    const track_radius = Radius.all(track.height * 0.5);
+    // The house rail is a pill in every size register. Explicit
+    // widget/theme radii still shape both rail and thumb.
+    const track_radius = selectionShapeRadius(widget, visual, track.height * 0.5);
     const knob_size = @max(0, track.height - knob_inset * 2);
     const knob_x = if (selected)
         track.x + track.width - knob_size - knob_inset
@@ -1247,7 +1246,7 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 3),
         .rect = knob,
-        .radius = controlRadius(widget, visual, knob.height * 0.5),
+        .radius = selectionShapeRadius(widget, visual, knob.height * 0.5),
         // The thumb is near-white in both states and schemes (the
         // primary-foreground tint), so it stays legible on the primary
         // track and on the dark input wash alike. Disabled washes it to
@@ -1260,6 +1259,13 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     });
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 4, track, track_radius);
     try emitControlLabelWithColor(builder, widget, tokens, track.x + track.width + widgetControlInset(widget, tokens, tokens.spacing.sm), 5, visual.foreground orelse tokens.colors.text);
+}
+
+fn selectionShapeRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
+    if (widget.style.radius != null or visual.radius != null) {
+        return controlRadius(widget, visual, fallback);
+    }
+    return Radius.all(@max(0, fallback));
 }
 
 pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {

@@ -50,7 +50,7 @@ const std = @import("std");
 /// documents, journals, serialized contracts) carry it; readers reach
 /// older artifacts through document→document migrations, never silent
 /// reinterpretation.
-pub const schema_version: u16 = 1;
+pub const schema_version: u16 = 2;
 
 /// Value type-class of an attribute: what shape of value the engines
 /// accept for it. `option` values name a Zig enum member (the enum itself
