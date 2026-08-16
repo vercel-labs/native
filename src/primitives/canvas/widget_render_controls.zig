@@ -1114,7 +1114,7 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         .fill = if (selected)
             colorFill(disabledWash(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent), widget.state.disabled, tokens.states.disabled_alpha))
         else
-            colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface))),
+            colorFill(disabledWash(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface)), widget.state.disabled, tokens.states.disabled_alpha)),
     });
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
@@ -1160,12 +1160,16 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
     const visual = selectionControlVisualTokens(widget, tokens);
     const circle = radioWidgetCircleRect(widget, tokens);
     const selected = booleanControlSelected(widget);
-    const radius = controlRadius(widget, visual, circle.height * 0.5);
+    // The ring is a circle in every size register. The general control
+    // radius ladder subtracts two pixels at sm, which turns this square
+    // circle box into a rounded rectangle while the selected dot remains
+    // circular.
+    const radius = Radius.all(circle.height * 0.5);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = circle,
         .radius = radius,
-        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface))),
+        .fill = colorFill(disabledWash(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface)), widget.state.disabled, tokens.states.disabled_alpha)),
     });
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
@@ -1202,7 +1206,9 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const visual = selectionControlVisualTokens(widget, tokens);
     const knob_inset = widgetSizedDensityValue(widget, tokens, 2);
     const track = toggleWidgetTrackRect(widget, tokens);
-    const track_radius = controlRadius(widget, visual, track.height * 0.5);
+    // The switch rail is a pill in every size register; applying the
+    // stepped control radius would flatten the ends at sm.
+    const track_radius = Radius.all(track.height * 0.5);
     const knob_size = @max(0, track.height - knob_inset * 2);
     const knob_x = if (selected)
         track.x + track.width - knob_size - knob_inset

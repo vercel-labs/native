@@ -550,6 +550,55 @@ test "a builder accumulating two widget trees keeps each checkbox mark's own geo
     }
 }
 
+test "compact radio and switch chrome stays circular and disabled selection fills wash" {
+    const tokens = DesignTokens{};
+    const disabled_fill = Color.rgba(
+        tokens.colors.surface.r,
+        tokens.colors.surface.g,
+        tokens.colors.surface.b,
+        tokens.colors.surface.a * tokens.states.disabled_alpha,
+    );
+    const controls = [_]struct { kind: WidgetKind, frame: geometry.RectF }{
+        .{ .kind = .checkbox, .frame = geometry.RectF.init(0, 0, 80, 28) },
+        .{ .kind = .radio, .frame = geometry.RectF.init(0, 0, 80, 28) },
+    };
+    for (controls) |control| {
+        const widget = Widget{
+            .id = 67,
+            .kind = control.kind,
+            .frame = control.frame,
+            .size = .sm,
+            .state = .{ .disabled = true },
+        };
+        var commands: [8]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, widget, tokens);
+        switch (builder.displayList().findCommandById(widgetPartId(67, 1)).?.command) {
+            .fill_rounded_rect => |fill| {
+                try expectFillColor(disabled_fill, fill.fill);
+                if (control.kind == .radio) {
+                    try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001);
+                }
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    const toggle = Widget{
+        .id = 68,
+        .kind = .switch_control,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+        .size = .sm,
+    };
+    var toggle_commands: [8]CanvasCommand = undefined;
+    var toggle_builder = Builder.init(&toggle_commands);
+    try emitWidgetTree(&toggle_builder, toggle, tokens);
+    switch (toggle_builder.displayList().findCommandById(widgetPartId(68, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "app-registered icons draw through the widget paths like built-ins" {
     var buffer = canvas.svg_icon.IconBuffer{};
     const parsed = try canvas.svg_icon.parse(
