@@ -1611,7 +1611,7 @@ fn emitVisibleTextSpansWidget(
             if (run.text.len == 0) continue;
             const span = widget.spans[run.span_index];
             const is_link = span.link.len > 0;
-            const underline_ordinal: ?usize = if (span.underline or is_link) blk: {
+            const underline_ordinal: ?usize = if (span.underline) blk: {
                 const value = decoration_base +| decoration_ordinal;
                 decoration_ordinal += 1;
                 break :blk value;

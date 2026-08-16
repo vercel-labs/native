@@ -78,6 +78,8 @@ pub const TextSpan = struct {
     /// backgrounds never affect measurement or layout (#86, intra-line
     /// diff emphasis).
     background: ?TextSpanColor = null,
+    /// Visual underline decoration. Independent from `link`: clickable
+    /// spans remain undecorated unless this is true.
     underline: bool = false,
     strikethrough: bool = false,
     /// Relative size multiplier against the paragraph base size; 0 means

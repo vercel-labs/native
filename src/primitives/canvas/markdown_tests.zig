@@ -187,6 +187,7 @@ test "markdown maps headings, paragraphs, and inline styles onto spans" {
     try testing.expectEqualStrings("gone", spans[7].text);
     try testing.expectEqualStrings("a link", spans[9].text);
     try testing.expectEqualStrings("https://example.com", spans[9].link);
+    try testing.expect(spans[9].underline);
 
     // The link span grew a hit-area child that dispatches on_link's Msg.
     const link_child = paragraph.children[0];

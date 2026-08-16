@@ -1530,6 +1530,10 @@ pub fn Markdown(comptime Msg: type) type {
                 if (style.html_small > 0) span.scale = if (span.scale > 0) span.scale * 0.875 else 0.875;
                 if (style.html_heading_level) |level| span.scale = heading_scales[@min(level, heading_scales.len) - 1];
                 if (span.link.len == 0 and style.html_link.len > 0) span.link = style.html_link;
+                // Markdown keeps its conventional underlined-link register,
+                // while the underlying TextSpan renderer leaves decoration
+                // entirely under the span's explicit `underline` flag.
+                if (span.link.len > 0) span.underline = true;
                 appendSpan(spans, len, span);
             }
 
