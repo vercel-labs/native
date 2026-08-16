@@ -7895,6 +7895,11 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         // initWithContentRect, which would add the titlebar again and grow
         // the window on every launch.
         [window setFrame:restoredFrame display:NO];
+    } else if (initialPlacement == 1) {
+        // Fresh authored dimensions are content size, but visibility is an
+        // OUTER-frame guarantee. AppKit adds titlebar chrome during
+        // construction, so constrain the completed frame as the final step.
+        [window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];
     } else if (centerOnPrimary) {
         [window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];
         // AppKit centers every new window by default, which leaves a

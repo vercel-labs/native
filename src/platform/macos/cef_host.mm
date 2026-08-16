@@ -1108,6 +1108,11 @@ static const char *NativeSdkCefBridgeScript() {
         // Using setFrame keeps the saved outer dimensions stable instead of
         // adding non-client chrome on every relaunch.
         [window setFrame:restoredFrame display:NO];
+    } else if (initialPlacement == 1) {
+        // AppKit adds titlebar chrome to the authored content rectangle;
+        // constrain the completed OUTER frame so no chrome escapes the
+        // matching or nearest display's visible bounds.
+        [window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];
     } else if (centerOnPrimary) {
         [window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];
         // Match the system-WebView host and Win32's default placement:

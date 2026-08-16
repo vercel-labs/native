@@ -2371,8 +2371,8 @@ fn runnerZig() []const u8 {
     \\            info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);
     \\            info.main_window.titlebar = manifestShellStartupTitlebar();
     \\            info.main_window.resizable = manifestShellStartupResizable();
-    \\            info.main_window.restore_policy = manifestShellStartupRestorePolicy();
-    \\            info.main_window.initial_placement = manifestShellStartupInitialPlacement();
+    \\            info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);
+    \\            info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);
     \\            info.main_window.show = manifestShellStartupShowMode();
     \\            info.main_window.transparent = manifestShellStartupBool("transparent", false);
     \\            info.main_window.always_on_top = manifestShellStartupBool("always_on_top", false);
@@ -2590,20 +2590,22 @@ fn runnerZig() []const u8 {
     \\    return fallback;
     \\}
     \\
-    \\fn manifestShellStartupRestorePolicy() native_sdk.WindowRestorePolicy {
-    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .clamp_to_visible_screen;
+    \\fn manifestShellStartupRestorePolicy(fallback: native_sdk.WindowRestorePolicy) native_sdk.WindowRestorePolicy {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
     \\    const shell = app_manifest.shell;
-    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return .clamp_to_visible_screen;
-    \\    if (comptime shell.windows.len == 0) return .clamp_to_visible_screen;
-    \\    return windowRestorePolicy(shell.windows[0]);
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    \\    if (comptime shell.windows.len == 0) return fallback;
+    \\    const window = shell.windows[0];
+    \\    if (comptime !@hasField(@TypeOf(window), "restore_policy")) return fallback;
+    \\    return windowRestorePolicy(window);
     \\}
     \\
-    \\fn manifestShellStartupInitialPlacement() native_sdk.WindowInitialPlacement {
-    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .default;
+    \\fn manifestShellStartupInitialPlacement(fallback: native_sdk.WindowInitialPlacement) native_sdk.WindowInitialPlacement {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
     \\    const shell = app_manifest.shell;
-    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return .default;
-    \\    if (comptime shell.windows.len == 0) return .default;
-    \\    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else .default;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    \\    if (comptime shell.windows.len == 0) return fallback;
+    \\    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else fallback;
     \\}
     \\
     \\/// Window-enforced content min-size floor from app.zon. Validated at
@@ -4235,8 +4237,10 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "windowFloatFallback(window, \"x\", fallback.x)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "if (comptime @hasField(@TypeOf(window), \"restore_state\")) return window.restore_state") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.restore_policy = manifestShellStartupRestorePolicy()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.initial_placement = manifestShellStartupInitialPlacement()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "if (comptime !@hasField(@TypeOf(window), \"restore_policy\")) return fallback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else fallback") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.show = manifestShellStartupShowMode()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.min_width = manifestShellStartupMinSize(\"min_width\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.min_height = manifestShellStartupMinSize(\"min_height\")") != null);

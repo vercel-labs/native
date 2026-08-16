@@ -834,8 +834,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "examples/hello/src/runner.zig", .pattern = "app_info.main_window.initial_placement = .restored;" },
         .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);" },
         .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);" },
-        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_policy = manifestShellStartupRestorePolicy();" },
-        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.initial_placement = manifestShellStartupInitialPlacement();" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-window-placement-contracts", "Verify both macOS hosts use the primary display and restore persisted outer frames without titlebar growth", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return [NSScreen screens].firstObject ?: [NSScreen mainScreen];" },
@@ -844,6 +844,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:restoredFrame display:NO];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "else if (initialPlacement == 1) {\n        // Fresh authored dimensions are content size" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "else if (initialPlacement == 1) {\n        // AppKit adds titlebar chrome" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "initWithFrame:window.contentView.bounds" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "initWithFrame:window.contentView.bounds" },
     });

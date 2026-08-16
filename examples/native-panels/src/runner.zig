@@ -61,8 +61,8 @@ pub const RunOptions = struct {
         } else {
             info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);
             info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);
-            info.main_window.restore_policy = manifestShellStartupRestorePolicy();
-            info.main_window.initial_placement = manifestShellStartupInitialPlacement();
+            info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);
+            info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);
         }
         return info;
     }
@@ -210,20 +210,22 @@ fn manifestShellStartupRestoreState(fallback: bool) bool {
     return fallback;
 }
 
-fn manifestShellStartupRestorePolicy() native_sdk.WindowRestorePolicy {
-    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .clamp_to_visible_screen;
+fn manifestShellStartupRestorePolicy(fallback: native_sdk.WindowRestorePolicy) native_sdk.WindowRestorePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
     const shell = app_manifest.shell;
-    if (comptime !@hasField(@TypeOf(shell), "windows")) return .clamp_to_visible_screen;
-    if (comptime shell.windows.len == 0) return .clamp_to_visible_screen;
-    return windowRestorePolicy(shell.windows[0]);
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    if (comptime !@hasField(@TypeOf(window), "restore_policy")) return fallback;
+    return windowRestorePolicy(window);
 }
 
-fn manifestShellStartupInitialPlacement() native_sdk.WindowInitialPlacement {
-    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .default;
+fn manifestShellStartupInitialPlacement(fallback: native_sdk.WindowInitialPlacement) native_sdk.WindowInitialPlacement {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
     const shell = app_manifest.shell;
-    if (comptime !@hasField(@TypeOf(shell), "windows")) return .default;
-    if (comptime shell.windows.len == 0) return .default;
-    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else .default;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else fallback;
 }
 
 fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
