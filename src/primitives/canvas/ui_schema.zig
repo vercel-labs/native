@@ -261,8 +261,8 @@ pub const elements = [_]ElementInfo{
     // paints whenever the view renders it.
     .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false, .anchorable = true },
     // Value controls and text entry.
-    .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox", .a11y_name = .control },
-    .{ .code = 41, .name = "radio", .widget_kind = "radio", .a11y_name = .control },
+    .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox", .takes_text = true, .a11y_name = .control },
+    .{ .code = 41, .name = "radio", .widget_kind = "radio", .takes_text = true, .a11y_name = .control },
     .{ .code = 42, .name = "slider", .widget_kind = "slider", .a11y_name = .control },
     .{ .code = 43, .name = "progress", .widget_kind = "progress" },
     .{ .code = 44, .name = "text-field", .widget_kind = "text_field", .a11y_name = .editable },

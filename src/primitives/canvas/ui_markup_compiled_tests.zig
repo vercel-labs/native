@@ -99,6 +99,34 @@ const zero_card_padding_markup =
 ;
 const ZeroCardPaddingCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, zero_card_padding_markup);
 
+const selection_label_content_markup =
+    \\<column gap="8">
+    \\  <checkbox checked="true" on-toggle="add">Done</checkbox>
+    \\  <radio-group label="Density">
+    \\    <radio checked="true" on-change="add">Default</radio>
+    \\  </radio-group>
+    \\</column>
+;
+const SelectionLabelContentCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, selection_label_content_markup);
+
+test "checkbox and radio element content builds identically in both markup engines" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.testModel();
+
+    var interpreter = try InboxInterpreter.init(arena, selection_label_content_markup);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(SelectionLabelContentCompiled.build(&compiled_ui, &model));
+
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+    try testing.expectEqualStrings("Done", fixture.findByKind(compiled.root, .checkbox).?.text);
+    try testing.expectEqualStrings("Default", fixture.findByKind(compiled.root, .radio).?.text);
+}
+
 test "explicit zero card padding survives interpreted and compiled markup" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

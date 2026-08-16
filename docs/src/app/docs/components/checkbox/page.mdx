@@ -4,7 +4,7 @@ import { CodeToggle } from "@/components/code-toggle";
 
 # Checkbox
 
-A binary value control: the label rides the `text` attribute — checkbox is not a text-bearing element, so text content between the tags is rejected with a teaching error (`label="..."` alone names one for accessibility without a visible label). The model binds `checked`, and `on-toggle` dispatches its Msg — the engine never flips state on its own. For a single choice among options, use [radio](/docs/components/radio); for an on/off setting rendered as a sliding thumb, use [switch](/docs/components/switch).
+A binary value control. Put its visible label between the tags (the `text` attribute is the equivalent binding-friendly form); `label="..."` alone supplies an accessible name without drawing a label. The model binds `checked`, and `on-toggle` dispatches its Msg — the engine never flips state on its own. For a single choice among options, use [radio](/docs/components/radio); for an on/off setting rendered as a sliding thumb, use [switch](/docs/components/switch).
 
 <ComponentPreview name="checkbox" alt="Checkboxes rendered by the engine" caption="checked, unchecked, and disabled checkboxes" />
 
@@ -12,9 +12,9 @@ A binary value control: the label rides the `text` attribute — checkbox is not
 
 ```html
 <column gap="12">
-  <checkbox checked="{accepted}" on-toggle="toggle_terms" text="Accept terms and conditions" />
-  <checkbox checked="{reports}" on-toggle="toggle_reports" text="Send usage reports" />
-  <checkbox checked="true" disabled="true" text="Managed by your organization" />
+  <checkbox checked="{accepted}" on-toggle="toggle_terms">Accept terms and conditions</checkbox>
+  <checkbox checked="{reports}" on-toggle="toggle_reports">Send usage reports</checkbox>
+  <checkbox checked="true" disabled="true">Managed by your organization</checkbox>
 </column>
 ```
 

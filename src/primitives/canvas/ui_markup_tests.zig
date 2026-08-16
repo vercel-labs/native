@@ -510,6 +510,7 @@ test "the a11y lint: unnamed controls, radiogroups, and text entry are errors" {
     // select's face content.
     const clean = [_][]const u8{
         "<row>\n  <checkbox on-toggle=\"select\">Done</checkbox>\n</row>",
+        "<radio-group label=\"Density\">\n  <radio checked=\"true\">Default</radio>\n</radio-group>",
         "<row>\n  <checkbox text=\"Done\" on-toggle=\"select\" />\n</row>",
         "<row>\n  <checkbox label=\"Done\" on-toggle=\"select\" />\n</row>",
         "<row>\n  <button icon=\"trash\" label=\"Delete\" on-press=\"remove\"></button>\n</row>",

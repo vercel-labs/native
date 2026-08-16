@@ -4,7 +4,7 @@ import { CodeToggle } from "@/components/code-toggle";
 
 # Radio
 
-The single-choice value control, grouped by a `radio-group`. Give the group an accessible `label` that names the shared choice. Like [checkbox](/docs/components/checkbox), each radio's label rides the `text` attribute — radio is not a text-bearing element, so text content between the tags is rejected with a teaching error. Descendant radios at any nesting depth form one logical group: one Tab stop, arrows wrap through the choices while Home/End move to the edges, focus and selection move together, and selecting one clears the rest. Bind the model's choice through `checked`; an actual selection transition dispatches `on-change` when bound, then falls back to `on-toggle` and `on-press` for compatibility. Activating the already-checked radio has no new `on-change` edge (a legacy fallback handler still receives the activation).
+The single-choice value control, grouped by a `radio-group`. Give the group an accessible `label` that names the shared choice. Like [checkbox](/docs/components/checkbox), each radio takes its visible label as element content; the `text` attribute is the equivalent binding-friendly form. Descendant radios at any nesting depth form one logical group: one Tab stop, arrows wrap through the choices while Home/End move to the edges, focus and selection move together, and selecting one clears the rest. Bind the model's choice through `checked`; an actual selection transition dispatches `on-change` when bound, then falls back to `on-toggle` and `on-press` for compatibility. Activating the already-checked radio has no new `on-change` edge (a legacy fallback handler still receives the activation).
 
 <ComponentPreview name="radio-group" alt="A radio group rendered by the engine" caption="a radio group with one selected and one disabled option" />
 
@@ -12,11 +12,11 @@ The single-choice value control, grouped by a `radio-group`. Give the group an a
 
 ```html
 <radio-group gap="12" label="Density">
-  <radio checked="{density == default}" on-change="set_default" text="Default" />
+  <radio checked="{density == default}" on-change="set_default">Default</radio>
   <row>
-    <radio checked="{density == comfortable}" on-change="set_comfortable" text="Comfortable" />
+    <radio checked="{density == comfortable}" on-change="set_comfortable">Comfortable</radio>
   </row>
-  <radio checked="{density == compact}" disabled="true" text="Compact" />
+  <radio checked="{density == compact}" disabled="true">Compact</radio>
 </radio-group>
 ```
 

@@ -438,15 +438,16 @@ test "icon widgets render built-in vector icons as tinted path commands" {
     }
 }
 
-test "checkbox check mark strokes one anti-aliased vector path" {
+test "checkbox check mark and label render through their pinned part slots" {
     const checkbox = Widget{
         .id = 63,
         .kind = WidgetKind.checkbox,
-        .frame = geometry.RectF.init(0, 0, 24, 24),
+        .frame = geometry.RectF.init(0, 0, 80, 24),
         .value = 1,
+        .text = "Done",
     };
     const tokens = DesignTokens{};
-    var commands: [8]CanvasCommand = undefined;
+    var commands: [9]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, checkbox, tokens);
     const display_list = builder.displayList();
@@ -465,18 +466,22 @@ test "checkbox check mark strokes one anti-aliased vector path" {
         },
         else => return error.TestUnexpectedResult,
     }
+    switch (display_list.findCommandById(widgetPartId(63, 6)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Done", text.text),
+        else => return error.TestUnexpectedResult,
+    }
 
-    // Rasterized, the diagonal carries partial-coverage edge pixels —
-    // anti-aliasing a binary point-in-capsule test can never produce —
-    // and the whole render pins byte-identical.
-    var render_commands: [8]RenderCommand = undefined;
+    // Rasterized, the diagonal carries partial-coverage edge pixels and
+    // the label is present at its stable part slot. The whole 80x24
+    // checkbox-plus-label render pins byte-identical.
+    var render_commands: [9]RenderCommand = undefined;
     const plan = try (DisplayList{ .commands = display_list.commands }).renderPlan(&render_commands);
-    var pixels: [24 * 24 * 4]u8 = undefined;
+    var pixels: [80 * 24 * 4]u8 = undefined;
     @memset(&pixels, 0);
-    const surface = try ReferenceRenderSurface.init(24, 24, &pixels);
+    const surface = try ReferenceRenderSurface.init(80, 24, &pixels);
     try surface.renderPass(.{
         .commands = plan.commands,
-        .surface_size = geometry.SizeF.init(24, 24),
+        .surface_size = geometry.SizeF.init(80, 24),
         .full_repaint = true,
     }, Color.rgb8(255, 255, 255));
     // Sample strictly inside the accent fill (the 16px box spans y 4-20;
@@ -487,12 +492,12 @@ test "checkbox check mark strokes one anti-aliased vector path" {
     while (y < 18) : (y += 1) {
         var x: usize = 2;
         while (x < 14) : (x += 1) {
-            const value = pixels[(y * 24 + x) * 4];
+            const value = pixels[(y * 80 + x) * 4];
             if (value > 60 and value < 200) partial += 1;
         }
     }
     try std.testing.expect(partial >= 4);
-    try std.testing.expectEqual(@as(u64, 10271374105851145327), support.referenceSurfaceSignature(&pixels));
+    try std.testing.expectEqual(@as(u64, 516383874562490834), support.referenceSurfaceSignature(&pixels));
 }
 
 test "a builder accumulating two widget trees keeps each checkbox mark's own geometry" {
