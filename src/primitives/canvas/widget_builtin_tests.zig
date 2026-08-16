@@ -2744,6 +2744,85 @@ test "built-in alert renders house surface chrome and text" {
     }
 }
 
+test "destructive alerts tint every channel and compact defaults align chrome with content" {
+    const tokens = DesignTokens{
+        .controls = .{
+            // One shared alert table may state neutral defaults; the
+            // destructive variant still owns its hue.
+            .alert = .{
+                .background = Color.rgb8(12, 18, 24),
+                .foreground = Color.rgb8(235, 240, 245),
+                .border = Color.rgb8(54, 64, 74),
+            },
+        },
+    };
+    const destructive = Widget{
+        .id = 42,
+        .kind = .alert,
+        .frame = geometry.RectF.init(0, 0, 320, 68),
+        .text = "Session expired",
+        .variant = .destructive,
+        .state = .{ .disabled = true },
+        .style = .{ .accent = Color.rgb8(196, 32, 64) },
+    };
+    var destructive_commands: [12]CanvasCommand = undefined;
+    var destructive_builder = Builder.init(&destructive_commands);
+    try emitWidgetTree(&destructive_builder, destructive, tokens);
+    const destructive_hue = destructive.style.accent.?;
+    const destructive_fill = colorWithAlpha(destructive_hue, tokens.states.destructive_wash_alpha * tokens.states.disabled_alpha);
+    const destructive_border = colorWithAlpha(destructive_hue, 0.5 * tokens.states.disabled_alpha);
+    const destructive_ink = colorWithAlpha(destructive_hue, tokens.states.disabled_alpha);
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(destructive_fill, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 2)).?.command) {
+        .stroke_rect => |stroke| try expectFillColor(destructive_border, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 4)).?.command) {
+        .stroke_path => |stroke| try expectFillColor(destructive_ink, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 10)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualDeep(destructive_ink, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const description = [_]Widget{.{
+        .id = 44,
+        .kind = .text,
+        .text = "Restart to update.",
+    }};
+    const compact = builtinComponentWidget(.alert, .{
+        .id = 43,
+        .frame = geometry.RectF.init(0, 0, 320, 80),
+        .text = "Update available",
+        .size = .sm,
+        .children = &description,
+    });
+    // Stored kind default and token-resolved chrome share the 14px compact
+    // inset; the 14px multiplicatively scaled icon plus 10px additive
+    // text gap put title and child at x=38. The semantic title gap stays
+    // 4px rather than shrinking with control chrome.
+    try std.testing.expectEqual(@as(f32, 14), compact.layout.padding.top);
+    try std.testing.expect(compact.layout.padding_is_kind_default);
+    var compact_nodes: [2]WidgetLayoutNode = undefined;
+    const compact_layout = try layoutWidgetTree(compact, compact.frame, &compact_nodes);
+    const child = compact_layout.findById(44) orelse return error.TestUnexpectedResult;
+    const text_size = widget_metrics.widgetBodyTextSize(compact, .{});
+    try std.testing.expectApproxEqAbs(@as(f32, 38), child.frame.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 14) + widget_metrics.widgetLineHeight(text_size) + 4, child.frame.y, 0.001);
+
+    var compact_commands: [16]CanvasCommand = undefined;
+    var compact_builder = Builder.init(&compact_commands);
+    try compact_layout.emitDisplayList(&compact_builder, .{});
+    switch (compact_builder.displayList().findCommandById(widgetPartId(43, 10)).?.command) {
+        .draw_text => |text| try std.testing.expectApproxEqAbs(child.frame.x, text.origin.x, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "built-in card renders house surface chrome and title" {
     const card = builtinComponentWidget(.card, .{
         .id = 44,

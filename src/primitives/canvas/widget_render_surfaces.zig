@@ -29,9 +29,11 @@ const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
 const widgetLineHeight = widget_metrics.widgetLineHeight;
 const widgetTypographySize = widget_metrics.widgetTypographySize;
 const widgetControlInset = widget_metrics.widgetControlInset;
+const widgetAlertInset = widget_metrics.widgetAlertInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
 
 const colorFill = widget_render_style.colorFill;
+const colorWithAlpha = widget_render_style.colorWithAlpha;
 const widgetBackgroundFill = widget_render_style.widgetBackgroundFill;
 const widgetBorderFill = widget_render_style.widgetBorderFill;
 const widgetFocusRingFill = widget_render_style.widgetFocusRingFill;
@@ -43,6 +45,7 @@ const controlStrokeWidth = widget_render_style.controlStrokeWidth;
 const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 const washHovered = widget_render_style.washHovered;
 const surfaceStateBackground = widget_render_style.surfaceStateBackground;
+const disabledWash = widget_render_style.disabledWash;
 const alertControlVisualTokens = widget_render_style.alertControlVisualTokens;
 const cardControlVisualTokens = widget_render_style.cardControlVisualTokens;
 const dialogControlVisualTokens = widget_render_style.dialogControlVisualTokens;
@@ -57,26 +60,26 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = colorFill(surfaceStateBackground(widget, visual, tokens)),
+        .fill = colorFill(alertBackgroundColor(widget, visual, tokens)),
     });
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+            .fill = colorFill(alertBorderColor(widget, visual, tokens)),
             .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
         },
     }));
     if (widget.text.len == 0) return;
 
-    // The house style alert geometry: a FIXED 16px icon centered on the first
+    // The house style alert geometry: a 16px-base icon centered on the first
     // text line's box, a spacing.md gap, and wrapped text hanging past
     // the icon column (`alertContentFrame` indents children the same
     // way, so a description column lines up under the title).
     const text_size = widgetBodyTextSize(widget, tokens);
     const line_height = widgetLineHeight(text_size);
-    const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
+    const inset = widgetAlertInset(widget, tokens);
     const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const icon_frame = geometry.RectF.init(
         widget.frame.x + inset,
@@ -91,7 +94,7 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         @max(1, widget.frame.width - inset * 2 - icon_size - text_gap),
         widget.frame.height,
     );
-    const foreground = widgetForegroundColor(widget, tokens, visual.foreground orelse alertVariantForeground(widget, tokens));
+    const foreground = widgetForegroundColor(widget, tokens, alertVariantForeground(widget, visual, tokens));
     try emitAlertMark(builder, widget, tokens, icon_frame, foreground);
     // Baseline centered within the first line box, so icon and first
     // line share one optical center.
@@ -116,10 +119,38 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
 /// The alert's identity color: destructive alerts read in the
 /// destructive hue (the house style `text-destructive` treatment on a plain
 /// card surface); every other variant keeps the plain foreground.
-fn alertVariantForeground(widget: Widget, tokens: DesignTokens) Color {
+fn alertBackgroundColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    if (widget.variant != .destructive) return surfaceStateBackground(widget, visual, tokens);
+    if (widget.style.background) |color| return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
+    const hue = widget.style.accent orelse tokens.colors.destructive;
+    const wash = colorWithAlpha(hue, if (widget.state.pressed)
+        tokens.states.destructive_wash_pressed_alpha
+    else if (washHovered(widget))
+        tokens.states.destructive_wash_hover_alpha
+    else
+        tokens.states.destructive_wash_alpha);
+    return disabledWash(wash, widget.state.disabled, tokens.states.disabled_alpha);
+}
+
+fn alertBorderColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    const border = widget.style.border orelse if (widget.variant == .destructive)
+        // Destructive alerts use the callout edge from the house recipe:
+        // the destructive hue at half strength. ControlTokens has one
+        // shared alert table, not per-variant alert tables, so a flat
+        // neutral `alert.border` cannot masquerade as variant theming.
+        colorWithAlpha(widget.style.accent orelse tokens.colors.destructive, 0.5)
+    else
+        visual.border orelse tokens.colors.border;
+    return disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha);
+}
+
+fn alertVariantForeground(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
     return switch (widget.variant) {
-        .destructive => tokens.colors.destructive,
-        else => tokens.colors.text,
+        // Variant identity precedes the shared alert table's flat neutral
+        // foreground; a local foreground still wins in
+        // `widgetForegroundColor` and disabled then washes that result.
+        .destructive => widget.style.accent orelse tokens.colors.destructive,
+        else => visual.foreground orelse tokens.colors.text,
     };
 }
 

@@ -257,6 +257,12 @@ pub fn widgetControlInset(widget: Widget, tokens: DesignTokens, base: f32) f32 {
     return densityValue(tokens, widgetSizedTokenValue(widget, tokens, base));
 }
 
+/// Alert chrome/content inset: one token-backed metric for rendering,
+/// effective default layout padding, and intrinsic/wrapped measurement.
+pub fn widgetAlertInset(widget: Widget, tokens: DesignTokens) f32 {
+    return widgetControlInset(widget, tokens, tokens.spacing.lg);
+}
+
 /// Tab-trigger metrics split at the register boundary. House pill tabs
 /// keep using the shared label/control ladder exactly as before; the
 /// underline register owns the taller, label-hugging geometry measured
@@ -293,14 +299,7 @@ pub fn widgetSizedDensityValue(widget: Widget, tokens: DesignTokens, value: f32)
 }
 
 pub fn widgetSizedTokenValue(widget: Widget, tokens: DesignTokens, value: f32) f32 {
-    const step = tokens.metrics.size_inset_step;
-    return switch (widget.size) {
-        .sm => @max(0, value - step),
-        // heading/display step type, not chrome: control metrics stay at
-        // the default step.
-        .default, .icon, .heading, .display => value,
-        .lg => value + step,
-    };
+    return widget_model.widgetSizeSteppedValue(widget.size, value, tokens.metrics.size_inset_step);
 }
 
 pub fn widgetSizeScale(widget: Widget) f32 {

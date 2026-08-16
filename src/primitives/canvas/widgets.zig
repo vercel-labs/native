@@ -1510,6 +1510,18 @@ fn builtinComponentSemantics(descriptor: BuiltinComponentDescriptor, semantics: 
 /// concentric with the container's at every position.
 pub const tabs_list_inset: f32 = 3;
 
+/// Additive control-size step shared by token-backed chrome metrics and
+/// token-independent kind defaults. The default alert inset uses the
+/// house 16px base / 2px step here; runtime token packs feed their own
+/// base and step through `widget_metrics.widgetSizedTokenValue`.
+pub fn widgetSizeSteppedValue(size: WidgetSize, value: f32, step: f32) f32 {
+    return switch (size) {
+        .sm => @max(0, value - step),
+        .default, .icon, .heading, .display => value,
+        .lg => value + step,
+    };
+}
+
 /// Ergonomic per-kind layout defaults for the composite surfaces whose
 /// house reference carries built-in content spacing, shared by EVERY
 /// authoring path — `builtinComponentWidget` and (via the ui builder,
@@ -1526,7 +1538,7 @@ pub fn widgetKindDefaultLayout(kind: WidgetKind, size: WidgetSize) ?WidgetLayout
             .clip_content = true,
         },
         .alert => .{
-            .padding = geometry.InsetsF.all(16),
+            .padding = geometry.InsetsF.all(widgetSizeSteppedValue(size, 16, 2)),
             .gap = 12,
             .clip_content = true,
         },

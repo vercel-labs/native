@@ -45,6 +45,7 @@ const widgetLineHeight = widget_metrics.widgetLineHeight;
 const widgetDefaultRowHeight = widget_metrics.widgetDefaultRowHeight;
 const widgetButtonInset = widget_metrics.widgetButtonInset;
 const widgetControlInset = widget_metrics.widgetControlInset;
+const widgetAlertInset = widget_metrics.widgetAlertInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
 const densityValue = widget_metrics.densityValue;
 const widgetControlHeight = widget_metrics.widgetControlHeight;
@@ -82,7 +83,7 @@ pub fn layoutWidgetDepth(
     };
     len.* += 1;
 
-    const layout_padding = if (widget.kind == .tabs) tabsLayoutPadding(widget, tokens) else widget.layout.padding;
+    const layout_padding = widgetLayoutPadding(widget, tokens);
     const content = windowControlsClearedContent(frame.inset(layout_padding), widget, tokens);
     switch (widget.kind) {
         .row, .breadcrumb, .pagination, .radio_group, .toggle_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
@@ -674,6 +675,19 @@ fn tabsLayoutPadding(widget: Widget, tokens: DesignTokens) geometry.InsetsF {
     return geometry.InsetsF.all(underlineTabsListInset(tokens));
 }
 
+fn alertLayoutPadding(widget: Widget, tokens: DesignTokens) geometry.InsetsF {
+    if (!widget.layout.padding_is_kind_default) return widget.layout.padding;
+    return geometry.InsetsF.all(widgetAlertInset(widget, tokens));
+}
+
+fn widgetLayoutPadding(widget: Widget, tokens: DesignTokens) geometry.InsetsF {
+    return switch (widget.kind) {
+        .tabs => tabsLayoutPadding(widget, tokens),
+        .alert => alertLayoutPadding(widget, tokens),
+        else => widget.layout.padding,
+    };
+}
+
 fn layoutAxisChildren(
     children: []const Widget,
     content: geometry.RectF,
@@ -994,7 +1008,7 @@ fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
 fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
     if (depth >= max_widget_depth) return preferredMainExtent(widget, .vertical, tokens);
     if (widget.frame.height > 0) return clampMainExtent(widget, .vertical, widget.frame.height);
-    const padding = widget.layout.padding;
+    const padding = widgetLayoutPadding(widget, tokens);
     const inner_width = @max(0, width - padding.left - padding.right);
     const content_height: f32 = switch (widget.kind) {
         .text => if (widget.spans.len > 0)
@@ -1053,7 +1067,7 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
         // measure at the indented width with the title's line reserved.
         .alert => blk: {
             const text_size = widgetBodyTextSize(widget, tokens);
-            const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
+            const inset = widgetAlertInset(widget, tokens);
             const icon_size = widgetSizedDensityValue(widget, tokens, 16);
             const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
             const indent = if (widget.text.len > 0) icon_size + text_gap else 0;
@@ -1065,7 +1079,7 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
             }
             var content = max_height;
             if (widget.text.len > 0) {
-                const title_gap = widgetControlInset(widget, tokens, tokens.spacing.xs);
+                const title_gap = densityValue(tokens, tokens.spacing.xs);
                 content = widgetLineHeight(text_size) + (if (max_height > 0) title_gap + max_height else 0);
             }
             // The same floor `intrinsicAlertWidgetSize` keeps, so wrapped
@@ -1957,7 +1971,7 @@ fn alertContentFrame(widget: Widget, content: geometry.RectF, tokens: DesignToke
     const text_size = widgetBodyTextSize(widget, tokens);
     const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
-    const title_gap = widgetControlInset(widget, tokens, tokens.spacing.xs);
+    const title_gap = densityValue(tokens, tokens.spacing.xs);
     const indent = @min(content.width, icon_size + text_gap);
     const y = @min(content.maxY(), content.y + widgetLineHeight(text_size) + title_gap);
     return geometry.RectF.init(
@@ -2258,25 +2272,25 @@ fn intrinsicStatusBarWidgetSize(widget: Widget, tokens: DesignTokens) geometry.S
 
 fn intrinsicAlertWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
     const text_size = widgetBodyTextSize(widget, tokens);
-    const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
+    const padding = alertLayoutPadding(widget, tokens);
     // The chrome's fixed 16px icon (`emitAlertWidgetChrome`).
     const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
     const text = intrinsicTextWidgetSize(widget, tokens, text_size);
     var size = geometry.SizeF.init(
-        @max(widgetSizedDensityValue(widget, tokens, 240), text.width + inset * 2 + icon_size + text_gap),
-        @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeight(text_size) + inset * 2),
+        @max(widgetSizedDensityValue(widget, tokens, 240), text.width + padding.left + padding.right + icon_size + text_gap),
+        @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeight(text_size) + padding.top + padding.bottom),
     );
     // A description column under the title (`alertContentFrame`) grows
     // the alert instead of overflowing it.
     const children = intrinsicStackedChildrenSize(widget, tokens, depth);
     if (children.height > 0 and widget.text.len > 0) {
-        const title_gap = widgetControlInset(widget, tokens, tokens.spacing.xs);
-        size.height = @max(size.height, widgetLineHeight(text_size) + title_gap + children.height + inset * 2);
-        size.width = @max(size.width, children.width + icon_size + text_gap + inset * 2);
+        const title_gap = densityValue(tokens, tokens.spacing.xs);
+        size.height = @max(size.height, widgetLineHeight(text_size) + title_gap + children.height + padding.top + padding.bottom);
+        size.width = @max(size.width, children.width + icon_size + text_gap + padding.left + padding.right);
     } else if (children.height > 0) {
-        size.height = @max(size.height, children.height + inset * 2);
-        size.width = @max(size.width, children.width + inset * 2);
+        size.height = @max(size.height, children.height + padding.top + padding.bottom);
+        size.width = @max(size.width, children.width + padding.left + padding.right);
     }
     return size;
 }
