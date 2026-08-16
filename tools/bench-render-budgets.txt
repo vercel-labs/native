@@ -25,8 +25,10 @@ first-frame 7500
 # plan lookups; the pre-fix quadratic put this at ~6700.
 keystroke-big-view 3000
 # toggle-big-view: guards one-emission-per-click and reconcile cost on a
-# full TEA rebuild; the pre-fix number was ~14700.
-toggle-big-view 9000
+# full TEA rebuild. Recalibrated against current main on 2026-08-16:
+# healthy p50 10587us (this canvas series is faster at 10458us); 1.3x
+# headroom rounds to 14000, still below the pre-fix ~14700 regression.
+toggle-big-view 14000
 # scroll-transcript: guards the text-layout/glyph-atlas planner indexes on
 # a text-heavy view; the pre-fix number was ~9300.
 scroll-transcript 5000
