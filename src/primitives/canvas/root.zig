@@ -740,7 +740,7 @@ pub const cursorForWidgetTarget = widget_runtime.cursorForWidgetTarget;
 /// the single source of truth the runtime, both markup engines, and the
 /// markup validator's element list all derive from). Kind-level only: the
 /// widget-level predicate is `widgetIsHitTarget`, which also admits any
-/// widget carrying a bound press/toggle handler.
+/// widget carrying a bound press/toggle/drag handler.
 pub const widgetKindHitTarget = @import("widget_access.zig").widgetKindHitTarget;
 /// Widget-level keyboard focusability without geometry/ancestor-clip
 /// filtering. Runtime roving-focus groups use this to identify a logical
@@ -749,7 +749,7 @@ pub const widgetKindHitTarget = @import("widget_access.zig").widgetKindHitTarget
 /// rejects clipped targets.
 pub const widgetIsFocusable = @import("widget_access.zig").isFocusable;
 /// Widget-level hit-target-ness: kind-level `widgetKindHitTarget` plus
-/// any widget with a bound press/toggle handler (stamped into
+/// any widget with a bound press/toggle/drag handler (stamped into
 /// `semantics.actions` by the builder and both markup engines).
 pub const widgetIsHitTarget = @import("widget_access.zig").isHitTarget;
 pub const widgetIsHoverMsgHitTarget = @import("widget_access.zig").isHoverMsgHitTarget;

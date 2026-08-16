@@ -128,8 +128,8 @@ pub const EventInfo = struct {
     /// ever receive this event.
     dismissible_only: bool = false,
     /// This handler binds control/text behavior a non-hit-target element
-    /// does not have, so it is a dead handler there (press/toggle are
-    /// exempt: a bound press handler makes any element pressable).
+    /// does not have, so it is a dead handler there (press/toggle/drag
+    /// are exempt: their handlers make any element interactive).
     dead_on_non_hit_target: bool = false,
 };
 

@@ -603,6 +603,99 @@ test "compact radio and switch chrome stays circular and disabled selection fill
     }
 }
 
+test "selection controls honor explicit disabled background and foreground tokens" {
+    const disabled_background = Color.rgb8(34, 68, 102);
+    const disabled_foreground = Color.rgb8(238, 204, 170);
+    const disabled_border = Color.rgb8(51, 119, 85);
+    const tokens = DesignTokens{ .controls = .{
+        .checkbox = .{ .disabled_background = disabled_background, .disabled_foreground = disabled_foreground, .border = disabled_border },
+        .radio = .{ .disabled_background = disabled_background, .disabled_foreground = disabled_foreground, .border = disabled_border },
+        .switch_control = .{ .disabled_background = disabled_background, .disabled_foreground = disabled_foreground, .border = disabled_border },
+    } };
+    const cases = [_]struct {
+        kind: WidgetKind,
+        foreground_slot: ObjectId,
+        label_slot: ObjectId,
+    }{
+        .{ .kind = .checkbox, .foreground_slot = 4, .label_slot = 6 },
+        .{ .kind = .radio, .foreground_slot = 4, .label_slot = 5 },
+        .{ .kind = .switch_control, .foreground_slot = 3, .label_slot = 5 },
+    };
+    for (cases, 0..) |case, index| {
+        const id: ObjectId = @intCast(80 + index);
+        const widget = Widget{
+            .id = id,
+            .kind = case.kind,
+            .frame = geometry.RectF.init(0, 0, 120, 28),
+            .text = "Disabled",
+            .value = 1,
+            .state = .{ .disabled = true },
+        };
+        var commands: [10]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, widget, tokens);
+        const list = builder.displayList();
+        switch (list.findCommandById(widgetPartId(id, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(disabled_background, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+        switch (list.findCommandById(widgetPartId(id, 2)).?.command) {
+            .stroke_rect => |stroke| try expectFillColor(disabled_border, stroke.stroke.fill),
+            else => return error.TestUnexpectedResult,
+        }
+        switch (list.findCommandById(widgetPartId(id, case.foreground_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(disabled_foreground, fill.fill),
+            .stroke_path => |stroke| try expectFillColor(disabled_foreground, stroke.stroke.fill),
+            else => return error.TestUnexpectedResult,
+        }
+        switch (list.findCommandById(widgetPartId(id, case.label_slot)).?.command) {
+            .draw_text => |text| try std.testing.expectEqualDeep(disabled_foreground, text.color),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    // Like the slider register, stating either disabled channel opts the
+    // control into color-swap mode: an unstated counterpart stays at full
+    // rest strength instead of being alpha-washed behind the swap.
+    const background_only_tokens = DesignTokens{ .controls = .{
+        .checkbox = .{ .disabled_background = disabled_background },
+    } };
+    const background_only = Widget{
+        .id = 83,
+        .kind = .checkbox,
+        .frame = geometry.RectF.init(0, 0, 120, 28),
+        .text = "Background only",
+        .value = 1,
+        .state = .{ .disabled = true },
+    };
+    var background_only_commands: [10]CanvasCommand = undefined;
+    var background_only_builder = Builder.init(&background_only_commands);
+    try emitWidgetTree(&background_only_builder, background_only, background_only_tokens);
+    switch (background_only_builder.displayList().findCommandById(widgetPartId(83, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(disabled_background, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (background_only_builder.displayList().findCommandById(widgetPartId(83, 4)).?.command) {
+        .stroke_path => |stroke| try expectFillColor(background_only_tokens.colors.accent_text, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const foreground_only_tokens = DesignTokens{ .controls = .{
+        .checkbox = .{ .disabled_foreground = disabled_foreground },
+    } };
+    var foreground_only_commands: [10]CanvasCommand = undefined;
+    var foreground_only_builder = Builder.init(&foreground_only_commands);
+    try emitWidgetTree(&foreground_only_builder, background_only, foreground_only_tokens);
+    switch (foreground_only_builder.displayList().findCommandById(widgetPartId(83, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(foreground_only_tokens.colors.accent, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (foreground_only_builder.displayList().findCommandById(widgetPartId(83, 4)).?.command) {
+        .stroke_path => |stroke| try expectFillColor(disabled_foreground, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "radio and switch shape overrides beat circular house fallbacks" {
     const tokens = DesignTokens{
         .controls = .{

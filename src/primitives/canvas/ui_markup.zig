@@ -1149,11 +1149,11 @@ pub const anchor_offset_value_message = "anchor-offset takes a literal number: t
 pub const anchor_dependent_attr_message = "anchor-alignment and anchor-offset only apply together with anchor - add anchor=\"below\" (or \"above\") to float this surface";
 
 /// Elements whose widget KIND the engine never hit-tests: layout and
-/// decoration only. A bound `on-press`/`on-double-press`/`on-toggle`
-/// makes any element a hit target (widget-level: the handler stamps the
-/// press/toggle action, and presses on non-interactive content inside it
-/// fall through to it), so those three are legal everywhere; the
-/// remaining value/text handlers
+/// decoration only. A bound `on-press`/`on-double-press`/`on-toggle`/
+/// `on-hold`/`on-drag` makes any element a hit target (widget-level: the
+/// handler stamps a press/toggle/drag action, and presses on
+/// non-interactive content inside it fall through to it), so those are
+/// legal everywhere; the remaining value/text handlers
 /// (`on-change`/`on-submit`/`on-input`) have no behavior to bind to on
 /// these elements and stay validation errors. Registry-derived from the
 /// `hit_target` element predicate, which mirrors the engine's kind
@@ -1177,7 +1177,7 @@ pub const autofocus_element_message = "autofocus is only supported on focusable 
 
 pub const submit_on_enter_element_message = "submit-on-enter is only supported on textarea - it makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; single-line fields already submit on Enter, and other elements have no multiline Enter policy";
 
-pub const non_hit_target_handler_message = "on-change/on-submit/on-input never fire here: this element has no control or text behavior - put them on a control (input, checkbox, slider) inside it (on-press/on-double-press/on-toggle are fine anywhere: a bound press handler makes any element pressable, and clicks on plain text or icons inside it fall through to it)";
+pub const non_hit_target_handler_message = "on-change/on-submit/on-input never fire here: this element has no control or text behavior - put them on a control (input, checkbox, slider) inside it (on-press/on-double-press/on-toggle/on-hold/on-drag are fine anywhere: they make any element interactive, and presses on plain text or icons inside it fall through to it)";
 
 /// Elements whose widget kind layers its children on top of each other
 /// (every child gets the full content box), so `gap` can never space
@@ -1594,12 +1594,17 @@ fn inlineSeparatorNode(source: []const u8, start: usize, end: usize) MarkupNode 
 }
 
 /// Whether an element can HOST a context-menu: right-click resolution
-/// walks the hit route, so the host must be a hit target — or carry a
-/// bound on-press/on-hold, which makes any element pressable. Shared by
-/// the validator and both engines; comptime-callable.
+/// walks the hit route, so the host must be a hit target — or carry any
+/// handler that stamps a press/toggle/drag action and therefore makes an
+/// otherwise structural element a hit target. Shared by the validator
+/// and both engines; comptime-callable.
 pub fn contextMenuHostEligible(node: MarkupNode) bool {
     if (!nameInList(node.name, &known_non_hit_target_element_names)) return true;
-    return node.attr("on-press") != null or node.attr("on-hold") != null;
+    return node.attr("on-press") != null or
+        node.attr("on-double-press") != null or
+        node.attr("on-toggle") != null or
+        node.attr("on-hold") != null or
+        node.attr("on-drag") != null;
 }
 
 fn a11yNodeHasName(node: MarkupNode) bool {
@@ -1922,7 +1927,7 @@ pub const series_color_message = "series color takes a literal color token name 
 pub const series_label_message = "series label expects text (a literal or one {binding}) - it names the series in the chart's semantics summary";
 pub const series_children_message = "series is a leaf - it takes no children; the values binding carries its data";
 pub const context_menu_parent_message = "context-menu must be a DIRECT child of the element whose right-click it answers - a conditional menu goes inside: wrap the menu-items in if/else, not the context-menu itself";
-pub const context_menu_host_message = "context-menu attaches to the element that takes the right-click, and this element is never a hit target - put the menu on the pressable element (list-item, button, panel, ...) or bind on-press on this one";
+pub const context_menu_host_message = "context-menu attaches to the element that takes the right-click, and this element is never a hit target - put the menu on an interactive element (list-item, button, panel, ...) or bind on-press/on-double-press/on-toggle/on-hold/on-drag on this one";
 pub const context_menu_single_message = "an element takes at most one context-menu - one right-click, one menu; swap its items with if/else INSIDE the menu";
 pub const context_menu_attrs_message = "context-menu takes no attributes - presentation belongs to the platform (the OS menu where the host has one, the anchored fallback surface elsewhere)";
 pub const context_menu_children_message = "context-menu takes menu-item and separator children (if/else/for around them are fine) - the items present through the platform's menu, so other elements cannot render there";

@@ -550,7 +550,7 @@ pub fn canvasWidgetClipsContent(widget: canvas.Widget) bool {
 
 pub fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
     // Widget-level hit-target-ness lives in one place (canvas
-    // widget_access.zig: kind predicate plus bound press/toggle handlers)
+    // widget_access.zig: kind predicate plus bound press/toggle/drag handlers)
     // so the runtime, the engines' hit test, and the markup validation of
     // pointer handlers can never drift.
     return canvas.widgetIsHitTarget(widget);

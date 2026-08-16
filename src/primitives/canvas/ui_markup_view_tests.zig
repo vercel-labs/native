@@ -28,6 +28,16 @@ pub const Msg = union(enum) {
     toggle: u32,
     set_filter: Filter,
     draft: canvas.TextInputEvent,
+    drag: DragPayload,
+};
+
+pub const DragPayload = struct {
+    sourceId: usize,
+    phase: u8,
+    x: f32,
+    y: f32,
+    viewWidth: f32,
+    viewHeight: f32,
 };
 
 pub const Model = struct {
@@ -1207,6 +1217,35 @@ pub const context_menu_markup_source =
     \\  </for>
     \\</column>
 ;
+
+pub const drag_context_menu_markup_source =
+    \\<row on-drag="drag:{open_count}" label="Draggable row">
+    \\  <text>Drag me</text>
+    \\  <context-menu>
+    \\    <menu-item on-press="add">Duplicate</menu-item>
+    \\  </context-menu>
+    \\</row>
+;
+
+test "a drag-only layout element can host a context menu" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = testModel();
+
+    var parser = canvas.ui_markup.Parser.init(arena, drag_context_menu_markup_source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+    var view = try InboxMarkup.init(arena, drag_context_menu_markup_source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expect(tree.root.semantics.actions.drag);
+    try testing.expect(canvas.widgetIsHitTarget(tree.root));
+    try testing.expect(canvas.widgetClaimsPress(tree.root));
+    try testing.expectEqual(@as(usize, 1), tree.root.context_menu.len);
+    try testing.expectEqualStrings("Duplicate", tree.root.context_menu[0].label);
+    try testing.expectEqual(Msg.add, tree.msgForContextMenu(tree.root.id, 0).?);
+}
 
 test "markup context-menus lower to declared platform-menu items on their host" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);

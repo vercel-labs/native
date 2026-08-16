@@ -162,6 +162,26 @@ fn compileInbox(arena: std.mem.Allocator, model: *const fixture.Model) !InboxUi.
 }
 
 const ContextMenuCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.context_menu_markup_source);
+const DragContextMenuCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.drag_context_menu_markup_source);
+
+test "compiled drag-only context-menu host matches the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.testModel();
+
+    var interpreter_view = try InboxInterpreter.init(arena, fixture.drag_context_menu_markup_source);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter_view.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(DragContextMenuCompiled.build(&compiled_ui, &model));
+
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+    try testing.expect(compiled.root.semantics.actions.drag);
+    try testing.expect(canvas.widgetClaimsPress(compiled.root));
+    try testing.expectEqual(fixture.Msg.add, compiled.msgForContextMenu(compiled.root.id, 0).?);
+}
 
 test "compiled context-menus build the interpreter's declared items and handler entries exactly" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
