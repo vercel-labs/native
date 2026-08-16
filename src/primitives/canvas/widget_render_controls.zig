@@ -830,7 +830,7 @@ pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
             .radius = radius,
-            .fill = widgetBackgroundFill(widget, fill),
+            .fill = colorFill(fill),
         });
     }
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 2);
@@ -902,7 +902,7 @@ pub fn emitDataCellWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
         try builder.fillRect(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
-            .fill = widgetBackgroundFill(widget, state_fill),
+            .fill = colorFill(state_fill),
         });
     }
     // Borderless by default: the table's chrome is its hairline ROW

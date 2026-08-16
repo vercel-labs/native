@@ -1826,6 +1826,93 @@ test "the quiet-surface knob silences the hover wash and nothing else" {
     try std.testing.expect(focused_builder.displayList().findCommandById(widgetPartId(74, 2)) != null);
 }
 
+test "actionable layout containers paint the row hover and pressed ladder in both emit paths" {
+    const tokens = DesignTokens{};
+    inline for (.{ WidgetKind.row, WidgetKind.column, WidgetKind.stack }) |kind| {
+        const base = Widget{
+            .id = 75,
+            .kind = kind,
+            .frame = geometry.RectF.init(0, 0, 160, 40),
+            .semantics = .{ .actions = .{ .press = true } },
+        };
+
+        var hovered = base;
+        hovered.state.hovered = true;
+        var commands: [4]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, hovered, tokens);
+        switch (builder.displayList().findCommandById(widgetPartId(75, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        // The laid-out/live emitter resolves the same state and part slot.
+        var nodes: [1]WidgetLayoutNode = undefined;
+        const layout = try layoutWidgetTree(hovered, hovered.frame, &nodes);
+        var layout_commands: [4]CanvasCommand = undefined;
+        var layout_builder = Builder.init(&layout_commands);
+        try layout.emitDisplayList(&layout_builder, tokens);
+        switch (layout_builder.displayList().findCommandById(widgetPartId(75, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        var pressed = base;
+        pressed.state.pressed = true;
+        var pressed_commands: [4]CanvasCommand = undefined;
+        var pressed_builder = Builder.init(&pressed_commands);
+        try emitWidgetTree(&pressed_builder, pressed, tokens);
+        switch (pressed_builder.displayList().findCommandById(widgetPartId(75, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_pressed, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        var quiet = hovered;
+        quiet.style.quiet_hover = true;
+        var quiet_commands: [4]CanvasCommand = undefined;
+        var quiet_builder = Builder.init(&quiet_commands);
+        try emitWidgetTree(&quiet_builder, quiet, tokens);
+        try std.testing.expect(quiet_builder.displayList().findCommandById(widgetPartId(75, 1)) == null);
+    }
+}
+
+test "house alert card and panel surfaces have visible hover and pressed fallbacks" {
+    const tokens = DesignTokens{};
+    const cases = [_]struct { kind: WidgetKind, fill_slot: u4 }{
+        .{ .kind = .alert, .fill_slot = 1 },
+        .{ .kind = .card, .fill_slot = 1 },
+        .{ .kind = .panel, .fill_slot = 2 },
+    };
+    for (cases) |case| {
+        const base = Widget{
+            .id = 76,
+            .kind = case.kind,
+            .frame = geometry.RectF.init(0, 0, 160, 48),
+            .semantics = .{ .actions = .{ .press = true } },
+        };
+
+        var hovered = base;
+        hovered.state.hovered = true;
+        var hovered_commands: [8]CanvasCommand = undefined;
+        var hovered_builder = Builder.init(&hovered_commands);
+        try emitWidgetTree(&hovered_builder, hovered, tokens);
+        switch (hovered_builder.displayList().findCommandById(widgetPartId(76, case.fill_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        var pressed = base;
+        pressed.state.pressed = true;
+        var pressed_commands: [8]CanvasCommand = undefined;
+        var pressed_builder = Builder.init(&pressed_commands);
+        try emitWidgetTree(&pressed_builder, pressed, tokens);
+        switch (pressed_builder.displayList().findCommandById(widgetPartId(76, case.fill_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_pressed, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
 test "icon buttons draw registry names as vector icons and keep the glyph fallback" {
     const tokens = DesignTokens{};
     const vector = Widget{

@@ -710,8 +710,25 @@ pub fn listItemFillColor(widget: Widget, tokens: DesignTokens, state: WidgetStat
     else if (hovered)
         tokens.colors.surface_subtle
     else
-        transparentColor();
+        widget.style.background orelse transparentColor();
     return controlStateBackground(visual, state.pressed, state.selected or state.pressed, hovered, fallback);
+}
+
+/// Surface chrome uses the same neutral feedback ladder as an actionable
+/// row when its theme does not state state-specific colors: surface at
+/// rest, subtle on hover, pressed on selection/press. A themed active or
+/// hover fill remains authoritative, and a locally authored background is
+/// the surface's explicit all-state override.
+pub fn surfaceStateBackground(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    const active = widget.state.pressed or widget.state.selected;
+    const hovered = washHovered(widget);
+    const fallback = if (active)
+        tokens.colors.surface_pressed
+    else if (hovered)
+        tokens.colors.surface_subtle
+    else
+        tokens.colors.surface;
+    return widgetBackgroundColor(widget, buttonStateBackground(visual, active, hovered, fallback));
 }
 
 pub fn transparentColor() Color {
