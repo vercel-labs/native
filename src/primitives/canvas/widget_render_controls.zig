@@ -1252,7 +1252,7 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         // track and on the dark input wash alike. Disabled washes it to
         // half strength with the track instead of swapping to gray.
         .fill = colorFill(disabledWash(
-            if (selected) widget.style.accent_foreground orelse visual.foreground orelse tokens.colors.accent_text else widget.style.background orelse visual.foreground orelse tokens.colors.accent_text,
+            widget.style.accent_foreground orelse visual.foreground orelse tokens.colors.accent_text,
             widget.state.disabled,
             tokens.states.disabled_alpha,
         )),

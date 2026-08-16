@@ -599,6 +599,31 @@ test "compact radio and switch chrome stays circular and disabled selection fill
     }
 }
 
+test "an off switch keeps authored track and thumb colors on separate channels" {
+    const track_color = Color.rgb8(12, 34, 56);
+    const thumb_color = Color.rgb8(240, 244, 248);
+    const toggle = Widget{
+        .id = 69,
+        .kind = .switch_control,
+        .frame = geometry.RectF.init(0, 0, 80, 32),
+        .style = .{
+            .background = track_color,
+            .accent_foreground = thumb_color,
+        },
+    };
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, toggle, .{});
+    switch (builder.displayList().findCommandById(widgetPartId(69, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(track_color, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (builder.displayList().findCommandById(widgetPartId(69, 3)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(thumb_color, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "app-registered icons draw through the widget paths like built-ins" {
     var buffer = canvas.svg_icon.IconBuffer{};
     const parsed = try canvas.svg_icon.parse(
