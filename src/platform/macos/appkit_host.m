@@ -99,9 +99,11 @@ static void *NativeSdkAppKitVideoTimeControlContext = &NativeSdkAppKitVideoTimeC
 /* Render-thread ring state for the spectrum tap; defined with the rest
  * of the spectrum machinery in the audio section below. */
 typedef struct native_sdk_spectrum_tap_state native_sdk_spectrum_tap_state_t;
+static NSScreen *NativeSdkPrimaryScreen(void);
 static NSScreen *NativeSdkScreenForFrame(NSRect frame);
 static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
 static NSRect NativeSdkConstrainFrame(NSRect frame);
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen);
 static NSString *NativeSdkAppKitBridgeScript(void);
 static NSString *NativeSdkMenuKeyEquivalent(NSString *key);
 static NSString *NativeSdkMimeTypeForPath(NSString *path);
@@ -7793,11 +7795,15 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
 
     (void)restoreFrame; // Persistence opt-in; initialPlacement says whether a frame was found.
+    const BOOL restoredPlacement = initialPlacement == 0;
     // A restored center policy deliberately discards only the saved origin;
-    // its saved size still creates the window before AppKit centers it.
-    const BOOL centerOnPrimary = initialPlacement == 2 || (initialPlacement == 0 && restorePolicy == 1);
+    // its saved OUTER size is reapplied after construction below. Fresh
+    // frames remain content rectangles, preserving the public width/height
+    // contract for authored windows.
+    const BOOL centerOnPrimary = initialPlacement == 2 || (restoredPlacement && restorePolicy == 1);
+    NSScreen *primaryScreen = NativeSdkPrimaryScreen();
     NSRect rect = centerOnPrimary
-        ? NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), [NSScreen mainScreen])
+        ? NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), primaryScreen)
         : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
                                   NSWindowStyleMaskClosable |
@@ -7880,8 +7886,17 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         window.toolbarStyle = NSWindowToolbarStyleUnified;
         window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
     }
-    if (centerOnPrimary) {
-        [window center];
+    if (restoredPlacement) {
+        NSRect restoredFrame = restorePolicy == 1
+            ? NativeSdkCenterFrameOnScreen(NSMakeRect(0, 0, width, height), primaryScreen)
+            : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
+        // Window-state events persist NSWindow.frame (the OUTER frame).
+        // Reapply it through setFrame rather than feeding it to
+        // initWithContentRect, which would add the titlebar again and grow
+        // the window on every launch.
+        [window setFrame:restoredFrame display:NO];
+    } else if (centerOnPrimary) {
+        [window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];
         // AppKit centers every new window by default, which leaves a
         // model-declared secondary window exactly covering the editor that
         // opened it. Cascade from the active window like Win32's default
@@ -7909,7 +7924,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
     if (makeMain) NativeSdkLaunchLap("window_chrome_ready");
 
-    NSView *container = [[NSView alloc] initWithFrame:rect];
+    NSView *container = [[NSView alloc] initWithFrame:window.contentView.bounds];
     container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = container;
     // The window's MAIN WebView is created lazily
@@ -9223,6 +9238,12 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
 }
 
+static NSScreen *NativeSdkPrimaryScreen(void) {
+    // AppKit's mainScreen follows the key window. The first screen is the
+    // menu-bar display: macOS's primary screen and the policy contract.
+    return [NSScreen screens].firstObject ?: [NSScreen mainScreen];
+}
+
 static NSScreen *NativeSdkScreenForFrame(NSRect frame) {
     NSArray<NSScreen *> *screens = [NSScreen screens];
     NSScreen *bestScreen = nil;
@@ -9270,6 +9291,15 @@ static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen) {
 
 static NSRect NativeSdkConstrainFrame(NSRect frame) {
     return NativeSdkConstrainFrameToScreen(frame, NativeSdkScreenForFrame(frame));
+}
+
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen) {
+    frame = NativeSdkConstrainFrameToScreen(frame, screen);
+    if (!screen) return frame;
+    NSRect visible = screen.visibleFrame;
+    frame.origin.x = NSMidX(visible) - NSWidth(frame) / 2.0;
+    frame.origin.y = NSMidY(visible) - NSHeight(frame) / 2.0;
+    return NativeSdkConstrainFrameToScreen(frame, screen);
 }
 
 static NSString *NativeSdkAppKitBridgeScript(void) {

@@ -110,6 +110,7 @@ pub const RunOptions = struct {
             // shown after its first canvas frame presents, so launch
             // never flashes a blank window.
             info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);
+            info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);
             info.main_window.titlebar = manifestShellStartupTitlebar();
             info.main_window.resizable = manifestShellStartupResizable();
             info.main_window.restore_policy = manifestShellStartupRestorePolicy();
@@ -444,6 +445,16 @@ fn manifestShellStartupFrame(fallback: native_sdk.geometry.RectF) native_sdk.geo
 
 fn windowFloatFallback(comptime window: anytype, comptime field: []const u8, fallback: f32) f32 {
     if (comptime @hasField(@TypeOf(window), field)) return @field(window, field);
+    return fallback;
+}
+
+fn manifestShellStartupRestoreState(fallback: bool) bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    if (comptime @hasField(@TypeOf(window), "restore_state")) return window.restore_state;
     return fallback;
 }
 

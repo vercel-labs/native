@@ -93,9 +93,11 @@ static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
     return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;
 }
 static const char *NativeSdkCefBridgeScript();
+static NSScreen *NativeSdkPrimaryScreen(void);
 static NSScreen *NativeSdkScreenForFrame(NSRect frame);
 static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
 static NSRect NativeSdkConstrainFrame(NSRect frame);
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
 static NSURL *NativeSdkAssetEntryFileURL(NSString *rootPath, NSString *entryPath);
 static NSString *NativeSdkSafeAssetPath(NSURL *url, NSString *entryPath);
@@ -380,6 +382,10 @@ static NSString *NativeSdkCefFrameworkPath(void) {
     return [devRoot stringByAppendingPathComponent:@"Release/Chromium Embedded Framework.framework"];
 }
 
+static NSScreen *NativeSdkPrimaryScreen(void) {
+    return [NSScreen screens].firstObject ?: [NSScreen mainScreen];
+}
+
 static NSScreen *NativeSdkScreenForFrame(NSRect frame) {
     NSArray<NSScreen *> *screens = [NSScreen screens];
     NSScreen *bestScreen = nil;
@@ -425,6 +431,15 @@ static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen) {
 
 static NSRect NativeSdkConstrainFrame(NSRect frame) {
     return NativeSdkConstrainFrameToScreen(frame, NativeSdkScreenForFrame(frame));
+}
+
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen) {
+    frame = NativeSdkConstrainFrameToScreen(frame, screen);
+    if (!screen) return frame;
+    NSRect visible = screen.visibleFrame;
+    frame.origin.x = NSMidX(visible) - NSWidth(frame) / 2.0;
+    frame.origin.y = NSMidY(visible) - NSHeight(frame) / 2.0;
+    return NativeSdkConstrainFrameToScreen(frame, screen);
 }
 
 static const char *NativeSdkCefBridgeScript() {
@@ -1055,9 +1070,11 @@ static const char *NativeSdkCefBridgeScript() {
     if (self.windows[key]) return NO;
 
     (void)restoreFrame; // Persistence opt-in; initialPlacement says whether a frame was found.
-    const BOOL centerOnPrimary = initialPlacement == 2 || (initialPlacement == 0 && restorePolicy == 1);
+    const BOOL restoredPlacement = initialPlacement == 0;
+    const BOOL centerOnPrimary = initialPlacement == 2 || (restoredPlacement && restorePolicy == 1);
+    NSScreen *primaryScreen = NativeSdkPrimaryScreen();
     NSRect rect = centerOnPrimary
-        ? NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), [NSScreen mainScreen])
+        ? NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), primaryScreen)
         : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
                                   NSWindowStyleMaskClosable |
@@ -1083,8 +1100,16 @@ static const char *NativeSdkCefBridgeScript() {
         [window standardWindowButton:NSWindowZoomButton].enabled = NO;
     }
     [window setTitle:title.length > 0 ? title : @"native-sdk"];
-    if (centerOnPrimary) {
-        [window center];
+    if (restoredPlacement) {
+        NSRect restoredFrame = restorePolicy == 1
+            ? NativeSdkCenterFrameOnScreen(NSMakeRect(0, 0, width, height), primaryScreen)
+            : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
+        // Persisted geometry is NSWindow.frame, not a content rectangle.
+        // Using setFrame keeps the saved outer dimensions stable instead of
+        // adding non-client chrome on every relaunch.
+        [window setFrame:restoredFrame display:NO];
+    } else if (centerOnPrimary) {
+        [window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];
         // Match the system-WebView host and Win32's default placement:
         // secondary windows should reveal the window that opened them,
         // not land directly on top of it.
@@ -1107,7 +1132,7 @@ static const char *NativeSdkCefBridgeScript() {
         }
     }
 
-    NSView *stackRoot = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+    NSView *stackRoot = [[NSView alloc] initWithFrame:window.contentView.bounds];
     stackRoot.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = stackRoot;
 

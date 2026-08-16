@@ -2777,10 +2777,13 @@ test "mac unrestored secondary windows cascade within the active screen" {
 
 test "both mac hosts distinguish restored explicit and default placement" {
     for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "initialPlacement == 2 || (initialPlacement == 0 && restorePolicy == 1)") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), [NSScreen mainScreen])") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "const BOOL restoredPlacement = initialPlacement == 0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "initialPlacement == 2 || (restoredPlacement && restorePolicy == 1)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), primaryScreen)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrame(NSMakeRect(x, y, width, height))") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window center]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "return [NSScreen screens].firstObject ?: [NSScreen mainScreen]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:restoredFrame display:NO]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO]") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "initialPlacement == 2 && restorePolicy == 0 && !makeMain && referenceWindow") != null);
     }
 }
