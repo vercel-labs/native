@@ -2083,10 +2083,14 @@ test "text editing affordance colors resolve tokens and per-widget overrides" {
     try std.testing.expectEqual(Color.rgb8(4, 5, 6).r, styled_wash.r);
     try std.testing.expectApproxEqAbs(@as(f32, 0.3), styled_wash.a, 0.001);
 
-    // A disabled field's ink mutes with its text.
+    // A disabled field keeps its resolved text identity at the shared
+    // disabled-wash strength instead of swapping to a flat gray.
     var disabled = field;
     disabled.state.disabled = true;
-    try std.testing.expectEqualDeep(tokens.colors.text_muted, textEditingInkColor(disabled, tokens));
+    try std.testing.expectEqualDeep(
+        Color.rgba(tokens.colors.text.r, tokens.colors.text.g, tokens.colors.text.b, tokens.states.disabled_alpha),
+        textEditingInkColor(disabled, tokens),
+    );
 }
 
 test "widget text fields render wrapped selection geometry" {

@@ -3025,7 +3025,7 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = widgetBorderFill(widget, badgeBorderColor(widget, tokens, visual)),
+            .fill = colorFill(badgeBorderColor(widget, tokens, visual)),
             .width = badgeStrokeWidth(widget, tokens, visual),
         },
     }));

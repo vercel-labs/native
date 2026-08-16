@@ -934,6 +934,66 @@ test "button disabled border override does not require a disabled background" {
     try expectFillColor(disabled_border, buttonBorderFill(button, tokens));
 }
 
+test "disabled colors wash resolved identity and secondary accents use the accent channel" {
+    const style_mod = @import("widget_render_style.zig");
+    const tokens = DesignTokens{};
+    const accent = Color.rgb8(180, 24, 48);
+    const accent_foreground = Color.rgb8(250, 226, 232);
+    const foreground = Color.rgb8(36, 92, 148);
+    const background = Color.rgb8(24, 56, 88);
+    const washed_accent = Color.rgba(accent.r, accent.g, accent.b, tokens.states.disabled_alpha);
+    const washed_accent_foreground = Color.rgba(accent_foreground.r, accent_foreground.g, accent_foreground.b, tokens.states.disabled_alpha);
+    const washed_foreground = Color.rgba(foreground.r, foreground.g, foreground.b, tokens.states.disabled_alpha);
+    const washed_background = Color.rgba(background.r, background.g, background.b, tokens.states.disabled_alpha);
+
+    const disabled = Widget{
+        .kind = .text,
+        .state = .{ .disabled = true },
+        .style = .{
+            .foreground = foreground,
+            .accent_foreground = accent_foreground,
+        },
+    };
+    try std.testing.expectEqualDeep(washed_foreground, style_mod.widgetForegroundColor(disabled, tokens, tokens.colors.text));
+    try std.testing.expectEqualDeep(washed_accent_foreground, style_mod.widgetAccentForegroundColor(disabled, tokens, tokens.colors.accent_text));
+
+    const secondary = Widget{
+        .kind = .button,
+        .variant = .secondary,
+        .style = .{ .accent = accent },
+    };
+    try std.testing.expectEqualDeep(accent, style_mod.buttonFillColor(secondary, tokens));
+    try expectFillColor(accent, style_mod.buttonBorderFill(secondary, tokens));
+
+    const disabled_input = Widget{
+        .kind = .text_field,
+        .state = .{ .disabled = true },
+        .style = .{ .background = background },
+    };
+    try expectFillColor(washed_background, style_mod.textInputFill(disabled_input, tokens, .{}));
+
+    const secondary_badge = Widget{
+        .kind = .badge,
+        .variant = .secondary,
+        .style = .{ .accent = accent },
+    };
+    try std.testing.expectEqualDeep(accent, style_mod.badgeBackgroundColor(secondary_badge, tokens, .{}));
+    try std.testing.expectEqualDeep(accent, style_mod.badgeBorderColor(secondary_badge, tokens, .{}));
+
+    const disabled_destructive_badge = Widget{
+        .kind = .badge,
+        .variant = .destructive,
+        .state = .{ .disabled = true },
+        .style = .{
+            .accent = accent,
+            .accent_foreground = accent_foreground,
+        },
+    };
+    try std.testing.expectEqualDeep(washed_accent, style_mod.badgeBackgroundColor(disabled_destructive_badge, tokens, .{}));
+    try std.testing.expectEqualDeep(washed_accent, style_mod.badgeBorderColor(disabled_destructive_badge, tokens, .{}));
+    try std.testing.expectEqualDeep(washed_accent_foreground, style_mod.badgeTextColor(disabled_destructive_badge, tokens, .{}));
+}
+
 /// The flush-group segment assertions, shared by the tree-walk and
 /// layout-walk halves of the test below so the two emission paths are
 /// pinned to the SAME bar: leading corners on the first segment,
