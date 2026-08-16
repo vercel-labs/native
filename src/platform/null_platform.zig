@@ -445,6 +445,10 @@ pub const NullPlatform = struct {
     /// seam-regression purpose as `window_resizable`.
     window_min_width: [max_windows]f32 = [_]f32{0} ** max_windows,
     window_min_height: [max_windows]f32 = [_]f32{0} ** max_windows,
+    /// Captured `WindowOptions.window_controls_offset` per created
+    /// window: only macOS acts on it, so nothing else would notice a
+    /// caller's offset being dropped before the create.
+    window_controls_offset: [max_windows]geometry.PointF = [_]geometry.PointF{geometry.PointF.init(0, 0)} ** max_windows,
     /// Live visibility per window, modeling the macOS host: immediate
     /// windows are visible at create; `.on_first_present` windows stay
     /// hidden until their first gpu-surface present (or an explicit
@@ -1166,6 +1170,7 @@ pub const NullPlatform = struct {
         self.window_close_policy[self.window_count] = options.close_policy;
         self.window_min_width[self.window_count] = options.min_width;
         self.window_min_height[self.window_count] = options.min_height;
+        self.window_controls_offset[self.window_count] = options.window_controls_offset;
         self.window_first_present_seq[self.window_count] = 0;
         // Present-before-show: deferred windows are created hidden and
         // become visible on their first gpu-surface present.
