@@ -2031,9 +2031,17 @@ test "a surface anchored to the scroll region itself never rides its content" {
         .{ .widget = .{ .id = 1, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 180, 72) }, .frame = geometry.RectF.init(0, 0, 180, 72), .depth = 0 },
         .{ .widget = .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 160, 200) }, .frame = geometry.RectF.init(0, 0, 160, 200), .depth = 1, .parent_index = 0 },
         .{ .widget = .{ .id = 4, .kind = .popover, .frame = geometry.RectF.init(20, 40, 100, 30), .layout = .{ .anchor = .{ .placement = .below } } }, .frame = geometry.RectF.init(20, 40, 100, 30), .depth = 2, .parent_index = 1 },
-        .{ .widget = .{ .id = 3, .kind = .popover, .frame = geometry.RectF.init(10, 72, 100, 30), .layout = .{ .anchor = .{ .placement = .below } } }, .frame = geometry.RectF.init(10, 72, 100, 30), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 3, .kind = .popover, .frame = geometry.RectF.init(10, 72, 100, 30), .layout = .{ .anchor = .{ .placement = .below } }, .semantics = .{ .focusable = true } }, .frame = geometry.RectF.init(10, 72, 100, 30), .depth = 1, .parent_index = 0 },
     };
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    // Programmatic reveal recognizes that the target itself is hoisted:
+    // it can take focus without scrolling the region behind it.
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 3, .action = .focus });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 72, 100, 30), retained.findById(3).?.frame);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -2045,7 +2053,7 @@ test "a surface anchored to the scroll region itself never rides its content" {
         .delta_y = 24,
     } });
 
-    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 24), retained.findById(1).?.widget.value);
     // Content and the content-anchored surface moved up together...
     try std.testing.expectEqualDeep(geometry.RectF.init(0, -24, 160, 200), retained.findById(2).?.frame);

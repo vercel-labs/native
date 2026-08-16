@@ -478,11 +478,14 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             if (view_index >= self.view_count) return error.ViewNotFound;
             // Programmatic focus names logical targets before applying the
             // pointer path's geometry clip. The shared keyboard/autofocus
-            // reveal seam scrolls every runtime-owned ancestor, reconciles,
-            // and only then returns an ordinary visible focus target.
+            // reveal seam scrolls every runtime-owned ancestor. Preflight
+            // the reveal before platform focus, then focus the view before
+            // committing any retained scroll mutation: a rejected platform
+            // focus leaves the canvas byte-for-byte where it was.
+            if (!CanvasWidgetEventMethods().canRevealCanvasWidgetFocusTarget(self, view_index, id)) return error.InvalidCommand;
+            try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
             const reveal = try CanvasWidgetEventMethods().revealCanvasWidgetFocusTarget(self, view_index, id) orelse return error.InvalidCommand;
             const target = reveal.target;
-            try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
             // Programmatic focus (autofocus, automation `focus`) follows
             // the pointer contract, not the keyboard one: buttons and
             // rows take focus QUIETLY (no ring), editable text kinds show

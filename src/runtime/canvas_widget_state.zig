@@ -13,6 +13,7 @@ const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_view = @import("view.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_automation_widget_dispatch = @import("automation_widget_dispatch.zig");
+const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const widget_bridge = @import("widget_bridge.zig");
 
 const validateViewLabel = validation.validateViewLabel;
@@ -355,6 +356,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 .drop_files => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetFileDrop(self, app, index, action.id, action.text),
                 .dismiss => try AutomationWidgetMethods(Runtime).dismissAutomationCanvasWidget(self, app, index, action.id),
             }
+            // A direct focus action can reveal an offscreen target without
+            // passing through the GPU input dispatcher. Deliver the pending
+            // scroll observation in this semantic-action transaction too,
+            // rather than leaving it parked until unrelated future input.
+            try runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime).dispatchPendingCanvasWidgetScrollEvents(self, app, index);
             // Key-driven action routes above dispatch real input events
             // whose refresh batches defer the platform publish; the AX
             // client reads the tree next, so force-flush here too.

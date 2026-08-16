@@ -939,8 +939,25 @@ test "failed automation focus reveal preserves ancestor scroll and prior focus" 
 
 test "automation focus reveals an offscreen field and its end caret" {
     const TestApp = struct {
+        scroll_event_count: u32 = 0,
+        last_scroll_id: canvas.ObjectId = 0,
+        last_scroll: canvas.ScrollState = .{},
+
         fn app(self: *@This()) App {
-            return .{ .context = self, .name = "gpu-widget-automation-focus-reveal", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+            return .{ .context = self, .name = "gpu-widget-automation-focus-reveal", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_scroll => |scroll_event| {
+                    self.scroll_event_count += 1;
+                    self.last_scroll_id = scroll_event.id;
+                    self.last_scroll = scroll_event.scroll;
+                },
+                else => {},
+            }
         }
     };
 
@@ -975,6 +992,10 @@ test "automation focus reveals an offscreen field and its end caret" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
 
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .focus });
+    try std.testing.expectEqual(@as(u32, 1), app_state.scroll_event_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 1), app_state.last_scroll_id);
+    try std.testing.expect(app_state.last_scroll.offset_y > 0);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].widget_scroll_event_count);
 
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     const scroll = retained.findById(1).?;
@@ -991,6 +1012,56 @@ test "automation focus reveals an offscreen field and its end caret" {
     const caret = text_geometry.caret_bounds.?;
     try std.testing.expect(caret.x >= field_viewport.x - 0.001);
     try std.testing.expect(caret.maxX() <= field_viewport.maxX() + 0.001);
+}
+
+test "failed view focus leaves automation reveal scroll untouched" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-focus-reveal-rollback", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 64),
+        .visible = false,
+    });
+
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 96, 96, 32),
+        .text = "Hidden view action",
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &children },
+        geometry.RectF.init(0, 0, 180, 64),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const before = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const target_frame = before.findById(2).?.frame;
+
+    try std.testing.expectError(
+        error.UnsupportedViewFocus,
+        harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .focus }),
+    );
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(target_frame, retained.findById(2).?.frame);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].widget_scroll_event_count);
 }
 
 test "runtime keeps programmatic focus quiet on buttons and rings editables" {

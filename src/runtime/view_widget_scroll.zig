@@ -411,6 +411,10 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             // that attempt used to jump the viewport (and could clear the
             // old focus) before the caller rejected the still-hidden target.
             if (!canvasWidgetCanScrollIntoView(self, target_index)) return null;
+            // The target itself is a hoisted window-level surface. Its
+            // authored scroll ancestors neither clip nor translate it, so
+            // revealing it must not move the content underneath it.
+            if (canvas.widgetEscapesAncestorClips(self.widget_layout_nodes[target_index].widget)) return null;
             var dirty: ?geometry.RectF = null;
             var current = self.widget_layout_nodes[target_index].parent_index;
             while (current) |ancestor_index| {
@@ -445,6 +449,14 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             return dirty;
         }
 
+        /// Pure preflight for the fallible focus/reveal sequence. Callers
+        /// can validate the entire scroll path before changing platform
+        /// focus or retained scroll offsets.
+        pub fn canScrollCanvasWidgetIntoView(self: *const RuntimeView, id: canvas.ObjectId) bool {
+            const target_index = self.canvasWidgetNodeIndexById(id) orelse return false;
+            return canvasWidgetCanScrollIntoView(self, target_index);
+        }
+
         /// Dry-run `scrollCanvasWidgetIntoView` against one target frame.
         /// Inner scrolls translate the target before each outer clip is
         /// tested, exactly like the live walk, but no retained scroll state,
@@ -454,6 +466,11 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (target_index >= self.widget_layout_node_count) return false;
             var target = self.widget_layout_nodes[target_index].frame.normalized();
             if (target.isEmpty()) return false;
+
+            // A window-level target escapes every ancestor clip at its own
+            // tree position. There is therefore nothing to reveal through
+            // the authored ancestor chain.
+            if (canvas.widgetEscapesAncestorClips(self.widget_layout_nodes[target_index].widget)) return true;
 
             var current = self.widget_layout_nodes[target_index].parent_index;
             while (current) |ancestor_index| {

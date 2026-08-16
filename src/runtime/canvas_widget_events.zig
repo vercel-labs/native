@@ -2883,6 +2883,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             scroll_dirty: ?geometry.RectF,
         };
 
+        /// Validate a programmatic focus reveal without changing retained
+        /// geometry. Automation uses this before asking the platform to
+        /// focus the view, keeping both halves of the operation untouched
+        /// when either the target or the platform focus request is invalid.
+        pub fn canRevealCanvasWidgetFocusTarget(self: *const Runtime, view_index: usize, target_id: canvas.ObjectId) bool {
+            if (view_index >= self.view_count or target_id == 0) return false;
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (layout.focusTargetById(target_id) == null) {
+                const node_index = canvas_widget_runtime.canvasWidgetLayoutNodeIndexById(layout, target_id) orelse return false;
+                _ = canvas_widget_runtime.canvasWidgetLogicalFocusTarget(layout, node_index) orelse return false;
+            }
+            return self.views[view_index].canScrollCanvasWidgetIntoView(target_id);
+        }
+
         /// Resolve a programmatic focus target without applying the pointer
         /// path's geometry clip first, reveal it through runtime-owned scroll
         /// ancestors, then re-verify the ordinary visible focus contract.
