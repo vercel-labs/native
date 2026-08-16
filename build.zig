@@ -832,6 +832,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "examples/hello/src/runner.zig", .pattern = ".initial_placement = if (@hasField(@TypeOf(window), \"x\") or @hasField(@TypeOf(window), \"y\")) .explicit else .default" },
         .{ .path = "examples/hello/src/runner.zig", .pattern = "window.initial_placement = .restored;" },
         .{ .path = "examples/hello/src/runner.zig", .pattern = "app_info.main_window.initial_placement = .restored;" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_policy = manifestShellStartupRestorePolicy();" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.initial_placement = manifestShellStartupInitialPlacement();" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-bridge-view-selector-helpers", "Verify injected view helpers accept string selectors", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "viewSelectorPayload(options)" },

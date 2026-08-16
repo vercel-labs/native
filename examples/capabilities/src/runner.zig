@@ -58,6 +58,10 @@ pub const RunOptions = struct {
         if (windows.len > 0) {
             info.main_window = windows[0];
             info.windows = windows;
+        } else {
+            info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);
+            info.main_window.restore_policy = manifestShellStartupRestorePolicy();
+            info.main_window.initial_placement = manifestShellStartupInitialPlacement();
         }
         return info;
     }
@@ -170,6 +174,45 @@ fn windowRestorePolicy(comptime window: anytype) native_sdk.WindowRestorePolicy 
     if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     @compileError("unknown app.zon window restore_policy");
+}
+
+fn windowHasExplicitOrigin(comptime window: anytype) bool {
+    return @hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y");
+}
+
+fn manifestShellStartupFrame(fallback: native_sdk.geometry.RectF) native_sdk.geometry.RectF {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    return native_sdk.geometry.RectF.init(
+        windowFloatFallback(window, "x", fallback.x),
+        windowFloatFallback(window, "y", fallback.y),
+        windowFloatFallback(window, "width", fallback.width),
+        windowFloatFallback(window, "height", fallback.height),
+    );
+}
+
+fn windowFloatFallback(comptime window: anytype, comptime field: []const u8, fallback: f32) f32 {
+    if (comptime @hasField(@TypeOf(window), field)) return @field(window, field);
+    return fallback;
+}
+
+fn manifestShellStartupRestorePolicy() native_sdk.WindowRestorePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .clamp_to_visible_screen;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .clamp_to_visible_screen;
+    if (comptime shell.windows.len == 0) return .clamp_to_visible_screen;
+    return windowRestorePolicy(shell.windows[0]);
+}
+
+fn manifestShellStartupInitialPlacement() native_sdk.WindowInitialPlacement {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .default;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .default;
+    if (comptime shell.windows.len == 0) return .default;
+    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else .default;
 }
 
 fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {

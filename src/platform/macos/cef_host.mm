@@ -93,6 +93,8 @@ static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
     return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;
 }
 static const char *NativeSdkCefBridgeScript();
+static NSScreen *NativeSdkScreenForFrame(NSRect frame);
+static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
 static NSRect NativeSdkConstrainFrame(NSRect frame);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
 static NSURL *NativeSdkAssetEntryFileURL(NSString *rootPath, NSString *entryPath);
@@ -378,8 +380,38 @@ static NSString *NativeSdkCefFrameworkPath(void) {
     return [devRoot stringByAppendingPathComponent:@"Release/Chromium Embedded Framework.framework"];
 }
 
-static NSRect NativeSdkConstrainFrame(NSRect frame) {
-    NSScreen *screen = [NSScreen mainScreen];
+static NSScreen *NativeSdkScreenForFrame(NSRect frame) {
+    NSArray<NSScreen *> *screens = [NSScreen screens];
+    NSScreen *bestScreen = nil;
+    CGFloat bestArea = 0;
+    for (NSScreen *screen in screens) {
+        NSRect intersection = NSIntersectionRect(frame, screen.visibleFrame);
+        CGFloat area = NSWidth(intersection) * NSHeight(intersection);
+        if (area > bestArea) {
+            bestArea = area;
+            bestScreen = screen;
+        }
+    }
+    if (bestScreen) return bestScreen;
+
+    NSPoint center = NSMakePoint(NSMidX(frame), NSMidY(frame));
+    CGFloat bestDistance = CGFLOAT_MAX;
+    for (NSScreen *screen in screens) {
+        NSRect visible = screen.visibleFrame;
+        CGFloat nearestX = MIN(MAX(center.x, NSMinX(visible)), NSMaxX(visible));
+        CGFloat nearestY = MIN(MAX(center.y, NSMinY(visible)), NSMaxY(visible));
+        CGFloat dx = center.x - nearestX;
+        CGFloat dy = center.y - nearestY;
+        CGFloat distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestScreen = screen;
+        }
+    }
+    return bestScreen ?: [NSScreen mainScreen];
+}
+
+static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen) {
     if (!screen) return frame;
     NSRect visible = screen.visibleFrame;
     if (frame.size.width > visible.size.width) frame.size.width = visible.size.width;
@@ -389,6 +421,10 @@ static NSRect NativeSdkConstrainFrame(NSRect frame) {
     if (NSMaxX(frame) > NSMaxX(visible)) frame.origin.x = NSMaxX(visible) - frame.size.width;
     if (NSMaxY(frame) > NSMaxY(visible)) frame.origin.y = NSMaxY(visible) - frame.size.height;
     return frame;
+}
+
+static NSRect NativeSdkConstrainFrame(NSRect frame) {
+    return NativeSdkConstrainFrameToScreen(frame, NativeSdkScreenForFrame(frame));
 }
 
 static const char *NativeSdkCefBridgeScript() {
@@ -1019,7 +1055,10 @@ static const char *NativeSdkCefBridgeScript() {
     if (self.windows[key]) return NO;
 
     (void)restoreFrame; // Persistence opt-in; initialPlacement says whether a frame was found.
-    NSRect rect = initialPlacement != 2 ? NativeSdkConstrainFrame(NSMakeRect(x, y, width, height)) : NSMakeRect(0, 0, width, height);
+    const BOOL centerOnPrimary = initialPlacement == 2 || (initialPlacement == 0 && restorePolicy == 1);
+    NSRect rect = centerOnPrimary
+        ? NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), [NSScreen mainScreen])
+        : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
                                   NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable;
@@ -1044,13 +1083,13 @@ static const char *NativeSdkCefBridgeScript() {
         [window standardWindowButton:NSWindowZoomButton].enabled = NO;
     }
     [window setTitle:title.length > 0 ? title : @"native-sdk"];
-    if (initialPlacement == 2) {
+    if (centerOnPrimary) {
         [window center];
         // Match the system-WebView host and Win32's default placement:
         // secondary windows should reveal the window that opened them,
         // not land directly on top of it.
         NSWindow *referenceWindow = NSApp.keyWindow ?: self.window;
-        if (restorePolicy == 0 && !makeMain && referenceWindow) {
+        if (initialPlacement == 2 && restorePolicy == 0 && !makeMain && referenceWindow) {
             NSRect referenceFrame = referenceWindow.frame;
             NSRect cascadedFrame = window.frame;
             cascadedFrame.origin.x = NSMinX(referenceFrame) + 24.0;

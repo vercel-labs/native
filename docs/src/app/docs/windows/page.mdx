@@ -15,7 +15,7 @@ const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 The first scene window adopts the startup window; additional scene windows are created through the window service. Secondary windows can also be created imperatively from Zig — or, in apps that [embed web content](/docs/frontend), from trusted JavaScript.
 
-Fresh windows use three-way placement. A successful state-store lookup restores the saved frame. Otherwise, an authored `x` or `y` places the window at that origin (constrained to a visible screen on macOS). With neither saved state nor an explicit origin, macOS centers the main window; secondary windows cascade under the default `clamp_to_visible_screen` policy, while `center_on_primary` keeps them centered. `restore_state = true` is only the persistence opt-in—it no longer makes a first launch look like a restored frame at `(0, 0)`.
+Fresh windows use three-way placement. A successful state-store lookup restores the saved frame. Otherwise, an authored `x` or `y` places the window at that origin (constrained to the matching or nearest visible screen on macOS). With neither saved state nor an explicit origin, macOS centers the main window. Under the default `clamp_to_visible_screen` policy, restored frames stay on their matching or nearest display and fresh secondary windows cascade from the active window; `center_on_primary` centers restored and fresh default frames on the primary display. `restore_state = true` is only the persistence opt-in—it no longer makes a first launch look like a restored frame at `(0, 0)`.
 
 ## Overlay windows
 
@@ -156,7 +156,7 @@ JavaScript creation also accepts `titlebar: "standard" | "hidden_inset" | "hidde
     </tr>
     <tr>
       <td><code>WindowRestorePolicy</code></td>
-      <td>How restored frames are placed, such as clamping to the visible screen or centering on the primary display</td>
+      <td>How macOS places restored and fresh default frames: clamp to the matching/nearest visible screen or center on the primary display</td>
     </tr>
     <tr>
       <td><code>WindowClosePolicy</code></td>
