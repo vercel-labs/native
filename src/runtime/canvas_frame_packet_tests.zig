@@ -725,7 +725,9 @@ test "runtime pixel fallback honors presentation scale without invalidating reta
     try std.testing.expect(!presented_frame.canvas_frame_requires_render);
 }
 
-test "runtime keeps frames with registered images on the packet path" {
+test "runtime keeps raised-budget registered images on the packet path" {
+    comptime std.debug.assert(platform.max_gpu_surface_image_pixel_bytes == runtime_module.max_registered_canvas_image_pixel_bytes_ceiling);
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "gpu-canvas-image-packet", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
@@ -735,6 +737,13 @@ test "runtime keeps frames with registered images on the packet path" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
+    Runtime.initAt(&harness.runtime, .{
+        .platform = harness.null_platform.platform(),
+        .trace_sink = harness.trace_sink.sink(),
+        .max_image_pixel_bytes = platform.max_gpu_surface_image_pixel_bytes,
+        .environ = std.testing.environ,
+    });
+    harness.runtime.dispatch_error_policy = .propagate;
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
 
@@ -745,14 +754,14 @@ test "runtime keeps frames with registered images on the packet path" {
         .frame = geometry.RectF.init(0, 0, 256, 160),
     });
 
-    // A 128px avatar: 64 KiB of RGBA. Serialized as JSON byte arrays this
-    // used to blow the 128 KiB packet JSON bound and evict the WHOLE
-    // frame to the software pixel path (block glyphs live); as an id +
-    // fingerprint reference over the binary upload side-channel it stays
-    // on the packet path.
-    const avatar_side: usize = 128;
-    const avatar_bytes = avatar_side * avatar_side * 4;
-    const avatar = try std.testing.allocator.alloc(u8, avatar_bytes);
+    // A 1024x512 image is 2 MiB: above the default registry tier and the
+    // upload seam's former fixed 1 MiB bound, but inside this runtime's
+    // declared budget. As an id + fingerprint reference over the binary
+    // side-channel it must upload and keep the frame on the packet path.
+    const image_width: usize = 1024;
+    const image_height: usize = 512;
+    const image_bytes = image_width * image_height * 4;
+    const avatar = try std.testing.allocator.alloc(u8, image_bytes);
     defer std.testing.allocator.free(avatar);
     var offset: usize = 0;
     while (offset < avatar.len) : (offset += 4) {
@@ -761,7 +770,7 @@ test "runtime keeps frames with registered images on the packet path" {
         avatar[offset + 2] = 32;
         avatar[offset + 3] = 255;
     }
-    try harness.runtime.registerCanvasImage(42, avatar_side, avatar_side, avatar);
+    try harness.runtime.registerCanvasImage(42, image_width, image_height, avatar);
 
     const commands = [_]canvas.CanvasCommand{
         .{ .fill_rect = .{
@@ -807,9 +816,9 @@ test "runtime keeps frames with registered images on the packet path" {
     // The pixel bytes rode the binary side-channel instead.
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_image_upload_count);
     try std.testing.expectEqual(@as(u64, 42), harness.null_platform.gpu_surface_image_upload_id);
-    try std.testing.expectEqual(avatar_side, harness.null_platform.gpu_surface_image_upload_width);
-    try std.testing.expectEqual(avatar_side, harness.null_platform.gpu_surface_image_upload_height);
-    try std.testing.expectEqual(avatar_bytes, harness.null_platform.gpu_surface_image_upload_byte_len);
+    try std.testing.expectEqual(image_width, harness.null_platform.gpu_surface_image_upload_width);
+    try std.testing.expectEqual(image_height, harness.null_platform.gpu_surface_image_upload_height);
+    try std.testing.expectEqual(image_bytes, harness.null_platform.gpu_surface_image_upload_byte_len);
     try std.testing.expectEqualDeep([4]u8{ 200, 64, 32, 255 }, harness.null_platform.gpuSurfaceImage(42).?.sample_rgba);
 
     // A clean second frame retains the image (no re-upload) and skips.

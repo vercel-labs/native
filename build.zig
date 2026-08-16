@@ -207,6 +207,16 @@ pub fn build(b: *std.Build) void {
             sqliteCompileFlags(),
     });
     desktop_mod.link_libc = true;
+    if (target.result.os.tag == .macos) {
+        const flags: []const []const u8 = if (b.sysroot) |sysroot|
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, b.fmt("-I{s}/usr/include", .{sysroot}) }
+        else
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+        desktop_mod.addCSourceFile(.{ .file = b.path("src/platform/macos/image_fit_test.m"), .flags = flags });
+        desktop_mod.linkFramework("Foundation", .{});
+        desktop_mod.linkFramework("ImageIO", .{});
+        desktop_mod.linkSystemLibrary("objc", .{});
+    }
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
     // Tier-5 crash battery: a child uses the public streamed sink, signals
@@ -1720,6 +1730,7 @@ pub fn build(b: *std.Build) void {
         "examples/calculator/zig-out/package/test-ios-layout/calculator.xcodeproj/xcshareddata/xcschemes/calculator.xcscheme",
         "examples/calculator/zig-out/package/test-ios-layout/Host/uikit_host.m",
         "examples/calculator/zig-out/package/test-ios-layout/Host/native_sdk_app.h",
+        "examples/calculator/zig-out/package/test-ios-layout/Host/apple_image_fit.h",
         "examples/calculator/zig-out/package/test-ios-layout/Host/Info.plist",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/Contents.json",

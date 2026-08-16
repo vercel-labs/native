@@ -519,6 +519,7 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     try dir.createDirPath(io, "Host");
     try writeFile(dir, io, "Host/" ++ ios_tool.host_source_name, ios_tool.host_source);
     try writeFile(dir, io, "Host/" ++ ios_tool.host_header_name, ios_tool.host_header);
+    try writeFile(dir, io, "Host/" ++ ios_tool.host_image_fit_header_name, ios_tool.host_image_fit_header);
     const info_plist = try ios_tool.infoPlistAlloc(allocator, options.metadata);
     defer allocator.free(info_plist);
     try writeFile(dir, io, "Host/Info.plist", info_plist);

@@ -31,9 +31,11 @@ const toolchain = @import("toolchain.zig");
 /// `ios_host` module (src/platform/ios/files.zig).
 pub const host_source = @import("ios_host").uikit_host_m;
 pub const host_header = @import("ios_host").native_sdk_app_h;
+pub const host_image_fit_header = @import("ios_host").apple_image_fit_h;
 
 pub const host_source_name = "uikit_host.m";
 pub const host_header_name = "native_sdk_app.h";
+pub const host_image_fit_header_name = "apple_image_fit.h";
 
 pub const deployment_target = "15.0";
 
@@ -54,6 +56,7 @@ pub fn writeHostSources(io: std.Io, dir_path: []const u8) !void {
     defer dir.close(io);
     try dir.writeFile(io, .{ .sub_path = host_source_name, .data = host_source });
     try dir.writeFile(io, .{ .sub_path = host_header_name, .data = host_header });
+    try dir.writeFile(io, .{ .sub_path = host_image_fit_header_name, .data = host_image_fit_header });
 }
 
 /// The iOS bundle identifier for an app.zon `id`: underscores map to

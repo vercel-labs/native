@@ -108,6 +108,7 @@
 #include <string.h>
 
 #include "native_sdk_app.h"
+#include "apple_image_fit.h"
 
 // ----------------------------------------------------------- credentials
 // Generic-password Keychain entries shared by the WebView bridge and core
@@ -980,11 +981,7 @@ static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uint
         size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
         CGImageRef image = NULL;
         if (source_width > 0 && source_height > 0 && source_width <= 8192 && source_height <= 8192) {
-            double scale = 1.0;
-            double source_pixels = (double)source_width * (double)source_height;
-            if (source_pixels > (double)max_pixels) scale = sqrt((double)max_pixels / source_pixels);
-            size_t max_dimension = (size_t)floor((double)MAX(source_width, source_height) * scale);
-            if (max_dimension < 1) max_dimension = 1;
+            const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
             NSDictionary *thumbnail_options = @{
                 (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
                 (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
@@ -1004,7 +1001,7 @@ static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uint
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
-        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+        if (width > max_pixels / height || byte_len / 4 / height != width || pixels_len < byte_len) {
             CGImageRelease(image);
             return -1;
         }

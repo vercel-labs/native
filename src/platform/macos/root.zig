@@ -4,9 +4,10 @@ const geometry = @import("geometry");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
+const canvas = @import("canvas");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
 // macOS mask/inset render so the Dock tile matches `native package`.
-const app_icon = @import("canvas").app_icon;
+const app_icon = canvas.app_icon;
 
 pub const Error = error{
     CallbackFailed,
@@ -152,6 +153,16 @@ const AppKitBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, we
 /// receiving claim was released (the host stops its frame timer),
 /// anything else one dropped frame.
 const AppKitVideoSinkPush = *const fn (context: ?*anyopaque, width: usize, height: usize, pixels: [*c]const u8, len: usize) callconv(.c) c_int;
+
+extern fn native_sdk_test_imageio_thumbnail_dimensions(
+    bytes: [*]const u8,
+    bytes_len: usize,
+    source_width: usize,
+    source_height: usize,
+    max_pixels: usize,
+    out_width: *usize,
+    out_height: *usize,
+) c_int;
 
 const shortcut_modifier_primary: u32 = 1 << 0;
 const shortcut_modifier_command: u32 = 1 << 1;
@@ -1189,6 +1200,43 @@ fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels
         -1 => error.ImageTooLarge,
         else => error.ImageDecodeFailed,
     };
+}
+
+test "mac image decoder keeps ImageIO thumbnail rounding inside the pixel cap" {
+    // ImageIO derives the minor dimension from ThumbnailMaxPixelSize and
+    // rounds it. 537x503 at the default 262,144-pixel target used to ask
+    // for a 529px major side and return 529x496 = 262,384 pixels, which
+    // the runtime correctly rejected as ImageTooLarge. The host must leave
+    // enough headroom for that platform rounding before it asks ImageIO.
+    const source_width: usize = 537;
+    const source_height: usize = 503;
+    const source_pixels = try std.testing.allocator.alloc(u8, source_width * source_height * 4);
+    defer std.testing.allocator.free(source_pixels);
+    var offset: usize = 0;
+    while (offset < source_pixels.len) : (offset += 4) {
+        source_pixels[offset..][0..4].* = .{ 23, 91, 177, 255 };
+    }
+
+    const encoded_len = try canvas.png.encodedRgba8ByteLen(source_width, source_height);
+    const encoded = try std.testing.allocator.alloc(u8, encoded_len);
+    defer std.testing.allocator.free(encoded);
+    var writer = std.Io.Writer.fixed(encoded);
+    try canvas.png.writeRgba8(&writer, source_width, source_height, source_pixels);
+
+    const max_pixels: usize = 512 * 512;
+    var decoded_width: usize = 0;
+    var decoded_height: usize = 0;
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_imageio_thumbnail_dimensions(
+        writer.buffered().ptr,
+        writer.buffered().len,
+        source_width,
+        source_height,
+        max_pixels,
+        &decoded_width,
+        &decoded_height,
+    ));
+    try std.testing.expect(decoded_width > 0 and decoded_height > 0);
+    try std.testing.expect(decoded_width * decoded_height <= max_pixels);
 }
 
 fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {

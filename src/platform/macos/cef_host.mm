@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../ios/apple_image_fit.h"
+
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
@@ -3143,11 +3145,7 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
             size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
             size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
             if (source_width > 0 && source_height > 0 && source_width <= 8192 && source_height <= 8192) {
-                double scale = 1.0;
-                double source_pixels = (double)source_width * (double)source_height;
-                if (source_pixels > (double)max_pixels) scale = sqrt((double)max_pixels / source_pixels);
-                size_t max_dimension = (size_t)floor((double)MAX(source_width, source_height) * scale);
-                if (max_dimension < 1) max_dimension = 1;
+                const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
                 NSDictionary *thumbnail_options = @{
                     (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
                     (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
@@ -3181,7 +3179,7 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
-        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+        if (width > max_pixels / height || byte_len / 4 / height != width || pixels_len < byte_len) {
             CGImageRelease(image);
             return -1;
         }

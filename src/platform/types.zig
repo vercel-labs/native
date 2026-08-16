@@ -304,13 +304,13 @@ pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
 /// (fits every `CanvasCommand` tag name).
 pub const max_gpu_present_fallback_detail_bytes: usize = 32;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
-/// matches the runtime registry's per-slot bound
-/// (`canvas_limits.max_registered_canvas_image_pixel_bytes`). Applies to
-/// ORDINARY registered-image ids only: the registry refuses anything
-/// larger at registration, so an over-bound upload of a registered image
-/// can only be an engine bug and is refused loudly here rather than
-/// copied into host allocations.
-pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
+/// matches the runtime registry's app-configurable ceiling
+/// (`canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling`).
+/// Applies to ORDINARY registered-image ids only: the runtime's frozen
+/// app budget may be lower, but anything it accepts must remain uploadable
+/// on packet hosts. An upload past the SDK ceiling is still an engine bug
+/// and is refused loudly rather than copied into host allocations.
+pub const max_gpu_surface_image_pixel_bytes: usize = 8 * 1024 * 1024;
 /// Per-image bound for uploads in the media-surface texture namespace
 /// (ids with `canvas.media_surface_image_id_bit` set — producer-pushed
 /// dynamic textures, structurally disjoint from registered-image ids):
@@ -3549,11 +3549,10 @@ pub const PlatformServices = struct {
         // Two honest bounds, keyed by the id namespace: hosts copy every
         // upload into host-owned allocations (AppKit's NSData + NSImage
         // store), so each bound teaches the real cost of its id space.
-        // Ordinary registered images are avatar-scale by the registry's
-        // own slot bound; media-surface textures (the reserved high-bit
-        // namespace) are video-scale by the producer channel's frame
-        // budget — the bound the producer already enforced, so nothing a
-        // producer staged can fail here.
+        // Ordinary registered images use the registry's configurable
+        // ceiling; media-surface textures (the reserved high-bit namespace)
+        // use the producer channel's frame budget — the bound the producer
+        // already enforced, so nothing either source accepted can fail here.
         const bound = if ((image.id & canvas.media_surface_image_id_bit) != 0)
             max_gpu_surface_media_image_pixel_bytes
         else
