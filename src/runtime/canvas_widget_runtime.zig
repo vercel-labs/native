@@ -1879,18 +1879,7 @@ fn canvasWidgetTreeRowFocusTarget(layout: canvas.WidgetLayoutTree, node_index: u
 /// geometry clip check performed by `WidgetLayoutTree.focusTargetById`. The
 /// shared reveal seam scrolls this target into view before focus commits.
 pub fn canvasWidgetLogicalFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
-    if (node_index >= layout.nodes.len) return null;
-    if (canvas.isWidgetHiddenInAncestors(layout, node_index)) return null;
-    if (canvas.isWidgetConcealedByDisclosure(layout, node_index)) return null;
-    const node = layout.nodes[node_index];
-    if (!canvas.widgetIsFocusable(node.widget)) return null;
-    return .{
-        .id = node.widget.id,
-        .kind = node.widget.kind,
-        .bounds = node.frame,
-        .index = node_index,
-        .state = node.widget.state,
-    };
+    return layout.logicalFocusTargetAtIndex(node_index);
 }
 
 /// The tree keymap's focus moves. Up/Down walk the scope's rows in node

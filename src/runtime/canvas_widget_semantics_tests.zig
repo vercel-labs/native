@@ -824,6 +824,119 @@ test "runtime autofocus preserves a source-declared text selection" {
     try std.testing.expectEqualDeep(selection, retained.findById(2).?.widget.text_selection.?);
 }
 
+test "runtime autofocus accepts a focusable virtual scroll-semantic container" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-autofocus-virtual-table", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 80),
+    });
+
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .table,
+        .frame = geometry.RectF.init(0, 96, 0, 80),
+        .autofocus = true,
+        .layout = .{
+            .virtualized = true,
+            .virtual_item_count = 20,
+            .virtual_item_extent = 24,
+        },
+        .semantics = .{ .label = "Virtual results" },
+    }};
+    const root_children = [_]canvas.Widget{.{
+        .id = 1,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(0, 0, 240, 80),
+        .children = &children,
+    }};
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 10, .kind = .card, .layout = .{ .clip_content = true }, .children = &root_children },
+        geometry.RectF.init(0, 0, 240, 80),
+        &nodes,
+    );
+    try std.testing.expect(!canvas.widgetIsFocusable(layout.nodes[2].widget));
+    try std.testing.expect(layout.focusTargetById(2) == null);
+    try std.testing.expect(layout.logicalFocusTargetAtIndex(2) != null);
+
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(1).?.widget.value > 0);
+}
+
+test "failed automation focus reveal preserves ancestor scroll and prior focus" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-focus-fixed-clip", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 64),
+    });
+
+    const clipped_target = [_]canvas.Widget{.{
+        .id = 4,
+        .kind = .button,
+        .frame = geometry.RectF.init(0, 0, 0, 24),
+        .text = "Hidden action",
+    }};
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "Standing focus" },
+        .{ .kind = .text, .frame = geometry.RectF.init(0, 0, 0, 64), .text = "Spacer" },
+        .{
+            .id = 3,
+            .kind = .card,
+            .frame = geometry.RectF.init(0, 0, 0, 32),
+            .layout = .{ .clip_content = true, .padding = .{ .top = 40 } },
+            .children = &clipped_target,
+        },
+    };
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &children },
+        geometry.RectF.init(0, 0, 180, 64),
+        &nodes,
+    );
+    try std.testing.expect(layout.focusTargetById(4) == null);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .focus });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+
+    try std.testing.expectError(
+        error.InvalidCommand,
+        harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 4, .action = .focus }),
+    );
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+}
+
 test "automation focus reveals an offscreen field and its end caret" {
     const TestApp = struct {
         fn app(self: *@This()) App {

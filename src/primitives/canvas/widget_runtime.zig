@@ -162,6 +162,10 @@ pub const WidgetLayoutTree = struct {
         return widget_routing.focusWidgetTargetById(self, id, widgetScrollSemantics);
     }
 
+    pub fn logicalFocusTargetAtIndex(self: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
+        return widget_routing.logicalFocusWidgetTargetAtIndex(self, index, widgetScrollSemantics);
+    }
+
     pub fn collectSemantics(self: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
         return collectWidgetSemantics(self, output);
     }

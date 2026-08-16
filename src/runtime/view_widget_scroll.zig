@@ -6,6 +6,7 @@ const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 
 const unionRects = canvas_frame_helpers.unionRects;
 const CanvasWidgetScrollKeyboardTarget = canvas_widget_runtime.CanvasWidgetScrollKeyboardTarget;
+const canvasWidgetClipsContent = canvas_widget_runtime.canvasWidgetClipsContent;
 const canvasWidgetScrollableKind = canvas_widget_runtime.canvasWidgetScrollableKind;
 const canvasWidgetSingleLineTextKind = canvas_widget_runtime.canvasWidgetSingleLineTextKind;
 
@@ -27,6 +28,23 @@ fn unionOptionalRects(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
     const first = a orelse return b;
     const second = b orelse return first;
     return unionRects(first, second);
+}
+
+fn canvasWidgetRevealAxisRequestedDelta(comptime axis: canvas.ScrollAxis, target: geometry.RectF, viewport: geometry.RectF) f32 {
+    return switch (axis) {
+        .vertical => if (target.y < viewport.y)
+            target.y - viewport.y
+        else if (target.maxY() > viewport.maxY())
+            target.maxY() - viewport.maxY()
+        else
+            0,
+        .horizontal => if (target.x < viewport.x)
+            target.x - viewport.x
+        else if (target.maxX() > viewport.maxX())
+            target.maxX() - viewport.maxX()
+        else
+            0,
+    };
 }
 
 pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
@@ -387,6 +405,12 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         /// normal routable focus target in the same key event.
         pub fn scrollCanvasWidgetIntoView(self: *RuntimeView, id: canvas.ObjectId) anyerror!?geometry.RectF {
             const target_index = self.canvasWidgetNodeIndexById(id) orelse return null;
+            // Prove the whole reveal before mutating the first retained
+            // offset. A fixed clip outside a runtime scroll can never be
+            // repaired by scrolling an outer ancestor; partially applying
+            // that attempt used to jump the viewport (and could clear the
+            // old focus) before the caller rejected the still-hidden target.
+            if (!canvasWidgetCanScrollIntoView(self, target_index)) return null;
             var dirty: ?geometry.RectF = null;
             var current = self.widget_layout_nodes[target_index].parent_index;
             while (current) |ancestor_index| {
@@ -402,24 +426,14 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     if (!viewport.isEmpty()) {
                         if (canvas.widgetScrollsAxis(ancestor.widget, .vertical)) {
                             const target = self.widget_layout_nodes[target_index].frame.normalized();
-                            const delta_y: f32 = if (target.y < viewport.y)
-                                target.y - viewport.y
-                            else if (target.maxY() > viewport.maxY())
-                                target.maxY() - viewport.maxY()
-                            else
-                                0;
+                            const delta_y = canvasWidgetRevealAxisRequestedDelta(.vertical, target, viewport);
                             if (delta_y != 0) {
                                 dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .vertical, delta_y, .discrete, false));
                             }
                         }
                         if (canvas.widgetScrollsAxis(ancestor.widget, .horizontal)) {
                             const target = self.widget_layout_nodes[target_index].frame.normalized();
-                            const delta_x: f32 = if (target.x < viewport.x)
-                                target.x - viewport.x
-                            else if (target.maxX() > viewport.maxX())
-                                target.maxX() - viewport.maxX()
-                            else
-                                0;
+                            const delta_x = canvasWidgetRevealAxisRequestedDelta(.horizontal, target, viewport);
                             if (delta_x != 0) {
                                 dirty = unionOptionalRects(dirty, try self.applyCanvasWidgetScrollAxis(ancestor_index, .horizontal, delta_x, .discrete, false));
                             }
@@ -429,6 +443,66 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 current = self.widget_layout_nodes[ancestor_index].parent_index;
             }
             return dirty;
+        }
+
+        /// Dry-run `scrollCanvasWidgetIntoView` against one target frame.
+        /// Inner scrolls translate the target before each outer clip is
+        /// tested, exactly like the live walk, but no retained scroll state,
+        /// descendant frame, semantics revision, or pending scroll event is
+        /// touched until every clip has proved revealable.
+        fn canvasWidgetCanScrollIntoView(self: *const RuntimeView, target_index: usize) bool {
+            if (target_index >= self.widget_layout_node_count) return false;
+            var target = self.widget_layout_nodes[target_index].frame.normalized();
+            if (target.isEmpty()) return false;
+
+            var current = self.widget_layout_nodes[target_index].parent_index;
+            while (current) |ancestor_index| {
+                if (ancestor_index >= self.widget_layout_node_count) break;
+                const ancestor = self.widget_layout_nodes[ancestor_index];
+
+                // Window-level surfaces still clip their own descendants;
+                // they only escape clips ABOVE their surface root.
+                if (canvas.widgetEscapesAncestorClips(ancestor.widget)) {
+                    if (canvasWidgetClipsContent(ancestor.widget) and geometry.RectF.intersection(target, ancestor.frame.normalized()).isEmpty()) return false;
+                    break;
+                }
+
+                if (canvasWidgetScrollableKind(ancestor.widget.kind) and ancestor.widget.kind != .textarea) {
+                    const viewport = ancestor.frame.inset(ancestor.widget.layout.padding).normalized();
+                    if (!viewport.isEmpty()) {
+                        const delta_y = canvasWidgetRevealAxisOffsetDelta(self, ancestor_index, .vertical, target, viewport);
+                        const delta_x = canvasWidgetRevealAxisOffsetDelta(self, ancestor_index, .horizontal, target, viewport);
+                        target = target.translate(.{ .dx = -delta_x, .dy = -delta_y });
+                    }
+                }
+
+                if (canvasWidgetClipsContent(ancestor.widget) and geometry.RectF.intersection(target, ancestor.frame.normalized()).isEmpty()) return false;
+                current = ancestor.parent_index;
+            }
+            return true;
+        }
+
+        fn canvasWidgetRevealAxisOffsetDelta(
+            self: *const RuntimeView,
+            scroll_index: usize,
+            comptime axis: canvas.ScrollAxis,
+            target: geometry.RectF,
+            viewport: geometry.RectF,
+        ) f32 {
+            if (scroll_index >= self.widget_layout_node_count) return 0;
+            const scroll_node = self.widget_layout_nodes[scroll_index];
+            if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return 0;
+            if (!canvas.widgetScrollsAxis(scroll_node.widget, axis)) return 0;
+
+            const requested = canvasWidgetRevealAxisRequestedDelta(axis, target, viewport);
+            if (requested == 0) return 0;
+
+            const current_axis = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport).axis(axis);
+            var next_axis = current_axis;
+            next_axis.offset += requested;
+            next_axis.velocity = 0;
+            next_axis = next_axis.clamped();
+            return next_axis.offset - current_axis.offset;
         }
 
         pub fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {

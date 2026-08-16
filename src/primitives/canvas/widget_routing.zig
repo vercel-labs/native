@@ -413,6 +413,26 @@ pub fn focusWidgetTargetById(layout: anytype, id: ObjectId, scroll_semantics_fn:
     return focusTargetFromLayoutNode(layout, index, scroll_semantics_fn);
 }
 
+/// Resolve every ordinary focus gate except ancestor geometry. Runtime
+/// reveal paths use this to name a clipped target before scrolling it, while
+/// keeping the exact same hidden, disclosure, disabled, and scroll-semantic
+/// eligibility as `focusWidgetTargetById`.
+pub fn logicalFocusWidgetTargetAtIndex(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
+    if (index >= layout.nodes.len) return null;
+    if (isWidgetHiddenInAncestors(layout, index)) return null;
+    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+    const node = layout.nodes[index];
+    if (node.widget.id == 0) return null;
+    if (!widget_access.isFocusable(node.widget) and (node.widget.state.disabled or !scroll_semantics_fn(layout, index).scrollable)) return null;
+    return .{
+        .id = node.widget.id,
+        .kind = node.widget.kind,
+        .bounds = node.frame,
+        .index = index,
+        .state = node.widget.state,
+    };
+}
+
 fn focusForward(layout: anytype, current_index: ?usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
     var index: usize = if (current_index) |value| value + 1 else 0;
     while (index < layout.nodes.len) : (index += 1) {
@@ -466,23 +486,9 @@ fn focusSpatial(layout: anytype, current_index: usize, direction: WidgetFocusDir
 }
 
 fn focusTargetFromLayoutNode(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
-    if (index >= layout.nodes.len) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    // Concealed disclosure content never joins the focus order: a
-    // closed section's controls are unreachable by tab or arrows, and
-    // mid-reveal content stays unreachable until the reveal settles.
-    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+    const target = logicalFocusWidgetTargetAtIndex(layout, index, scroll_semantics_fn) orelse return null;
     if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    const node = layout.nodes[index];
-    if (node.widget.id == 0) return null;
-    if (!widget_access.isFocusable(node.widget) and (node.widget.state.disabled or !scroll_semantics_fn(layout, index).scrollable)) return null;
-    return .{
-        .id = node.widget.id,
-        .kind = node.widget.kind,
-        .bounds = node.frame,
-        .index = index,
-        .state = node.widget.state,
-    };
+    return target;
 }
 
 fn spatialFocusCandidate(
