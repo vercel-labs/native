@@ -10080,7 +10080,16 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     NSString *label = self.windowLabels[@(windowId)] ?: (windowId == 1 ? self.windowLabel : @"");
-    NSRect frame = window.frame;
+    // The frame event's rect is the CONTENT rect in screen coordinates,
+    // never window.frame: every consumer treats these numbers as content
+    // geometry — shell layout bounds, the resize channel
+    // (contentView.bounds), window-state persistence, and
+    // createWindowWithId:'s initWithContentRect: round-trip — and the
+    // GTK/Win32 hosts report content size on the same event. The outer
+    // frame here laid shell views past the content's bottom edge on
+    // open/restore and grew every restored window by the titlebar height
+    // once per launch.
+    NSRect frame = [window contentRectForFrameRect:window.frame];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_WINDOW_FRAME,
         .window_id = windowId,
