@@ -3388,17 +3388,23 @@ fn autofocusUpdate(model: *AutofocusModel, msg: AutofocusMsg) void {
 /// must receive the keyboard without a click.
 fn autofocusView(ui: *AutofocusApp.Ui, model: *const AutofocusModel) AutofocusApp.Ui.Node {
     if (!model.editing) {
-        return ui.column(.{ .gap = 8, .padding = 12 }, .{
-            ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+        return ui.column(.{ .padding = 12 }, .{
+            ui.scroll(.{ .height = 96 }, ui.column(.{ .gap = 8 }, .{
+                ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+                ui.text(.{ .height = 120 }, "Recent notes"),
+            })),
         });
     }
-    return ui.column(.{ .gap = 8, .padding = 12 }, .{
-        ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
-        ui.textField(.{
-            .autofocus = true,
-            .text = model.draft.text(),
-            .on_input = AutofocusApp.Ui.inputMsg(.draft_edit),
-        }),
+    return ui.column(.{ .padding = 12 }, .{
+        ui.scroll(.{ .height = 96 }, ui.column(.{ .gap = 8 }, .{
+            ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+            ui.text(.{ .height = 120 }, "Recent notes"),
+            ui.textField(.{
+                .autofocus = true,
+                .text = model.draft.text(),
+                .on_input = AutofocusApp.Ui.inputMsg(.draft_edit),
+            }),
+        })),
     });
 }
 
@@ -3453,12 +3459,20 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     }
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[view_index].canvas_widget_focused_id);
 
-    // The Cmd-N-shaped command mounts the editor; the rebuild's
-    // autofocus edge moves keyboard focus to it — no click.
+    // The Cmd-N-shaped command mounts the editor BELOW the scroll
+    // viewport; the rebuild's autofocus edge reveals it and moves
+    // keyboard focus to it — no click.
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "note.new", .window_id = 1 } });
     try std.testing.expect(app_state.model.editing);
     const field_id = findWidgetIdByKind(app_state.tree.?.root, .text_field).?;
+    const scroll_id = findWidgetIdByKind(app_state.tree.?.root, .scroll_view).?;
     try std.testing.expectEqual(field_id, harness.runtime.views[view_index].canvas_widget_focused_id);
+    var retained = try harness.runtime.canvasWidgetLayout(1, autofocus_canvas_label);
+    const scroll = retained.findById(scroll_id).?;
+    const field = retained.findById(field_id).?;
+    try std.testing.expect(scroll.widget.value > 0);
+    try std.testing.expect(field.frame.y >= scroll.frame.y);
+    try std.testing.expect(field.frame.maxY() <= scroll.frame.maxY());
 
     // Typing lands in the model through the ordinary input path.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
@@ -3470,10 +3484,18 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     try std.testing.expectEqualStrings("Groceries", app_state.model.draft.text());
     try std.testing.expect(app_state.model.edit_count > 0);
 
-    // A later rebuild with the flag still true never re-steals focus:
-    // click the button (its press dispatches begin_edit and rebuilds).
+    // A later rebuild with the flag still true never re-steals focus.
+    // Programmatically focusing the now-offscreen button first also proves
+    // the shared automation focus verb reveals logical targets; its real
+    // click then dispatches begin_edit and rebuilds.
     const button_id = findWidgetIdByKind(app_state.tree.?.root, .button).?;
     var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} focus", .{ autofocus_canvas_label, button_id });
+    try harness.runtime.dispatchAutomationCommand(app, focus_command);
+    try std.testing.expectEqual(button_id, harness.runtime.views[view_index].canvas_widget_focused_id);
+    retained = try harness.runtime.canvasWidgetLayout(1, autofocus_canvas_label);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(scroll_id).?.widget.value);
+
     const click_command = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ autofocus_canvas_label, button_id });
     try harness.runtime.dispatchAutomationCommand(app, click_command);
     try std.testing.expectEqual(button_id, harness.runtime.views[view_index].canvas_widget_focused_id);

@@ -476,7 +476,12 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
 
         pub fn focusAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
             if (view_index >= self.view_count) return error.ViewNotFound;
-            const target = self.views[view_index].widgetLayoutTree().focusTargetById(id) orelse return error.InvalidCommand;
+            // Programmatic focus names logical targets before applying the
+            // pointer path's geometry clip. The shared keyboard/autofocus
+            // reveal seam scrolls every runtime-owned ancestor, reconciles,
+            // and only then returns an ordinary visible focus target.
+            const reveal = try CanvasWidgetEventMethods().revealCanvasWidgetFocusTarget(self, view_index, id) orelse return error.InvalidCommand;
+            const target = reveal.target;
             try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
             // Programmatic focus (autofocus, automation `focus`) follows
             // the pointer contract, not the keyboard one: buttons and
@@ -486,8 +491,9 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             // window-level default focus landing on a button dressed an
             // idle control in the focus ring.
             const focus_visible_id: canvas.ObjectId = if (canvas_widget_runtime.canvasWidgetShowsPointerFocusRing(target.kind)) target.id else 0;
-            if (self.views[view_index].canvas_widget_focused_id != target.id or self.views[view_index].canvas_widget_focus_visible_id != focus_visible_id) {
-                const previous_state = self.views[view_index].canvasWidgetRenderState();
+            const previous_state = self.views[view_index].canvasWidgetRenderState();
+            const focus_changed = self.views[view_index].canvas_widget_focused_id != target.id or self.views[view_index].canvas_widget_focus_visible_id != focus_visible_id;
+            if (focus_changed) {
                 self.views[view_index].canvas_widget_focused_id = target.id;
                 self.views[view_index].canvas_widget_focus_visible_id = focus_visible_id;
                 // Pointer-contract provenance: a programmatic ring
@@ -501,14 +507,47 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 // widget whose focus-shown tooltip is up with the ring
                 // intact is not a move, and leaves it alone.
                 try CanvasWidgetEventMethods().updateCanvasTooltipIntentForProgrammaticFocusMove(self, view_index);
-                // A focus change repaints; record the automation input so
-                // the completing frame publishes (same contract as select
+            }
+
+            // The established programmatic-selection contract is a collapsed
+            // caret at text.len when no source/retained selection exists.
+            // Preserve an existing selection, then reveal its focus endpoint
+            // inside the editor after the outer ancestor reveal has made the
+            // editability/visibility gate truthful.
+            const caret_initialized = try self.views[view_index].ensureCanvasWidgetFocusedTextCaret();
+            var inner_scroll_changed = false;
+            if (self.views[view_index].canEditCanvasWidgetText(target.id)) {
+                if (self.views[view_index].canvasWidgetNodeIndexById(target.id)) |node_index| {
+                    const before = self.views[view_index].widget_layout_nodes[node_index].widget;
+                    self.views[view_index].scrollCanvasTextInputCaretIntoView(node_index);
+                    const after = self.views[view_index].widget_layout_nodes[node_index].widget;
+                    inner_scroll_changed = before.value != after.value or before.value_x != after.value_x;
+                }
+            }
+            if (inner_scroll_changed) {
+                try self.views[view_index].refreshCanvasWidgetSemantics();
+                if (!caret_initialized) self.views[view_index].widget_revision += 1;
+            }
+
+            if (focus_changed or caret_initialized or inner_scroll_changed or reveal.scroll_dirty != null) {
+                // A focus/reveal change repaints; record the automation input
+                // so the completing frame publishes (same contract as select
                 // and text edits). Callers that dispatch a follow-up input
                 // event simply overwrite this with their own timestamp.
                 self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
-                try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
             }
-            _ = try self.views[view_index].ensureCanvasWidgetFocusedTextCaret();
+            if (focus_changed) {
+                try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+            } else if (caret_initialized or inner_scroll_changed) {
+                if (self.views[view_index].canvasWidgetNodeIndexById(target.id)) |node_index| {
+                    if (self.views[view_index].canvasWidgetDirtyBounds(node_index, self.views[view_index].widget_layout_nodes[node_index].frame)) |dirty| {
+                        try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dirty);
+                    }
+                }
+            }
+            if (reveal.scroll_dirty != null) {
+                _ = try CanvasWidgetDisplayMethods().refreshCanvasWidgetDisplayListIfOwned(self, view_index);
+            }
         }
 
         pub fn dispatchAutomationWidgetKey(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, key: []const u8) anyerror!void {

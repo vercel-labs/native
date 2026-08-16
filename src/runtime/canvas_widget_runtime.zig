@@ -1872,13 +1872,13 @@ fn canvasWidgetTreeRowFocusTarget(layout: canvas.WidgetLayoutTree, node_index: u
     return canvasWidgetLogicalFocusTarget(layout, node_index);
 }
 
-/// A roving group must be able to name its next LOGICAL row even when a
-/// scroll ancestor clips that row out of the current viewport. Keep every
-/// other focus gate (identity, disabled/hidden state, hidden ancestors,
-/// concealed disclosure content), but deliberately omit only the geometry
-/// clip check performed by `WidgetLayoutTree.focusTargetById`. The runtime
-/// scrolls this target into view before it commits focus.
-fn canvasWidgetLogicalFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
+/// Keyboard roving and programmatic focus must be able to name a LOGICAL
+/// target even when a scroll ancestor clips it out of the current viewport.
+/// Keep every other focus gate (identity, disabled/hidden state, hidden
+/// ancestors, concealed disclosure content), but deliberately omit only the
+/// geometry clip check performed by `WidgetLayoutTree.focusTargetById`. The
+/// shared reveal seam scrolls this target into view before focus commits.
+pub fn canvasWidgetLogicalFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
     if (node_index >= layout.nodes.len) return null;
     if (canvas.isWidgetHiddenInAncestors(layout, node_index)) return null;
     if (canvas.isWidgetConcealedByDisclosure(layout, node_index)) return null;

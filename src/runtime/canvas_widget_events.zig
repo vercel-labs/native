@@ -2878,14 +2878,25 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             try setCanvasWidgetFocusFromKeyboardWithVisibility(self, view_index, target_id, true);
         }
 
-        fn setCanvasWidgetFocusFromKeyboardWithVisibility(self: *Runtime, view_index: usize, target_id: canvas.ObjectId, focus_visible: bool) anyerror!void {
-            const next_focus_visible_id: canvas.ObjectId = if (focus_visible) target_id else 0;
-            if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+        pub const CanvasWidgetFocusReveal = struct {
+            target: canvas.WidgetFocusTarget,
+            scroll_dirty: ?geometry.RectF,
+        };
 
-            // Roving tree/list navigation may resolve a logical row that
-            // is currently clipped. Reveal it before the focus write so
-            // keyboard routing, semantics, and rendering all see an
-            // ordinary visible target during this same key event.
+        /// Resolve a programmatic focus target without applying the pointer
+        /// path's geometry clip first, reveal it through runtime-owned scroll
+        /// ancestors, then re-verify the ordinary visible focus contract.
+        /// Keyboard traversal, autofocus, and automation all enter through
+        /// this seam so an offscreen logical target is never focused before
+        /// its retained geometry and semantics have caught up with the scroll.
+        pub fn revealCanvasWidgetFocusTarget(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!?CanvasWidgetFocusReveal {
+            if (view_index >= self.view_count or target_id == 0) return null;
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (layout.focusTargetById(target_id) == null) {
+                const node_index = canvas_widget_runtime.canvasWidgetLayoutNodeIndexById(layout, target_id) orelse return null;
+                _ = canvas_widget_runtime.canvasWidgetLogicalFocusTarget(layout, node_index) orelse return null;
+            }
+
             const scroll_dirty = try self.views[view_index].scrollCanvasWidgetIntoView(target_id);
             if (scroll_dirty) |dirty| {
                 const previous_cursor = self.views[view_index].canvas_widget_cursor;
@@ -2897,12 +2908,19 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     self.invalidateFor(.state, self.views[view_index].frame);
                 }
             }
-            // Logical tree/list navigation may name a row before geometry
-            // filtering so a scroll viewport can reveal it. If no runtime-
-            // owned scroll ancestor actually made the row visible (for
-            // example, a fixed clip_content card), keep focus on the current
-            // target instead of committing an invisible, unroutable id.
-            if (target_id != 0 and self.views[view_index].widgetLayoutTree().focusTargetById(target_id) == null) return;
+
+            // A fixed clip cannot be repaired by scrolling. Re-check the
+            // pointer-visible contract only after every scrollable ancestor
+            // has had its chance to reveal the logical target.
+            const target = self.views[view_index].widgetLayoutTree().focusTargetById(target_id) orelse return null;
+            return .{ .target = target, .scroll_dirty = scroll_dirty };
+        }
+
+        fn setCanvasWidgetFocusFromKeyboardWithVisibility(self: *Runtime, view_index: usize, target_id: canvas.ObjectId, focus_visible: bool) anyerror!void {
+            const next_focus_visible_id: canvas.ObjectId = if (focus_visible) target_id else 0;
+            if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+
+            const reveal = try revealCanvasWidgetFocusTarget(self, view_index, target_id) orelse return;
             const previous_state = self.views[view_index].canvasWidgetRenderState();
             self.views[view_index].canvas_widget_focused_id = target_id;
             self.views[view_index].canvas_widget_focus_visible_id = next_focus_visible_id;
@@ -2935,7 +2953,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 }
             }
             try invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
-            if (scroll_dirty != null) {
+            if (reveal.scroll_dirty != null) {
                 _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, view_index);
             }
         }

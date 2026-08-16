@@ -130,7 +130,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "expanded", .doc = "Tree rows (role=\"treeitem\"): disclosure state (true/false or a {binding}). Omit on leaves; expanded rows collapse on Left, collapsed ones expand on Right, both through on-toggle - the model owns the state." },
     .{ .name = "tree-level", .doc = "Flat sibling rows with role=\"treeitem\": one-based logical depth used by Left/Right to resolve parents and first children. Omit it when tree rows are structurally nested." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
     .{ .name = "submit-on-enter", .doc = "textarea only: true makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; Cmd/Ctrl+Enter still submits. False or absent keeps the multiline default where Enter inserts and submission uses the primary chord." },
     .{ .name = "icon", .doc = "button, toggle-button, list-item, menu-item: vector icon drawn inline (buttons/toggle-buttons before the label, list/menu items as a leading slot): a built-in name (comptime-validated against canvas.icons.known_icon_names, e.g. save, plus, refresh-cw), an app-registered app:<name>, or one {binding} resolving to such a name. Icon-only buttons when the content is empty — add a label. One hit target, one enabled/disabled tint." },
     .{ .name = "icon-placement", .doc = "Icon slot side on label-bearing buttons/toggle-buttons: leading (default) draws the icon before the label, trailing after it — the next-page chevron. Icon-only buttons center the glyph regardless." },
@@ -200,7 +200,7 @@ pub const stepper_attr_docs = [_]Doc{
     .{ .name = "key", .doc = "Sibling-scoped identity key." },
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
 };
 
 pub const timeline_attr_docs = [_]Doc{
@@ -209,7 +209,7 @@ pub const timeline_attr_docs = [_]Doc{
     .{ .name = "key", .doc = "Sibling-scoped identity key." },
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
 };
 
 pub const timeline_item_attr_docs = [_]Doc{

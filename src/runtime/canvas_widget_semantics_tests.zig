@@ -690,10 +690,11 @@ test "runtime applies source-driven autofocus on the edge, never on the level" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
 
     // An editor MOUNTING with autofocus takes keyboard focus (view focus
-    // included) on the rebuild that applies it.
+    // included) on the rebuild that applies it. With no source selection,
+    // programmatic focus collapses the caret at the END of non-empty text.
     const editing = [_]canvas.Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 10, 96, 32), .text = "New" },
-        .{ .id = 7, .kind = .text_field, .frame = geometry.RectF.init(10, 56, 200, 32), .autofocus = true },
+        .{ .id = 7, .kind = .text_field, .frame = geometry.RectF.init(10, 56, 200, 32), .text = "Draft", .autofocus = true },
     };
     var editing_nodes: [3]canvas.WidgetLayoutNode = undefined;
     const editing_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &editing }, geometry.RectF.init(0, 0, 320, 240), &editing_nodes);
@@ -702,7 +703,7 @@ test "runtime applies source-driven autofocus on the edge, never on the level" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 7), harness.runtime.views[0].canvas_widget_focus_visible_id);
     try std.testing.expect(harness.runtime.views[0].focused);
     const focused_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), focused_layout.findById(7).?.widget.text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(5), focused_layout.findById(7).?.widget.text_selection.?);
 
     // The user moves focus; re-applying the SAME layout (flag held true)
     // must not steal it back — edge-triggered, level-ignored.
@@ -728,6 +729,155 @@ test "runtime applies source-driven autofocus on the edge, never on the level" {
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", plain_layout);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", editing_layout);
     try std.testing.expectEqual(@as(canvas.ObjectId, 7), harness.runtime.views[0].canvas_widget_focused_id);
+}
+
+test "runtime autofocus reveals an offscreen textarea and its end caret" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-autofocus-reveal", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 64),
+    });
+
+    const text = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight";
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .textarea,
+        .frame = geometry.RectF.init(0, 96, 0, 48),
+        .text = text,
+        .autofocus = true,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &children },
+        geometry.RectF.init(0, 0, 180, 64),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focus_visible_id);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const scroll = retained.findById(1).?;
+    const editor = retained.findById(2).?;
+    const viewport = scroll.frame.normalized();
+    try std.testing.expect(scroll.widget.value > 0);
+    try std.testing.expect(editor.frame.y >= viewport.y);
+    try std.testing.expect(editor.frame.maxY() <= viewport.maxY());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(text.len), editor.widget.text_selection.?);
+    try std.testing.expect(editor.widget.value > 0);
+
+    const editor_viewport = canvas.textInputViewportForWidget(editor.widget, harness.runtime.views[0].widget_tokens).?;
+    const text_geometry = try harness.runtime.canvasWidgetTextGeometry(1, "canvas", 2);
+    const caret = text_geometry.caret_bounds.?;
+    try std.testing.expect(caret.y >= editor_viewport.y - 0.001);
+    try std.testing.expect(caret.maxY() <= editor_viewport.maxY() + 0.001);
+}
+
+test "runtime autofocus preserves a source-declared text selection" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-autofocus-selection", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    const selection = canvas.TextSelection{ .anchor = 2, .focus = 8 };
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 180, 32),
+        .text = "A selected draft",
+        .text_selection = selection,
+        .autofocus = true,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(selection, retained.findById(2).?.widget.text_selection.?);
+}
+
+test "automation focus reveals an offscreen field and its end caret" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-automation-focus-reveal", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 64),
+    });
+
+    const text = "This field is deliberately much wider than its viewport";
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(0, 96, 96, 32),
+        .text = text,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .scroll_view, .children = &children },
+        geometry.RectF.init(0, 0, 180, 64),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_focused_id);
+
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 2, .action = .focus });
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const scroll = retained.findById(1).?;
+    const field = retained.findById(2).?;
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expect(scroll.widget.value > 0);
+    try std.testing.expect(field.frame.y >= scroll.frame.y);
+    try std.testing.expect(field.frame.maxY() <= scroll.frame.maxY());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(text.len), field.widget.text_selection.?);
+    try std.testing.expect(field.widget.value > 0);
+
+    const field_viewport = canvas.textInputViewportForWidget(field.widget, harness.runtime.views[0].widget_tokens).?;
+    const text_geometry = try harness.runtime.canvasWidgetTextGeometry(1, "canvas", 2);
+    const caret = text_geometry.caret_bounds.?;
+    try std.testing.expect(caret.x >= field_viewport.x - 0.001);
+    try std.testing.expect(caret.maxX() <= field_viewport.maxX() + 0.001);
 }
 
 test "runtime keeps programmatic focus quiet on buttons and rings editables" {

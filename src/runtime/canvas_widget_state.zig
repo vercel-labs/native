@@ -203,11 +203,20 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (render_state_changed) CanvasWidgetEventMethods(Runtime).invalidateForCanvasWidgetRenderStateDirty(self, index, render_state_dirty);
             const layout_dirty = invalidations.len > 0 or render_state_changed;
             if (autofocus_target) |autofocus_id| {
-                // The same focus write every other focus source performs
-                // (view focus + focused/visible ids + invalidation);
-                // widgets that are not focusable ignore the request.
-                if (self.views[index].widgetLayoutTree().focusTargetById(autofocus_id) != null) {
-                    try AutomationWidgetMethods(Runtime).focusAutomationCanvasWidget(self, index, autofocus_id);
+                // Autofocus is programmatic, not pointer hit testing: admit a
+                // logically focusable target even while a scroll ancestor
+                // clips it, then let the shared automation/keyboard reveal
+                // seam scroll, reconcile, and re-verify before focus lands.
+                // A disabled/hidden/fixed-clipped target still consumes the
+                // source edge; holding autofocus true never retries or steals.
+                const retained_layout = self.views[index].widgetLayoutTree();
+                if (canvas_widget_runtime.canvasWidgetLayoutNodeIndexById(retained_layout, autofocus_id)) |autofocus_index| {
+                    if (canvas_widget_runtime.canvasWidgetLogicalFocusTarget(retained_layout, autofocus_index) != null) {
+                        AutomationWidgetMethods(Runtime).focusAutomationCanvasWidget(self, index, autofocus_id) catch |err| switch (err) {
+                            error.InvalidCommand => {},
+                            else => return err,
+                        };
+                    }
                 }
             }
             self.frame_profile.end(.reconcile, reconcile_begin);
