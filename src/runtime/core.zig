@@ -39,6 +39,7 @@ const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const window_state = @import("../window_state/root.zig");
 const runtime_effects = @import("effects.zig");
 const runtime_record_store = @import("record_store.zig");
 const runtime_relational_store = @import("relational_store.zig");
@@ -253,6 +254,11 @@ pub const Runtime = struct {
     video_height: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
+    /// Reused by runtime-created window restoration. `Store.loadWindow`
+    /// needs the whole bounded state file plus decoded-string scratch; keep
+    /// that 64-KiB workspace on the already heap-owned Runtime instead of
+    /// placing it on the event-loop stack for every secondary-window create.
+    window_state_read_scratch: [window_state.max_serialized_bytes]u8 = undefined,
     next_window_id: platform.WindowId = 2,
     next_view_id: platform.ViewId = 1,
     invalidated: bool = true,

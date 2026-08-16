@@ -117,7 +117,22 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             // build has no web layer, so the error names the real cause.
             if (self.windows[index].source != null and !self.options.web_layer) return error.WebViewLayerNotBuilt;
 
-            const window_options = options.windowOptions(id, self.windows[index].info.label);
+            var window_options = options.windowOptions(id, self.windows[index].info.label);
+            // Startup windows are restored by the app runner before the
+            // platform exists. Windows materialized later (scene secondary
+            // windows, model-declared windows, imperative calls, and the JS
+            // bridge) first exist here, so this is the one layer that can
+            // perform their label-keyed lookup. A miss or read failure keeps
+            // the authored explicit/default placement unchanged; only an
+            // actual record can claim the `.restored` reason.
+            if (window_options.restore_state) {
+                if (self.options.window_state_store) |store| {
+                    if (store.loadWindow(window_options.label, &self.window_state_read_scratch) catch null) |saved| {
+                        window_options.default_frame = saved.frame;
+                        window_options.initial_placement = .restored;
+                    }
+                }
+            }
             const native_info = try self.options.platform.services.createWindow(window_options);
             native_created = true;
             try Self.applyNativeInfo(self, index, native_info);

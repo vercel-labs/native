@@ -96,6 +96,92 @@ test "runtime creates lists focuses and closes windows" {
     try std.testing.expect(!harness.runtime.windows[1].info.open);
 }
 
+test "runtime-created windows restore saved frames by label" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "window-restore", .source = platform.WebViewSource.html("<p>Windows</p>") };
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var state_dir_buffer: [128]u8 = undefined;
+    var state_file_buffer: [160]u8 = undefined;
+    const state_dir = try std.fmt.bufPrint(&state_dir_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const state_file = try std.fmt.bufPrint(&state_file_buffer, "{s}/windows.zon", .{state_dir});
+    const store = window_state.Store.init(std.testing.io, state_dir, state_file);
+    const saved_frame = geometry.RectF.init(240, 180, 860, 620);
+    try store.saveWindow(.{
+        .id = 77,
+        .label = "tools",
+        .title = "Stale persisted title",
+        .frame = saved_frame,
+    });
+    try store.saveWindow(.{
+        .id = 78,
+        .label = "opted-out",
+        .frame = geometry.RectF.init(320, 240, 940, 700),
+    });
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    harness.runtime.options.window_state_store = store;
+
+    const info = try harness.runtime.createWindow(.{
+        .label = "tools",
+        .title = "Current title",
+        .default_frame = geometry.RectF.init(40, 60, 420, 320),
+    });
+    try std.testing.expectEqual(saved_frame, info.frame);
+    try std.testing.expectEqualStrings("Current title", info.title);
+    try std.testing.expectEqual(platform.WindowInitialPlacement.restored, harness.null_platform.window_placement[1]);
+
+    const opted_out_frame = geometry.RectF.init(24, 36, 400, 300);
+    const opted_out = try harness.runtime.createWindow(.{
+        .label = "opted-out",
+        .default_frame = opted_out_frame,
+        .restore_state = false,
+    });
+    try std.testing.expectEqual(opted_out_frame, opted_out.frame);
+    try std.testing.expectEqual(platform.WindowInitialPlacement.explicit, harness.null_platform.window_placement[2]);
+}
+
+test "runtime-created window store miss preserves authored placement" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "window-restore-miss", .source = platform.WebViewSource.html("<p>Windows</p>") };
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var state_dir_buffer: [128]u8 = undefined;
+    var state_file_buffer: [160]u8 = undefined;
+    const state_dir = try std.fmt.bufPrint(&state_dir_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const state_file = try std.fmt.bufPrint(&state_file_buffer, "{s}/windows.zon", .{state_dir});
+    const store = window_state.Store.init(std.testing.io, state_dir, state_file);
+    try store.saveWindow(.{
+        .label = "other-window",
+        .frame = geometry.RectF.init(300, 220, 900, 700),
+    });
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    harness.runtime.options.window_state_store = store;
+
+    const authored_frame = geometry.RectF.init(80, 120, 480, 360);
+    const info = try harness.runtime.createWindow(.{
+        .label = "tools",
+        .default_frame = authored_frame,
+    });
+    try std.testing.expectEqual(authored_frame, info.frame);
+    try std.testing.expectEqual(platform.WindowInitialPlacement.explicit, harness.null_platform.window_placement[1]);
+}
+
 test "transparent imperative window without explicit source stays canvas-only" {
     const TestApp = struct {
         fn app(self: *@This()) App {
