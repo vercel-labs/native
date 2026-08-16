@@ -512,9 +512,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
             }
             if (elementTakesText(kind) and !composite_children) {
-                const text = try self.interpolatedText(ui, scope, inner);
                 var built = ui.el(kind, options, .{});
-                built.widget.text = text;
+                // Element content wins when present; an empty element
+                // keeps the already-resolved text= attribute in options.
+                // Checkbox/radio joined this path when they became text
+                // leaves, so replacing unconditionally would regress the
+                // binding-friendly attribute that already worked.
+                if (inner.children.len > 0) {
+                    built.widget.text = try self.interpolatedText(ui, scope, inner);
+                }
                 // Avatars clip their runtime image to the avatar circle,
                 // exactly like `Ui.avatar` (a no-op while the id is 0 and
                 // the initials fallback renders).

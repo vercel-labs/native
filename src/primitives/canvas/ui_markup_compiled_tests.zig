@@ -102,8 +102,10 @@ const ZeroCardPaddingCompiled = canvas.CompiledMarkupView(fixture.Model, fixture
 const selection_label_content_markup =
     \\<column gap="8">
     \\  <checkbox checked="true" on-toggle="add">Done</checkbox>
+    \\  <checkbox on-toggle="add" text="Later" />
     \\  <radio-group label="Density">
     \\    <radio checked="true" on-change="add">Default</radio>
+    \\    <radio on-change="add" text="Compact" />
     \\  </radio-group>
     \\</column>
 ;
@@ -123,8 +125,10 @@ test "checkbox and radio element content builds identically in both markup engin
 
     try expectSameTree(fixture.Msg, interpreted, compiled);
     try expectSameTexts(interpreted.root, compiled.root);
-    try testing.expectEqualStrings("Done", fixture.findByKind(compiled.root, .checkbox).?.text);
-    try testing.expectEqualStrings("Default", fixture.findByKind(compiled.root, .radio).?.text);
+    try testing.expect(fixture.findByText(compiled.root, .checkbox, "Done") != null);
+    try testing.expect(fixture.findByText(compiled.root, .checkbox, "Later") != null);
+    try testing.expect(fixture.findByText(compiled.root, .radio, "Default") != null);
+    try testing.expect(fixture.findByText(compiled.root, .radio, "Compact") != null);
 }
 
 test "explicit zero card padding survives interpreted and compiled markup" {

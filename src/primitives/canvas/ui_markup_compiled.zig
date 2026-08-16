@@ -514,7 +514,11 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             }
             if (comptime (interpreter.elementTakesText(kind) and !composite_children)) {
                 var built = ui.el(kind, options, .{});
-                built.widget.text = interpolatedText(inner, entries, ui, model, scope);
+                // Interpreter parity: content wins when present; an empty
+                // element keeps its already-resolved text= attribute.
+                if (comptime inner.children.len > 0) {
+                    built.widget.text = interpolatedText(inner, entries, ui, model, scope);
+                }
                 // Avatars clip their runtime image to the avatar circle,
                 // exactly like `Ui.avatar` and the interpreter (a no-op
                 // while the id is 0 and the initials fallback renders).
