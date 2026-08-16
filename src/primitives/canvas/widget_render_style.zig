@@ -726,13 +726,13 @@ pub fn listItemFillColor(widget: Widget, tokens: DesignTokens, state: WidgetStat
     // The quiet-surface knob reads through the widget, not the caller's
     // state copy, so every row/cell path honors it identically.
     const hovered = state.hovered and !widget.style.quiet_hover;
-    const fallback = if (state.selected or state.pressed)
-        tokens.colors.surface_pressed
-    else if (hovered)
-        tokens.colors.surface_subtle
-    else
-        widget.style.background orelse transparentColor();
-    return controlStateBackground(visual, state.pressed, state.selected or state.pressed, hovered, fallback);
+    if (state.pressed) return visual.pressed_background orelse visual.active_background orelse visual.hover_background orelse visual.background orelse tokens.colors.surface_pressed;
+    if (state.selected) return visual.active_background orelse visual.hover_background orelse visual.background orelse tokens.colors.surface_pressed;
+    if (hovered) return visual.hover_background orelse visual.background orelse tokens.colors.surface_subtle;
+    // Local authored chrome is the rest rung. A theme's shared row
+    // background remains the fallback for rows without one, while its
+    // state-specific channels above still own interaction feedback.
+    return widget.style.background orelse visual.background orelse transparentColor();
 }
 
 /// Surface chrome uses the same neutral feedback ladder as an actionable

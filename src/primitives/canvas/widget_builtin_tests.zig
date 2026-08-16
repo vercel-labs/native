@@ -2004,6 +2004,35 @@ test "actionable layout containers paint the row hover and pressed ladder in bot
     }
 }
 
+test "an actionable container uses authored background only at rest" {
+    const authored = Color.rgb8(28, 52, 76);
+    const tokens = DesignTokens{};
+    const base = Widget{
+        .id = 77,
+        .kind = .row,
+        .frame = geometry.RectF.init(0, 0, 160, 40),
+        .style = .{ .background = authored },
+        .semantics = .{ .actions = .{ .press = true } },
+    };
+    var rest_commands: [4]CanvasCommand = undefined;
+    var rest_builder = Builder.init(&rest_commands);
+    try emitWidgetTree(&rest_builder, base, tokens);
+    switch (rest_builder.displayList().findCommandById(widgetPartId(77, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(authored, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var hovered = base;
+    hovered.state.hovered = true;
+    var hover_commands: [4]CanvasCommand = undefined;
+    var hover_builder = Builder.init(&hover_commands);
+    try emitWidgetTree(&hover_builder, hovered, tokens);
+    switch (hover_builder.displayList().findCommandById(widgetPartId(77, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "house alert card and panel surfaces have visible hover and pressed fallbacks" {
     const tokens = DesignTokens{};
     const cases = [_]struct { kind: WidgetKind, fill_slot: u4 }{
