@@ -62,8 +62,7 @@ pub fn hitTestWidgetLayoutWithPolicy(layout: anytype, point: geometry.PointF, to
     var previous: ?widget_tree.WidgetPaintOrder = null;
     while (tested < surface_count) : (tested += 1) {
         const index = widget_tree.previousWidgetLayoutWindowSurface(layout, tokens, previous) orelse break;
-        const node = layout.nodes[index];
-        previous = .{ .layer = widget_tree.widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
+        previous = widget_tree.widgetLayoutWindowSurfaceOrder(layout, index, tokens);
         if (isWidgetHiddenInAncestors(layout, index)) continue;
         if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
         if (hitTestWidgetLayoutNode(layout, index, point, tokens, policy)) |hit| return hit;

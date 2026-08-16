@@ -782,6 +782,9 @@ pub const widgetKindStacksChildren = @import("widget_layout.zig").widgetKindStac
 pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
 pub const widgetIsRootRelativeModal = @import("widget_tree.zig").widgetIsRootRelativeModal;
 pub const widgetEscapesAncestorClips = @import("widget_tree.zig").widgetEscapesAncestorClips;
+pub const WidgetPaintOrder = @import("widget_tree.zig").WidgetPaintOrder;
+pub const widgetLayoutWindowSurfaceOrder = @import("widget_tree.zig").widgetLayoutWindowSurfaceOrder;
+pub const widgetPaintOrderLess = @import("widget_tree.zig").widgetPaintOrderLess;
 /// The runtime-scrolled virtual list predicate (widget_tree.zig): a
 /// virtualized scroll_view with a DECLARED total item count, whose
 /// scroll offset the runtime owns (engine scrolling + native drivers)

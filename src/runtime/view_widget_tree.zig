@@ -502,7 +502,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
         /// Escape's dismissal resolution: the nearest dismissible surface
         /// up the focused widget's chain when something is focused, and
-        /// otherwise — or when the chain finds none — the topmost MOUNTED
+        /// otherwise — or when the chain finds none — the topmost painted
         /// anchored surface in the view. The fallback is what makes
         /// surfaces opened from NON-focusable triggers dismissible: a
         /// text-crumb trigger takes no focus on click, so nothing is
@@ -512,7 +512,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// never dismisses a surface, not even through the fallback.
         /// With SEVERAL surfaces anchored on one stack (the select
         /// trigger's focus-shown tooltip floating over its open menu),
-        /// each Escape peels exactly one, topmost (last-mounted) first —
+        /// each Escape peels exactly one, topmost by effective layer first —
         /// the tooltip goes, then the menu.
         pub fn dismissCanvasWidgetSurfaceFromEscape(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             if (focused_id != 0) {
@@ -732,7 +732,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return null;
         }
 
-        /// The topmost (last-mounted) visible anchored dismissible surface
+        /// The topmost visible anchored dismissible surface
         /// whose anchor is `anchor_index`, or null.
         pub fn canvasWidgetAnchoredDismissibleChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
             return canvasWidgetAnchoredChildIndexInScope(self, anchor_index, .any);
@@ -744,12 +744,17 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// menu) never masks the surface the caller asked for.
         fn canvasWidgetAnchoredChildIndexInScope(self: *const RuntimeView, anchor_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             var found: ?usize = null;
+            var found_order: ?canvas.WidgetPaintOrder = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.parent_index != anchor_index) continue;
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
                 if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (node.widget.semantics.hidden) continue;
-                found = index;
+                const order = canvas.widgetLayoutWindowSurfaceOrder(self.widgetLayoutTree(), index, self.widget_tokens);
+                if (found_order == null or canvas.widgetPaintOrderLess(found_order.?, order)) {
+                    found = index;
+                    found_order = order;
+                }
             }
             return found;
         }
@@ -963,9 +968,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         /// The topmost visible anchored dismissible surface in the whole
-        /// view — highest node index, matching both the anchored late
-        /// z-pass paint order and reverse-order hit-testing, so "topmost"
-        /// here is the surface the user sees on top. Ancestor-hidden
+        /// view — highest effective `(layer, node index)`, matching both
+        /// the anchored late z-pass and reverse-order hit-testing, so
+        /// "topmost" here is the surface the user sees on top. Ancestor-hidden
         /// subtrees are skipped: a surface inside a hidden branch is not
         /// on screen and must not swallow Escape.
         pub fn canvasWidgetTopmostAnchoredDismissibleIndex(self: *const RuntimeView) ?usize {
@@ -974,11 +979,16 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
         fn canvasWidgetTopmostAnchoredSurfaceIndexInScope(self: *const RuntimeView, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             var found: ?usize = null;
+            var found_order: ?canvas.WidgetPaintOrder = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
                 if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (canvasWidgetNodeHiddenInTree(self, index)) continue;
-                found = index;
+                const order = canvas.widgetLayoutWindowSurfaceOrder(self.widgetLayoutTree(), index, self.widget_tokens);
+                if (found_order == null or canvas.widgetPaintOrderLess(found_order.?, order)) {
+                    found = index;
+                    found_order = order;
+                }
             }
             return found;
         }

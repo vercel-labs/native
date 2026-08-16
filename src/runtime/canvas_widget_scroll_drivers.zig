@@ -239,9 +239,8 @@ pub fn canvasWidgetScrollDriverEligible(node: canvas.WidgetLayoutNode) bool {
 ///   - its own subtree (a scroll region inside an open popover or
 ///     modal is above the surface, not beneath it);
 ///   - a driver whose window-level ROOT paints LATER in the floating pass
-///     (window-level surfaces paint in tree order above all in-flow
-///     content, so a scroll region inside the topmost of two
-///     overlapping popovers sits above the lower one).
+///     (window-level surfaces paint by effective layer and then tree order,
+///     so a scroll region inside the topmost surface sits above lower ones).
 fn driverOccluderMask(view: anytype, driver_node: usize, occluder_nodes: []const usize) u32 {
     const driver_window_root = windowSurfaceRootIndex(view, driver_node);
     var mask: u32 = 0;
@@ -249,7 +248,10 @@ fn driverOccluderMask(view: anytype, driver_node: usize, occluder_nodes: []const
         if (occluder_node == driver_node) continue;
         if (driver_window_root) |root| {
             if (occluder_node == root) continue;
-            if (root > occluder_node) continue;
+            const layout = view.widgetLayoutTree();
+            const root_order = canvas.widgetLayoutWindowSurfaceOrder(layout, root, view.widget_tokens);
+            const occluder_order = canvas.widgetLayoutWindowSurfaceOrder(layout, occluder_node, view.widget_tokens);
+            if (canvas.widgetPaintOrderLess(occluder_order, root_order)) continue;
         }
         if (nodeIsAncestor(view, occluder_node, driver_node)) continue;
         mask |= @as(u32, 1) << @intCast(bit);

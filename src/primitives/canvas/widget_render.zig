@@ -405,8 +405,7 @@ fn emitWidgetLayoutWindowSurfaces(builder: *Builder, layout: anytype, tokens: De
     var previous: ?widget_tree.WidgetPaintOrder = null;
     while (emitted < surface_count) : (emitted += 1) {
         const index = widget_tree.nextWidgetLayoutWindowSurface(layout, tokens, previous) orelse return;
-        const node = layout.nodes[index];
-        previous = .{ .layer = widget_tree.widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
+        previous = widget_tree.widgetLayoutWindowSurfaceOrder(layout, index, tokens);
         if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
         // A floating surface anchored inside a concealed disclosure
         // subtree stays down with its anchor — concealed content is

@@ -37,6 +37,35 @@ pub fn widgetWindowSurfaceLayer(widget: Widget, tokens: DesignTokens) i32 {
     return widgetPaintLayer(widget, tokens);
 }
 
+/// Effective layer of a hoisted window surface in a laid tree. A surface
+/// without an explicit layer cannot fall beneath the window surface that
+/// contains it: a default dropdown/tooltip opened inside a modal therefore
+/// stays in the modal stratum, while an explicitly authored layer remains an
+/// intentional escape hatch.
+pub fn widgetLayoutWindowSurfaceLayer(layout: anytype, node_index: usize, tokens: DesignTokens) i32 {
+    const node = layout.nodes[node_index];
+    if (node.widget.layer) |layer| return layer;
+
+    var layer = widgetWindowSurfaceLayer(node.widget, tokens);
+    var current = node.parent_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) break;
+        const ancestor = layout.nodes[index];
+        if (widgetEscapesAncestorClips(ancestor.widget)) {
+            layer = @max(layer, widgetWindowSurfaceLayer(ancestor.widget, tokens));
+        }
+        current = ancestor.parent_index;
+    }
+    return layer;
+}
+
+pub fn widgetLayoutWindowSurfaceOrder(layout: anytype, node_index: usize, tokens: DesignTokens) WidgetPaintOrder {
+    return .{
+        .layer = widgetLayoutWindowSurfaceLayer(layout, node_index, tokens),
+        .index = node_index,
+    };
+}
+
 /// Modal surfaces are placed in layout-root coordinates and never ride an
 /// ancestor scroll region's content translation.
 pub fn widgetIsRootRelativeModal(widget: Widget) bool {
@@ -104,7 +133,7 @@ pub fn nextWidgetLayoutWindowSurface(layout: anytype, tokens: DesignTokens, prev
     var best: ?WidgetPaintOrder = null;
     for (layout.nodes, 0..) |node, index| {
         if (!widgetEscapesAncestorClips(node.widget)) continue;
-        const order = WidgetPaintOrder{ .layer = widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
+        const order = widgetLayoutWindowSurfaceOrder(layout, index, tokens);
         if (!widgetPaintOrderAfter(order, previous)) continue;
         if (best == null or widgetPaintOrderLess(order, best.?)) best = order;
     }
@@ -115,7 +144,7 @@ pub fn previousWidgetLayoutWindowSurface(layout: anytype, tokens: DesignTokens, 
     var best: ?WidgetPaintOrder = null;
     for (layout.nodes, 0..) |node, index| {
         if (!widgetEscapesAncestorClips(node.widget)) continue;
-        const order = WidgetPaintOrder{ .layer = widgetWindowSurfaceLayer(node.widget, tokens), .index = index };
+        const order = widgetLayoutWindowSurfaceOrder(layout, index, tokens);
         if (!widgetPaintOrderBefore(order, previous)) continue;
         if (best == null or widgetPaintOrderLess(best.?, order)) best = order;
     }
@@ -132,7 +161,7 @@ fn widgetPaintOrderBefore(order: WidgetPaintOrder, previous: ?WidgetPaintOrder) 
     return order.layer < value.layer or (order.layer == value.layer and order.index < value.index);
 }
 
-fn widgetPaintOrderLess(a: WidgetPaintOrder, b: WidgetPaintOrder) bool {
+pub fn widgetPaintOrderLess(a: WidgetPaintOrder, b: WidgetPaintOrder) bool {
     return a.layer < b.layer or (a.layer == b.layer and a.index < b.index);
 }
 

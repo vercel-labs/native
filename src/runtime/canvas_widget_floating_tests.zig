@@ -236,6 +236,54 @@ test "runtime escape with no focused widget dismisses the topmost mounted anchor
     try std.testing.expect(!retained.findById(1).?.widget.semantics.hidden);
 }
 
+test "escape and outside dismissal follow explicit anchored surface layers" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-layered-surface-dismiss", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    const elevated = canvas.Widget{
+        .id = 2,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 120, 60),
+        .layer = 500,
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(20, 20) } },
+    };
+    const later_default = canvas.Widget{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 120, 60),
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(40, 40) } },
+    };
+    const root = canvas.Widget{ .id = 1, .kind = .stack, .children = &.{ elevated, later_default } };
+
+    var outside_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const outside_layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 320, 180), &outside_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", outside_layout);
+    const outside = try harness.runtime.views[0].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(0, &.{}) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), outside.id);
+
+    var escape_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const escape_layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 320, 180), &escape_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", escape_layout);
+    const escape = try harness.runtime.views[0].dismissCanvasWidgetSurfaceFromEscape(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), escape.id);
+}
+
 test "runtime dismisses canvas floating surfaces from automation and accessibility actions" {
     const TestApp = struct {
         fn app(self: *@This()) App {

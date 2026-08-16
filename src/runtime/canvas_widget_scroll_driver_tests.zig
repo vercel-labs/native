@@ -845,3 +845,37 @@ test "floating surfaces push occluders that block underlying drivers but not the
     try std.testing.expectEqual(@as(u64, 0), drivers[0].parent_id);
     try std.testing.expectEqual(@as(u64, 1), drivers[1].parent_id);
 }
+
+test "lower-layer later surfaces do not occlude a modal scroll driver" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 160),
+    });
+
+    // The modal mounts before a default anchored popover, but its effective
+    // layer is higher. Its nested scroll driver must therefore ignore both
+    // its own modal catcher and the later surface painted beneath it.
+    const nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .stack }, .frame = geometry.RectF.init(0, 0, 240, 160), .depth = 0 },
+        .{ .widget = .{ .id = 10, .kind = .dialog, .scrim = true }, .frame = geometry.RectF.init(20, 20, 200, 120), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 11, .kind = .scroll_view }, .frame = geometry.RectF.init(30, 30, 180, 80), .depth = 2, .parent_index = 1 },
+        .{ .widget = .{ .id = 12, .kind = .panel }, .frame = geometry.RectF.init(30, 30, 180, 200), .depth = 3, .parent_index = 2 },
+        .{ .widget = .{ .id = 20, .kind = .popover, .layout = .{ .anchor = .{} } }, .frame = geometry.RectF.init(40, 40, 100, 60), .depth = 1, .parent_index = 0 },
+    };
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.scroll_occluder_count);
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expectEqual(@as(u64, 11), drivers[0].id);
+    try std.testing.expectEqual(@as(u32, 0), drivers[0].occluder_mask);
+}

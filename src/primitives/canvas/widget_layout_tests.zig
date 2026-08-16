@@ -1525,6 +1525,45 @@ test "modal surfaces resolve against root bounds through nested layout" {
     }
 }
 
+test "root-relative modals consume neither flow extent nor grid cells" {
+    const first = Widget{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 80, 20), .text = "First" };
+    const dialog = Widget{ .id = 3, .kind = .dialog, .frame = geometry.RectF.init(0, 0, 200, 100) };
+    const second = Widget{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 0, 80, 20), .text = "Second" };
+
+    const column = Widget{
+        .id = 1,
+        .kind = .column,
+        .layout = .{ .gap = 5 },
+        .children = &.{ first, dialog, second },
+    };
+    const column_without_modal = Widget{
+        .id = 1,
+        .kind = .column,
+        .layout = .{ .gap = 5 },
+        .children = &.{ first, second },
+    };
+    try std.testing.expectEqualDeep(intrinsicWidgetSize(column_without_modal, .{}), intrinsicWidgetSize(column, .{}));
+
+    const bounds = geometry.RectF.init(0, 0, 400, 200);
+    var column_nodes: [4]WidgetLayoutNode = undefined;
+    const column_layout = try layoutWidgetTree(column, bounds, &column_nodes);
+    try expectLayoutFrame(column_layout, 2, geometry.RectF.init(0, 0, 80, 20));
+    try expectLayoutFrame(column_layout, 4, geometry.RectF.init(0, 25, 80, 20));
+    try expectLayoutFrame(column_layout, 3, geometry.RectF.init(100, 50, 200, 100));
+
+    const grid = Widget{
+        .id = 1,
+        .kind = .grid,
+        .layout = .{ .columns = 2 },
+        .children = &.{ first, dialog, second },
+    };
+    var grid_nodes: [4]WidgetLayoutNode = undefined;
+    const grid_layout = try layoutWidgetTree(grid, bounds, &grid_nodes);
+    try expectLayoutFrame(grid_layout, 2, geometry.RectF.init(0, 0, 80, 20));
+    try expectLayoutFrame(grid_layout, 4, geometry.RectF.init(200, 0, 80, 20));
+    try expectLayoutFrame(grid_layout, 3, geometry.RectF.init(100, 50, 200, 100));
+}
+
 test "a modal layout root retains viewport bounds for scrims and anchored children" {
     const menu = Widget{
         .id = 2,

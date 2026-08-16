@@ -296,6 +296,33 @@ test "window-level modals paint and route above later anchored overlays" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 3), elevated.hitTest(geometry.PointF.init(150, 150)).?.id);
 }
 
+test "default anchored surfaces inside a modal stay above their modal" {
+    const dropdown = Widget{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 100, 50),
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(120, 120) } },
+    };
+    const dialog = Widget{
+        .id = 2,
+        .kind = .dialog,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+        .children = &.{dropdown},
+    };
+    const root = Widget{ .id = 1, .kind = .stack, .children = &.{dialog} };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, window, &nodes);
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const list = builder.displayList();
+    const dialog_index = firstCommandIndexForWidget(list, 2) orelse return error.TestUnexpectedResult;
+    const dropdown_index = firstCommandIndexForWidget(list, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dropdown_index > dialog_index);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), layout.hitTest(geometry.PointF.init(140, 140)).?.id);
+}
+
 test "anchored surfaces render in a late z-pass above later siblings and outside ancestor clips" {
     var nodes: [8]WidgetLayoutNode = undefined;
     const layout = try buildOverlapFixture(&nodes);
