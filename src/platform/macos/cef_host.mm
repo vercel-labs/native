@@ -2362,13 +2362,18 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *aboutDescriptionString = [[NSString alloc] initWithBytes:about_description length:about_description_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *titleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
         NativeSdkChromiumHost *host = [[NativeSdkChromiumHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString dockVisible:(dock_visible != 0) title:titleString width:width height:height];
-        if (restore_frame) {
-            [host.window setFrame:NativeSdkConstrainFrame(NSMakeRect(x, y, width, height)) display:NO];
-        }
+        // Restored coordinates are content geometry, matching the window
+        // frame event and createWindowWithId:'s initWithContentRect: path.
+        // Install the final titlebar first so AppKit can convert that content
+        // rect through the actual chrome before setFrame: consumes it.
+        NativeSdkApplyHiddenInsetTitlebar(host.window, titlebar_style, host.delegates[@1]);
         if (!resizable) {
             host.window.styleMask &= ~NSWindowStyleMaskResizable;
         }
-        NativeSdkApplyHiddenInsetTitlebar(host.window, titlebar_style, host.delegates[@1]);
+        if (restore_frame) {
+            NSRect contentRect = NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
+            [host.window setFrame:[host.window frameRectForContentRect:contentRect] display:NO];
+        }
         NativeSdkApplyOverlayWindowFlags(host, 1, window_flags);
         if (show_policy == 2) [host.policyHiddenWindows addObject:@1];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
