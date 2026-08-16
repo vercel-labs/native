@@ -1203,6 +1203,11 @@ fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels
 }
 
 test "mac image decoder keeps ImageIO thumbnail rounding inside the pixel cap" {
+    // The Objective-C probe is compiled and linked only for macOS test
+    // artifacts (build.zig's target-gated image_fit_test.m source). Keep
+    // every other host from referencing its symbol at link time.
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+
     // ImageIO derives the minor dimension from ThumbnailMaxPixelSize and
     // rounds it. 537x503 at the default 262,144-pixel target used to ask
     // for a 529px major side and return 529x496 = 262,384 pixels, which

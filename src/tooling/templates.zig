@@ -2315,6 +2315,12 @@ fn runnerZig() []const u8 {
     \\const manifest_menus = if (@hasField(@TypeOf(app_manifest), "menus")) app_manifest.menus else .{};
     \\const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
     \\
+    \\fn manifestImagePixelBudget() usize {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "images")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    \\    if (comptime !@hasField(@TypeOf(app_manifest.images), "max_image_pixel_bytes")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    \\    return app_manifest.images.max_image_pixel_bytes;
+    \\}
+    \\
     \\pub const StdoutTraceSink = struct {
     \\    pub fn sink(self: *StdoutTraceSink) native_sdk.trace.Sink {
     \\        return .{ .context = self, .write_fn = write };
@@ -2857,6 +2863,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = null_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -2914,6 +2921,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = mac_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -2971,6 +2979,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = linux_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -3028,6 +3037,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = windows_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -4181,6 +4191,12 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "defer std.heap.page_allocator.destroy(runtime)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "native_sdk.Runtime.initAt(runtime, .{") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "Runtime.init(.{") == null);
+    // Every generated desktop runner freezes the app.zon registered-image
+    // budget into Runtime options, with a compatibility fallback for
+    // manifests generated before the images block existed.
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestImagePixelBudget() usize") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "@hasField(@TypeOf(app_manifest), \"images\")") != null);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, runner_zig_text, ".max_image_pixel_bytes = manifestImagePixelBudget(),"));
     // The generated runner consumes the same web-layer contract: the
     // shared inference for honest menus, the build option threaded into
     // every runtime init, and the comptime conflict guard.
