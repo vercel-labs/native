@@ -1117,6 +1117,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// hand-assembled cores: every `envMsgs` entry must name a Msg
         /// arm carrying exactly one bytes payload.
         fn validateEnvMsgs() void {
+            @setEvalBranchQuota(10_000);
             for (core.envMsgs) |entry| {
                 var found = false;
                 for (@typeInfo(Msg).@"union".fields) |arm| {
