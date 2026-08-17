@@ -1099,10 +1099,65 @@ pub const max_effect_channel_pending: usize = 32;
 
 /// In-flight ptys (interactive terminal sessions) per Effects channel —
 /// their own table beside the channel table: a pty is a long-lived keyed
-/// occupancy like a channel, not a run-to-completion worker slot. One
-/// live terminal surface plus a background job or two is the realistic
-/// shape; a fifth spawn is refused loudly (reason `.rejected`).
-pub const max_effect_ptys: usize = 4;
+/// occupancy like a channel, not a run-to-completion worker slot. The
+/// (N+1)-th spawn is refused loudly (reason `.rejected`).
+///
+/// This was 4, on the reasoning that "one live terminal surface plus a
+/// background job or two is the realistic shape". That is the shape of an
+/// app that HAS a terminal. It is not the shape of an app that IS one: a
+/// multiplexer offers tabs and splits, and under 4 its fifth pane is
+/// refused by a ceiling that lives here, invisible from the app. This
+/// table is per-PROCESS, so every surface in every window shares it.
+///
+/// NOTHING STRUCTURAL PICKS THE NUMBER. There is no bitmask over slots,
+/// no `fd_set`, no shared poll array, and no fixed-width slot index that
+/// saturates below 65535 (`Entry.slot_index` is a `u16`). Every slot
+/// operation is a linear scan (`findPtySlot`, `findIdlePtySlot`,
+/// `idlePtySlotCount`, `ptyOccupiesKey`), each pty polls only its OWN two
+/// fds on its own io thread (`pty.zig`, `poll(&fds, nfds, -1)` over
+/// `[2]Pollfd`), and no assertion anywhere mentions this constant. The
+/// costs are all linear, and each was MEASURED against a real terminal
+/// app rather than reasoned about:
+///
+///   shells=1 rss_kib=153952 threads=23 fds=63
+///   shells=2 rss_kib=161072 threads=24 fds=66
+///   shells=3 rss_kib=163840 threads=25 fds=69
+///   shells=4 rss_kib=166592 threads=26 fds=72
+///
+/// so one LIVE pty costs exactly +1 OS thread, exactly +3 descriptors,
+/// and ~2.7 MiB of rss — and the thread and descriptor counts land on the
+/// nose of what the code says they should, which is the check that the
+/// measurement is measuring the right thing. Derive it again with:
+///
+///   phux-cockpit/scripts/drive-shell-ceiling.sh --want 4 --measure
+///
+/// The per-SLOT cost (paid whether or not the slot is used) is only the
+/// inline part of `PtySlot`, measured at 6552 bytes by the comptime
+/// budget below — 209,664 bytes of inline `Effects` at 32 slots, up from
+/// 26,208 at 4. The 256 KiB staging block and the 64 KiB outbound block
+/// are NOT in that: they are heap, allocated at spawn and freed at
+/// retire, so they scale with live sessions rather than with this number.
+///
+/// 32 rather than 8 or 16 because 32 is what the consuming multiplexer's
+/// own terminal registry holds, and a ceiling that is invisible AND lower
+/// than the app's own is the exact shape of the bug this replaces: the
+/// app refuses at a number it never chose and cannot see. At 32 the
+/// binding constraint moves back into the app, where it is nameable.
+/// Worst case (all 32 live at once) that is ~86 MiB rss, 32 threads and
+/// 96 descriptors against a `kern.maxfilesperproc` of 184320.
+pub const max_effect_ptys: usize = 32;
+
+/// The pty table's INLINE footprint inside `Effects`, bounded so that
+/// raising `max_effect_ptys` again has to look at what it costs. This is
+/// not a guess about `PtySlot`: it is checked against the real
+/// `@sizeOf`, so the assert moves the moment either factor does.
+///
+/// `Effects` is normally heap-allocated (see the by-value warning on
+/// `UiApp`), but the suite constructs it on the stack
+/// (`var fx = DirectFx.init(...)` in effects_pty_tests.zig), and a stack
+/// frame is the one place this table's growth can actually break
+/// something. 512 KiB leaves that headroom explicit.
+pub const max_effect_pty_table_bytes: usize = 512 * 1024;
 /// Longest one delivered pty output record: one Msg payload, one
 /// journal blob. Output arriving between drains coalesces into batches
 /// of at most this size — `cat largefile` journals per-drain batches,
@@ -3535,6 +3590,20 @@ pub fn Effects(comptime Msg: type) type {
                 return slot.term_storage[0..slot.term_len];
             }
         };
+
+        comptime {
+            // The pty table is the only inline cost `max_effect_ptys`
+            // multiplies. Measured, not assumed: `@sizeOf` is the real
+            // slot, so this fails if a slot grows a buffer as readily as
+            // if the count grows. See `max_effect_pty_table_bytes`.
+            const table_bytes = @sizeOf(PtySlot) * max_effect_ptys;
+            if (table_bytes > max_effect_pty_table_bytes) @compileError(std.fmt.comptimePrint(
+                "pty table is {d} bytes ({d} slots x {d}); budget is {d}. " ++
+                    "Raising max_effect_ptys costs inline Effects bytes - " ++
+                    "measure before raising the budget with it.",
+                .{ table_bytes, max_effect_ptys, @sizeOf(PtySlot), max_effect_pty_table_bytes },
+            ));
+        }
 
         /// How one channel table slot advances: `.open` accepts posts
         /// and delivers `.data` events; `.closing` (closeChannel ran)
