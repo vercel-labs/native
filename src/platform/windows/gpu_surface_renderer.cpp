@@ -150,7 +150,14 @@ public:
         va_end(args);
         if (written <= 0) return;
         fputs(text, file_);
-        fputc('\n', file_);
+        /* Every line carries the monotonic clock, appended rather than
+         * prefixed so the record type still leads the line. Per-event
+         * durations cannot answer the question a resize actually poses —
+         * how far apart a surface's consecutive frames land — and that
+         * needs a wall clock, not a sequence number. Stamped at write
+         * time, i.e. immediately after the span the line reports. */
+        fprintf(file_, " t_us=%llu\n",
+            static_cast<unsigned long long>(gpuClockNs() / 1000ULL));
         /* Buffered, not per-line flushed: a synchronous write inside a
          * measured frame would show up in the very numbers being measured.
          * 64 lines is well under a second of drag at any refresh rate, and
@@ -168,7 +175,8 @@ private:
         if (length == 0 || length >= MAX_PATH) return;
         file_ = _wfopen(path, L"w");
         if (!file_) return;
-        fputs("# native-sdk gpu surface profile: times in microseconds, images_us is inside render_us\n", file_);
+        fputs("# native-sdk gpu surface profile: times in microseconds, images_us is inside render_us,"
+              " t_us is a monotonic stamp taken as the line is written\n", file_);
     }
 
     ~GpuProfileLog() {
