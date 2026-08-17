@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "The Native SDK: the complete toolkit for building native desktop applications — declarative markup, native rendering, WebView surfaces, and OS capabilities",
   "type": "module",
   "bin": {
@@ -35,14 +35,14 @@
     "scriptc": "0.0.31"
   },
   "optionalDependencies": {
-    "@native-sdk/cli-darwin-arm64": "0.9.2",
-    "@native-sdk/cli-darwin-x64": "0.9.2",
-    "@native-sdk/cli-linux-arm64-gnu": "0.9.2",
-    "@native-sdk/cli-linux-arm64-musl": "0.9.2",
-    "@native-sdk/cli-linux-x64-gnu": "0.9.2",
-    "@native-sdk/cli-linux-x64-musl": "0.9.2",
-    "@native-sdk/cli-win32-arm64": "0.9.2",
-    "@native-sdk/cli-win32-x64": "0.9.2"
+    "@native-sdk/cli-darwin-arm64": "0.9.3",
+    "@native-sdk/cli-darwin-x64": "0.9.3",
+    "@native-sdk/cli-linux-arm64-gnu": "0.9.3",
+    "@native-sdk/cli-linux-arm64-musl": "0.9.3",
+    "@native-sdk/cli-linux-x64-gnu": "0.9.3",
+    "@native-sdk/cli-linux-x64-musl": "0.9.3",
+    "@native-sdk/cli-win32-arm64": "0.9.3",
+    "@native-sdk/cli-win32-x64": "0.9.3"
   },
   "repository": {
     "type": "git",

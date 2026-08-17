@@ -2,9 +2,30 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.2
+## 0.9.3
 
 <!-- release:start -->
+
+### New Features
+
+- **Model-driven TypeScript theme state**: Zero-config TypeScript apps can now derive the built-in pack, color scheme, and accent from committed model state while preserving manifest fallback, live system accessibility settings, deterministic replay, and the existing `themePack` helper (#378).
+- **Platform-correct line deletion**: Command+Backspace on macOS now deletes to the start of a field or logical textarea line across every editable canvas control, with matching TypeScript text helpers, controlled-state behavior, undo, and replay (#377).
+
+### Bug Fixes
+
+- **Precise macOS file-drop routing**: AppKit drops now retain labeled canvas and WebView targets with top-left, view-local coordinates, while unlabeled window regions fall back to content coordinates (#374).
+- **Manifest menus in generated runners**: Zero-config TypeScript and Zig-core apps now load `app.zon` commands, shortcuts, and menus consistently in live and replay runners, including ejected-runner fallbacks (#376).
+- **Large TypeScript message unions compile reliably**: Generated shims now derive comptime scan quotas from message shape and identifier size, allowing wide unions to compile across persistence, channels, environment routing, and the full external-core pipeline (#375).
+- **Correct combobox Enter precedence**: A bound `on-submit` now handles Enter before trigger activation, so query submission no longer opens the picker or dispatches the wrong command (#373).
+
+### Contributors
+
+- @ctate
+- @MohakBajaj
+
+<!-- release:end -->
+
+## 0.9.2
 
 ### New Features
 
@@ -27,8 +48,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @sepehr-safari
-
-<!-- release:end -->
 
 ## 0.9.1
 
