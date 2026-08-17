@@ -370,9 +370,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             x: ?f32 = null,
             y: ?f32 = null,
             resizable: bool = true,
-            /// Placement policy applied by the host when creating this
-            /// fresh, non-restored window. `.center_on_primary` centers a
-            /// descriptor without an authored origin on the primary screen.
+            /// Placement policy passed to the host when creating this
+            /// fresh, non-restored window. On macOS,
+            /// `.center_on_primary` centers a descriptor without an authored
+            /// origin on the primary screen; other hosts currently retain
+            /// their native default placement.
             restore_policy: app_manifest.WindowRestorePolicy = .clamp_to_visible_screen,
             /// Content min-size floor the WINDOW enforces (macOS
             /// `contentMinSize`): the user's resize stops at the floor

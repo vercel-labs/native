@@ -482,7 +482,7 @@ Export `windows(model): readonly WindowDescriptor[]` to derive the live secondar
 
 `closePolicy` accepts `"quit"` (the default) or `"hide"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`, where the app maps it to the Msg that clears its open flag. A `"hide"` close retains the same native window and view and dispatches no close command; `Cmd.showWindow(label)` reveals it. Model-declared secondary windows are desktop-only. See `examples/system-monitor-ts`.
 
-`restorePolicy` accepts `"clamp_to_visible_screen"` (the default) or `"center_on_primary"`. Model-declared windows do not restore persisted frames, so `"center_on_primary"` centers a fresh descriptor with no authored `x`/`y` during native creation.
+`restorePolicy` accepts `"clamp_to_visible_screen"` (the default) or `"center_on_primary"`. Model-declared windows do not restore persisted frames. On macOS, `"center_on_primary"` centers a fresh descriptor with no authored `x`/`y`; Windows and Linux currently keep their native default placement.
 
 `titlebar` accepts `"standard"`, `"hidden_inset"`, `"hidden_inset_tall"`, or `"chromeless"`. Transparent Windows windows require `"chromeless"`; because that removes the system buttons, fully skinned windows must draw working close/minimize controls.
 

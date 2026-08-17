@@ -241,7 +241,7 @@ export function windows(model: Model): readonly WindowDescriptor[] {
 
 `closePolicy` is `"quit"` by default. Under `"quit"`, a user close really closes the window and routes `onCloseCommand` through `commandMsg`; map it to the Msg that clears the model's open flag. If the model keeps declaring the label, source wins and the next reconciliation recreates it. Under `"hide"`, the same native window and view stay alive, no close command fires, and `Cmd.showWindow("settings")` reveals it. Stopping the declaration always performs a real reconcile close. The platform safeguards for `hide` are the same as manifest windows. Model-declared secondary windows are desktop-only.
 
-`restorePolicy` accepts `"clamp_to_visible_screen"` (the default) or `"center_on_primary"`. Model-declared windows do not restore persisted frames, so the latter centers a fresh descriptor with no `x`/`y` directly at native creation time.
+`restorePolicy` accepts `"clamp_to_visible_screen"` (the default) or `"center_on_primary"`. Model-declared windows do not restore persisted frames. On macOS, the latter centers a fresh descriptor with no `x`/`y` directly at native creation time; Windows and Linux currently keep their native default placement.
 
 `titlebar` accepts `"standard"`, `"hidden_inset"`, `"hidden_inset_tall"`, and `"chromeless"`. The last removes all OS chrome and is required when a transparent model-declared window targets Windows; provide working app-drawn close/minimize controls for that fully skinned shape.
 
