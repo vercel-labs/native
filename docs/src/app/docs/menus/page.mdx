@@ -14,7 +14,7 @@ The Native SDK can configure native app menus from `app.zon` or typed Zig data. 
 },
 ```
 
-Generated runners load `app.zon` menus automatically. Pass `menus` to `runWithOptions` when an app needs to override the manifest at runtime:
+Generated zero-config runners load `app.zon` menus automatically for both TypeScript cores and Zig cores. Ejected runners use the same fallback. Pass a non-null `menus` slice to `runWithOptions` when lower-level Zig wiring needs to override the manifest at runtime (an explicit empty slice disables manifest menus):
 
 ```zig
 const view_items = [_]native_sdk.MenuItem{
