@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { compilerArgv } from "./compiler_command.mjs";
 
 function parseArgs(argv) {
   const args = {};
@@ -143,7 +144,7 @@ for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "c
   if (args[key]) args[key] = path.resolve(args[key]);
 }
 const argv0 = args.compiler
-  ? (fs.existsSync(args.compiler) ? [args.compiler] : args.compiler.split(/\s+/))
+  ? compilerArgv(args.compiler)
   : [process.execPath, args["compiler-js"]];
 
 // Cross compiles hand the compiler its zig-cc lane: the target triple as

@@ -20,6 +20,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { compilerArgv } from "./compiler_command.mjs";
 
 function parseArgs(argv) {
   const args = {};
@@ -56,10 +57,10 @@ for (const key of ["stage", "manifest", "frontend-sidecar", "out-archive", "out-
   if (key in args) args[key] = path.resolve(args[key]);
 }
 // --compiler is a COMMAND: a bare executable path (possibly containing
-// spaces) or an interpreter plus script ("node .../main.js"). A path
-// that exists is taken whole; anything else splits on whitespace.
+// spaces) or an interpreter plus script ("node .../main.js"). The shared
+// resolver also unwraps npm's Windows .cmd shim to its declared JS bin.
 const argv0 = args.compiler
-  ? (fs.existsSync(args.compiler) ? [args.compiler] : args.compiler.split(/\s+/))
+  ? compilerArgv(args.compiler)
   : [process.execPath, args["compiler-js"]];
 
 // App and fixture build graphs state the host and target explicitly. A

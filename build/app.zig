@@ -1055,6 +1055,7 @@ fn tsCoreStage(
         service_compile.setName("native scriptc service compile");
         if (build_trace) service_compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
         service_compile.addFileArg(dep.path("packages/core/scripts/run_external_service_compiler.mjs"));
+        service_compile.addFileInput(dep.path("packages/core/scripts/compiler_command.mjs"));
         service_compile.addArg("--stage");
         service_compile.addDirectoryArg(service_stage_dir);
         service_compile.addArg("--manifest");
@@ -1128,6 +1129,7 @@ fn tsCoreStage(
     compile.setName("native scriptc core compile");
     if (build_trace) compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
     compile.addFileArg(dep.path("packages/core/scripts/run_external_core_compiler.mjs"));
+    compile.addFileInput(dep.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArgs(&.{ "--name", symbol_name });

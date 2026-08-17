@@ -847,6 +847,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "node_modules\", \"scriptc\", \"dist\", \"bootstrap.js\"" },
         .{ .path = "build/app.zig", .pattern = "setEnvironmentVariable(\"SCRIPTC_TIMING\", \"1\")" },
         .{ .path = "build/app.zig", .pattern = "node_modules\", \".bin\", if (builtin.os.tag == .windows) \"scriptc.cmd\" else \"scriptc\"" },
+        .{ .path = "build/app.zig", .pattern = "addFileInput(dep.path(\"packages/core/scripts/compiler_command.mjs\"))" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/compiler_command.mjs", .pattern = "npmTarget !== null" },
         .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
         .{ .path = "tools/native-sdk/main.zig", .pattern = "--explain-rebuild" },
     });
@@ -3777,6 +3781,7 @@ fn externalServiceFixture(
 
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_service_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArg("--manifest");
@@ -4029,6 +4034,7 @@ fn externalCoreFixtureModule(
     // pin, archive normalized, the co-emitted sidecar captured.
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_core_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArgs(&.{ "--name", spec.name });
