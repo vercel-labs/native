@@ -258,6 +258,16 @@ class ServiceShapeTable {
     if (this.listed.has(name)) return;
     const info = this.table.structs.get(name);
     if (!info) throw new ServiceShapeError(`The shared type table has no record named \`${name}\``, this.fallbackSite);
+    const optionalField = info.fields.find((field) =>
+      (ts.isPropertySignature(field.decl) || ts.isPropertyDeclaration(field.decl)) &&
+      field.decl.questionToken !== undefined
+    );
+    if (optionalField) {
+      throw new ServiceShapeError(
+        `Service boundary record \`${name}\` has optional property \`${optionalField.tsName}?\`; spell absence explicitly as \`${optionalField.tsName}: T | null\` so both service codecs encode the same state`,
+        optionalField.decl,
+      );
+    }
     this.listed.add(name);
     const record: ServiceRecordType = {
       name,

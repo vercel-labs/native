@@ -12,7 +12,8 @@
 //   T | null/undefined    -> ?T (R7)
 //   Uint8Array            -> []const u8 (R3)
 
-import { ts, TypedAst, hasExportModifier, exportListBindings, type PropInfo } from "./typed_ast.ts";
+import path from "node:path";
+import { ts, TypedAst, hasExportModifier, exportListBindings, sdkLibraryModules, type PropInfo } from "./typed_ast.ts";
 import { mutatingMethodNames } from "./ownership.ts";
 
 export type ZType =
@@ -265,14 +266,17 @@ export class TypeTable {
           this.declOrder.push(name);
           continue;
         }
-        if (ts.isTypeLiteralNode(stmt.type) && this.tast.propsOfTypeLiteral(stmt.type) !== null) {
+        const projectOptional = this.isCanonicalThemeState(stmt);
+        if (ts.isTypeLiteralNode(stmt.type) && this.tast.propsOfTypeLiteral(stmt.type, projectOptional) !== null) {
           // A plain-record object-literal alias is a struct exactly like
           // an interface; the alias FORM is how a contract projection
           // spells a value-stored record (interfaces spell node
           // storage), and the storage itself still comes from the
           // promotion walk. Shapes the plain-record walk cannot carry
           // whole (quoted or optional properties) stay unclassified and
-          // refuse at emission instead of losing fields silently.
+          // refuse at emission instead of losing fields silently. The
+          // canonical SDK ThemeState is the sole optional-property record:
+          // omission is its manifest/system inheritance signal.
           this.structs.set(name, {
             name,
             decl: stmt,
@@ -319,24 +323,30 @@ export class TypeTable {
         }
         const structInfo = this.structs.get(stmt.name.text);
         if (structInfo && structInfo.decl === stmt && ts.isTypeLiteralNode(stmt.type)) {
-          const props = this.tast.propsOfTypeLiteral(stmt.type);
-          if (props) structInfo.fields = props.map((p) => this.fieldOf(p));
+          const projectOptional = this.isCanonicalThemeState(stmt);
+          const props = this.tast.propsOfTypeLiteral(stmt.type, projectOptional);
+          if (props) structInfo.fields = props.map((p) => this.fieldOf(p, projectOptional));
         }
       }
     }
   }
 
-  private fieldOf(p: PropInfo): ZField {
+  private isCanonicalThemeState(decl: ts.TypeAliasDeclaration): boolean {
+    const events = sdkLibraryModules.get("@native-sdk/core/events");
+    return decl.name.text === "ThemeState" && events !== undefined &&
+      path.resolve(decl.getSourceFile().fileName) === path.resolve(events);
+  }
+
+  private fieldOf(p: PropInfo, projectOptional = false): ZField {
     const resolved = p.typeNode ? this.resolveTypeNode(p.typeNode) : { k: "void" } as ZType;
     return {
       tsName: p.name,
       zigName: zigDeclName(p.name),
-      // An optional interface property is one JS `undefined` absence level.
-      // Project it onto the contract's ordinary optional slot so helper
-      // records such as ThemeState preserve omission across the ABI. Model
-      // and Msg trees still teach authors toward explicit `T | null` at
-      // their own shape checks; projection-safe helper records may use `?`.
-      type: p.optional && resolved.k !== "void" && resolved.k !== "optional"
+      // Only the canonical ThemeState projects JS `undefined` omission onto
+      // the contract's ordinary optional slot. Applying this globally would
+      // let service records acquire an absent state while their generated
+      // codecs still accept only explicit null.
+      type: projectOptional && p.optional && resolved.k !== "void" && resolved.k !== "optional"
         ? { k: "optional", inner: resolved }
         : resolved,
       decl: p.declaration,

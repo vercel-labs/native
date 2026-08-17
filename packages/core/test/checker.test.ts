@@ -1156,6 +1156,20 @@ export function update(model: Model, msg: Msg): Model { return model; }
   assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
   assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
 
+  const lookalike = checkOnly(`
+export type ThemeState = {
+  readonly pack?: "house" | "geist";
+  readonly colorScheme?: "light" | "dark" | "system";
+  readonly accent?: string;
+};
+export interface Model { readonly enabled: boolean; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { enabled: false }; }
+export function themeState(model: Model): ThemeState { return {}; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(lookalike).includes("NS1033"), `got ${ruleIds(lookalike)}`);
+
   const wrongRecord = checkOnly(`
 export interface WrongThemeState { readonly pack: "house" | "geist"; readonly accent: Uint8Array; }
 export interface Model { readonly enabled: boolean; }

@@ -265,6 +265,51 @@ export function roundTrip(request: BoundaryRecord): BoundaryRecord { return requ
   assert.match(result.servicesClient!, /serviceUnionBytes/);
 });
 
+test("optional service record properties refuse before generating an undefined-unsafe codec", () => {
+  const files = {
+    "core.ts": `
+import { Cmd } from "@native-sdk/core";
+import { preferencesSave } from "@native-sdk/services";
+import type { Preferences } from "./shared.ts";
+export interface Model { readonly saved: boolean; }
+export type Msg =
+  | { readonly kind: "save" }
+  | { readonly kind: "saved"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly error: Uint8Array };
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "save": {
+      const request: Preferences = {};
+      return [model, preferencesSave(request, { ok: "saved", err: "failed" })];
+    }
+    case "saved": return { saved: true };
+    case "failed": return model;
+  }
+}`,
+    "shared.ts": `export type Preferences = { readonly accent?: Uint8Array };`,
+    "services/preferences.ts": `
+import type { Preferences } from "../shared.ts";
+export function save(request: Preferences): Uint8Array {
+  return request.accent ?? new Uint8Array(0);
+}`,
+  };
+  for (const declaration of [
+    `export type Preferences = { readonly accent?: Uint8Array };`,
+    `export interface Preferences { readonly accent?: Uint8Array }`,
+  ]) {
+    const result = checkFiles({ ...files, "shared.ts": declaration }, {
+      contractEntry: "src/core.ts",
+      servicesContract: true,
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.diagnostics.some((diagnostic) =>
+      diagnostic.id === "NS1067" && /(resolves to void|has optional property)/.test(diagnostic.message)
+    ), JSON.stringify(result.diagnostics));
+    assert.equal(result.servicesContract, null);
+    assert.equal(result.servicesClient, null);
+  }
+});
+
 test("generated clients parenthesize composite slice element types", () => {
   const result = checkFiles({
     "core.ts": serviceCore,

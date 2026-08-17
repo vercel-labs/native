@@ -2648,7 +2648,7 @@ pub fn build(b: *std.Build) void {
         \\case "$ready_snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "component gallery GPU surface was not ready" >&2; exit 1 ;; esac
         \\case "$ready_snapshot" in *'view @w1/main kind=webview'*) echo "component gallery created an implicit WebView" >&2; exit 1 ;; *) ;; esac
         \\"$cli" automate assert 'role=tree name="Components"' 'role=treeitem name="Components".*state=\[expanded\]' 'role=treeitem name="Accordion".*state=\[selected\]' 'role=group name="Details".*state=\[selected,expanded\]' 'name="Accordion details are visible. The model owns this expanded state."'
-        \\"$cli" automate assert 'role=group name="Theme"' 'role=button name="Default".*state=\[selected\]' 'role=button name="Geist"'
+        \\"$cli" automate assert 'role=group name="Theme pack"' 'role=group name="Color scheme"' 'role=group name="Theme accent"' 'role=button name="Default".*state=\[selected\]' 'role=button name="Geist"' 'role=button name="System".*state=\[selected\]' 'role=button name="Pink"' 'role=button name="Teal"'
         \\"$cli" automate screenshot components-canvas >/dev/null 2>&1
         \\cp "$automation_dir/screenshot-components-canvas.png" "$automation_dir/screenshot-components-house.png"
         \\rm -f "$automation_dir/screenshot-components-canvas.png"
