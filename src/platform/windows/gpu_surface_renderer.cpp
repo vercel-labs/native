@@ -2983,29 +2983,84 @@ bool GpuSurfaceImpl::paintRects(const RECT *paint_rects, size_t paint_rect_count
      * flip a buffer holding a two-frames-old image to the front. */
     if (damage.empty()) return true;
 
-    /* Deliberately NOT gated on `exact`. The backing surface is sized
-     * from the packet (`ceil(logical * scale)`) and the swap chain from
-     * `GetClientRect`, and at fractional DPI those disagree by a pixel
-     * more often than not -- 1349x895 against 1348x894 at 125%. Treating
-     * that as a reason to copy everything meant the partial path
-     * essentially never ran. A partial copy is just as correct when the
-     * blit scales: it draws the same scaled image the full copy would,
-     * clipped to the damage. Only the sampling mode cares. */
-    const bool full_copy = force_full_present_ || !swap_history_valid_ ||
-        damage.size() + swap_last_damage_.size() > kSwapDirtyRectCap;
-
     const float logical_client_width = static_cast<float>(client_width / scale_);
     const float logical_client_height = static_cast<float>(client_height / scale_);
-    const D2D1_RECT_F whole = D2D1::RectF(0, 0, logical_client_width, logical_client_height);
-    /* Sizes disagree only in the window between a resize step and the
-     * packet that re-renders at the new size; scale rather than refuse,
-     * so a drag never shows a hole. */
-    const D2D1_INTERPOLATION_MODE sampling = exact
-        ? D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
-        : D2D1_INTERPOLATION_MODE_LINEAR;
+
+    /* Where the retained image lands. Deliberately NOT the client rect.
+     *
+     * Between a resize step and the packet that re-renders at the new
+     * size, `backing_bitmap_` still holds the PREVIOUS size's pixels.
+     * Drawing those into the new client rect stretches a whole surface's
+     * image to a size the app never laid out, and every anchored thing
+     * inside it slides and distorts for as long as the drag runs: a menu
+     * bar pulls away from its own left edge, a right-flush caption
+     * cluster smears, glyphs resample a fraction of a pixel on every
+     * step. The window's contents read as rubber.
+     *
+     * Anchored at the top-left and drawn at the size it was rendered,
+     * every retained pixel stays where the app put it. The only wrong
+     * region is then the strip the window has just gained, and that is
+     * cleared below. A stale POSITION for one frame is invisible; a
+     * stale SHAPE is not.
+     *
+     * A sub-pixel disagreement is not staleness and must keep scaling.
+     * The backing surface is sized from the packet
+     * (`ceil(logical * scale)`) and the swap chain from `GetClientRect`,
+     * so at fractional DPI the two differ by a pixel indefinitely --
+     * 1349x895 against 1348x894 at 125%. Anchoring that would leave a
+     * permanent hairline of cleared pixels down two edges. */
+    const auto pixel_delta = [](UINT a, UINT b) { return a > b ? a - b : b - a; };
+    const UINT delta_width = pixel_delta(backing_pixels.width, source_width_);
+    const UINT delta_height = pixel_delta(backing_pixels.height, source_height_);
+    const float content_width = delta_width <= 1
+        ? logical_client_width
+        : static_cast<float>(backing_pixels.width / scale_);
+    const float content_height = delta_height <= 1
+        ? logical_client_height
+        : static_cast<float>(backing_pixels.height / scale_);
+    const D2D1_RECT_F whole = D2D1::RectF(0, 0, content_width, content_height);
+    /* Exactly the one-pixel case resamples: zero already matches the
+     * window, and anything larger is drawn at its own extent. Each axis
+     * decides for itself -- a band whose width is a resize behind and
+     * whose height is one DPI-rounded pixel off is the common shape. */
+    const D2D1_INTERPOLATION_MODE sampling = (delta_width == 1 || delta_height == 1)
+        ? D2D1_INTERPOLATION_MODE_LINEAR
+        : D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
+    /* A window that grew leaves the retained image short of its own
+     * client rect. Those pixels are not background: a flip-model back
+     * buffer holds the frame presented two flips ago. */
+    const bool uncovered = content_width < logical_client_width || content_height < logical_client_height;
+
+    /* `full_copy` stays NOT gated on `exact`: treating the fractional-DPI
+     * pixel above as a reason to copy everything meant the partial path
+     * essentially never ran, and a partial copy is just as correct when
+     * the blit scales -- it draws the same scaled image the full copy
+     * would, clipped to the damage.
+     *
+     * An uncovered strip IS a reason. It has to be repainted on every
+     * flip until the app renders at the new size, and it lies outside
+     * this paint's damage, so a partial copy would present it stale. */
+    const bool full_copy = force_full_present_ || !swap_history_valid_ || uncovered ||
+        damage.size() + swap_last_damage_.size() > kSwapDirtyRectCap;
 
     beginOn(swap_bitmap_);
     if (full_copy) {
+        if (uncovered) {
+            /* The clear colour is by construction the colour that strip
+             * is about to be painted -- the same reasoning
+             * `applyBackgroundColor` runs on, and the same opaque
+             * treatment, the swap chain's D2D view being ALPHA_MODE_IGNORE. */
+            const D2D1_COLOR_F fill = D2D1::ColorF(
+                clamp01(clear_color_.r), clamp01(clear_color_.g), clamp01(clear_color_.b), 1.0f);
+            const auto clear_strip = [&](const D2D1_RECT_F &strip) {
+                if (strip.right <= strip.left || strip.bottom <= strip.top) return;
+                ctx()->PushAxisAlignedClip(strip, D2D1_ANTIALIAS_MODE_ALIASED);
+                ctx()->Clear(fill);
+                ctx()->PopAxisAlignedClip();
+            };
+            clear_strip(D2D1::RectF(content_width, 0, logical_client_width, logical_client_height));
+            clear_strip(D2D1::RectF(0, content_height, content_width, logical_client_height));
+        }
         ctx()->DrawBitmap(backing_bitmap_, whole, 1.0f, sampling, nullptr, nullptr);
     } else {
         auto copy_region = [&](const RECT &pixels) {
