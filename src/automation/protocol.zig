@@ -55,7 +55,9 @@ pub const fingerprint: u64 = layout_fingerprint.hash(layoutDescription(semantic_
 /// visibility, and `tray-action` gained the explicit
 /// `<status-item-id> <menu-item-id>` form (the old one-id primary-item
 /// shorthand remains valid).
-pub const semantic_epoch: u32 = 2;
+/// Epoch 3: automation snapshots expose the app menus configured on the
+/// runtime, including command ids and enabled/checked/key state.
+pub const semantic_epoch: u32 = 3;
 
 /// The canonical description the protocol fingerprint hashes: the
 /// command vocabulary (the `Action` enum, reflected — names and values,

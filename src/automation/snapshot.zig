@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 const protocol = @import("protocol.zig");
 
@@ -290,6 +291,12 @@ pub const Input = struct {
     windows: []const Window,
     views: []const platform.ViewInfo = &.{},
     widgets: []const Widget = &.{},
+    /// Static command and app-menu catalogs configured on the runtime.
+    /// These receipts let automation prove generated/ejected runners
+    /// loaded their manifest declarations before injecting command-source
+    /// events that cannot drive an OS menu tracking loop directly.
+    commands: []const app_manifest.Command = &.{},
+    menus: []const platform.Menu = &.{},
     diagnostics: Diagnostics = .{},
     /// Per-stage frame timing, non-null while `profile on` is active —
     /// printed as the `frame_profile` line right after the header.
@@ -594,6 +601,35 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetTextRanges(widget, writer);
         try writeWidgetContextMenu(widget, writer);
         try writer.writeByte('\n');
+    }
+    for (input.commands) |command| {
+        try writer.print("command id=\"{s}\" title=\"{s}\" enabled={any} checked={any}\n", .{
+            command.id,
+            command.title,
+            command.enabled,
+            command.checked,
+        });
+    }
+    for (input.menus) |menu| {
+        try writer.print("app-menu title=\"{s}\" items={d}\n", .{ menu.title, menu.items.len });
+        for (menu.items) |item| {
+            if (item.separator) {
+                try writer.writeAll("  app-menu-item separator\n");
+                continue;
+            }
+            try writer.print("  app-menu-item label=\"{s}\" command=\"{s}\" enabled={any} checked={any} key=\"{s}\" modifiers=(primary={any},command={any},control={any},option={any},shift={any})\n", .{
+                item.label,
+                item.command,
+                item.enabled,
+                item.checked,
+                item.key,
+                item.modifiers.primary,
+                item.modifiers.command,
+                item.modifiers.control,
+                item.modifiers.option,
+                item.modifiers.shift,
+            });
+        }
     }
     for (input.trays) |tray| {
         try writer.print("tray #{d} title=\"{s}\" visible={any} items={d}\n", .{ tray.id, tray.title, tray.visible, tray.items.len });
@@ -940,6 +976,32 @@ test "snapshot emits tray title and dropdown items" {
     var empty_writer = std.Io.Writer.fixed(&empty_buffer);
     try writeText(.{ .windows = &windows }, &empty_writer);
     try std.testing.expect(std.mem.indexOf(u8, empty_writer.buffered(), "tray") == null);
+}
+
+test "snapshot emits configured command and app-menu catalogs" {
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
+    const commands = [_]app_manifest.Command{
+        .{ .id = "app.refresh", .title = "Refresh" },
+    };
+    const items = [_]platform.MenuItem{
+        .{ .label = "Refresh", .command = "app.refresh", .key = "r", .modifiers = .{ .primary = true } },
+        .{ .separator = true },
+    };
+    const menus = [_]platform.Menu{
+        .{ .title = "View", .items = &items },
+    };
+    try writeText(.{
+        .windows = &windows,
+        .commands = &commands,
+        .menus = &menus,
+    }, &writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "\ncommand id=\"app.refresh\" title=\"Refresh\" enabled=true checked=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "app-menu title=\"View\" items=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item label=\"Refresh\" command=\"app.refresh\" enabled=true checked=false key=\"r\" modifiers=(primary=true,command=false,control=false,option=false,shift=false)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item separator\n") != null);
 }
 
 test "accessibility snapshot uses visible view text as name" {

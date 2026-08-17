@@ -2196,6 +2196,9 @@ pub fn build(b: *std.Build) void {
         \\ready="$("$cli" automate wait 2>&1)"
         \\case "$ready" in *"ready=true"*) ;; *) echo "menu-bar automation snapshot was not ready" >&2; exit 1 ;; esac
         \\before="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\case "$before" in *'command id="player.next" title="Next Track" enabled=true checked=false'*) ;; *) echo "app.zon command catalog was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu title="Player" items=6'*) ;; *) echo "app.zon Player menu was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu-item label="Next Track" command="player.next" enabled=true checked=false key="n" modifiers=(primary=true,command=false,control=false,option=false,shift=false)'*) ;; *) echo "app.zon player.next menu item was not loaded by the zero-config runner" >&2; exit 1 ;; esac
         \\case "$before" in
         \\  *'Ambient Coast'*) expected='Night Drive' ;;
         \\  *'Night Drive'*) expected='Paper Planes' ;;
