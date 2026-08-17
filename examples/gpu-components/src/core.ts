@@ -3,6 +3,7 @@
 // controlled component state and the messages produced by interaction.
 
 import { Cmd, asciiBytes } from "@native-sdk/core";
+import { type ThemeState } from "@native-sdk/core/events";
 import {
   applyTextInputEvent,
   clampedInsertEvent,
@@ -109,6 +110,8 @@ function applyDraft(value: Draft, event: TextInputEvent): Draft {
 
 export type Density = "default" | "comfortable";
 export type ThemePack = "house" | "geist";
+export type ThemeColorScheme = "system" | "light" | "dark";
+export type ThemeAccent = "manifest" | "pink" | "teal";
 export type DropdownChoice = "none" | "duplicate" | "rename" | "download" | "delete";
 export type SelectChoice = "production" | "staging" | "development";
 export type Tab = "account" | "password" | "team";
@@ -120,6 +123,8 @@ export interface Model {
   readonly components: readonly ComponentItem[];
   readonly selectedComponentId: number;
   readonly theme: ThemePack;
+  readonly themeColorScheme: ThemeColorScheme;
+  readonly themeAccent: ThemeAccent;
   readonly catalogExpanded: boolean;
   readonly accordionOpen: boolean;
   readonly checkboxChecked: boolean;
@@ -157,6 +162,12 @@ export type Msg =
   | { readonly kind: "select_component"; readonly componentId: number }
   | { readonly kind: "theme_house" }
   | { readonly kind: "theme_geist" }
+  | { readonly kind: "theme_system" }
+  | { readonly kind: "theme_light" }
+  | { readonly kind: "theme_dark" }
+  | { readonly kind: "accent_manifest" }
+  | { readonly kind: "accent_pink" }
+  | { readonly kind: "accent_teal" }
   | { readonly kind: "toggle_catalog" }
   | { readonly kind: "action" }
   | { readonly kind: "toggle_accordion" }
@@ -220,7 +231,6 @@ export type Msg =
 
 // These records are intentionally read only through binding helpers.
 export const viewUnbound = [
-  "theme",
   "comboboxDraft",
   "inputDraft",
   "textareaDraft",
@@ -232,6 +242,8 @@ export function initialModel(): Model {
     components: COMPONENTS,
     selectedComponentId: 1,
     theme: "house",
+    themeColorScheme: "system",
+    themeAccent: "manifest",
     catalogExpanded: true,
     accordionOpen: true,
     checkboxChecked: true,
@@ -285,11 +297,17 @@ export function selectedLabel(model: Model): Uint8Array {
   return asciiBytes("Component");
 }
 
-// The default TypeScript launcher recognizes this exported single-model
-// helper and selects the built-in pack on every rebuild. System light/dark,
-// contrast, reduced-motion, accent, and surface scale remain runtime-owned.
-export function themePack(model: Model): ThemePack {
-  return model.theme;
+// One model helper owns the stock theme's author-facing axes. Omitting the
+// accent inherits app.zon's theme_accent; `system` follows the OS. High
+// contrast/reduced motion and each surface's scale stay runtime-owned.
+export function themeState(model: Model): ThemeState {
+  if (model.themeAccent === "pink") {
+    return { pack: model.theme, colorScheme: model.themeColorScheme, accent: "#df2670" };
+  }
+  if (model.themeAccent === "teal") {
+    return { pack: model.theme, colorScheme: model.themeColorScheme, accent: "#00786f" };
+  }
+  return { pack: model.theme, colorScheme: model.themeColorScheme };
 }
 
 export function selectLabel(model: Model): Uint8Array {
@@ -338,6 +356,18 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, theme: "house" }, Cmd.none];
     case "theme_geist":
       return [{ ...model, theme: "geist" }, Cmd.none];
+    case "theme_system":
+      return [{ ...model, themeColorScheme: "system" }, Cmd.none];
+    case "theme_light":
+      return [{ ...model, themeColorScheme: "light" }, Cmd.none];
+    case "theme_dark":
+      return [{ ...model, themeColorScheme: "dark" }, Cmd.none];
+    case "accent_manifest":
+      return [{ ...model, themeAccent: "manifest" }, Cmd.none];
+    case "accent_pink":
+      return [{ ...model, themeAccent: "pink" }, Cmd.none];
+    case "accent_teal":
+      return [{ ...model, themeAccent: "teal" }, Cmd.none];
     case "toggle_catalog":
       return [{ ...model, catalogExpanded: !model.catalogExpanded }, Cmd.none];
     case "action":

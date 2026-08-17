@@ -4,6 +4,7 @@
     .display_name = "GPU Components",
     .description = "An isolated gallery of interactive Native UI components authored in TypeScript and Native markup.",
     .version = "0.1.0",
+    .theme_accent = "#7c3aed",
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },

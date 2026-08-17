@@ -2403,6 +2403,19 @@ test "the accent override desaturates its dark-scheme focus ring" {
     try std.testing.expectEqualDeep(gray, canvas.accentFocusRing(gray, .dark));
 }
 
+test "accent overrides compose over either built-in pack without moving unrelated tokens" {
+    const accent = Color.rgb8(0, 120, 111);
+    for ([_]canvas.ThemePack{ .house, .geist }) |pack| {
+        const base = DesignTokens.theme(.{ .pack = pack, .color_scheme = .dark });
+        const branded = base.withOverrides(canvas.accentOverrides(accent, .dark));
+        try std.testing.expectEqualDeep(accent, branded.colors.accent);
+        try std.testing.expectEqualDeep(canvas.accentFocusRing(accent, .dark), branded.colors.focus_ring);
+        try std.testing.expectEqualDeep(accent, branded.controls.slider.active_background);
+        try std.testing.expectEqual(base.metrics.control_height, branded.metrics.control_height);
+        try std.testing.expectEqualDeep(base.colors.background, branded.colors.background);
+    }
+}
+
 test "the dark accent focus ring holds the non-text contrast floor across hues" {
     // Rings draw OUTSIDE controls, so the tones that matter are the
     // dark containers controls commonly sit on, across BOTH shipped

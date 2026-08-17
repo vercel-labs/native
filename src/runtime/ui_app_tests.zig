@@ -47,6 +47,18 @@ fn counterThemePack(model: *const CounterModel) canvas.ThemePack {
     return if (model.count == 0) .house else .geist;
 }
 
+fn counterThemeState(model: *const CounterModel) CounterApp.ThemeState {
+    return switch (model.count) {
+        0 => .{ .color_scheme = .dark },
+        1 => .{ .pack = .geist, .color_scheme = .system, .accent = canvas.Color.rgb8(0, 0x78, 0x6f) },
+        else => .{ .pack = .house, .color_scheme = .light, .accent = canvas.Color.rgb8(0xdf, 0x26, 0x70) },
+    };
+}
+
+fn invalidCounterThemeState(_: *const CounterModel) CounterApp.ThemeState {
+    return .{ .invalid_accent = "pink" };
+}
+
 const counter_views = [_]app_manifest.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
 };
@@ -1918,6 +1930,117 @@ test "model-derived theme packs retain live appearance, accent, and surface scal
     try std.testing.expect(house.metrics.control_height != geist.metrics.control_height);
     try std.testing.expectEqual(@as(u32, 0), actual.motion.normal_ms);
     try std.testing.expectEqual(@as(f32, 2), actual.pixel_snap.scale);
+}
+
+test "model-derived theme state composes forced/system schemes and model accent over manifest defaults" {
+    var options = counterOptions();
+    options.theme = .house;
+    options.theme_accent = canvas.Color.rgb8(0x12, 0x34, 0x56);
+    options.theme_state_fn = counterThemeState;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    app_state.system_appearance = .{ .color_scheme = .light };
+    app_state.pixel_snap_scale = 2;
+
+    // Model-forced dark wins over an OS-light appearance; omitted pack and
+    // accent inherit the manifest-backed options.
+    var expected = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .pack = .house });
+    expected = expected.withOverrides(canvas.accentOverrides(options.theme_accent.?, .dark));
+    var actual = app_state.effectiveTokens();
+    try std.testing.expectEqualDeep(expected.colors.background, actual.colors.background);
+    try std.testing.expectEqualDeep(expected.colors.accent, actual.colors.accent);
+    try std.testing.expectEqual(@as(f32, 2), actual.pixel_snap.scale);
+
+    // `system` resumes live OS following while model pack/accent override the
+    // manifest values.
+    app_state.model.count = 1;
+    app_state.theme_state_known = false;
+    app_state.system_appearance = .{ .color_scheme = .dark };
+    const teal = canvas.Color.rgb8(0, 0x78, 0x6f);
+    expected = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .pack = .geist });
+    expected = expected.withOverrides(canvas.accentOverrides(teal, .dark));
+    actual = app_state.effectiveTokens();
+    try std.testing.expectEqualDeep(expected.colors.background, actual.colors.background);
+    try std.testing.expectEqualDeep(teal, actual.colors.accent);
+    try std.testing.expectEqualDeep(canvas.accentFocusRing(teal, .dark), actual.colors.focus_ring);
+
+    // High contrast keeps the existing accessibility rule: neither the
+    // model nor manifest accent layers over the pack's loud register.
+    app_state.system_appearance.high_contrast = true;
+    actual = app_state.effectiveTokens();
+    const loud = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .contrast = .high, .pack = .geist });
+    try std.testing.expectEqualDeep(loud.colors.accent, actual.colors.accent);
+    try std.testing.expect(!std.meta.eql(teal, actual.colors.accent));
+}
+
+test "malformed adapter theme accents reject the rebuild instead of inheriting silently" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var options = counterOptions();
+    options.theme_state_fn = invalidCounterThemeState;
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try std.testing.expectError(error.InvalidThemeAccent, harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } }));
+    try std.testing.expect(!app_state.installed);
+}
+
+test "forced theme state still follows accessibility axes while scheme-only OS flips do not restyle" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    var options = counterOptions();
+    options.theme_state_fn = counterThemeState; // count 0 forces dark.
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    var stored = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    const dark = canvas.DesignTokens.theme(.{ .color_scheme = .dark });
+    try std.testing.expectEqualDeep(dark.colors.background, stored.colors.background);
+
+    // A scheme-only flip cannot override the forced state.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    stored = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expectEqualDeep(dark.colors.background, stored.colors.background);
+
+    // Accessibility axes remain live even under a forced color scheme.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{
+        .color_scheme = .light,
+        .high_contrast = true,
+        .reduce_motion = true,
+    } });
+    stored = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    const dark_loud = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .contrast = .high, .reduce_motion = true });
+    try std.testing.expectEqualDeep(dark_loud.colors.background, stored.colors.background);
+    try std.testing.expectEqualDeep(dark_loud.colors.focus_ring, stored.colors.focus_ring);
+    try std.testing.expectEqual(@as(u32, 0), stored.motion.normal_ms);
 }
 
 test "static tokens carry the surface scale and re-snap on a scale change" {

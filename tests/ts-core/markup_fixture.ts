@@ -23,6 +23,7 @@ import {
   type ColorScheme,
   type ChromeInsets,
   type ChromeButtons,
+  type ThemeState,
 } from "@native-sdk/core/events";
 
 export type Filter = "all" | "open" | "done";
@@ -290,6 +291,15 @@ export function dropMsg(drop: FileDropEvent): Msg | null {
 export const appearanceMsg = "appearance_changed";
 export const chromeMsg = "chrome_changed";
 export const envMsgs = [{ env: "TS_BOARD_BANNER", msg: "banner_set" }] as const;
+
+/// Full-loop fixture for the model-derived appearance helper. `open` follows
+/// the OS, `done` forces dark with a model accent, and `all` inherits every
+/// axis. The record/replay suite cycles to `done` before its screenshot mark.
+export function themeState(model: Model): ThemeState {
+  if (model.filter === "done") return { colorScheme: "dark", accent: "#df2670" };
+  if (model.filter === "open") return { colorScheme: "system" };
+  return {};
+}
 
 export function initialModel(): Model {
   return {

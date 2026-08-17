@@ -4,10 +4,22 @@
 <row background="background">
   <column width="248" padding="12" gap="8" background="surface" label="Component navigation">
     <column gap="6">
-      <text foreground="text_muted">Theme</text>
-      <toggle-group gap="2" label="Theme">
-        <toggle-button size="sm" selected="{themePack == 'house'}" on-toggle="theme_house">Default</toggle-button>
-        <toggle-button size="sm" selected="{themePack == 'geist'}" on-toggle="theme_geist">Geist</toggle-button>
+      <text foreground="text_muted">Pack</text>
+      <toggle-group gap="2" label="Theme pack">
+        <toggle-button size="sm" selected="{theme == 'house'}" on-toggle="theme_house">Default</toggle-button>
+        <toggle-button size="sm" selected="{theme == 'geist'}" on-toggle="theme_geist">Geist</toggle-button>
+      </toggle-group>
+      <text foreground="text_muted">Scheme</text>
+      <toggle-group gap="2" label="Color scheme">
+        <toggle-button size="sm" selected="{themeColorScheme == 'system'}" on-toggle="theme_system">System</toggle-button>
+        <toggle-button size="sm" selected="{themeColorScheme == 'light'}" on-toggle="theme_light">Light</toggle-button>
+        <toggle-button size="sm" selected="{themeColorScheme == 'dark'}" on-toggle="theme_dark">Dark</toggle-button>
+      </toggle-group>
+      <text foreground="text_muted">Accent</text>
+      <toggle-group gap="2" label="Theme accent">
+        <toggle-button size="sm" selected="{themeAccent == 'manifest'}" on-toggle="accent_manifest">Default</toggle-button>
+        <toggle-button size="sm" selected="{themeAccent == 'pink'}" on-toggle="accent_pink">Pink</toggle-button>
+        <toggle-button size="sm" selected="{themeAccent == 'teal'}" on-toggle="accent_teal">Teal</toggle-button>
       </toggle-group>
     </column>
     <separator />

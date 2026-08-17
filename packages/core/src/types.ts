@@ -327,10 +327,18 @@ export class TypeTable {
   }
 
   private fieldOf(p: PropInfo): ZField {
+    const resolved = p.typeNode ? this.resolveTypeNode(p.typeNode) : { k: "void" } as ZType;
     return {
       tsName: p.name,
       zigName: zigDeclName(p.name),
-      type: p.typeNode ? this.resolveTypeNode(p.typeNode) : { k: "void" },
+      // An optional interface property is one JS `undefined` absence level.
+      // Project it onto the contract's ordinary optional slot so helper
+      // records such as ThemeState preserve omission across the ABI. Model
+      // and Msg trees still teach authors toward explicit `T | null` at
+      // their own shape checks; projection-safe helper records may use `?`.
+      type: p.optional && resolved.k !== "void" && resolved.k !== "optional"
+        ? { k: "optional", inner: resolved }
+        : resolved,
       decl: p.declaration,
     };
   }

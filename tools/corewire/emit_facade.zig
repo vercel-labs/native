@@ -2101,14 +2101,24 @@ const FacadeEmitter = struct {
             },
             .bytes => {
                 self.use(.w_bytes);
-                try self.print("{s}nscfWBytes(sink, {s});\n", .{ pad, expr });
+                if (self.isThemeStateAccent(container, member)) {
+                    // ThemeState.accent is author-facing `string` (the
+                    // ergonomic "#rrggbb" API) but the core ABI's one text
+                    // representation is bytes. The contract intentionally
+                    // reflects strings as bytes; bridge this one exact
+                    // launcher record at the generated boundary.
+                    self.use(.utf8_text);
+                    try self.print("{s}nscfWBytes(sink, nscfUtf8TextBytes({s}));\n", .{ pad, expr });
+                } else {
+                    try self.print("{s}nscfWBytes(sink, {s});\n", .{ pad, expr });
+                }
             },
             .void => {},
             .optional => |inner| {
                 self.use(.w_bool);
                 const temp = try std.fmt.allocPrint(self.arena, "nscfOpt{d}", .{self.temp_counter});
                 self.temp_counter += 1;
-                try self.print("{s}const {s} = {s};\n{s}if ({s} === null) {{\n{s}  nscfWBool(sink, false);\n{s}}} else {{\n{s}  nscfWBool(sink, true);\n", .{ pad, temp, expr, pad, temp, pad, pad, pad });
+                try self.print("{s}const {s} = {s};\n{s}if ({s} === null || {s} === undefined) {{\n{s}  nscfWBool(sink, false);\n{s}}} else {{\n{s}  nscfWBool(sink, true);\n", .{ pad, temp, expr, pad, temp, temp, pad, pad, pad });
                 try self.fieldWriteStatements(inner.*, temp, container, member, depth + 1);
                 try self.print("{s}}}\n", .{pad});
             },
@@ -2143,6 +2153,18 @@ const FacadeEmitter = struct {
                 try self.print("{s}nscfWrite{s}(sink, {s});\n", .{ pad, name, expr });
             },
         }
+    }
+
+    fn isThemeStateAccent(self: *FacadeEmitter, container: []const u8, member: []const u8) bool {
+        if (!std.mem.eql(u8, member, "accent")) return false;
+        for (self.sidecar.model_helpers) |helper| {
+            if (!std.mem.eql(u8, helper.name, "themeState")) continue;
+            return switch (helper.returns) {
+                .node, .value => |name| std.mem.eql(u8, name, container),
+                else => false,
+            };
+        }
+        return false;
     }
 
     fn recordWriter(self: *FacadeEmitter, name: []const u8) Error!void {
@@ -4002,6 +4024,37 @@ test "helpers wrap in declaration order with classed-return proofs" {
     try testing.expect(std.mem.indexOf(u8, generated, "if (helper === 1) {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "nscfWBytes(sink, nscfValue);") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "nscfWI64(sink, nscfValue);") != null);
+}
+
+test "themeState helper encodes omitted fields and UTF-8 string accent" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"structs\": [",
+        "\"structs\": [\n      {\"name\": \"ThemeState\", \"origin\": \"sdk/events.ts\", \"fields\": [{\"name\": \"pack\", \"type\": {\"kind\": \"optional\", \"inner\": {\"kind\": \"enum\", \"name\": \"ThemeStatePack\"}}}, {\"name\": \"colorScheme\", \"type\": {\"kind\": \"optional\", \"inner\": {\"kind\": \"enum\", \"name\": \"ThemeStateColorScheme\"}}}, {\"name\": \"accent\", \"type\": {\"kind\": \"optional\", \"inner\": {\"kind\": \"bytes\"}}}] },",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "\"enums\": []",
+        "\"enums\": [{\"name\": \"ThemeStatePack\", \"origin\": \"sdk/events.ts\", \"members\": [\"house\", \"geist\"]}, {\"name\": \"ThemeStateColorScheme\", \"origin\": \"sdk/events.ts\", \"members\": [\"light\", \"dark\", \"system\"]}]",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"themeState\", \"params\": [], \"returns\": {\"kind\": \"value\", \"name\": \"ThemeState\"}, \"arena\": false}]",
+    );
+    const generated = try facadeFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "=== null ||") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "=== undefined") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "nscfWBytes(sink, nscfUtf8TextBytes(") != null);
 }
 
 test "nullable integer helper returns prove their present branch" {

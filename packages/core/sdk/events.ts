@@ -37,12 +37,28 @@
 //   - `AppearanceEvent`, `ChromeEvent`, `AudioEvent`: the full arm
 //     payload shapes, canonical and importable for helper signatures
 //     (an arm value is structurally assignable to its event record).
+//   - `ThemeState`: the model-derived built-in theme axes returned by
+//     `themeState(model)`; omitted fields inherit the manifest/system.
 //   - `StatusItemState`, `StatusItemDescriptor`, and their nested records:
 //     the model-derived shell returned by `statusItem(model)` or keyed
 //     `statusItems(model)`; the generated launcher refreshes shell,
 //     presentation, visibility, and menu after committed model changes.
 
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.ts";
+
+/// The stock theme axes a TypeScript core may derive from committed model
+/// state. Omit `pack`/`accent` to inherit app.zon; omit `colorScheme` (or
+/// return `"system"`) to follow the OS. High contrast and reduced motion
+/// remain system-owned, and high contrast suppresses accent overrides.
+export type ThemeStatePack = "house" | "geist";
+
+export type ThemeStateColorScheme = "light" | "dark" | "system";
+
+export type ThemeState = {
+  readonly pack?: ThemeStatePack;
+  readonly colorScheme?: ThemeStateColorScheme;
+  readonly accent?: string;
+};
 
 /// One row in a menu-bar status item's menu. Non-separator rows need a
 /// unique non-zero `id`, a non-empty `label`, and (when actionable) a

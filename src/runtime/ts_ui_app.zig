@@ -44,7 +44,8 @@
 //! the committed model. One model-helper convention joins that wiring:
 //! an exported `themePack(model): "house" | "geist"` helper selects the
 //! stock pack live through `theme_fn`, without taking ownership of the
-//! system appearance axes. An exported
+//! system appearance axes; `themeState(model)` subsumes it with scheme and
+//! accent axes through `theme_state_fn`. An exported
 //! `statusItem(model): StatusItemState` helper similarly owns one complete
 //! menu-bar item through `status_item_fn`; `statusItems(model)` owns a keyed
 //! collection through `status_items_fn`. Both keep shell, presentation, and
@@ -405,11 +406,21 @@ pub fn TsUiApp(comptime core: type) type {
             // external-core mirror. The app owns only the pack; UiApp's
             // stock-token path keeps following the OS appearance.
             if (comptime @hasDecl(Model, "themePack")) {
+                if (comptime @hasDecl(Model, "themeState")) {
+                    @compileError("TsUiApp: export either themePack or themeState, not both");
+                }
                 if (options.theme_fn != null) {
                     @panic("TsUiApp wires theme_fn from the core's themePack helper - remove the wiring's theme_fn");
                 }
                 comptime validateThemePackHelper();
                 stamped.theme_fn = themePackAdapter;
+            }
+            if (comptime @hasDecl(Model, "themeState")) {
+                if (options.theme_state_fn != null or options.theme_fn != null) {
+                    @panic("TsUiApp wires theme_state_fn from the core's themeState helper - remove the wiring's theme_state_fn/theme_fn");
+                }
+                comptime validateThemeStateHelper();
+                stamped.theme_state_fn = themeStateAdapter;
             }
             // A statusItem helper is the TS app's model-derived shell
             // declaration. UiApp installs it on the first frame and
@@ -524,6 +535,82 @@ pub fn TsUiApp(comptime core: type) type {
             const pack_info = @typeInfo(Pack);
             if (pack_info != .@"enum" or pack_info.@"enum".fields.len != 2 or
                 !@hasField(Pack, "house") or !@hasField(Pack, "geist"))
+            {
+                @compileError(teaching);
+            }
+        }
+
+        fn themeStateAdapter(model: *const Model) App.ThemeState {
+            const params = @typeInfo(@TypeOf(Model.themeState)).@"fn".params;
+            const raw_state = if (comptime params.len == 1)
+                model.themeState()
+            else
+                model.themeState(core.rt.frameAllocator());
+            const state = if (comptime @typeInfo(@TypeOf(raw_state)) == .pointer) raw_state.* else raw_state;
+            const accent = if (state.accent) |value| parseThemeAccent(value) else null;
+            return .{
+                .pack = if (state.pack) |pack| canvas.ThemePack.fromName(@tagName(pack)).? else null,
+                .color_scheme = if (state.colorScheme) |scheme| themeColorScheme(scheme) else .system,
+                .accent = accent,
+                .invalid_accent = if (state.accent != null and accent == null) state.accent else null,
+            };
+        }
+
+        fn themeColorScheme(value: anytype) App.ThemeColorScheme {
+            const name = @tagName(value);
+            inline for (std.meta.fields(App.ThemeColorScheme)) |field| {
+                if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn parseThemeAccent(value: []const u8) ?canvas.Color {
+            if (value.len != 7 or value[0] != '#') return null;
+            const r = themeHexByte(value[1], value[2]) orelse return null;
+            const g = themeHexByte(value[3], value[4]) orelse return null;
+            const b = themeHexByte(value[5], value[6]) orelse return null;
+            return canvas.Color.rgb8(r, g, b);
+        }
+
+        fn themeHexByte(hi: u8, lo: u8) ?u8 {
+            const h = themeHexNibble(hi) orelse return null;
+            const l = themeHexNibble(lo) orelse return null;
+            return h * 16 + l;
+        }
+
+        fn themeHexNibble(byte: u8) ?u8 {
+            return switch (byte) {
+                '0'...'9' => byte - '0',
+                'a'...'f' => byte - 'a' + 10,
+                'A'...'F' => byte - 'A' + 10,
+                else => null,
+            };
+        }
+
+        fn validateThemeStateHelper() void {
+            const teaching = "TsUiApp: themeState must be exported from core.ts as themeState(model: Model): ThemeState; import ThemeState from @native-sdk/core/events";
+            const helper_info = @typeInfo(@TypeOf(Model.themeState));
+            if (helper_info != .@"fn") @compileError(teaching);
+            const function = helper_info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type == null or function.params[0].type.? != *const Model) {
+                @compileError(teaching);
+            }
+            if (function.params.len == 2) {
+                if (function.params[1].type == null or function.params[1].type.? != std.mem.Allocator or
+                    !@hasDecl(core, "rt") or !@hasDecl(core.rt, "frameAllocator"))
+                {
+                    @compileError(teaching);
+                }
+            }
+            const RawState = function.return_type orelse @compileError(teaching);
+            const State = statusItemRecordType(RawState, teaching);
+            const info = @typeInfo(State).@"struct";
+            if (info.fields.len != 3 or !@hasField(State, "pack") or !@hasField(State, "colorScheme") or !@hasField(State, "accent")) {
+                @compileError(teaching);
+            }
+            if (!optionalEnumType(@FieldType(State, "pack"), &.{ "house", "geist" }) or
+                !optionalEnumType(@FieldType(State, "colorScheme"), &.{ "light", "dark", "system" }) or
+                @FieldType(State, "accent") != ?[]const u8)
             {
                 @compileError(teaching);
             }
@@ -954,6 +1041,11 @@ pub fn TsUiApp(comptime core: type) type {
         fn optionalNumericType(comptime T: type) bool {
             const info = @typeInfo(T);
             return info == .optional and statusItemNumericType(info.optional.child);
+        }
+
+        fn optionalEnumType(comptime T: type, comptime expected: []const []const u8) bool {
+            const info = @typeInfo(T);
+            return info == .optional and statusItemEnumType(info.optional.child, expected);
         }
 
         fn statusItemNumericType(comptime T: type) bool {
@@ -1582,6 +1674,45 @@ const WindowsAdapterTestCore = struct {
         }
     };
 };
+
+const ThemeStateAdapterTestCore = struct {
+    const Pack = enum { house, geist };
+    const Scheme = enum { light, dark, system };
+    const State = struct {
+        pack: ?Pack,
+        colorScheme: ?Scheme,
+        accent: ?[]const u8,
+    };
+
+    pub const Msg = union(enum) { noop };
+    pub const Model = struct {
+        bad: bool = false,
+
+        pub fn themeState(self: *const Model) State {
+            return .{
+                .pack = .geist,
+                .colorScheme = .dark,
+                .accent = if (self.bad) "hot-pink" else "#Df2670",
+            };
+        }
+    };
+};
+
+test "TypeScript themeState adapter validates, parses hex, and preserves malformed accent teaching" {
+    const Adapter = TsUiApp(ThemeStateAdapterTestCore);
+    comptime Adapter.validateThemeStateHelper();
+    var model = ThemeStateAdapterTestCore.Model{};
+    var state = Adapter.themeStateAdapter(&model);
+    try std.testing.expectEqual(canvas.ThemePack.geist, state.pack.?);
+    try std.testing.expectEqual(Adapter.App.ThemeColorScheme.dark, state.color_scheme);
+    try std.testing.expectEqual(canvas.Color.rgb8(0xdf, 0x26, 0x70), state.accent.?);
+    try std.testing.expect(state.invalid_accent == null);
+
+    model.bad = true;
+    state = Adapter.themeStateAdapter(&model);
+    try std.testing.expect(state.accent == null);
+    try std.testing.expectEqualStrings("hot-pink", state.invalid_accent.?);
+}
 
 test "TypeScript windows adapter keeps the declared prefix on overflow and projects chromeless" {
     const Adapter = TsUiApp(WindowsAdapterTestCore);

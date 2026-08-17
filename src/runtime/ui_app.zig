@@ -281,6 +281,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             items: []const platform.TrayMenuItem = &.{},
         };
 
+        /// The stock-theme axes a model may own without replacing the full
+        /// DesignTokens register. `system` follows the platform's live color
+        /// scheme; null pack/accent values inherit the manifest-backed
+        /// Options fields. Native chrome and WebViews remain OS-themed — this
+        /// state controls canvas tokens only.
+        pub const ThemeColorScheme = enum { system, light, dark };
+
+        pub const ThemeState = struct {
+            pack: ?canvas.ThemePack = null,
+            color_scheme: ThemeColorScheme = .system,
+            accent: ?canvas.Color = null,
+            /// Adapter-only invalid declaration marker. Zig cores already
+            /// pass a typed Color; the TS adapter retains malformed source
+            /// text here so rebuild rejects it instead of silently inheriting.
+            invalid_accent: ?[]const u8 = null,
+        };
+
         /// One entry in the model-declared status-item collection.
         /// `id` is stable identity; dropping the entry removes that
         /// native status item, while every other field patches in place.
@@ -485,6 +502,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// `tokens_fn` still take precedence because those paths own
             /// the complete token register.
             theme_fn: ?*const fn (model: *const ModelT) canvas.ThemePack = null,
+            /// Cohesive model-derived stock-theme state: built-in pack,
+            /// canvas color scheme, and accent. This subsumes `theme_fn` and
+            /// is mutually exclusive with it. Explicit `tokens_fn`/`tokens`
+            /// still own the complete register and take precedence.
+            theme_state_fn: ?*const fn (model: *const ModelT) ThemeState = null,
             /// The app's ONE-accent brand statement over the stock
             /// tokens: when set (and the app claims neither `tokens`
             /// nor `tokens_fn` — apps that own their tokens own their
@@ -962,6 +984,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// light/dark setting live. Test/null platforms never emit it,
         /// so deterministic runs stay on the default light theme.
         system_appearance: platform.Appearance = .{},
+        /// Last valid model-derived state. Re-derived before each rebuild;
+        /// equality is a handful of scalar/optional fields.
+        theme_state: ThemeState = .{},
+        theme_state_known: bool = false,
         pixel_snap_scale: f32 = 1,
         frame_timestamp_ns: u64 = 0,
         markup_arenas: [2]std.heap.ArenaAllocator,
@@ -1397,6 +1423,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             std.debug.assert((options.update != null) != (options.update_fx != null));
             // Declared windows need the per-window view to build them.
             std.debug.assert(options.windows_fn == null or options.window_view != null);
+            std.debug.assert(options.theme_fn == null or options.theme_state_fn == null);
             if (comptime !features.runtime_markup) std.debug.assert(options.markup == null);
         }
 
@@ -1883,30 +1910,64 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.pixel_snap.scale = self.pixel_snap_scale;
                 return tokens;
             }
-            var tokens = canvas.DesignTokens.theme(.{
-                .color_scheme = switch (self.system_appearance.color_scheme) {
+            const state = self.currentThemeState();
+            const color_scheme: canvas.ColorScheme = switch (state.color_scheme) {
+                .system => switch (self.system_appearance.color_scheme) {
                     .light => .light,
                     .dark => .dark,
                 },
+                .light => .light,
+                .dark => .dark,
+            };
+            var tokens = canvas.DesignTokens.theme(.{
+                .color_scheme = color_scheme,
                 .contrast = if (self.system_appearance.high_contrast) .high else .standard,
                 .reduce_motion = self.system_appearance.reduce_motion,
-                .pack = if (self.options.theme_fn) |theme_fn| theme_fn(&self.model) else self.options.theme,
+                .pack = state.pack orelse if (self.options.theme_fn) |theme_fn| theme_fn(&self.model) else self.options.theme,
             });
-            if (self.options.theme_accent) |accent| {
+            if (state.accent orelse self.options.theme_accent) |accent| {
                 // The manifest accent layers over the resolved pack —
                 // except under high contrast, where the pack's own loud
                 // register wins untouched (accessibility beats brand).
                 // The bundle takes the resolved scheme: the dark ring
                 // derives desaturated (canvas.accentFocusRing).
                 if (!self.system_appearance.high_contrast) {
-                    tokens = tokens.withOverrides(canvas.accentOverrides(accent, switch (self.system_appearance.color_scheme) {
-                        .light => .light,
-                        .dark => .dark,
-                    }));
+                    tokens = tokens.withOverrides(canvas.accentOverrides(accent, color_scheme));
                 }
             }
             tokens.pixel_snap.scale = self.pixel_snap_scale;
             return tokens;
+        }
+
+        fn currentThemeState(self: *const Self) ThemeState {
+            if (self.theme_state_known) return self.theme_state;
+            return if (self.options.theme_state_fn) |theme_state_fn| theme_state_fn(&self.model) else .{};
+        }
+
+        /// Re-derive once per rebuild and reject malformed adapter input at
+        /// the declaration boundary. A valid retained state contains no
+        /// borrowed accent text, so it remains safe between dispatches.
+        fn refreshThemeState(self: *Self) error{InvalidThemeAccent}!void {
+            // Complete-token paths outrank the stock-theme helper entirely.
+            // Do not even validate an unused model accent: the app has
+            // explicitly claimed the whole DesignTokens register.
+            if (self.options.tokens_fn != null or self.options.tokens != null) {
+                self.theme_state = .{};
+                self.theme_state_known = true;
+                return;
+            }
+            const next = if (self.options.theme_state_fn) |theme_state_fn| theme_state_fn(&self.model) else ThemeState{};
+            if (next.invalid_accent) |accent| {
+                ui_app_log.warn(
+                    "themeState(model) returned accent '{s}'; expected exactly #rrggbb (six hexadecimal digits)",
+                    .{accent},
+                );
+                return error.InvalidThemeAccent;
+            }
+            if (!self.theme_state_known or !std.meta.eql(self.theme_state, next)) {
+                self.theme_state = next;
+                self.theme_state_known = true;
+            }
         }
 
         /// The design tokens for a secondary window's rebuild: the same
@@ -1924,13 +1985,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// true only when the app claims neither token override, so an
         /// appearance flip must re-derive and re-render.
         fn followsSystemAppearance(self: *const Self) bool {
-            return self.options.tokens_fn == null and self.options.tokens == null;
+            if (self.options.tokens_fn != null or self.options.tokens != null) return false;
+            if (self.options.theme_state_fn == null) return true;
+            return self.currentThemeState().color_scheme == .system;
         }
 
         /// Whether tokens are derived per rebuild (model-owned or
         /// system-followed) rather than a fixed set.
         fn derivesTokens(self: *const Self) bool {
-            return self.options.tokens_fn != null or self.followsSystemAppearance();
+            return self.options.tokens_fn != null or self.options.theme_state_fn != null or self.followsSystemAppearance();
         }
 
         /// Whether a rebuild must push its tokens into the runtime's
@@ -1947,8 +2010,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// pre-registration metrics). Ordinary rebuilds keep skipping
         /// the redundant emission.
         fn rebuildEmitsTokens(self: *const Self, runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, tokens: canvas.DesignTokens) bool {
-            if (self.derivesTokens()) return true;
             const stored = runtime.canvasWidgetDesignTokens(window_id, canvas_label) catch return true;
+            if (self.derivesTokens()) return !std.meta.eql(stored, tokens);
             if (!std.meta.eql(stored.text_measure, tokens.text_measure)) return true;
             return stored.pixel_snap.scale != tokens.pixel_snap.scale;
         }
@@ -1981,6 +2044,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// for the next Msg.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             self.syncModel(runtime, window_id);
+            try self.refreshThemeState();
             if (comptime features.runtime_markup) {
                 // Under automation, drive the interpreter from the first
                 // frame even when a compiled view is present: provenance
@@ -2953,6 +3017,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             if (self.options.window_view == null) return;
+            try self.refreshThemeState();
             var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = self.contextMenuRebuildIndex(slot.window_id, slot.arena_index);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
@@ -4249,7 +4314,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     }
                 },
                 .appearance_changed => |appearance| {
-                    const changed = !std.meta.eql(self.system_appearance, appearance);
+                    const previous = self.system_appearance;
                     self.system_appearance = appearance;
                     if (self.options.on_appearance) |map| {
                         if (map(appearance)) |msg| {
@@ -4257,14 +4322,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             return;
                         }
                     }
-                    // No app mapping consumed the change: when the stock
-                    // tokens follow the system, re-derive and re-render
-                    // live — flipping the OS appearance re-themes the
-                    // running app without a restart. Before install the
-                    // stored appearance alone is enough: the first build
+                    // No app mapping consumed the change. High contrast and
+                    // reduced motion remain live system axes even when the
+                    // model forces light/dark; only a scheme-only flip may
+                    // skip repaint while themeState is forced. Before install
+                    // the stored appearance alone is enough: the first build
                     // reads it.
-                    if (changed and self.installed and self.followsSystemAppearance()) {
+                    const accessibility_changed =
+                        previous.high_contrast != appearance.high_contrast or
+                        previous.reduce_motion != appearance.reduce_motion;
+                    const followed_scheme_changed =
+                        previous.color_scheme != appearance.color_scheme and self.followsSystemAppearance();
+                    if (self.installed and self.options.tokens_fn == null and self.options.tokens == null and
+                        (accessibility_changed or followed_scheme_changed))
+                    {
                         try self.rebuild(runtime, self.canvas_window_id);
+                        try self.rebuildWindowSlots(runtime);
                         if (self.options.chrome == null) {
                             _ = try runtime.emitCanvasWidgetDisplayList(self.canvas_window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
                         }

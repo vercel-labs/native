@@ -1,4 +1,11 @@
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.js";
+export type ThemeStatePack = "house" | "geist";
+export type ThemeStateColorScheme = "light" | "dark" | "system";
+export type ThemeState = {
+    readonly pack?: ThemeStatePack;
+    readonly colorScheme?: ThemeStateColorScheme;
+    readonly accent?: string;
+};
 export type StatusItemTone = "normal" | "warning" | "critical";
 export type StatusItemMenuRole = "command" | "info" | "header" | "hero" | "agent" | "context";
 export interface StatusItemModifiers {

@@ -125,7 +125,7 @@ export const rules = {
     id: "NS1014",
     title: "the core's entry points live in core.ts",
     fix: "Move this export into src/core.ts (imported modules may hold the helpers it calls and the types it uses).",
-    why: "The build wires `update`, `initialModel`, `subscriptions`, the host-event channels, `themePack`, and `viewUnbound` from the entry module only, so an entry export in an imported file would be silently ignored.",
+    why: "The build wires `update`, `initialModel`, `subscriptions`, the host-event channels, `themeState` / `themePack`, and `viewUnbound` from the entry module only, so an entry export in an imported file would be silently ignored.",
     class: "guarantee",
   },
   NS1015: {
@@ -257,7 +257,7 @@ export const rules = {
   NS1033: {
     id: "NS1033",
     title: "wiring exports match their runtime shapes",
-    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; singular `statusItem(model: Model): StatusItemState` or collection `statusItems(model: Model): readonly StatusItemDescriptor[]`; `windows(model: Model): readonly WindowDescriptor[]`, with each entry constructed by `windowDescriptor` and a literal `label: asciiBytes(\"name\")` matching `src/windows/name.native`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; `envMsgs` entries targeting one-`Uint8Array`-field arms; and persistence ok/none routes naming void arms while err names a one-`Uint8Array`-field arm. Import canonical records from the SDK modules.",
+    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack` or `themeState(model: Model): ThemeState` (not both); singular `statusItem(model: Model): StatusItemState` or collection `statusItems(model: Model): readonly StatusItemDescriptor[]`; `windows(model: Model): readonly WindowDescriptor[]`, with each entry constructed by `windowDescriptor` and a literal `label: asciiBytes(\"name\")` matching `src/windows/name.native`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; `envMsgs` entries targeting one-`Uint8Array`-field arms; and persistence ok/none routes naming void arms while err names a one-`Uint8Array`-field arm. Import canonical records from the SDK modules.",
     why: "The generated wiring builds host events, persistence restore results, model-derived theme/status/window declarations, and their typed callbacks structurally at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
     class: "guarantee",
   },

@@ -514,6 +514,11 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
     try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .dark } });
     try std.testing.expect(Bridge.model().dark);
 
+    // themeState: the key event below moves the model to `open` (system), so
+    // the OS-dark tokens stay live. One more cycle selects `done`, which forces
+    // dark and layers the model accent; an OS-light event still reaches
+    // appearanceMsg (model.dark becomes false) but cannot restyle canvas.
+
     // keyMsg: the app-level key FALLBACK — the key name arrives
     // lowercased, so the core's `key.key === "space"` matches the
     // platform's "Space" spelling, and the modifier booleans ride along.
@@ -526,6 +531,21 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
     } });
     try std.testing.expect(Bridge.model().filter == .open);
     try std.testing.expect(h.hasText("filter open"));
+    try h.menu("board.cycle");
+    try std.testing.expect(Bridge.model().filter == .done);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    try std.testing.expect(!Bridge.model().dark);
+    var themed = h.app_state.effectiveTokens();
+    const pink = canvas.Color.rgb8(0xdf, 0x26, 0x70);
+    const dark_tokens = canvas.DesignTokens.theme(.{ .color_scheme = .dark });
+    try std.testing.expectEqualDeep(dark_tokens.colors.background, themed.colors.background);
+    try std.testing.expectEqualDeep(pink, themed.colors.accent);
+
+    // Return to `all`: omitted state follows the current OS-light scheme.
+    try h.menu("board.cycle");
+    themed = h.app_state.effectiveTokens();
+    const light_tokens = canvas.DesignTokens.theme(.{ .color_scheme = .light });
+    try std.testing.expectEqualDeep(light_tokens.colors.background, themed.colors.background);
 
     // pinchMsg: the trackpad pinch channel — the phase alias matches by
     // member name, begin/end gate to null in the core, and each change
@@ -769,6 +789,12 @@ fn recordBoardSession(buffer: *JournalBuffer, screenshot_dir: []const u8) !struc
     try h.menu("board.stamp");
     try std.testing.expectEqual(@as(f64, 77_000), Bridge.model().stampMs);
     try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    // The screenshot checkpoint now derives a forced dark scheme + accent
+    // purely from model state; replay must reproduce the same pixels.
+    try h.menu("board.cycle");
+    try h.menu("board.cycle");
+    try std.testing.expect(Bridge.model().filter == .done);
 
     // A screenshot taken during a recorded session marks a pixel
     // checkpoint the replay must re-render to the same hash.

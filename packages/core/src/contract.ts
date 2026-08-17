@@ -457,10 +457,11 @@ class ContractEmitter {
         }
       }
     }
-    // `statusItem` is consumed by the generated launcher, not markup. It
-    // is still an ordinary Model helper in the core ABI, so teach native
-    // check that this one helper is intentionally shell-bound without
-    // making every app repeat it in `viewUnbound`.
+    // These helpers are consumed by the generated launcher, not markup.
+    // They remain ordinary Model helpers in the core ABI, so teach native
+    // check that they are intentionally shell-bound without making every
+    // app repeat them in `viewUnbound`.
+    if (helperNames.includes("themeState") && !model.includes("themeState")) model.push("themeState");
     if (helperNames.includes("statusItem") && !model.includes("statusItem")) model.push("statusItem");
     if (helperNames.includes("statusItems") && !model.includes("statusItems")) model.push("statusItems");
     if (helperNames.includes("windows") && !model.includes("windows")) model.push("windows");

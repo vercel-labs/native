@@ -507,6 +507,7 @@ export class SubsetChecker {
     this.checkModelBindingSurface();
     this.checkMigrationHook();
     this.checkThemePackHelper();
+    this.checkThemeStateHelper();
     this.checkStatusItemHelper();
     this.checkStatusItemsHelper();
     this.checkWindowsHelper();
@@ -838,6 +839,55 @@ export class SubsetChecker {
       this.report(
         "NS1033",
         "`themePack` does not return exactly the built-in `\"house\" | \"geist\"` theme-pack union.",
+        decl.type,
+      );
+    }
+  }
+
+  /// `themeState(model)` subsumes themePack with one exact, projection-safe
+  /// record. Optional properties are intentional: omission is the manifest /
+  /// system inheritance signal that crosses the helper ABI as null.
+  private checkThemeStateHelper(): void {
+    const decl = this.entryExportedFunction("themeState");
+    if (decl === null) return;
+
+    if (this.table.modelHelperDecls().some((candidate) => candidate.name === "themePack")) {
+      this.report("NS1033", "Export either `themePack` or `themeState`, not both.", decl.name ?? decl);
+    }
+
+    const helper = this.table.modelHelperDecls().find(
+      (candidate) => candidate.name === "themeState" && candidate.decl === decl,
+    );
+    if (helper === undefined || decl.type === undefined) {
+      this.report(
+        "NS1033",
+        "`themeState` is not a single-Model-parameter helper with an explicit return type.",
+        decl.name ?? decl,
+      );
+      return;
+    }
+
+    const returns = this.table.resolveTypeNode(decl.type);
+    const state = returns.k === "struct" ? this.table.structs.get(returns.name) : undefined;
+    const names = state?.fields.map((field) => field.tsName).sort() ?? [];
+    const field = (name: string) => state?.fields.find((candidate) => candidate.tsName === name);
+    const pack = field("pack");
+    const colorScheme = field("colorScheme");
+    const accent = field("accent");
+    const optionalEnumMembersAre = (candidate: typeof pack, expected: readonly string[]): boolean => {
+      if (candidate?.type.k !== "optional" || candidate.type.inner.k !== "enum") return false;
+      const found = this.table.enums.get(candidate.type.inner.name)?.members.slice().sort() ?? [];
+      return found.join(",") === expected.slice().sort().join(",");
+    };
+    const valid =
+      names.join(",") === "accent,colorScheme,pack" &&
+      optionalEnumMembersAre(pack, ["house", "geist"]) &&
+      optionalEnumMembersAre(colorScheme, ["light", "dark", "system"]) &&
+      accent?.type.k === "optional" && accent.type.inner.k === "string";
+    if (!valid) {
+      this.report(
+        "NS1033",
+        "`themeState` must return the exact canonical `ThemeState` record (`pack?`, `colorScheme?`, `accent?`); import it from `@native-sdk/core/events`.",
         decl.type,
       );
     }
@@ -1871,7 +1921,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem", "statusItems", "windows",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "statusItem", "statusItems", "windows",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 
@@ -2039,6 +2089,13 @@ export class SubsetChecker {
         : this.table.unions.get(typeName)?.arms.flatMap((a) => [...a.fields]) ?? [];
       for (const f of fields) {
         const decl = f.decl;
+        if (ts.isPropertySignature(decl) && decl.questionToken) {
+          this.report(
+            "NS1012",
+            `Optional field \`${f.tsName}?\` in the ${typeName} tree has an implicit undefined state — spell the empty explicitly as \`${f.tsName}: T | null\`.`,
+            decl,
+          );
+        }
         if (ts.isPropertySignature(decl) && decl.type && ts.isFunctionTypeNode(decl.type)) {
           this.report("NS1003", `\`${f.tsName}\` stores a function in the ${typeName} tree.`, decl);
         }

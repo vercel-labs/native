@@ -28,21 +28,84 @@ const MyApp = native_sdk.UiApp(Model, Msg);
 .theme = app_runner.manifestThemePack(),
 ```
 
-In a zero-config TypeScript app, export a single-model `themePack` helper when the pack itself belongs in live app state. The generated launcher recognizes this helper and wires the stock-token path automatically:
+In a zero-config TypeScript app, export `themeState(model)` when pack, color scheme, or accent belongs in live app state. The generated launcher recognizes the helper and wires the stock-token path automatically:
 
 ```ts
+import { type ThemeState } from "@native-sdk/core/events";
+
 export type ThemePack = "house" | "geist";
+export type ThemePreference = "system" | "light" | "dark";
 
 export interface Model {
   readonly theme: ThemePack;
+  readonly themePreference: ThemePreference;
+  readonly pinkAccent: boolean;
 }
 
-export function themePack(model: Model): ThemePack {
-  return model.theme;
+export function themeState(model: Model): ThemeState {
+  if (model.pinkAccent) {
+    return {
+      pack: model.theme,
+      colorScheme: model.themePreference,
+      accent: "#df2670",
+    };
+  }
+  return { pack: model.theme, colorScheme: model.themePreference };
 }
 ```
 
-Change `model.theme` through ordinary messages (for example, from a pair of model-driven `toggle-button`s). The helper is evaluated on every rebuild. It changes only the built-in pack: system light/dark, high contrast, reduced motion, manifest `theme_accent`, and each surface's scale remain live runtime inputs. Without the helper, `app.zon` remains the static pack choice.
+`ThemeState` has three optional fields:
+
+```ts
+export type ThemeState = {
+  readonly pack?: "house" | "geist";
+  readonly colorScheme?: "light" | "dark" | "system";
+  readonly accent?: string; // exactly #rrggbb
+};
+```
+
+Change the model through ordinary messages (for example, model-driven `toggle-button`s). The helper is evaluated after every committed update. Omitted fields inherit the next lower layer; omitted `colorScheme` and `"system"` both follow the OS. A malformed accent is a loud runtime teaching error, never a silent fallback. High contrast and reduced motion remain live OS inputs; high contrast suppresses both manifest and model accent overrides so accessibility wins.
+
+The stock-theme precedence is:
+
+<table>
+  <thead>
+    <tr>
+      <th>Axis</th>
+      <th>Highest to lowest precedence</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Complete tokens</td>
+      <td><code>tokens_fn</code> → static <code>tokens</code> → stock theme composition below</td>
+    </tr>
+    <tr>
+      <td>Pack</td>
+      <td><code>themeState.pack</code> → <code>app.zon theme</code> → <code>house</code></td>
+    </tr>
+    <tr>
+      <td>Color scheme</td>
+      <td>forced <code>themeState.colorScheme</code> → OS appearance</td>
+    </tr>
+    <tr>
+      <td>Accent</td>
+      <td><code>themeState.accent</code> → <code>app.zon theme_accent</code> → selected pack</td>
+    </tr>
+    <tr>
+      <td>High contrast / reduced motion</td>
+      <td>OS appearance (high contrast suppresses accent overrides)</td>
+    </tr>
+    <tr>
+      <td>Surface scale / text measurement</td>
+      <td>Runtime-stamped last</td>
+    </tr>
+  </tbody>
+</table>
+
+`themeState` deliberately controls canvas design tokens in v1. Native title bars and WebViews still follow the platform's effective appearance; forcing dark canvas content does not call `NSApp.appearance` or impose a scheme on embedded web content.
+
+The earlier `themePack(model): "house" | "geist"` helper remains supported unchanged for apps that only switch packs. It preserves live OS scheme, manifest accent, high contrast, reduced motion, and surface scale. Export `themePack` or `themeState`, never both; the checker and adapter report that conflict as a teaching error.
 
 Apps that derive their own tokens select the pack directly — `ThemeOptions.pack` is just another theme axis, exactly as switchable at runtime as the scheme:
 
@@ -113,7 +176,7 @@ pub fn brandTokens(scheme: canvas.ColorScheme, contrast: canvas.ColorContrast) c
 }
 ```
 
-Hand it to your app via `tokens_fn` (model-owned, follows the system scheme through your model) or `tokens` (fixed). The runtime stamps `pixel_snap.scale` and text measurement after your function runs, so never cache those.
+Hand it to your app via `tokens_fn` (model-owned, follows the system scheme through your model) or `tokens` (fixed). These complete-token paths take precedence over `themeState`; the runtime stamps `pixel_snap.scale` and text measurement after your function runs, so never cache those.
 
 ## What themes cannot do
 
