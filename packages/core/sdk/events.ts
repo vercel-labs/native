@@ -256,9 +256,12 @@ export interface FileDropPoint {
 
 /// The app-level file-drop channel's record (`dropMsg(drop)`). `windowId`
 /// and `viewLabel` identify the source; `point` is present when the host can
-/// resolve view-local coordinates. Paths are byte text so arbitrary UTF-8
-/// filesystem names cross without becoming runtime JS strings. Return null
-/// from `dropMsg` to ignore a drop, or map it to an ordinary Msg.
+/// resolve local coordinates. The macOS system host reports labeled canvas or
+/// WebView coordinates and degrades unlabeled regions to window-content
+/// coordinates; hosts without either leave `point` null. Paths are byte text
+/// so arbitrary UTF-8 filesystem names cross without becoming runtime JS
+/// strings. Return null from `dropMsg` to ignore a drop, or map it to an
+/// ordinary Msg.
 export interface FileDropEvent {
   readonly windowId: number;
   readonly viewLabel: string;

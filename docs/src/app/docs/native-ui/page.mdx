@@ -320,7 +320,7 @@ export function dropMsg(drop: FileDropEvent): Msg | null {
 }
 ```
 
-The platform event is journaled before either route, so record/replay delivers the identical source, point, and path bytes. A host that cannot resolve the target view leaves `viewLabel` empty and `point` null.
+The platform event is journaled before either route, so record/replay delivers the identical source, point, and path bytes. The macOS system host reports labeled, view-local points for canvas and WebView drops; an unlabeled window region keeps an empty `viewLabel` and reports a window-content point. A host that cannot resolve either leaves `viewLabel` empty and `point` null.
 
 ## Native scrolling and context menus
 

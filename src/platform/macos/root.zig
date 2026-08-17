@@ -999,11 +999,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
         .wake => state.emit(.wake),
         .files_dropped => {
             var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
-            const paths = platform_mod.splitDropPaths(event.drop_paths[0..event.drop_paths_len], paths_buffer[0..]);
-            state.emit(.{ .files_dropped = .{
-                .window_id = event.window_id,
-                .paths = paths,
-            } });
+            state.emit(.{ .files_dropped = fileDropEventFromAppKitEvent(event, paths_buffer[0..]) });
         },
         .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
             .window_id = event.window_id,
@@ -1138,6 +1134,17 @@ fn gpuSurfaceInputEventFromAppKitEvent(event: *const AppKitEvent) platform_mod.G
         // The pinch magnification delta rides the ABI event's `scale`
         // field (zero on every non-pinch input emission).
         .scale = @floatCast(event.scale),
+    };
+}
+
+fn fileDropEventFromAppKitEvent(event: *const AppKitEvent, paths_buffer: [][]const u8) platform_mod.FileDropEvent {
+    return .{
+        .window_id = event.window_id,
+        .view_label = appKitEventBytes(event.view_label, event.view_label_len),
+        // AppKit's system host converts every accepted drop to the same
+        // top-left-origin view space as gpu-surface input before emitting.
+        .point = geometry.PointF.init(@floatCast(event.x), @floatCast(event.y)),
+        .paths = platform_mod.splitDropPaths(appKitEventBytes(event.drop_paths, event.drop_paths_len), paths_buffer),
     };
 }
 
@@ -3167,6 +3174,62 @@ test "mac gpu surface input preserves key and text" {
     try std.testing.expectEqualStrings("\n", input.text);
     try std.testing.expect(input.modifiers.primary);
     try std.testing.expect(input.modifiers.shift);
+}
+
+test "mac file drop bridge preserves view label point and paths" {
+    const label = "kanban-canvas";
+    const paths = "/tmp/spec.txt\x00/tmp/design.pdf";
+    var event = std.mem.zeroes(AppKitEvent);
+    event.kind = .files_dropped;
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.x = 42.5;
+    event.y = 91.25;
+    event.drop_paths = paths.ptr;
+    event.drop_paths_len = paths.len;
+
+    var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
+    const drop = fileDropEventFromAppKitEvent(&event, paths_buffer[0..]);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), drop.window_id);
+    try std.testing.expectEqualStrings("kanban-canvas", drop.view_label);
+    try std.testing.expectEqualDeep(geometry.PointF.init(42.5, 91.25), drop.point.?);
+    try std.testing.expectEqual(@as(usize, 2), drop.paths.len);
+    try std.testing.expectEqualStrings("/tmp/spec.txt", drop.paths[0]);
+    try std.testing.expectEqualStrings("/tmp/design.pdf", drop.paths[1]);
+}
+
+test "mac file drops and pointer input share the host y-down conversion" {
+    const host_source = @embedFile("appkit_host.m");
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, host_source, "NativeSdkViewLocalYDownPoint("));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "point.y = view.bounds.size.height - point.y;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "const NSPoint yDownPoint = NativeSdkViewLocalYDownPoint(self, point);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "NativeSdkViewLocalYDownPoint(self, [self convertPoint:sender.draggingLocation fromView:nil])",
+    ) != null);
+
+    const label = "canvas";
+    var event = std.mem.zeroes(AppKitEvent);
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.x = 128.5;
+    event.y = 73.25;
+
+    var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
+    const drop = fileDropEventFromAppKitEvent(&event, paths_buffer[0..]);
+    const input = gpuSurfaceInputEventFromAppKitEvent(&event);
+    try std.testing.expectEqual(input.x, drop.point.?.x);
+    try std.testing.expectEqual(input.y, drop.point.?.y);
 }
 
 test "mac gpu surface input preserves ime composition cursor" {
