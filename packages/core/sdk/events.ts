@@ -247,8 +247,10 @@ export interface PinchEvent {
   readonly y: number;
 }
 
-/// A file drop's optional point in view-local canvas coordinates. Desktop
-/// hosts that only know the target window leave `FileDropEvent.point` null.
+/// A file drop's optional point in top-left-origin local coordinates. A
+/// non-empty `FileDropEvent.viewLabel` names its canvas or WebView coordinate
+/// space; an empty label may carry window-content coordinates. Hosts that
+/// cannot resolve local coordinates leave `FileDropEvent.point` null.
 export interface FileDropPoint {
   readonly x: number;
   readonly y: number;
