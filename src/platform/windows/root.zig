@@ -1545,7 +1545,7 @@ fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemI
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (status_item_id != platform_mod.primary_status_item_id) return error.UnsupportedService;
     if (self.web_engine != .system) return error.UnsupportedService;
-    const count = @min(items.len, max_tray_items);
+    var count: usize = 0;
     var ids: [max_tray_items]u32 = undefined;
     var labels: [max_tray_items][*]const u8 = undefined;
     var label_lens: [max_tray_items]usize = undefined;
@@ -1563,23 +1563,45 @@ fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemI
     // returning). Doubling covers the all-ampersands worst case.
     var label_pool: [max_tray_items * (platform_mod.max_tray_item_label_bytes + platform_mod.max_tray_item_detail_bytes) * 2]u8 = undefined;
     var pool_used: usize = 0;
-    for (items[0..count], 0..) |item, index| {
-        const label = escapeMenuLabelAmpersands(item.label, &label_pool, &pool_used);
-        const detail = escapeMenuLabelAmpersands(item.detail, &label_pool, &pool_used);
-        ids[index] = item.id;
-        labels[index] = label.ptr;
-        label_lens[index] = label.len;
-        separators[index] = if (item.separator) 1 else 0;
+    for (items) |item| {
+        if (item.segmented) |segmented| {
+            for (segmented.options) |option| {
+                const label = escapeMenuLabelAmpersands(option.label, &label_pool, &pool_used);
+                ids[count] = option.id;
+                labels[count] = label.ptr;
+                label_lens[count] = label.len;
+                separators[count] = 0;
+                enabled_flags[count] = if (option.enabled) 1 else 0;
+                const selected_detail = if (option.selected) "Selected" else "";
+                details[count] = selected_detail.ptr;
+                detail_lens[count] = selected_detail.len;
+                roles[count] = @intFromEnum(platform_mod.TrayItemRole.command);
+                keys[count] = "".ptr;
+                key_lens[count] = 0;
+                modifiers[count] = 0;
+                count += 1;
+            }
+            continue;
+        }
+        const raw_label = if (item.metric) |metric| metric.primary_text else if (item.chart) |chart| chart.leading_caption else item.label;
+        const raw_detail = if (item.metric) |metric| metric.secondary_text else if (item.chart) |chart| chart.trailing_summary else item.detail;
+        const label = escapeMenuLabelAmpersands(raw_label, &label_pool, &pool_used);
+        const detail = escapeMenuLabelAmpersands(raw_detail, &label_pool, &pool_used);
+        ids[count] = item.id;
+        labels[count] = label.ptr;
+        label_lens[count] = label.len;
+        separators[count] = if (item.separator) 1 else 0;
         // Windows has no custom status-menu row seam. Preserve semantic
         // readouts as visible detail text, while only command/agent rows can
         // become actions.
-        enabled_flags[index] = if (item.enabled and (item.role == .command or item.role == .agent)) 1 else 0;
-        details[index] = detail.ptr;
-        detail_lens[index] = detail.len;
-        roles[index] = @intFromEnum(item.role);
-        keys[index] = item.key.ptr;
-        key_lens[index] = item.key.len;
-        modifiers[index] = shortcutModifierFlags(item.modifiers);
+        enabled_flags[count] = if (item.enabled and (item.role == .command or item.role == .agent)) 1 else 0;
+        details[count] = detail.ptr;
+        detail_lens[count] = detail.len;
+        roles[count] = @intFromEnum(item.role);
+        keys[count] = item.key.ptr;
+        key_lens[count] = item.key.len;
+        modifiers[count] = shortcutModifierFlags(item.modifiers);
+        count += 1;
     }
     if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count) == 0) return error.UnsupportedService;
 }

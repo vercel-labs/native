@@ -463,7 +463,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("app.sync"),
     alternateActivationCommand: asciiBytes(""),
     openCommand: asciiBytes("app.sync"),
-    presentation: { title: model.syncing ? utf8Bytes("SYNC…") : utf8Bytes("READY"), width: 62, tone: model.failed ? "critical" : "normal", iconOpacity: model.stale ? 0.5 : 1, monospaced: true },
+    presentation: { title: model.syncing ? utf8Bytes("SYNC…") : utf8Bytes("READY"), width: 62, tone: model.failed ? "critical" : "normal", iconOpacity: model.stale ? 0.5 : 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
     items: [
       { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
       { id: 2, label: utf8Bytes("Sync now…"), command: asciiBytes("app.sync"), separator: false, enabled: !model.syncing, detail: asciiBytes(""), role: "command", key: asciiBytes("r"), modifiers: { primary: true, command: false, control: false, option: false, shift: false } },
@@ -472,7 +472,7 @@ export function statusItem(model: Model): StatusItemState {
 }
 ```
 
-Import the canonical records and unions from `@native-sdk/core/events`. Presentation includes byte `title`, numeric `width`, `normal | warning | critical` tone, `iconOpacity` in 0…1, and `monospaced`. Rows include id/label/command/separator/enabled plus secondary `detail`, semantic `role`, key equivalent, and all five modifier booleans. Actionable ids are unique and non-zero, and there are at most 32 rows. `commandMsg(name): Msg | null` maps row selection, status-button activation, Option-activation, and menu-open refresh into the ordinary update loop. See [System Tray](/docs/tray) and the zero-Zig `examples/menu-bar` app for the full hide/Open/Quit lifecycle.
+Import the canonical records and unions from `@native-sdk/core/events`. Presentation includes byte `title`, numeric `width`, tone, `iconOpacity`, `monospaced`, `fontSize`, and `fontWeight`; `statusItems` composes several independently styled persistent menu-bar items. Rows include id/label/command/separator/enabled plus secondary `detail`, semantic `role`, key equivalent, and all five modifier booleans. Actionable ids are unique and non-zero, and there are at most 32 rows. `commandMsg(name): Msg | null` maps row selection, status-button activation, Option-activation, and menu-open refresh into the ordinary update loop. See [System Tray](/docs/tray).
 
 Export `statusItems(model): readonly StatusItemDescriptor[]` when the app needs several independent items. Each descriptor adds stable non-zero `id` identity and a live `visible` flag to the same shell/presentation/menu record. Adding/removing descriptors creates/removes only those ids; icon, title, tooltip, visibility, activation/open commands, and menu changes patch in place. Export either the singular or collection helper, not both. macOS supports up to eight simultaneous items; every item keeps its own 32-row menu.
 

@@ -705,6 +705,44 @@ typedef struct {
 
 typedef void (*native_sdk_appkit_tray_callback_t)(void *context, uint32_t status_item_id, uint32_t item_id);
 
+typedef struct {
+    uint32_t item_id;
+    const char *label;
+    size_t label_len;
+    int selected;
+    int enabled;
+} native_sdk_appkit_tray_segment_option_t;
+
+typedef struct {
+    size_t row_index;
+    const native_sdk_appkit_tray_segment_option_t *options;
+    size_t option_count;
+} native_sdk_appkit_tray_segmented_row_t;
+
+typedef struct {
+    size_t row_index;
+    const char *primary_text;
+    size_t primary_text_len;
+    const char *secondary_text;
+    size_t secondary_text_len;
+    const char *accessibility_label;
+    size_t accessibility_label_len;
+} native_sdk_appkit_tray_metric_row_t;
+
+typedef struct {
+    size_t row_index;
+    const float *values;
+    size_t value_count;
+    double min_value;
+    double max_value;
+    const char *leading_caption;
+    size_t leading_caption_len;
+    const char *trailing_summary;
+    size_t trailing_summary_len;
+    const char *accessibility_label;
+    size_t accessibility_label_len;
+} native_sdk_appkit_tray_chart_row_t;
+
 /* One native scroll driver's desired state (see PlatformServices
  * set_gpu_surface_scroll_drivers_fn). Frame coordinates are view-local
  * canvas points (top-left origin, y-down); the host flips to AppKit
@@ -772,15 +810,16 @@ int native_sdk_appkit_show_context_menu(native_sdk_appkit_host_t *host, uint64_t
 native_sdk_appkit_open_dialog_result_t native_sdk_appkit_show_open_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_open_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 size_t native_sdk_appkit_show_save_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_save_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 int native_sdk_appkit_show_message_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_message_dialog_opts_t *opts);
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
 void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, int visible, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
 void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t status_item_id, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
+void native_sdk_appkit_update_tray_rich_rows(native_sdk_appkit_host_t *host, uint32_t status_item_id, const native_sdk_appkit_tray_segmented_row_t *segmented_rows, size_t segmented_count, const native_sdk_appkit_tray_metric_row_t *metric_rows, size_t metric_count, const native_sdk_appkit_tray_chart_row_t *chart_rows, size_t chart_count);
 /* Retitle the live status item's button without re-creating it (create
  * would flicker and reshuffle the menu bar). Empty title falls back to
  * the icon-only square well, or the app-name initial when there is no
  * icon either — the same fallbacks as create. */
 void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len);
-void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced);
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight);
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id);
 void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_callback_t callback, void *context);
 

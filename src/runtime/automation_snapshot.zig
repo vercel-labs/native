@@ -103,6 +103,9 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                         .role = item.role,
                         .key = item.key,
                         .modifiers = item.modifiers,
+                        .segmented = item.segmented,
+                        .metric = item.metric,
+                        .chart = item.chart,
                     };
                 }
                 self.automation_trays[tray_count] = .{

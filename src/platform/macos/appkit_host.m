@@ -784,6 +784,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) int presentationTone;
 @property(nonatomic, assign) double presentationIconOpacity;
 @property(nonatomic, assign) BOOL presentationMonospaced;
+@property(nonatomic, assign) double presentationFontSize;
+@property(nonatomic, assign) int presentationFontWeight;
 @property(nonatomic, strong) NSString *activationCommand;
 @property(nonatomic, strong) NSString *alternateActivationCommand;
 @property(nonatomic, strong) NSString *openCommand;
@@ -1095,6 +1097,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (NativeSdkStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu;
 - (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId;
 - (void)statusItemActivated:(id)sender;
+- (void)traySegmentChanged:(NSSegmentedControl *)control;
 - (uint64_t)activeCommandWindowId;
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount;
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context;
@@ -12197,6 +12200,14 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     }
 }
 
+- (void)traySegmentChanged:(NSSegmentedControl *)control {
+    NSInteger selected = control.selectedSegment;
+    if (selected < 0 || !self.trayCallback) return;
+    NSInteger itemId = [control tagForSegment:selected];
+    if (itemId <= 0) return;
+    self.trayCallback(self.trayContext, (uint32_t)control.tag, (uint32_t)itemId);
+}
+
 - (NativeSdkStatusItemEntry *)statusEntryForId:(uint32_t)identifier {
     return self.statusItems[@(identifier)];
 }
@@ -13344,20 +13355,33 @@ static NSImage *NativeSdkTrayImageWithOpacity(NSImage *source, double opacity) {
     return image;
 }
 
-static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NativeSdkStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
+static NSFontWeight NativeSdkTrayFontWeight(int weight) {
+    switch (weight) {
+        case 1: return NSFontWeightMedium;
+        case 2: return NSFontWeightSemibold;
+        case 3: return NSFontWeightBold;
+        default: return NSFontWeightRegular;
+    }
+}
+
+static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NativeSdkStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced, double fontSize, int fontWeight) {
     if (!entry.item) return;
     entry.presentationTitle = requestedTitle ?: @"";
     entry.presentationWidth = width;
     entry.presentationTone = tone;
     entry.presentationIconOpacity = iconOpacity;
     entry.presentationMonospaced = monospaced;
+    entry.presentationFontSize = fontSize;
+    entry.presentationFontWeight = fontWeight;
     NSString *title = requestedTitle ?: @"";
     if (!entry.baseImage && title.length == 0) {
         title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
     }
+    CGFloat resolvedSize = fontSize > 0 ? fontSize : 11;
+    NSFontWeight resolvedWeight = NativeSdkTrayFontWeight(fontWeight);
     NSFont *font = monospaced
-        ? ([NSFont fontWithName:@"Geist Mono" size:11] ?: [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular])
-        : [NSFont systemFontOfSize:11];
+        ? [NSFont monospacedSystemFontOfSize:resolvedSize weight:resolvedWeight]
+        : [NSFont systemFontOfSize:resolvedSize weight:resolvedWeight];
     NSStatusBarButton *button = entry.item.button;
     if (tone == 0) {
         button.title = title;
@@ -13398,7 +13422,7 @@ static void NativeSdkApplyTrayShell(NativeSdkAppKitHost *object, NativeSdkStatus
     entry.item.visible = visible != 0;
 }
 
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         NSNumber *key = @(status_item_id);
@@ -13415,7 +13439,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t stat
         entry.item = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
         NSString *titleString = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
         NativeSdkApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
-        NativeSdkApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0, font_size, font_weight);
     }
 }
 
@@ -13425,7 +13449,7 @@ void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_
         NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
         if (!entry) return;
         NativeSdkApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
-        NativeSdkApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced);
+        NativeSdkApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced, entry.presentationFontSize, entry.presentationFontWeight);
         if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = entry.menu;
         else entry.item.menu = nil;
     }
@@ -13438,7 +13462,112 @@ enum {
     NativeSdkTrayRoleHero = 3,
     NativeSdkTrayRoleAgent = 4,
     NativeSdkTrayRoleContext = 5,
+    NativeSdkTrayRoleSegmented = 6,
+    NativeSdkTrayRoleChart = 7,
 };
+
+@interface NativeSdkTrayBarChartView : NSView
+@property(nonatomic, copy) NSArray<NSNumber *> *values;
+@property(nonatomic, assign) double minValue;
+@property(nonatomic, assign) double maxValue;
+@end
+
+@implementation NativeSdkTrayBarChartView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    if (self.values.count == 0 || !(self.maxValue > self.minValue)) return;
+    CGFloat gap = 2;
+    CGFloat barWidth = MAX(1, (NSWidth(self.bounds) - gap * (self.values.count - 1)) / self.values.count);
+    CGFloat x = 0;
+    [NSColor.controlAccentColor setFill];
+    for (NSNumber *number in self.values) {
+        double fraction = (number.doubleValue - self.minValue) / (self.maxValue - self.minValue);
+        fraction = MIN(MAX(fraction, 0), 1);
+        CGFloat height = MAX(fraction > 0 ? 1 : 0, floor(fraction * NSHeight(self.bounds)));
+        NSRectFill(NSMakeRect(x, NSHeight(self.bounds) - height, barWidth, height));
+        x += barWidth + gap;
+    }
+}
+@end
+
+static NSString *NativeSdkTrayString(const char *bytes, size_t len) {
+    return bytes && len > 0 ? ([[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+}
+
+static NSView *NativeSdkTraySegmentedView(NativeSdkAppKitHost *object, uint32_t statusItemId, const native_sdk_appkit_tray_segment_option_t *options, size_t count) {
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 38)];
+    NSSegmentedControl *control = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(14, 5, 292, 28)];
+    control.segmentCount = count;
+    control.segmentStyle = NSSegmentStyleAutomatic;
+    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
+    control.target = object;
+    control.action = @selector(traySegmentChanged:);
+    control.tag = (NSInteger)statusItemId;
+    control.autoresizingMask = NSViewWidthSizable;
+    for (size_t i = 0; i < count; i++) {
+        [control setLabel:NativeSdkTrayString(options[i].label, options[i].label_len) forSegment:i];
+        [control setEnabled:options[i].enabled != 0 forSegment:i];
+        [control setTag:(NSInteger)options[i].item_id forSegment:i];
+        [control setSelected:options[i].selected != 0 forSegment:i];
+    }
+    [row addSubview:control];
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
+}
+
+static NSView *NativeSdkTrayMetricView(const native_sdk_appkit_tray_metric_row_t *metric) {
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 58)];
+    NSTextField *primary = [NSTextField labelWithString:NativeSdkTrayString(metric->primary_text, metric->primary_text_len)];
+    NSTextField *secondary = [NSTextField labelWithString:NativeSdkTrayString(metric->secondary_text, metric->secondary_text_len)];
+    primary.frame = NSMakeRect(14, 25, 292, 28);
+    secondary.frame = NSMakeRect(14, 6, 292, 16);
+    primary.font = [NSFont fontWithName:@"Geist Mono" size:20] ?: [NSFont monospacedDigitSystemFontOfSize:20 weight:NSFontWeightMedium];
+    secondary.font = [NSFont systemFontOfSize:11];
+    secondary.textColor = NSColor.secondaryLabelColor;
+    primary.autoresizingMask = NSViewWidthSizable;
+    secondary.autoresizingMask = NSViewWidthSizable;
+    primary.accessibilityElement = NO;
+    secondary.accessibilityElement = NO;
+    [row addSubview:primary];
+    [row addSubview:secondary];
+    row.accessibilityLabel = NativeSdkTrayString(metric->accessibility_label, metric->accessibility_label_len);
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
+}
+
+static NSView *NativeSdkTrayChartView(const native_sdk_appkit_tray_chart_row_t *chart) {
+    NSString *leading = NativeSdkTrayString(chart->leading_caption, chart->leading_caption_len);
+    NSString *trailing = NativeSdkTrayString(chart->trailing_summary, chart->trailing_summary_len);
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 58)];
+    NSTextField *leadingField = [NSTextField labelWithString:leading];
+    NSTextField *trailingField = [NSTextField labelWithString:trailing];
+    leadingField.frame = NSMakeRect(14, 3, 142, 15);
+    trailingField.frame = NSMakeRect(164, 3, 142, 15);
+    trailingField.alignment = NSTextAlignmentRight;
+    leadingField.font = [NSFont systemFontOfSize:10];
+    trailingField.font = [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular];
+    leadingField.textColor = NSColor.secondaryLabelColor;
+    trailingField.textColor = NSColor.secondaryLabelColor;
+    leadingField.autoresizingMask = NSViewWidthSizable;
+    trailingField.autoresizingMask = NSViewMinXMargin;
+    leadingField.accessibilityElement = NO;
+    trailingField.accessibilityElement = NO;
+    NativeSdkTrayBarChartView *bars = [[NativeSdkTrayBarChartView alloc] initWithFrame:NSMakeRect(14, 21, 292, 32)];
+    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:chart->value_count];
+    for (size_t i = 0; i < chart->value_count; i++) [values addObject:@(chart->values[i])];
+    bars.values = values;
+    bars.minValue = chart->min_value;
+    bars.maxValue = chart->max_value;
+    bars.autoresizingMask = NSViewWidthSizable;
+    bars.accessibilityElement = NO;
+    [row addSubview:leadingField];
+    [row addSubview:trailingField];
+    [row addSubview:bars];
+    row.accessibilityLabel = NativeSdkTrayString(chart->accessibility_label, chart->accessibility_label_len);
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
+}
 
 static NSView *NativeSdkTrayHeroView(NSString *headline, NSString *quota) {
     NSArray<NSString *> *parts = [headline componentsSeparatedByString:@"\n"];
@@ -13667,6 +13796,7 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
                                                           action:@selector(trayMenuItemClicked:)
                                                    keyEquivalent:@""];
+            item.representedObject = @(i);
             item.tag = (NSInteger)(((uint64_t)status_item_id << 32) | item_ids[i]);
             item.target = object;
             item.enabled = enabled_flags[i] != 0;
@@ -13740,6 +13870,46 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t
     }
 }
 
+void native_sdk_appkit_update_tray_rich_rows(native_sdk_appkit_host_t *host, uint32_t status_item_id, const native_sdk_appkit_tray_segmented_row_t *segmented_rows, size_t segmented_count, const native_sdk_appkit_tray_metric_row_t *metric_rows, size_t metric_count, const native_sdk_appkit_tray_chart_row_t *chart_rows, size_t chart_count) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry || !entry.menu) return;
+        for (size_t i = 0; i < segmented_count; i++) {
+            const native_sdk_appkit_tray_segmented_row_t *row = &segmented_rows[i];
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(row->row_index)]) { item = candidate; break; }
+            }
+            if (!item) continue;
+            item.action = NULL;
+            item.target = nil;
+            item.view = NativeSdkTraySegmentedView(object, status_item_id, row->options, row->option_count);
+        }
+        for (size_t i = 0; i < metric_count; i++) {
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(metric_rows[i].row_index)]) { item = candidate; break; }
+            }
+            if (!item) continue;
+            item.action = NULL;
+            item.target = nil;
+            item.view = NativeSdkTrayMetricView(&metric_rows[i]);
+        }
+        for (size_t i = 0; i < chart_count; i++) {
+            const native_sdk_appkit_tray_chart_row_t *row = &chart_rows[i];
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(row->row_index)]) { item = candidate; break; }
+            }
+            if (!item) continue;
+            item.action = NULL;
+            item.target = nil;
+            item.view = NativeSdkTrayChartView(row);
+        }
+    }
+}
+
 void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
@@ -13753,18 +13923,20 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_
             entry.presentationWidth,
             entry.presentationTone,
             entry.presentationIconOpacity,
-            entry.presentationMonospaced
+            entry.presentationMonospaced,
+            entry.presentationFontSize,
+            entry.presentationFontWeight
         );
     }
 }
 
-void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
         if (!entry) return;
         NSString *value = title ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        NativeSdkApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0, font_size, font_weight);
     }
 }
 

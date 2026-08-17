@@ -229,6 +229,9 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             const status_item = findStatusItemConst(self, status_item_id) orelse return false;
             for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id) return true;
+                if (item.segmented) |segmented| {
+                    for (segmented.options) |option| if (option.id == item_id) return true;
+                }
             }
             return false;
         }
@@ -241,6 +244,11 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             const status_item = findStatusItemConst(self, status_item_id) orelse return "tray.action";
             for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id and item.command.len > 0) return item.command;
+                if (item.segmented) |segmented| {
+                    for (segmented.options) |option| {
+                        if (option.id == item_id) return option.command;
+                    }
+                }
             }
             return "tray.action";
         }
@@ -480,6 +488,44 @@ fn storeTrayItems(status_item: anytype, items: []const platform.TrayMenuItem) !v
         status_item.items[index].role = item.role;
         status_item.items[index].key = try copyInto(&status_item.items[index].key_storage, item.key);
         status_item.items[index].modifiers = item.modifiers;
+        status_item.items[index].segmented = null;
+        status_item.items[index].segment_option_count = 0;
+        if (item.segmented) |segmented| {
+            for (segmented.options, 0..) |option, option_index| {
+                const stored = &status_item.items[index].segment_options[option_index];
+                stored.id = option.id;
+                stored.label = try copyInto(&status_item.items[index].segment_option_label_storage[option_index], option.label);
+                stored.command = try copyInto(&status_item.items[index].segment_option_command_storage[option_index], option.command);
+                stored.selected = option.selected;
+                stored.enabled = option.enabled;
+            }
+            status_item.items[index].segment_option_count = segmented.options.len;
+            const stored = &status_item.items[index];
+            stored.segmented = .{ .options = stored.segment_options[0..stored.segment_option_count] };
+        }
+        status_item.items[index].metric = null;
+        if (item.metric) |metric| {
+            status_item.items[index].metric = .{
+                .primary_text = try copyInto(&status_item.items[index].metric_primary_storage, metric.primary_text),
+                .secondary_text = try copyInto(&status_item.items[index].metric_secondary_storage, metric.secondary_text),
+                .accessibility_label = try copyInto(&status_item.items[index].metric_accessibility_storage, metric.accessibility_label),
+            };
+        }
+        status_item.items[index].chart = null;
+        if (item.chart) |chart| {
+            @memcpy(status_item.items[index].chart_values[0..chart.values.len], chart.values);
+            const leading_caption = try copyInto(&status_item.items[index].chart_leading_caption_storage, chart.leading_caption);
+            const trailing_summary = try copyInto(&status_item.items[index].chart_trailing_summary_storage, chart.trailing_summary);
+            const accessibility_label = try copyInto(&status_item.items[index].chart_accessibility_label_storage, chart.accessibility_label);
+            status_item.items[index].chart = .{
+                .values = status_item.items[index].chart_values[0..chart.values.len],
+                .min_value = chart.min_value,
+                .max_value = chart.max_value,
+                .leading_caption = leading_caption,
+                .trailing_summary = trailing_summary,
+                .accessibility_label = accessibility_label,
+            };
+        }
     }
     status_item.item_count = items.len;
 }

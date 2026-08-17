@@ -185,7 +185,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("refresh"),
     alternateActivationCommand: asciiBytes("toggle"),
     openCommand: asciiBytes("refresh"),
-    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
+    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
     items: [{ id: 1, label: asciiBytes("Toggle"), command: asciiBytes("toggle"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } }],
   };
 }
@@ -199,6 +199,10 @@ export function statusItem(model: Model): StatusItemState {
   assert.ok(structs.includes("StatusItemMenuItem"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemPresentation"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemSegmentedRow"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemSegmentOption"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemMetricRow"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemChartRow"), `structs: ${structs.join(", ")}`);
 });
 
 test("themeState projects optional pack, scheme, and string accent as a launcher-bound record", () => {

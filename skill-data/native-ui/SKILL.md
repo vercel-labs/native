@@ -34,7 +34,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("app.refresh"),
     alternateActivationCommand: asciiBytes("player.toggle"),
     openCommand: asciiBytes("app.refresh"),
-    presentation: { title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"), width: 62, tone: "normal", iconOpacity: 1, monospaced: true },
+    presentation: { title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"), width: 62, tone: "normal", iconOpacity: 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
     items: [
       { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
       { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
@@ -44,7 +44,7 @@ export function statusItem(model: Model): StatusItemState {
 }
 ```
 
-Presentation fields are `title`, `width`, `tone`, `iconOpacity`, and `monospaced`. Rows add secondary `detail`, a semantic `command | info | header | hero | agent | context` role, a key equivalent, and all five modifier booleans to the ordinary id/label/command/separator/enabled fields. Actionable rows need unique non-zero whole u32 ids; separators conventionally use id 0, and the menu cap is 32 rows. `examples/menu-bar` is the full TypeScript + Native markup hide/Open/Quit lifecycle. The lower-level Zig `Options.status_item` / `status_item_fn` recipe appears below for Zig cores and custom wiring.
+Presentation fields style the persistent menu-bar item. Inside its dropdown, `metric` carries prominent primary/secondary text, `segmented` carries up to eight typed command options, and `chart` carries 1–32 bounded values with captions and accessibility. These are generic composable row payloads, not text conventions.
 
 ## App wiring (Zig cores and extensions only)
 

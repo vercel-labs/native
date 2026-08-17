@@ -414,15 +414,50 @@ const widget_action_drop_files: u32 = 1 << 9;
 const widget_action_dismiss: u32 = 1 << 10;
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, status_item_id: u32, item_id: u32) callconv(.c) void;
+const AppKitTraySegmentOption = extern struct {
+    item_id: u32,
+    label: [*]const u8,
+    label_len: usize,
+    selected: c_int,
+    enabled: c_int,
+};
+const AppKitTraySegmentedRow = extern struct {
+    row_index: usize,
+    options: [*]const AppKitTraySegmentOption,
+    option_count: usize,
+};
+const AppKitTrayMetricRow = extern struct {
+    row_index: usize,
+    primary_text: [*]const u8,
+    primary_text_len: usize,
+    secondary_text: [*]const u8,
+    secondary_text_len: usize,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+};
+const AppKitTrayChartRow = extern struct {
+    row_index: usize,
+    values: [*]const f32,
+    value_count: usize,
+    min_value: f64,
+    max_value: f64,
+    leading_caption: [*]const u8,
+    leading_caption_len: usize,
+    trailing_summary: [*]const u8,
+    trailing_summary_len: usize,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+};
 
 extern fn native_sdk_appkit_show_open_dialog(host: *AppKitHost, opts: *const AppKitOpenDialogOpts, buffer: [*]u8, buffer_len: usize) AppKitOpenDialogResult;
 extern fn native_sdk_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_show_message_dialog(host: *AppKitHost, opts: *const AppKitMessageDialogOpts) c_int;
-extern fn native_sdk_appkit_create_tray(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
+extern fn native_sdk_appkit_create_tray(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, font_size: f64, font_weight: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
 extern fn native_sdk_appkit_update_tray_shell(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
 extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, status_item_id: u32, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
+extern fn native_sdk_appkit_update_tray_rich_rows(host: *AppKitHost, status_item_id: u32, segmented_rows: [*]const AppKitTraySegmentedRow, segmented_count: usize, metric_rows: [*]const AppKitTrayMetricRow, metric_count: usize, chart_rows: [*]const AppKitTrayChartRow, chart_count: usize) void;
 extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize) void;
-extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int) void;
+extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, font_size: f64, font_weight: c_int) void;
 extern fn native_sdk_appkit_remove_tray(host: *AppKitHost, status_item_id: u32) void;
 extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
 
@@ -2690,6 +2725,8 @@ fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, o
         @intFromEnum(presentation.tone),
         presentation.icon_opacity,
         if (presentation.monospaced) 1 else 0,
+        presentation.font_size,
+        @intFromEnum(presentation.font_weight),
         options.activation_command.ptr,
         options.activation_command.len,
         options.alternate_activation_command.ptr,
@@ -2739,6 +2776,65 @@ fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemI
             (@as(u32, @intFromBool(item.modifiers.shift)) << 4);
     }
     native_sdk_appkit_update_tray_menu(self.host, status_item_id, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count);
+
+    var segment_options: [max_tray_items * platform_mod.max_tray_segment_options]AppKitTraySegmentOption = undefined;
+    var segmented_rows: [max_tray_items]AppKitTraySegmentedRow = undefined;
+    var metric_rows: [max_tray_items]AppKitTrayMetricRow = undefined;
+    var chart_rows: [max_tray_items]AppKitTrayChartRow = undefined;
+    var option_count: usize = 0;
+    var segmented_count: usize = 0;
+    var metric_count: usize = 0;
+    var chart_count: usize = 0;
+    for (items[0..count], 0..) |item, row_index| {
+        if (item.segmented) |segmented| {
+            const start = option_count;
+            for (segmented.options) |option| {
+                segment_options[option_count] = .{
+                    .item_id = option.id,
+                    .label = option.label.ptr,
+                    .label_len = option.label.len,
+                    .selected = if (option.selected) 1 else 0,
+                    .enabled = if (option.enabled) 1 else 0,
+                };
+                option_count += 1;
+            }
+            segmented_rows[segmented_count] = .{
+                .row_index = row_index,
+                .options = segment_options[start..option_count].ptr,
+                .option_count = option_count - start,
+            };
+            segmented_count += 1;
+        }
+        if (item.metric) |metric| {
+            metric_rows[metric_count] = .{
+                .row_index = row_index,
+                .primary_text = metric.primary_text.ptr,
+                .primary_text_len = metric.primary_text.len,
+                .secondary_text = metric.secondary_text.ptr,
+                .secondary_text_len = metric.secondary_text.len,
+                .accessibility_label = metric.accessibility_label.ptr,
+                .accessibility_label_len = metric.accessibility_label.len,
+            };
+            metric_count += 1;
+        }
+        if (item.chart) |chart| {
+            chart_rows[chart_count] = .{
+                .row_index = row_index,
+                .values = chart.values.ptr,
+                .value_count = chart.values.len,
+                .min_value = chart.min_value,
+                .max_value = chart.max_value,
+                .leading_caption = chart.leading_caption.ptr,
+                .leading_caption_len = chart.leading_caption.len,
+                .trailing_summary = chart.trailing_summary.ptr,
+                .trailing_summary_len = chart.trailing_summary.len,
+                .accessibility_label = chart.accessibility_label.ptr,
+                .accessibility_label_len = chart.accessibility_label.len,
+            };
+            chart_count += 1;
+        }
+    }
+    native_sdk_appkit_update_tray_rich_rows(self.host, status_item_id, &segmented_rows, segmented_count, &metric_rows, metric_count, &chart_rows, chart_count);
 }
 
 fn updateTrayTitle(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, title: []const u8) anyerror!void {
@@ -2748,7 +2844,7 @@ fn updateTrayTitle(context: ?*anyopaque, status_item_id: platform_mod.StatusItem
 
 fn updateTrayPresentation(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, presentation: platform_mod.TrayPresentation) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_appkit_update_tray_presentation(self.host, status_item_id, presentation.title.ptr, presentation.title.len, presentation.width, @intFromEnum(presentation.tone), presentation.icon_opacity, if (presentation.monospaced) 1 else 0);
+    native_sdk_appkit_update_tray_presentation(self.host, status_item_id, presentation.title.ptr, presentation.title.len, presentation.width, @intFromEnum(presentation.tone), presentation.icon_opacity, if (presentation.monospaced) 1 else 0, presentation.font_size, @intFromEnum(presentation.font_weight));
 }
 
 fn removeTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId) anyerror!void {
@@ -2818,6 +2914,17 @@ test "mac status lifecycle hooks emit tray commands" {
         const emit_source = emit_tail[0..emit_end];
         try std.testing.expect(std.mem.indexOf(u8, emit_source, "NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND") != null);
         try std.testing.expect(std.mem.indexOf(u8, emit_source, "NATIVE_SDK_APPKIT_EVENT_MENU_COMMAND") == null);
+    }
+}
+
+test "mac typed tray rows cross the AppKit ABI without text conventions" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |source| {
+        try std.testing.expect(std.mem.indexOf(u8, source, "TraySegmentedView") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "NSSegmentedControl") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "TrayChartView") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "native_sdk_appkit_update_tray_rich_rows") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "range_selected") == null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "chart|") == null);
     }
 }
 

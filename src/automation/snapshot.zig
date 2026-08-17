@@ -228,6 +228,9 @@ pub const TrayItem = struct {
     role: platform.TrayItemRole = .command,
     key: []const u8 = "",
     modifiers: platform.ShortcutModifiers = .{},
+    segmented: ?platform.TraySegmentedRow = null,
+    metric: ?platform.TrayMetricRow = null,
+    chart: ?platform.TrayChartRow = null,
 };
 
 /// The live status item (tray): current button title + dropdown items.
@@ -643,6 +646,44 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 try writer.writeAll("  tray-item separator\n");
                 continue;
             }
+            if (item.segmented) |segmented| {
+                try writer.print("  tray-item #{d} role=segmented options={d}\n", .{ item.id, segmented.options.len });
+                for (segmented.options) |option| {
+                    try writer.print("    tray-segment #{d} label=\"{s}\" command=\"{s}\" selected={any} enabled={any}\n", .{
+                        option.id,
+                        option.label,
+                        option.command,
+                        option.selected,
+                        option.enabled,
+                    });
+                }
+                continue;
+            }
+            if (item.metric) |metric| {
+                try writer.print("  tray-item #{d} role=metric primary=\"{s}\" secondary=\"{s}\" accessibility=\"{s}\"\n", .{
+                    item.id,
+                    metric.primary_text,
+                    metric.secondary_text,
+                    metric.accessibility_label,
+                });
+                continue;
+            }
+            if (item.chart) |chart| {
+                try writer.print("  tray-item #{d} role=chart caption=\"{s}\" summary=\"{s}\" accessibility=\"{s}\" domain=({d},{d}) values=", .{
+                    item.id,
+                    chart.leading_caption,
+                    chart.trailing_summary,
+                    chart.accessibility_label,
+                    chart.min_value,
+                    chart.max_value,
+                });
+                for (chart.values, 0..) |value, index| {
+                    if (index > 0) try writer.writeByte(',');
+                    try writer.print("{d}", .{value});
+                }
+                try writer.writeByte('\n');
+                continue;
+            }
             try writer.print("  tray-item #{d} label=\"{s}\" command=\"{s}\" enabled={any} detail=\"{s}\" role={s} key=\"{s}\" modifiers=(primary={any},command={any},control={any},option={any},shift={any})\n", .{
                 item.id,
                 item.label,
@@ -982,24 +1023,36 @@ test "snapshot emits the frame_profile line only while profiling" {
     try std.testing.expect(std.mem.indexOf(u8, off_writer.buffered(), "frame_profile") == null);
 }
 
-test "snapshot emits tray title and dropdown items" {
-    var buffer: [1024]u8 = undefined;
+test "snapshot emits tray title and typed dropdown items" {
+    var buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
+    const segments = [_]platform.TraySegmentOption{
+        .{ .id = 20, .label = "Day", .command = "range.day", .selected = true },
+        .{ .id = 21, .label = "Week", .command = "range.week", .enabled = false },
+    };
+    const chart_values = [_]f32{ 0.25, 0.5, 1 };
     const items = [_]TrayItem{
         .{ .id = 1, .label = "Refresh", .command = "app.refresh" },
+        .{ .role = .hero, .metric = .{ .primary_text = "2,494 requests", .secondary_text = "Today · production", .accessibility_label = "2,494 requests today in production" } },
         .{ .separator = true },
         .{ .id = 10, .label = "Fix crash on resize", .command = "issue.select.0", .enabled = false, .detail = "warning ⚠", .role = .agent, .key = "q", .modifiers = .{ .command = true } },
+        .{ .role = .segmented, .segmented = .{ .options = &segments } },
+        .{ .role = .chart, .chart = .{ .values = &chart_values, .min_value = 0, .max_value = 1, .leading_caption = "CPU", .trailing_summary = "50%", .accessibility_label = "CPU history, 50 percent" } },
     };
     try writeText(.{
         .windows = &windows,
         .trays = &.{.{ .id = 7, .title = "ZN 3", .visible = false, .items = &items }},
     }, &writer);
     const text = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "\ntray #7 title=\"ZN 3\" visible=false items=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\ntray #7 title=\"ZN 3\" visible=false items=6\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #1 label=\"Refresh\" command=\"app.refresh\" enabled=true detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item separator\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #0 role=metric primary=\"2,494 requests\" secondary=\"Today · production\" accessibility=\"2,494 requests today in production\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=false detail=\"warning ⚠\" role=agent key=\"q\" modifiers=(primary=false,command=true,control=false,option=false,shift=false)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #0 role=segmented options=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "    tray-segment #20 label=\"Day\" command=\"range.day\" selected=true enabled=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #0 role=chart caption=\"CPU\" summary=\"50%\" accessibility=\"CPU history, 50 percent\" domain=(0,1) values=0.25,0.5,1\n") != null);
 
     // No tray -> no tray lines.
     var empty_buffer: [512]u8 = undefined;

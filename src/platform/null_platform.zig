@@ -45,6 +45,10 @@ const max_tray_title_bytes = types.max_tray_title_bytes;
 const max_tray_tooltip_bytes = types.max_tray_tooltip_bytes;
 const max_tray_item_label_bytes = types.max_tray_item_label_bytes;
 const max_tray_item_command_bytes = types.max_tray_item_command_bytes;
+const max_tray_segment_options = types.max_tray_segment_options;
+const max_tray_segment_label_bytes = types.max_tray_segment_label_bytes;
+const max_tray_chart_values = types.max_tray_chart_values;
+const max_tray_chart_text_bytes = types.max_tray_chart_text_bytes;
 const max_drop_paths_bytes = types.max_drop_paths_bytes;
 const max_drop_paths = types.max_drop_paths;
 const max_window_event_name_bytes = types.max_window_event_name_bytes;
@@ -319,6 +323,11 @@ const NullStatusItem = struct {
     open_command_len: usize = 0,
     presentation: TrayPresentation = .{},
     items: [max_tray_items]TrayMenuItem = undefined,
+    segment_options: [max_tray_items * max_tray_segment_options]types.TraySegmentOption = undefined,
+    metric_primary_storage: [max_tray_items][max_tray_item_label_bytes]u8 = undefined,
+    metric_secondary_storage: [max_tray_items][types.max_tray_item_detail_bytes]u8 = undefined,
+    metric_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_values: [max_tray_items * max_tray_chart_values]f32 = undefined,
     item_count: usize = 0,
 };
 
@@ -1789,7 +1798,26 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const status_item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
         if (items.len > status_item.items.len) return error.InvalidTrayOptions;
-        for (items, 0..) |item, index| status_item.items[index] = item;
+        for (items, 0..) |item, index| {
+            status_item.items[index] = item;
+            if (item.segmented) |segmented| {
+                const start = index * max_tray_segment_options;
+                @memcpy(status_item.segment_options[start .. start + segmented.options.len], segmented.options);
+                status_item.items[index].segmented = .{ .options = status_item.segment_options[start .. start + segmented.options.len] };
+            }
+            if (item.metric) |metric| {
+                status_item.items[index].metric = .{
+                    .primary_text = try copyInto(&status_item.metric_primary_storage[index], metric.primary_text),
+                    .secondary_text = try copyInto(&status_item.metric_secondary_storage[index], metric.secondary_text),
+                    .accessibility_label = try copyInto(&status_item.metric_accessibility_storage[index], metric.accessibility_label),
+                };
+            }
+            if (item.chart) |chart| {
+                const start = index * max_tray_chart_values;
+                @memcpy(status_item.chart_values[start .. start + chart.values.len], chart.values);
+                status_item.items[index].chart.?.values = status_item.chart_values[start .. start + chart.values.len];
+            }
+        }
         status_item.item_count = items.len;
         self.tray_update_count += 1;
     }

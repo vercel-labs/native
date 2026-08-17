@@ -992,6 +992,8 @@ export class SubsetChecker {
     const tone = presentation?.fields.find((field) => field.tsName === "tone");
     const iconOpacity = presentation?.fields.find((field) => field.tsName === "iconOpacity");
     const monospaced = presentation?.fields.find((field) => field.tsName === "monospaced");
+    const fontSize = presentation?.fields.find((field) => field.tsName === "fontSize");
+    const fontWeight = presentation?.fields.find((field) => field.tsName === "fontWeight");
     const itemType = items?.type.k === "slice" && items.type.elem.k === "struct" ? items.type.elem : null;
     const item = itemType === null ? undefined : this.table.structs.get(itemType.name);
     const itemNames = item?.fields.map((field) => field.tsName).sort() ?? [];
@@ -1004,9 +1006,27 @@ export class SubsetChecker {
     const role = item?.fields.find((field) => field.tsName === "role");
     const key = item?.fields.find((field) => field.tsName === "key");
     const modifiersField = item?.fields.find((field) => field.tsName === "modifiers");
+    const segmentedField = item?.fields.find((field) => field.tsName === "segmented");
+    const metricField = item?.fields.find((field) => field.tsName === "metric");
+    const chartField = item?.fields.find((field) => field.tsName === "chart");
     const modifiersType = modifiersField?.type.k === "struct" ? modifiersField.type : null;
     const modifiers = modifiersType === null ? undefined : this.table.structs.get(modifiersType.name);
     const modifierNames = modifiers?.fields.map((field) => field.tsName).sort() ?? [];
+    const optionalStruct = (field: typeof segmentedField) =>
+      field?.type.k === "optional" && field.type.inner.k === "struct" ? this.table.structs.get(field.type.inner.name) : undefined;
+    const segmented = optionalStruct(segmentedField);
+    const segmentedNames = segmented?.fields.map((field) => field.tsName).sort() ?? [];
+    const segmentOptions = segmented?.fields.find((field) => field.tsName === "options");
+    const segmentOptionType = segmentOptions?.type.k === "slice" && segmentOptions.type.elem.k === "struct" ? segmentOptions.type.elem : null;
+    const segmentOption = segmentOptionType === null ? undefined : this.table.structs.get(segmentOptionType.name);
+    const segmentOptionNames = segmentOption?.fields.map((field) => field.tsName).sort() ?? [];
+    const segmentOptionField = (name: string) => segmentOption?.fields.find((field) => field.tsName === name);
+    const chart = optionalStruct(chartField);
+    const chartNames = chart?.fields.map((field) => field.tsName).sort() ?? [];
+    const chartFieldNamed = (name: string) => chart?.fields.find((field) => field.tsName === name);
+    const metric = optionalStruct(metricField);
+    const metricNames = metric?.fields.map((field) => field.tsName).sort() ?? [];
+    const metricFieldNamed = (name: string) => metric?.fields.find((field) => field.tsName === name);
     const allByteFields = [iconPath, tooltip, activationCommand, alternateActivationCommand, openCommand].every(
       (field) => field?.type.k === "bytes",
     );
@@ -1019,27 +1039,48 @@ export class SubsetChecker {
     const numericId = id !== undefined && ["number", "i64", "f64", "numAlias"].includes(id.type.k);
     const numericWidth = width !== undefined && ["number", "i64", "f64", "numAlias"].includes(width.type.k);
     const numericOpacity = iconOpacity !== undefined && ["number", "i64", "f64", "numAlias"].includes(iconOpacity.type.k);
+    const numericFontSize = fontSize !== undefined && ["number", "i64", "f64", "numAlias"].includes(fontSize.type.k);
     const valid =
       stateNames.join(",") === "activationCommand,alternateActivationCommand,iconPath,items,openCommand,presentation,tooltip" &&
       allByteFields &&
-      presentationNames.join(",") === "iconOpacity,monospaced,title,tone,width" &&
+      presentationNames.join(",") === "fontSize,fontWeight,iconOpacity,monospaced,title,tone,width" &&
       title?.type.k === "bytes" &&
       numericWidth &&
       enumMembersAre(tone, ["normal", "warning", "critical"]) &&
       numericOpacity &&
       monospaced?.type.k === "bool" &&
+      numericFontSize &&
+      enumMembersAre(fontWeight, ["regular", "medium", "semibold", "bold"]) &&
       item !== undefined &&
-      itemNames.join(",") === "command,detail,enabled,id,key,label,modifiers,role,separator" &&
+      itemNames.join(",") === "chart,command,detail,enabled,id,key,label,metric,modifiers,role,segmented,separator" &&
       numericId &&
       label?.type.k === "bytes" &&
       command?.type.k === "bytes" &&
       separator?.type.k === "bool" &&
       enabled?.type.k === "bool" &&
       detail?.type.k === "bytes" &&
-      enumMembersAre(role, ["command", "info", "header", "hero", "agent", "context"]) &&
+      enumMembersAre(role, ["command", "info", "header", "hero", "agent", "context", "segmented", "chart"]) &&
       key?.type.k === "bytes" &&
       modifierNames.join(",") === "command,control,option,primary,shift" &&
-      boolModifierFields;
+      boolModifierFields &&
+      segmentedNames.join(",") === "options" &&
+      segmentOptionNames.join(",") === "command,enabled,id,label,selected" &&
+      segmentOptionField("id") !== undefined && ["number", "i64", "f64", "numAlias"].includes(segmentOptionField("id")!.type.k) &&
+      segmentOptionField("label")?.type.k === "bytes" &&
+      segmentOptionField("command")?.type.k === "bytes" &&
+      segmentOptionField("selected")?.type.k === "bool" &&
+      segmentOptionField("enabled")?.type.k === "bool" &&
+      metricNames.join(",") === "accessibilityLabel,primaryText,secondaryText" &&
+      metricFieldNamed("primaryText")?.type.k === "bytes" &&
+      metricFieldNamed("secondaryText")?.type.k === "bytes" &&
+      metricFieldNamed("accessibilityLabel")?.type.k === "bytes" &&
+      chartNames.join(",") === "accessibilityLabel,leadingCaption,maxValue,minValue,trailingSummary,values" &&
+      chartFieldNamed("values")?.type.k === "slice" && chartFieldNamed("values")?.type.elem.k === "number" &&
+      chartFieldNamed("minValue") !== undefined && ["number", "i64", "f64", "numAlias"].includes(chartFieldNamed("minValue")!.type.k) &&
+      chartFieldNamed("maxValue") !== undefined && ["number", "i64", "f64", "numAlias"].includes(chartFieldNamed("maxValue")!.type.k) &&
+      chartFieldNamed("leadingCaption")?.type.k === "bytes" &&
+      chartFieldNamed("trailingSummary")?.type.k === "bytes" &&
+      chartFieldNamed("accessibilityLabel")?.type.k === "bytes";
     if (!valid) {
       this.report(
         "NS1033",
@@ -1352,6 +1393,8 @@ export class SubsetChecker {
     const tone = presentationFieldNamed("tone");
     const iconOpacity = presentationFieldNamed("iconOpacity");
     const monospaced = presentationFieldNamed("monospaced");
+    const fontSize = presentationFieldNamed("fontSize");
+    const fontWeight = presentationFieldNamed("fontWeight");
     const items = field("items");
     const itemType = items?.type.k === "slice" && items.type.elem.k === "struct" ? items.type.elem : null;
     const item = itemType === null ? undefined : this.table.structs.get(itemType.name);
@@ -1366,13 +1409,33 @@ export class SubsetChecker {
     const role = itemField("role");
     const key = itemField("key");
     const modifiersField = itemField("modifiers");
+    const segmentedField = itemField("segmented");
+    const metricField = itemField("metric");
+    const chartField = itemField("chart");
     const modifiersType = modifiersField?.type.k === "struct" ? modifiersField.type : null;
     const modifiers = modifiersType === null ? undefined : this.table.structs.get(modifiersType.name);
     const modifierNames = modifiers?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const optionalStruct = (candidate: typeof segmentedField) =>
+      candidate?.type.k === "optional" && candidate.type.inner.k === "struct" ? this.table.structs.get(candidate.type.inner.name) : undefined;
+    const segmented = optionalStruct(segmentedField);
+    const segmentedNames = segmented?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const segmentOptions = segmented?.fields.find((candidate) => candidate.tsName === "options");
+    const segmentOptionType = segmentOptions?.type.k === "slice" && segmentOptions.type.elem.k === "struct" ? segmentOptions.type.elem : null;
+    const segmentOption = segmentOptionType === null ? undefined : this.table.structs.get(segmentOptionType.name);
+    const segmentOptionNames = segmentOption?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const segmentOptionField = (name: string) => segmentOption?.fields.find((candidate) => candidate.tsName === name);
+    const chart = optionalStruct(chartField);
+    const chartNames = chart?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const chartFieldNamed = (name: string) => chart?.fields.find((candidate) => candidate.tsName === name);
+    const chartValues = chartFieldNamed("values");
+    const metric = optionalStruct(metricField);
+    const metricNames = metric?.fields.map((candidate) => candidate.tsName).sort() ?? [];
+    const metricFieldNamed = (name: string) => metric?.fields.find((candidate) => candidate.tsName === name);
     const numericId = id !== undefined && ["number", "i64", "f64", "numAlias"].includes(id.type.k);
     const numericItemId = itemId !== undefined && ["number", "i64", "f64", "numAlias"].includes(itemId.type.k);
     const numericWidth = width !== undefined && ["number", "i64", "f64", "numAlias"].includes(width.type.k);
     const numericOpacity = iconOpacity !== undefined && ["number", "i64", "f64", "numAlias"].includes(iconOpacity.type.k);
+    const numericFontSize = fontSize !== undefined && ["number", "i64", "f64", "numAlias"].includes(fontSize.type.k);
     const enumMembersAre = (candidate: typeof tone, expected: readonly string[]): boolean => {
       if (candidate?.type.k !== "enum") return false;
       const found = this.table.enums.get(candidate.type.name)?.members.slice().sort() ?? [];
@@ -1384,23 +1447,43 @@ export class SubsetChecker {
       numericId &&
       visible?.type.k === "bool" &&
       byteFields.every((candidate) => candidate?.type.k === "bytes") &&
-      presentationNames.join(",") === "iconOpacity,monospaced,title,tone,width" &&
+      presentationNames.join(",") === "fontSize,fontWeight,iconOpacity,monospaced,title,tone,width" &&
       title?.type.k === "bytes" &&
       numericWidth &&
       enumMembersAre(tone, ["normal", "warning", "critical"]) &&
       numericOpacity &&
       monospaced?.type.k === "bool" &&
-      itemNames.join(",") === "command,detail,enabled,id,key,label,modifiers,role,separator" &&
+      numericFontSize &&
+      enumMembersAre(fontWeight, ["regular", "medium", "semibold", "bold"]) &&
+      itemNames.join(",") === "chart,command,detail,enabled,id,key,label,metric,modifiers,role,segmented,separator" &&
       numericItemId &&
       label?.type.k === "bytes" &&
       command?.type.k === "bytes" &&
       separator?.type.k === "bool" &&
       enabled?.type.k === "bool" &&
       detail?.type.k === "bytes" &&
-      enumMembersAre(role, ["command", "info", "header", "hero", "agent", "context"]) &&
+      enumMembersAre(role, ["command", "info", "header", "hero", "agent", "context", "segmented", "chart"]) &&
       key?.type.k === "bytes" &&
       modifierNames.join(",") === "command,control,option,primary,shift" &&
-      boolModifierFields;
+      boolModifierFields &&
+      segmentedNames.join(",") === "options" &&
+      segmentOptionNames.join(",") === "command,enabled,id,label,selected" &&
+      segmentOptionField("id") !== undefined && ["number", "i64", "f64", "numAlias"].includes(segmentOptionField("id")!.type.k) &&
+      segmentOptionField("label")?.type.k === "bytes" &&
+      segmentOptionField("command")?.type.k === "bytes" &&
+      segmentOptionField("selected")?.type.k === "bool" &&
+      segmentOptionField("enabled")?.type.k === "bool" &&
+      metricNames.join(",") === "accessibilityLabel,primaryText,secondaryText" &&
+      metricFieldNamed("primaryText")?.type.k === "bytes" &&
+      metricFieldNamed("secondaryText")?.type.k === "bytes" &&
+      metricFieldNamed("accessibilityLabel")?.type.k === "bytes" &&
+      chartNames.join(",") === "accessibilityLabel,leadingCaption,maxValue,minValue,trailingSummary,values" &&
+      chartValues?.type.k === "slice" && chartValues.type.elem.k === "number" &&
+      chartFieldNamed("minValue") !== undefined && ["number", "i64", "f64", "numAlias"].includes(chartFieldNamed("minValue")!.type.k) &&
+      chartFieldNamed("maxValue") !== undefined && ["number", "i64", "f64", "numAlias"].includes(chartFieldNamed("maxValue")!.type.k) &&
+      chartFieldNamed("leadingCaption")?.type.k === "bytes" &&
+      chartFieldNamed("trailingSummary")?.type.k === "bytes" &&
+      chartFieldNamed("accessibilityLabel")?.type.k === "bytes";
     if (!valid) {
       this.report(
         "NS1033",

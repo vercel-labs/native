@@ -638,23 +638,13 @@ pub fn TsUiApp(comptime core: type) type {
             }
             for (state.items, 0..) |raw_item, index| {
                 const item = if (comptime @typeInfo(@TypeOf(raw_item)) == .pointer) raw_item.* else raw_item;
-                scratch.items[index] = .{
-                    .id = statusItemId(item.id),
-                    .label = item.label,
-                    .command = item.command,
-                    .separator = item.separator,
-                    .enabled = item.enabled,
-                    .detail = item.detail,
-                    .role = statusItemRole(item.role),
-                    .key = item.key,
-                    .modifiers = .{
-                        .primary = item.modifiers.primary,
-                        .command = item.modifiers.command,
-                        .control = item.modifiers.control,
-                        .option = item.modifiers.option,
-                        .shift = item.modifiers.shift,
-                    },
-                };
+                const segment_start = index * platform.max_tray_segment_options;
+                const chart_start = index * platform.max_tray_chart_values;
+                scratch.items[index] = statusItemMenuItem(
+                    item,
+                    scratch.segment_options[segment_start .. segment_start + platform.max_tray_segment_options],
+                    scratch.chart_values[chart_start .. chart_start + platform.max_tray_chart_values],
+                );
             }
             return statusItemState(state, scratch.items[0..state.items.len]);
         }
@@ -684,7 +674,14 @@ pub fn TsUiApp(comptime core: type) type {
                 }
                 for (state.items, 0..) |raw_item, item_index| {
                     const item = if (comptime @typeInfo(@TypeOf(raw_item)) == .pointer) raw_item.* else raw_item;
-                    row_storage[item_index] = statusItemMenuItem(item);
+                    const flat_row_index = row_start + item_index;
+                    const segment_start = flat_row_index * platform.max_tray_segment_options;
+                    const chart_start = flat_row_index * platform.max_tray_chart_values;
+                    row_storage[item_index] = statusItemMenuItem(
+                        item,
+                        scratch.segment_options[segment_start .. segment_start + platform.max_tray_segment_options],
+                        scratch.chart_values[chart_start .. chart_start + platform.max_tray_chart_values],
+                    );
                 }
                 scratch.status_items[status_index] = .{
                     .id = statusItemId(state.id),
@@ -781,8 +778,8 @@ pub fn TsUiApp(comptime core: type) type {
             };
         }
 
-        fn statusItemMenuItem(item: anytype) platform.TrayMenuItem {
-            return .{
+        fn statusItemMenuItem(item: anytype, segment_storage: []platform.TraySegmentOption, chart_storage: []f32) platform.TrayMenuItem {
+            var result = platform.TrayMenuItem{
                 .id = statusItemId(item.id),
                 .label = item.label,
                 .command = item.command,
@@ -799,6 +796,49 @@ pub fn TsUiApp(comptime core: type) type {
                     .shift = item.modifiers.shift,
                 },
             };
+            if (@hasField(@TypeOf(item), "segmented")) if (item.segmented) |raw_segmented| {
+                const segmented = if (comptime @typeInfo(@TypeOf(raw_segmented)) == .pointer) raw_segmented.* else raw_segmented;
+                if (segmented.options.len <= segment_storage.len) {
+                    for (segmented.options, 0..) |raw_option, index| {
+                        const option = if (comptime @typeInfo(@TypeOf(raw_option)) == .pointer) raw_option.* else raw_option;
+                        segment_storage[index] = .{
+                            .id = statusItemId(option.id),
+                            .label = option.label,
+                            .command = option.command,
+                            .selected = option.selected,
+                            .enabled = option.enabled,
+                        };
+                    }
+                    result.segmented = .{ .options = segment_storage[0..segmented.options.len] };
+                } else {
+                    result.segmented = .{};
+                }
+            };
+            if (@hasField(@TypeOf(item), "metric")) if (item.metric) |raw_metric| {
+                const metric = if (comptime @typeInfo(@TypeOf(raw_metric)) == .pointer) raw_metric.* else raw_metric;
+                result.metric = .{
+                    .primary_text = metric.primaryText,
+                    .secondary_text = metric.secondaryText,
+                    .accessibility_label = metric.accessibilityLabel,
+                };
+            };
+            if (@hasField(@TypeOf(item), "chart")) if (item.chart) |raw_chart| {
+                const chart = if (comptime @typeInfo(@TypeOf(raw_chart)) == .pointer) raw_chart.* else raw_chart;
+                if (chart.values.len <= chart_storage.len) {
+                    for (chart.values, 0..) |value, index| chart_storage[index] = statusItemFloat(value);
+                    result.chart = .{
+                        .values = chart_storage[0..chart.values.len],
+                        .min_value = statusItemFloat(chart.minValue),
+                        .max_value = statusItemFloat(chart.maxValue),
+                        .leading_caption = chart.leadingCaption,
+                        .trailing_summary = chart.trailingSummary,
+                        .accessibility_label = chart.accessibilityLabel,
+                    };
+                } else {
+                    result.chart = .{};
+                }
+            };
+            return result;
         }
 
         fn statusItemState(state: anytype, items: []const platform.TrayMenuItem) App.StatusItemState {
@@ -810,6 +850,8 @@ pub fn TsUiApp(comptime core: type) type {
                     .tone = statusItemTone(presentation.tone),
                     .icon_opacity = statusItemFloat(presentation.iconOpacity),
                     .monospaced = presentation.monospaced,
+                    .font_size = statusItemFloat(presentation.fontSize),
+                    .font_weight = statusItemFontWeight(presentation.fontWeight),
                 },
                 .icon_path = state.iconPath,
                 .tooltip = state.tooltip,
@@ -845,6 +887,14 @@ pub fn TsUiApp(comptime core: type) type {
         fn statusItemTone(value: anytype) platform.TrayTone {
             const name = @tagName(value);
             inline for (std.meta.fields(platform.TrayTone)) |field| {
+                if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn statusItemFontWeight(value: anytype) platform.TrayFontWeight {
+            const name = @tagName(value);
+            inline for (std.meta.fields(platform.TrayFontWeight)) |field| {
                 if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
             }
             unreachable;
@@ -893,14 +943,17 @@ pub fn TsUiApp(comptime core: type) type {
             }
             const Presentation = statusItemRecordType(@FieldType(State, "presentation"), teaching);
             const presentation_info = @typeInfo(Presentation).@"struct";
-            if (presentation_info.fields.len != 5 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
-                !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced"))
+            if (presentation_info.fields.len != 7 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
+                !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced") or
+                !@hasField(Presentation, "fontSize") or !@hasField(Presentation, "fontWeight"))
             {
                 @compileError(teaching);
             }
             if (@FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
                 !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
-                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool)
+                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool or
+                !statusItemNumericType(@FieldType(Presentation, "fontSize")) or
+                !statusItemEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
             {
                 @compileError(teaching);
             }
@@ -908,9 +961,10 @@ pub fn TsUiApp(comptime core: type) type {
             if (items_info != .pointer or items_info.pointer.size != .slice or !items_info.pointer.is_const) @compileError(teaching);
             const Item = statusItemRecordType(items_info.pointer.child, teaching);
             const item_info = @typeInfo(Item).@"struct";
-            if (item_info.fields.len != 9 or !@hasField(Item, "id") or !@hasField(Item, "label") or
+            if (item_info.fields.len != 12 or !@hasField(Item, "id") or !@hasField(Item, "label") or
                 !@hasField(Item, "command") or !@hasField(Item, "separator") or !@hasField(Item, "enabled") or
-                !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or !@hasField(Item, "modifiers"))
+                !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or !@hasField(Item, "modifiers") or
+                !@hasField(Item, "segmented") or !@hasField(Item, "metric") or !@hasField(Item, "chart"))
             {
                 @compileError(teaching);
             }
@@ -918,7 +972,7 @@ pub fn TsUiApp(comptime core: type) type {
             if (@FieldType(Item, "label") != []const u8 or @FieldType(Item, "command") != []const u8 or
                 @FieldType(Item, "separator") != bool or @FieldType(Item, "enabled") != bool or
                 @FieldType(Item, "detail") != []const u8 or
-                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context" }) or
+                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context", "segmented", "chart" }) or
                 @FieldType(Item, "key") != []const u8)
             {
                 @compileError(teaching);
@@ -932,6 +986,7 @@ pub fn TsUiApp(comptime core: type) type {
             {
                 @compileError(teaching);
             }
+            validateStatusItemRichTypes(Item, teaching);
         }
 
         fn validateStatusItemsHelper() void {
@@ -967,11 +1022,14 @@ pub fn TsUiApp(comptime core: type) type {
             }
             const Presentation = statusItemRecordType(@FieldType(State, "presentation"), teaching);
             const presentation_info = @typeInfo(Presentation).@"struct";
-            if (presentation_info.fields.len != 5 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
+            if (presentation_info.fields.len != 7 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
                 !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced") or
+                !@hasField(Presentation, "fontSize") or !@hasField(Presentation, "fontWeight") or
                 @FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
                 !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
-                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool)
+                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool or
+                !statusItemNumericType(@FieldType(Presentation, "fontSize")) or
+                !statusItemEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
             {
                 @compileError(teaching);
             }
@@ -979,18 +1037,20 @@ pub fn TsUiApp(comptime core: type) type {
             if (items_info != .pointer or items_info.pointer.size != .slice or !items_info.pointer.is_const) @compileError(teaching);
             const Item = statusItemRecordType(items_info.pointer.child, teaching);
             const item_info = @typeInfo(Item).@"struct";
-            if (item_info.fields.len != 9 or !@hasField(Item, "id") or !@hasField(Item, "label") or
+            if (item_info.fields.len != 12 or !@hasField(Item, "id") or !@hasField(Item, "label") or
                 !@hasField(Item, "command") or !@hasField(Item, "separator") or !@hasField(Item, "enabled") or
                 !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or
-                !@hasField(Item, "modifiers") or !statusItemNumericType(@FieldType(Item, "id")) or
+                !@hasField(Item, "modifiers") or !@hasField(Item, "segmented") or !@hasField(Item, "metric") or !@hasField(Item, "chart") or
+                !statusItemNumericType(@FieldType(Item, "id")) or
                 @FieldType(Item, "label") != []const u8 or @FieldType(Item, "command") != []const u8 or
                 @FieldType(Item, "separator") != bool or @FieldType(Item, "enabled") != bool or
                 @FieldType(Item, "detail") != []const u8 or
-                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context" }) or
+                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context", "segmented", "chart" }) or
                 @FieldType(Item, "key") != []const u8)
             {
                 @compileError(teaching);
             }
+            validateStatusItemRichTypes(Item, teaching);
             const Modifiers = statusItemRecordType(@FieldType(Item, "modifiers"), teaching);
             const modifiers_info = @typeInfo(Modifiers).@"struct";
             if (modifiers_info.fields.len != 5 or !@hasField(Modifiers, "primary") or !@hasField(Modifiers, "command") or
@@ -1046,6 +1106,43 @@ pub fn TsUiApp(comptime core: type) type {
         fn optionalEnumType(comptime T: type, comptime expected: []const []const u8) bool {
             const info = @typeInfo(T);
             return info == .optional and statusItemEnumType(info.optional.child, expected);
+        }
+
+        fn validateStatusItemRichTypes(comptime Item: type, comptime teaching: []const u8) void {
+            const segmented_info = @typeInfo(@FieldType(Item, "segmented"));
+            const metric_info = @typeInfo(@FieldType(Item, "metric"));
+            const chart_info = @typeInfo(@FieldType(Item, "chart"));
+            if (segmented_info != .optional or metric_info != .optional or chart_info != .optional) @compileError(teaching);
+
+            const Segmented = statusItemRecordType(segmented_info.optional.child, teaching);
+            const segmented_fields = @typeInfo(Segmented).@"struct".fields;
+            if (segmented_fields.len != 1 or !@hasField(Segmented, "options")) @compileError(teaching);
+            const options_info = @typeInfo(@FieldType(Segmented, "options"));
+            if (options_info != .pointer or options_info.pointer.size != .slice or !options_info.pointer.is_const) @compileError(teaching);
+            const Option = statusItemRecordType(options_info.pointer.child, teaching);
+            const option_info = @typeInfo(Option).@"struct";
+            if (option_info.fields.len != 5 or !@hasField(Option, "id") or !@hasField(Option, "label") or
+                !@hasField(Option, "command") or !@hasField(Option, "selected") or !@hasField(Option, "enabled") or
+                !statusItemNumericType(@FieldType(Option, "id")) or @FieldType(Option, "label") != []const u8 or
+                @FieldType(Option, "command") != []const u8 or @FieldType(Option, "selected") != bool or
+                @FieldType(Option, "enabled") != bool) @compileError(teaching);
+
+            const Metric = statusItemRecordType(metric_info.optional.child, teaching);
+            const metric_fields = @typeInfo(Metric).@"struct".fields;
+            if (metric_fields.len != 3 or !@hasField(Metric, "primaryText") or !@hasField(Metric, "secondaryText") or
+                !@hasField(Metric, "accessibilityLabel") or @FieldType(Metric, "primaryText") != []const u8 or
+                @FieldType(Metric, "secondaryText") != []const u8 or @FieldType(Metric, "accessibilityLabel") != []const u8) @compileError(teaching);
+
+            const Chart = statusItemRecordType(chart_info.optional.child, teaching);
+            const chart_fields = @typeInfo(Chart).@"struct".fields;
+            if (chart_fields.len != 6 or !@hasField(Chart, "values") or !@hasField(Chart, "minValue") or
+                !@hasField(Chart, "maxValue") or !@hasField(Chart, "leadingCaption") or
+                !@hasField(Chart, "trailingSummary") or !@hasField(Chart, "accessibilityLabel")) @compileError(teaching);
+            const values_info = @typeInfo(@FieldType(Chart, "values"));
+            if (values_info != .pointer or values_info.pointer.size != .slice or !values_info.pointer.is_const or
+                !statusItemNumericType(values_info.pointer.child) or !statusItemNumericType(@FieldType(Chart, "minValue")) or
+                !statusItemNumericType(@FieldType(Chart, "maxValue")) or @FieldType(Chart, "leadingCaption") != []const u8 or
+                @FieldType(Chart, "trailingSummary") != []const u8 or @FieldType(Chart, "accessibilityLabel") != []const u8) @compileError(teaching);
         }
 
         fn statusItemNumericType(comptime T: type) bool {
@@ -1550,7 +1647,7 @@ pub fn TsUiApp(comptime core: type) type {
 
 const StatusItemsAdapterTestCore = struct {
     const Tone = enum { normal, warning, critical };
-    const Role = enum { command, info, header, hero, agent, context };
+    const Role = enum { command, info, header, hero, agent, context, segmented, chart };
     const Modifiers = struct {
         primary: bool,
         command: bool,
@@ -1564,6 +1661,29 @@ const StatusItemsAdapterTestCore = struct {
         tone: Tone,
         iconOpacity: f64,
         monospaced: bool,
+        fontSize: f64,
+        fontWeight: enum { regular, medium, semibold, bold },
+    };
+    const SegmentOption = struct {
+        id: f64,
+        label: []const u8,
+        command: []const u8,
+        selected: bool,
+        enabled: bool,
+    };
+    const Segmented = struct { options: []const SegmentOption };
+    const Metric = struct {
+        primaryText: []const u8,
+        secondaryText: []const u8,
+        accessibilityLabel: []const u8,
+    };
+    const Chart = struct {
+        values: []const f64,
+        minValue: f64,
+        maxValue: f64,
+        leadingCaption: []const u8,
+        trailingSummary: []const u8,
+        accessibilityLabel: []const u8,
     };
     const Item = struct {
         id: f64,
@@ -1575,6 +1695,9 @@ const StatusItemsAdapterTestCore = struct {
         role: Role,
         key: []const u8,
         modifiers: Modifiers,
+        segmented: ?Segmented,
+        metric: ?Metric,
+        chart: ?Chart,
     };
     const Descriptor = struct {
         id: f64,
@@ -1598,6 +1721,9 @@ const StatusItemsAdapterTestCore = struct {
         .role = .command,
         .key = "r",
         .modifiers = .{ .primary = true, .command = false, .control = false, .option = false, .shift = false },
+        .segmented = null,
+        .metric = null,
+        .chart = null,
     }};
     const descriptors = [_]Descriptor{.{
         .id = 7,
@@ -1607,7 +1733,7 @@ const StatusItemsAdapterTestCore = struct {
         .activationCommand = "spend.open",
         .alternateActivationCommand = "",
         .openCommand = "spend.refresh",
-        .presentation = .{ .title = "$7", .width = 52, .tone = .warning, .iconOpacity = 0.75, .monospaced = true },
+        .presentation = .{ .title = "$7", .width = 52, .tone = .warning, .iconOpacity = 0.75, .monospaced = true, .fontSize = 13, .fontWeight = .semibold },
         .items = &rows,
     }};
 
