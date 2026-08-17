@@ -41,7 +41,10 @@ const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
 const app_sources = @import("app_sources.zig");
 
-const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = false });
+/// Shared with the embed host: its UiApp type must use the same feature set
+/// as this module's TypeScript adapter or their Options types are distinct.
+pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false };
+const Adapter = native_sdk.TsUiAppWithFeatures(core, features);
 
 /// Re-exported for the embed host's AppDef contract (and any test that
 /// reflects the core's real surface).

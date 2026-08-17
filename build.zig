@@ -118,7 +118,8 @@ test "generated TypeScript runners install the compiled root markup view" {
     try std.testing.expect(std.mem.indexOf(u8, desktop, ".view = CompiledAppView.build") != null);
 
     const mobile = @embedFile("src/app_runner/ts_core_mobile.zig");
-    try std.testing.expect(std.mem.indexOf(u8, mobile, "TsUiAppWithFeatures(core, .{ .runtime_markup = false })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "TsUiAppWithFeatures(core, features)") != null);
     try std.testing.expect(std.mem.indexOf(u8, mobile, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
     try std.testing.expect(std.mem.indexOf(u8, mobile, ".view = CompiledAppView.build") != null);
     try std.testing.expect(std.mem.indexOf(u8, mobile, ".markup =") == null);
