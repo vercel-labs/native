@@ -2,9 +2,35 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.1
+## 0.9.2
 
 <!-- release:start -->
+
+### New Features
+
+- **Flash-free accessory startup**: Apps can opt into accessory activation from `app.zon` to launch without a Dock icon or foreground flash, with tray-affordance validation, runtime composition, packaging support, and an updated menu-bar example (#358).
+- **Logical canvas radio groups**: Nested radios now form accessible single-selection groups with roving focus and consistent keyboard, pointer, handler, and naming semantics (#361).
+- **Budget-aware photo decoding**: Dynamic encoded images are downsampled across desktop and mobile codecs to fit a configurable registered-pixel budget, with independent source bounds, deterministic replay, and platform-level regression coverage (#366).
+
+### Bug Fixes
+
+- **Correct anchored surfaces**: Floating and modal surfaces now dismiss without requiring focus, relayout after scroll restoration, resolve against the correct root, and behave consistently across window contexts (#363).
+- **Reliable autofocus and caret reveal**: Keyboard focus, autofocus, and automation now transactionally reveal offscreen targets while preserving collapsed end-caret selections in text editors (#364).
+- **Explicit link decoration**: Linked text spans now honor their underline flag while Markdown-generated links retain conventional underlines (#368).
+- **Stable macOS window geometry**: Fresh windows now distinguish restored, explicit, and default placement, while AppKit and CEF frame events consistently report content geometry without titlebar drift (#369, #370).
+
+### Improvements
+
+- **Consistent canvas controls and surfaces**: Checkbox and radio labels can contain markup consistently, while actionable states, disabled colors, variant accents, selection geometry, compact layouts, and zero-width strokes now render uniformly across the schema, runtime, accessibility tree, and documentation (#367).
+
+### Contributors
+
+- @ctate
+- @sepehr-safari
+
+<!-- release:end -->
+
+## 0.9.1
 
 ### New Features
 
@@ -30,8 +56,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 - @ctate
 - @ElSebas41
 - @johnlindquist
-
-<!-- release:end -->
 
 ## 0.9.0
 
