@@ -993,6 +993,9 @@ test "compiled catalog elements match the interpreter and the hand-written view"
         interpreted.msgForKeyboard(input.id, submit).?,
         compiled.msgForKeyboard(input.id, submit).?,
     );
+    const combobox = fixture.findByKind(compiled.root, .combobox).?;
+    try testing.expectEqual(fixture.CatalogMsg.submit_query, compiled.msgForKeyboard(combobox.id, submit).?);
+    try testing.expectEqual(fixture.CatalogMsg.open_picker, compiled.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "space" }).?);
 }
 
 test "compiled catalog stays in parity when conditional surfaces flip" {

@@ -2214,7 +2214,7 @@ pub const catalog_markup_source =
     \\  </row>
     \\  <row gap="8">
     \\    <input text="{query}" placeholder="Name" autofocus="true" on-input="query_edit" on-submit="submit_query" grow="1" />
-    \\    <combobox text="{query}" placeholder="Search fruit" on-input="query_edit" />
+    \\    <combobox text="{query}" placeholder="Search fruit" on-input="query_edit" on-press="open_picker" on-submit="submit_query" />
     \\  </row>
     \\  <radio-group gap="4" label="Formatting">
     \\    <radio checked="{bold}" on-change="toggle_bold" label="Bold" />
@@ -2344,7 +2344,7 @@ pub fn handCatalogView(ui: *CatalogUi, model: *const CatalogModel) CatalogUi.Nod
         }),
         ui.row(.{ .gap = 8 }, .{
             ui.el(.input, .{ .text = model.query, .placeholder = "Name", .autofocus = true, .on_input = CatalogUi.inputMsg(.query_edit), .on_submit = .submit_query, .grow = 1 }, .{}),
-            ui.el(.combobox, .{ .text = model.query, .placeholder = "Search fruit", .on_input = CatalogUi.inputMsg(.query_edit) }, .{}),
+            ui.el(.combobox, .{ .text = model.query, .placeholder = "Search fruit", .on_input = CatalogUi.inputMsg(.query_edit), .on_press = .open_picker, .on_submit = .submit_query }, .{}),
         }),
         ui.el(.radio_group, .{ .gap = 4, .semantics = .{ .label = "Formatting" } }, .{
             ui.el(.radio, .{ .checked = model.bold, .on_change = .toggle_bold }, .{}),
@@ -2489,6 +2489,10 @@ test "catalog elements build the hand-written tree and dispatch typed messages" 
     try testing.expectEqualStrings("q", markup_tree.msgForKeyboard(input.id, typed).?.query_edit.insert_text);
     const submit = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter" };
     try testing.expectEqual(CatalogMsg.submit_query, markup_tree.msgForKeyboard(input.id, submit).?);
+    const combobox = findByKind(markup_tree.root, .combobox).?;
+    try testing.expectEqual(CatalogMsg.submit_query, markup_tree.msgForKeyboard(combobox.id, submit).?);
+    try testing.expectEqual(CatalogMsg.open_picker, markup_tree.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "space" }).?);
+    try testing.expectEqual(CatalogMsg.open_picker, markup_tree.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "arrowdown" }).?);
 
     // The whole catalog lays out through the canvas engine.
     var nodes: [256]canvas.WidgetLayoutNode = undefined;

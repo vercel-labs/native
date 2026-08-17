@@ -2182,6 +2182,8 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
     try std.testing.expectEqual(@as(u32, 6), app_state.command_count);
 
     harness.runtime.views[0].canvas_widget_focused_id = 6;
+    // Command-string widgets have no typed on-submit channel, so their
+    // combobox Enter behavior intentionally remains trigger activation.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",

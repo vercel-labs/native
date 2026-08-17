@@ -349,6 +349,43 @@ test "keyboard events resolve activation and submit messages" {
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(checkbox.id, letter));
 }
 
+test "combobox Enter prefers submit while its other open keys still press" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{}, .{
+        ui.el(.combobox, .{
+            .text = "both handlers",
+            .on_press = .load_more,
+            .on_submit = .add,
+        }, .{}),
+        ui.el(.combobox, .{
+            .text = "press only",
+            .on_press = .load_more,
+        }, .{}),
+        ui.el(.combobox, .{
+            .text = "submit only",
+            .on_submit = .add,
+        }, .{}),
+    }));
+
+    const both = tree.root.children[0];
+    const press_only = tree.root.children[1];
+    const submit_only = tree.root.children[2];
+    const enter = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter" };
+    const space = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "space" };
+    const arrow_down = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowdown" };
+    const arrow_up = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowup" };
+
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(both.id, enter).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(both.id, space).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(both.id, arrow_down).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(both.id, arrow_up).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(press_only.id, enter).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(submit_only.id, enter).?);
+}
+
 test "tree keyboard navigation can select without dispatching pointer activation" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

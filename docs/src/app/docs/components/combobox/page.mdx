@@ -5,6 +5,8 @@ import { AttrTable } from "@/components/attr-table";
 
 `combobox` is a trigger-only primitive like [select](/docs/components/select), but the trigger is a text entry with a menu affordance: `on-input` names a Msg variant that receives every edit as a text-input event (`canvas.TextInputEvent` in a Zig core; the `TextInputEvent` union from `@native-sdk/core/text` in a TypeScript core), and the model filters the options as the user types. The options themselves are composed the same way as the select's — an anchored [dropdown-menu](/docs/components/dropdown-menu) of menu-items beside the trigger in a `stack`, rendered under an `if`, with `on-dismiss` clearing the model's open flag when Escape or a click outside closes the surface.
 
+Enter submits when `on-submit` is bound; otherwise Enter opens the picker. Space and the open-arrow keys (Down/Up) always open it. Once focus moves into the open menu, Enter selects the focused `menu-item` as usual.
+
 <ComponentPreview name="combobox" alt="A combobox rendered by the engine" caption="a combobox trigger with its search placeholder" />
 
 ## Markup
@@ -13,8 +15,8 @@ The model owns the query and the open flag; the `for` source is the model-filter
 
 ```html
 <stack width="240">
-  <combobox placeholder="Search frameworks" text="{framework_query}" on-input="framework_edited" on-press="open_framework_menu" />
-  <if test="{framework_menu_open}">
+  <combobox placeholder="Search frameworks" text="{frameworkQuery}" on-input="framework_edited" on-submit="commit_framework_query" on-press="open_framework_menu" />
+  <if test="{frameworkMenuOpen}">
     <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_framework_menu">
       <for each="matchingFrameworks" key="id" as="f">
         <menu-item on-press="pick_framework:{f.id}">{f.name}</menu-item>
@@ -22,6 +24,19 @@ The model owns the query and the open flag; the `for` source is the model-filter
     </dropdown-menu>
   </if>
 </stack>
+```
+
+In the primary TypeScript core, the submit arm commits the current model-owned query. The open and submit messages remain separate, so Enter can commit without toggling the picker:
+
+```ts
+export type Msg =
+  | { readonly kind: "framework_edited"; readonly edit: TextInputEvent }
+  | { readonly kind: "open_framework_menu" }
+  | { readonly kind: "close_framework_menu" }
+  | { readonly kind: "commit_framework_query" };
+
+case "commit_framework_query":
+  return { ...model, committedFrameworkQuery: model.frameworkQuery, frameworkMenuOpen: false };
 ```
 
 ## Programmatic construction (Zig)
@@ -34,6 +49,7 @@ ui.stack(.{ .width = 240 }, .{
         .placeholder = "Search frameworks",
         .text = model.framework_query,
         .on_input = Ui.inputMsg(.framework_edited),
+        .on_submit = .commit_framework_query,
         .on_press = .open_framework_menu,
     }, .{}),
     if (model.framework_menu_open) ui.el(.dropdown_menu, .{
@@ -56,6 +72,7 @@ ui.stack(.{ .width = 240 }, .{
     "disabled",
     "on-press",
     "on-input",
+    "on-submit",
     "on-dismiss",
   ]}
 />

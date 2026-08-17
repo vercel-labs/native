@@ -710,6 +710,9 @@ fn widgetSemanticPressControlIntent(widget: Widget, actions: WidgetActions) Widg
 }
 
 pub fn isWidgetActivationKey(key: []const u8) bool {
+    // Host adapters normalize the physical Return key to "enter" before
+    // it reaches this canonical event vocabulary. AppKit maps both its
+    // carriage-return key event and insertNewline: selector to that name.
     return std.ascii.eqlIgnoreCase(key, "space") or std.ascii.eqlIgnoreCase(key, "enter");
 }
 

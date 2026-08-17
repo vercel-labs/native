@@ -3151,12 +3151,16 @@ const ComboMirrorModel = struct {
     note: canvas.TextBuffer(64) = .{},
     open: bool = false,
     opens: u32 = 0,
+    submits: u32 = 0,
+    picks: u32 = 0,
     query_edits: u32 = 0,
 };
 
 const ComboMirrorMsg = union(enum) {
     open_picker,
     close_picker,
+    submit_query,
+    pick_query: []const u8,
     query_edit: canvas.TextInputEvent,
     note_edit: canvas.TextInputEvent,
 };
@@ -3170,6 +3174,16 @@ fn comboMirrorUpdate(model: *ComboMirrorModel, msg: ComboMirrorMsg) void {
             model.opens += 1;
         },
         .close_picker => model.open = false,
+        .submit_query => {
+            model.open = false;
+            model.submits += 1;
+        },
+        .pick_query => |query| {
+            model.query.clear();
+            model.query.apply(.{ .insert_text = query });
+            model.open = false;
+            model.picks += 1;
+        },
         .query_edit => |edit| {
             model.query.apply(edit);
             model.query_edits += 1;
@@ -3185,6 +3199,7 @@ fn comboMirrorView(ui: *ComboMirrorApp.Ui, model: *const ComboMirrorModel) Combo
         .width = 200,
         .expanded = model.open,
         .on_press = .open_picker,
+        .on_submit = .submit_query,
         .on_input = ComboMirrorApp.Ui.inputMsg(.query_edit),
     }, .{});
     const picker = if (model.open) ui.stack(.{ .height = 28 }, .{
@@ -3196,8 +3211,8 @@ fn comboMirrorView(ui: *ComboMirrorApp.Ui, model: *const ComboMirrorModel) Combo
             .height = 60,
             .on_dismiss = .close_picker,
         }, .{
-            ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "glass bead", .height = 26, .on_press = .close_picker }, .{}),
-            ui.el(.menu_item, .{ .key = .{ .int = 1 }, .text = "glass jar", .height = 26, .on_press = .close_picker }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "glass bead", .height = 26, .on_press = ComboMirrorMsg{ .pick_query = "glass bead" } }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 1 }, .text = "glass jar", .height = 26, .on_press = ComboMirrorMsg{ .pick_query = "glass jar" } }, .{}),
         }),
     }) else ui.stack(.{ .height = 28 }, .{trigger});
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
@@ -3237,7 +3252,7 @@ fn comboMirrorRetainedSelection(harness: *core.TestHarness(), id: canvas.ObjectI
     return layout.findById(id).?.widget.text_selection;
 }
 
-test "a closed combobox's open arrows move neither the retained caret nor the model mirror" {
+test "combobox submit precedence and open-menu selection keep the text mirror consistent" {
     // The split-brain escapee: a CLOSED combobox maps ArrowUp/Down to
     // BOTH its open press (`widgetKeyboardControlIntent`'s menu-open
     // keys) and — through the single-line caret derivation — a stamped
@@ -3292,6 +3307,19 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expectEqualStrings("glass", app_state.model.query.text());
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
 
+    // Enter resolves through on_submit BEFORE the trigger's open press.
+    // The closed picker stays closed and neither side of the text mirror
+    // changes while the submit message commits.
+    const edits_before_submit = app_state.model.query_edits;
+    try comboMirrorKey(harness, app, "enter");
+    try std.testing.expect(!app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.opens);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.submits);
+    try std.testing.expectEqual(edits_before_submit, app_state.model.query_edits);
+    try std.testing.expectEqualStrings("glass", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
+
     // THE pin: ArrowDown on the closed trigger opens the picker and
     // both carets stay at 3 — no query edit is heard or applied.
     const edits_before_open = app_state.model.query_edits;
@@ -3302,9 +3330,10 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
     try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
 
-    // The OPEN-picker truth, pinned as-is: the next arrow walks the
-    // keyboard INTO the mounted menu (the focus step consumes it before
-    // routing reaches the trigger), so it is no caret edit either.
+    // The OPEN-picker truth: the next arrow walks the keyboard INTO the
+    // mounted menu (the focus step consumes it before routing reaches
+    // the trigger), so Enter selects that menu item instead of reaching
+    // the combobox submit handler again.
     const first_item_id = findWidgetIdByText(app_state.tree.?, .menu_item, "glass bead").?;
     try comboMirrorKey(harness, app, "arrowdown");
     try std.testing.expectEqual(first_item_id, harness.runtime.views[0].canvas_widget_focused_id);
@@ -3312,12 +3341,12 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
     try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
 
-    // Escape is consumed by the DISMISSAL pass while the menu floats:
-    // the picker closes through `on_dismiss` and the combobox's
-    // Escape-clear never runs — the query survives.
-    try comboMirrorKey(harness, app, "escape");
+    try comboMirrorKey(harness, app, "enter");
     try std.testing.expect(!app_state.model.open);
-    try std.testing.expectEqualStrings("glass", app_state.model.query.text());
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.submits);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.picks);
+    try std.testing.expectEqualStrings("glass bead", app_state.model.query.text());
+    try std.testing.expectEqualStrings("glass bead", (try harness.runtime.canvasWidgetLayout(1, combo_mirror_canvas_label)).findById(combo_id).?.widget.text);
     try std.testing.expectEqual(combo_id, harness.runtime.views[0].canvas_widget_focused_id);
 
     // ArrowUp on the closed trigger is the same open key: opens, and
@@ -3326,8 +3355,8 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expect(app_state.model.open);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.opens);
     try std.testing.expectEqual(edits_before_open, app_state.model.query_edits);
-    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
-    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed("glass bead".len), app_state.model.query.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed("glass bead".len)), try comboMirrorRetainedSelection(harness, combo_id));
     try comboMirrorKey(harness, app, "escape");
     try std.testing.expect(!app_state.model.open);
 

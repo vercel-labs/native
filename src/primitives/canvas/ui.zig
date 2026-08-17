@@ -1471,13 +1471,14 @@ pub fn Ui(comptime Msg: type) type {
                 if (widget.semantics.role == .treeitem and keyboard.focus_moved) {
                     if (self.msgFor(target_id, .change)) |msg| return msg;
                 }
-                // A list row prefers a bound submit handler on plain
-                // Enter: Enter is the row's PRIMARY action (open the
-                // record, play the track — the desktop list convention),
-                // while Space keeps the select activation below. Only
-                // rows that bind `on_submit` take this branch; everything
-                // else resolves exactly as before.
-                if (widget.kind == .list_item and isSubmitKeyboard(widget, keyboard)) {
+                // List rows and comboboxes prefer a bound submit handler
+                // on plain Enter before their activation intent: Enter is
+                // the row's PRIMARY action or commits the combobox text,
+                // while Space and the combobox open arrows keep the
+                // activation below. Only widgets that bind `on_submit`
+                // return from this branch; everything else resolves
+                // exactly as before.
+                if ((widget.kind == .list_item or widget.kind == .combobox) and isSubmitKeyboard(widget, keyboard)) {
                     if (self.msgFor(target_id, .submit)) |msg| return msg;
                 }
                 if (canvas.widgetKeyboardControlIntent(widget, keyboard)) |intent| {
