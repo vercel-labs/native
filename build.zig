@@ -3515,6 +3515,9 @@ fn tsCoreE2eArtifact(
     // against (the same module the generated shims stage).
     conformance_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
     conformance_mod.addImport("shim_markup_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+    // Compile-cost guard: this generated mirror carries 160 realistically
+    // named Msg arms and must need no quota setting in app or test code.
+    conformance_mod.addImport("shim_wide_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/wide_msg_fixture.contract.json")));
     // The integer-class fixture: a hand-written sidecar attesting mixed
     // i64/u64 slot classes, so the suite drives boundary and full-range
     // integer values through a generated mirror's decode paths.

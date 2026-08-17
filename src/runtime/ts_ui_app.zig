@@ -80,6 +80,27 @@ const ts_core_host = @import("ts_core_host.zig");
 
 const ts_ui_app_log = std.log.scoped(.zero_ts_ui_app);
 
+/// Quota for a comptime scan of an app-authored type. TS `Msg` unions may
+/// legally carry 256 arms; include total identifier bytes because
+/// `std.mem.eql`'s comptime scalar path scales with the compared names.
+fn typeScanQuota(comptime T: type) u32 {
+    const fields = switch (@typeInfo(T)) {
+        .@"struct" => |info| info.fields,
+        .@"union" => |info| info.fields,
+        .@"enum" => |info| info.fields,
+        else => return 2_000,
+    };
+    var name_bytes: u64 = 0;
+    for (fields) |field| name_bytes += field.name.len;
+    const quota: u64 = 100_000 + @as(u64, fields.len) * 1_024 + name_bytes * 256;
+    return @intCast(@min(quota, std.math.maxInt(u32)));
+}
+
+fn scaledTypeScanQuota(comptime T: type, comptime scans: usize) u32 {
+    const quota = @as(u64, typeScanQuota(T)) * @max(scans, 1);
+    return @intCast(@min(quota, std.math.maxInt(u32)));
+}
+
 pub fn TsUiApp(comptime core: type) type {
     return struct {
         /// The effect bridge — shared with any direct `TsCoreHost(core)`
@@ -92,6 +113,9 @@ pub fn TsUiApp(comptime core: type) type {
         pub const Options = App.Options;
         pub const Effects = App.Effects;
         pub const Ui = App.Ui;
+        /// Shared with generated launchers that perform their own Msg scans.
+        pub const msg_scan_quota = typeScanQuota(Msg);
+        pub const persist_route_scan_quota = scaledTypeScanQuota(Msg, 3);
 
         /// Internal keyed-channel namespace for persistence write failures
         /// ("TSPR"). It never shares an app-authored TS bridge index.
@@ -223,12 +247,14 @@ pub fn TsUiApp(comptime core: type) type {
         /// a typo or payload mismatch fails during `native build`, before a
         /// first boot can reach the dynamic dispatch path below.
         pub fn validatePersistRoutes(comptime routes: PersistRoutes) void {
+            @setEvalBranchQuota(persist_route_scan_quota);
             validatePersistRoute(routes.ok, void, "ok");
             validatePersistRoute(routes.none, void, "none");
             validatePersistRoute(routes.err, []const u8, "err");
         }
 
         fn validatePersistRoute(comptime route: []const u8, comptime Payload: type, comptime role: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime std.mem.eql(u8, arm.name, route)) {
                     if (arm.type != Payload) {
@@ -1029,6 +1055,7 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         fn persistOutcomeMsg(event: runtime_effects.EffectChannelEvent) Msg {
+            @setEvalBranchQuota(msg_scan_quota);
             const reason: []const u8 = switch (event.kind) {
                 .data => event.bytes,
                 .rejected => "rejected",
@@ -1044,6 +1071,7 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         fn dispatchPersistVoid(fx: *Effects, route: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime arm.type == void) {
                     if (std.mem.eql(u8, arm.name, route)) {
@@ -1056,6 +1084,7 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         fn dispatchPersistError(fx: *Effects, route: []const u8, reason: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime arm.type == []const u8) {
                     if (std.mem.eql(u8, arm.name, route)) {
@@ -1098,6 +1127,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// One env delivery: resolve the arm by name and dispatch the
         /// value through a full core cycle.
         fn dispatchOneEnvValue(fx: *Effects, msg: []const u8, value: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime arm.type == []const u8) {
                     if (std.mem.eql(u8, arm.name, msg)) {
@@ -1117,6 +1147,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// hand-assembled cores: every `envMsgs` entry must name a Msg
         /// arm carrying exactly one bytes payload.
         fn validateEnvMsgs() void {
+            @setEvalBranchQuota(scaledTypeScanQuota(Msg, core.envMsgs.len));
             for (core.envMsgs) |entry| {
                 var found = false;
                 for (@typeInfo(Msg).@"union".fields) |arm| {
@@ -1333,6 +1364,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// error the frontend's NS1033 re-derives for hand-written
         /// cores.
         fn channelArmIndex(comptime tag: []const u8, comptime channel: []const u8) usize {
+            @setEvalBranchQuota(msg_scan_quota);
             for (@typeInfo(Msg).@"union".fields, 0..) |arm, index| {
                 if (std.mem.eql(u8, arm.name, tag)) return index;
             }

@@ -92,6 +92,24 @@ var model_arenas = [2]std.heap.ArenaAllocator{
 };
 var model_arena_index: u1 = 0;
 
+/// Quota for one comptime reflection pass over a record/union/enum. Canonical
+/// encoding specializes over sidecar-shaped types, whose legal 256-arm unions
+/// and long authored names can outrun Zig's default quota while resolving an
+/// arm index. Scale with both entries and identifier bytes so app code never
+/// has to raise a quota for generated shim work.
+fn typeScanQuota(comptime T: type) u32 {
+    const fields = switch (@typeInfo(T)) {
+        .@"struct" => |info| info.fields,
+        .@"union" => |info| info.fields,
+        .@"enum" => |info| info.fields,
+        else => return 2_000,
+    };
+    var name_bytes: u64 = 0;
+    for (fields) |field| name_bytes += field.name.len;
+    const quota: u64 = 100_000 + @as(u64, fields.len) * 1_024 + name_bytes * 256;
+    return @intCast(@min(quota, std.math.maxInt(u32)));
+}
+
 /// Decode a committed-model snapshot into a fresh mirror root. The
 /// PREVIOUS decode's root stays valid until the decode after this one;
 /// anything older is gone (the host holds exactly one committed root at
@@ -116,6 +134,7 @@ pub fn encodeAlloc(comptime T: type, value: T, allocator: std.mem.Allocator) []c
 }
 
 fn encodeInto(comptime T: type, value: T, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    @setEvalBranchQuota(comptime typeScanQuota(T));
     switch (@typeInfo(T)) {
         .bool => try out.append(allocator, @intFromBool(value)),
         .int => {
@@ -220,6 +239,7 @@ pub const Reader = struct {
 /// records and slices into `allocator` (the shim frame arena in the
 /// dispatch path).
 pub fn decode(comptime T: type, reader: *Reader, allocator: std.mem.Allocator) T {
+    @setEvalBranchQuota(comptime typeScanQuota(T));
     switch (@typeInfo(T)) {
         .bool => {
             const raw = reader.take(1)[0];

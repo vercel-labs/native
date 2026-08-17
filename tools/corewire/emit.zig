@@ -42,6 +42,19 @@ const Sidecar = sidecar_mod.Sidecar;
 const TypeRef = sidecar_mod.TypeRef;
 const Payload = sidecar_mod.Payload;
 
+/// Comptime string scans pay for every arm and every byte in its name.
+/// Keep the generated consistency fence independent of Zig's default
+/// 1000-backwards-branch quota: the sidecar admits 256 arms, and long legal
+/// TypeScript identifiers must remain legal here too. The fixed floor covers
+/// the surrounding reflection; the linear terms leave generous headroom over
+/// `std.mem.eql`'s scalar comptime path.
+fn msgTagConsistencyQuota(arms: []const sidecar_mod.MsgArm) u32 {
+    var name_bytes: u64 = 0;
+    for (arms) |arm| name_bytes += arm.name.len;
+    const quota: u64 = 100_000 + @as(u64, arms.len) * 1_024 + name_bytes * 256;
+    return @intCast(@min(quota, std.math.maxInt(u32)));
+}
+
 /// The eleven text-input event tags the markup engines recognize
 /// structurally; a union payload carrying exactly these dispatches
 /// through the ABI's text_input entry.
@@ -883,6 +896,7 @@ const Emitter = struct {
     }
 
     fn tagTable(self: *Emitter) Error!void {
+        const consistency_quota = msgTagConsistencyQuota(self.sidecar.msg.arms);
         try self.raw(
             \\
             \\/// Declaration-order wire tags: the arm's index in this table IS
@@ -898,16 +912,17 @@ const Emitter = struct {
         try self.print(
             \\
             \\comptime {{
+            \\    @setEvalBranchQuota({d});
             \\    // The union and the tag table are emitted from one arm list;
             \\    // hold them equal anyway so a hand edit cannot skew dispatch.
             \\    const fields = @typeInfo({f}).@"union".fields;
-            \\    if (fields.len != msg_tags.len) @compileError("core_shim: msg_tags and the message union disagree — regenerate from the sidecar");
+            \\    if (fields.len != msg_tags.len) @compileError("core_shim: Msg arm count does not match msg_tags");
             \\    for (fields, msg_tags) |field, tag_name| {{
-            \\        if (!std.mem.eql(u8, field.name, tag_name)) @compileError("core_shim: msg_tags and the message union disagree — regenerate from the sidecar");
+            \\        if (!std.mem.eql(u8, field.name, tag_name)) @compileError("core_shim: Msg arm names do not match msg_tags");
             \\    }}
             \\}}
             \\
-        , .{ident(self.sidecar.msg.name)});
+        , .{ consistency_quota, ident(self.sidecar.msg.name) });
     }
 
     // --------------------------------------------------- entry points

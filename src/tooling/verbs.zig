@@ -254,6 +254,7 @@ fn runZig(io: std.Io, verb: Verb, argv: []const []const u8) !void {
     // SDK builds with Zig 0.16, where std APIs moved, and those failures
     // read "no member named 'cwd'/'init'/'io'" on std types.
     std.debug.print("if the errors above name missing std members, the code may use pre-0.16 Zig idioms - run `native skills get zig` or see https://native-sdk.dev/zig\n", .{});
+    std.debug.print("if generated core wiring exceeds Zig's eval branch quota, do not regenerate the TypeScript contract or add an app-side quota - update or report the SDK-generated scan\n", .{});
     return error.ZigBuildFailed;
 }
 

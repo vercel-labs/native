@@ -477,6 +477,7 @@ fn manifestPersistDebounce(comptime config: anytype) u32 {
 }
 
 fn validatePersistRoutes(comptime routes: anytype) void {
+    @setEvalBranchQuota(Adapter.persist_route_scan_quota);
     if (!persistRouteMatches(routes.ok, void)) {
         @compileError("app.zon .persist.restore.ok must name a void Msg arm in src/core.ts");
     }
@@ -489,6 +490,7 @@ fn validatePersistRoutes(comptime routes: anytype) void {
 }
 
 fn persistRouteMatches(comptime name: []const u8, comptime Payload: type) bool {
+    @setEvalBranchQuota(Adapter.msg_scan_quota);
     const info = @typeInfo(core.Msg);
     if (info != .@"union") return false;
     inline for (info.@"union".fields) |field| {

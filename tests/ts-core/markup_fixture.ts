@@ -83,7 +83,156 @@ export type Msg =
   | { readonly kind: "zoomed"; readonly factor: number; readonly windowId: number; readonly fromBoard: boolean }
   | { readonly kind: "appearance_changed"; readonly colorScheme: ColorScheme; readonly reduceMotion: boolean; readonly highContrast: boolean }
   | { readonly kind: "chrome_changed"; readonly insets: ChromeInsets; readonly buttons: ChromeButtons; readonly tabsProjected: boolean }
-  | { readonly kind: "banner_set"; readonly value: Uint8Array };
+  | { readonly kind: "banner_set"; readonly value: Uint8Array }
+  // Compile-cost guard for the default TypeScript path. Together with the
+  // 15 functional arms above these make a 160-arm Msg, crossing the former
+  // Zig comptime-quota cliff while the real checker -> contract -> corewire ->
+  // TsUiApp channel pipeline compiles with no app-side quota.
+  | { readonly kind: "quota_probe_000_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_001_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_002_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_003_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_004_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_005_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_006_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_007_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_008_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_009_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_010_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_011_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_012_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_013_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_014_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_015_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_016_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_017_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_018_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_019_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_020_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_021_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_022_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_023_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_024_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_025_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_026_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_027_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_028_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_029_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_030_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_031_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_032_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_033_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_034_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_035_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_036_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_037_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_038_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_039_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_040_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_041_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_042_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_043_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_044_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_045_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_046_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_047_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_048_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_049_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_050_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_051_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_052_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_053_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_054_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_055_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_056_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_057_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_058_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_059_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_060_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_061_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_062_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_063_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_064_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_065_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_066_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_067_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_068_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_069_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_070_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_071_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_072_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_073_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_074_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_075_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_076_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_077_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_078_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_079_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_080_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_081_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_082_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_083_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_084_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_085_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_086_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_087_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_088_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_089_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_090_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_091_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_092_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_093_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_094_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_095_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_096_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_097_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_098_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_099_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_100_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_101_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_102_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_103_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_104_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_105_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_106_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_107_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_108_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_109_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_110_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_111_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_112_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_113_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_114_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_115_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_116_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_117_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_118_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_119_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_120_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_121_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_122_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_123_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_124_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_125_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_126_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_127_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_128_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_129_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_130_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_131_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_132_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_133_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_134_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_135_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_136_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_137_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_138_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_139_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_140_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_141_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_142_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_143_with_realistic_message_name" }
+  | { readonly kind: "quota_probe_144_with_realistic_message_name" };
 
 /// Presented frames dispatch ONLY on a width change (the idle law: a
 /// frame that changes nothing dispatches nothing, so the channel starves
@@ -239,5 +388,153 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, chromeTop: msg.insets.top }, Cmd.none];
     case "banner_set":
       return [{ ...model, banner: msg.value }, Cmd.none];
+    // The wide-union arms are compile-only probes; they intentionally share
+    // one inert reducer branch so the switch remains exhaustive.
+    case "quota_probe_000_with_realistic_message_name":
+    case "quota_probe_001_with_realistic_message_name":
+    case "quota_probe_002_with_realistic_message_name":
+    case "quota_probe_003_with_realistic_message_name":
+    case "quota_probe_004_with_realistic_message_name":
+    case "quota_probe_005_with_realistic_message_name":
+    case "quota_probe_006_with_realistic_message_name":
+    case "quota_probe_007_with_realistic_message_name":
+    case "quota_probe_008_with_realistic_message_name":
+    case "quota_probe_009_with_realistic_message_name":
+    case "quota_probe_010_with_realistic_message_name":
+    case "quota_probe_011_with_realistic_message_name":
+    case "quota_probe_012_with_realistic_message_name":
+    case "quota_probe_013_with_realistic_message_name":
+    case "quota_probe_014_with_realistic_message_name":
+    case "quota_probe_015_with_realistic_message_name":
+    case "quota_probe_016_with_realistic_message_name":
+    case "quota_probe_017_with_realistic_message_name":
+    case "quota_probe_018_with_realistic_message_name":
+    case "quota_probe_019_with_realistic_message_name":
+    case "quota_probe_020_with_realistic_message_name":
+    case "quota_probe_021_with_realistic_message_name":
+    case "quota_probe_022_with_realistic_message_name":
+    case "quota_probe_023_with_realistic_message_name":
+    case "quota_probe_024_with_realistic_message_name":
+    case "quota_probe_025_with_realistic_message_name":
+    case "quota_probe_026_with_realistic_message_name":
+    case "quota_probe_027_with_realistic_message_name":
+    case "quota_probe_028_with_realistic_message_name":
+    case "quota_probe_029_with_realistic_message_name":
+    case "quota_probe_030_with_realistic_message_name":
+    case "quota_probe_031_with_realistic_message_name":
+    case "quota_probe_032_with_realistic_message_name":
+    case "quota_probe_033_with_realistic_message_name":
+    case "quota_probe_034_with_realistic_message_name":
+    case "quota_probe_035_with_realistic_message_name":
+    case "quota_probe_036_with_realistic_message_name":
+    case "quota_probe_037_with_realistic_message_name":
+    case "quota_probe_038_with_realistic_message_name":
+    case "quota_probe_039_with_realistic_message_name":
+    case "quota_probe_040_with_realistic_message_name":
+    case "quota_probe_041_with_realistic_message_name":
+    case "quota_probe_042_with_realistic_message_name":
+    case "quota_probe_043_with_realistic_message_name":
+    case "quota_probe_044_with_realistic_message_name":
+    case "quota_probe_045_with_realistic_message_name":
+    case "quota_probe_046_with_realistic_message_name":
+    case "quota_probe_047_with_realistic_message_name":
+    case "quota_probe_048_with_realistic_message_name":
+    case "quota_probe_049_with_realistic_message_name":
+    case "quota_probe_050_with_realistic_message_name":
+    case "quota_probe_051_with_realistic_message_name":
+    case "quota_probe_052_with_realistic_message_name":
+    case "quota_probe_053_with_realistic_message_name":
+    case "quota_probe_054_with_realistic_message_name":
+    case "quota_probe_055_with_realistic_message_name":
+    case "quota_probe_056_with_realistic_message_name":
+    case "quota_probe_057_with_realistic_message_name":
+    case "quota_probe_058_with_realistic_message_name":
+    case "quota_probe_059_with_realistic_message_name":
+    case "quota_probe_060_with_realistic_message_name":
+    case "quota_probe_061_with_realistic_message_name":
+    case "quota_probe_062_with_realistic_message_name":
+    case "quota_probe_063_with_realistic_message_name":
+    case "quota_probe_064_with_realistic_message_name":
+    case "quota_probe_065_with_realistic_message_name":
+    case "quota_probe_066_with_realistic_message_name":
+    case "quota_probe_067_with_realistic_message_name":
+    case "quota_probe_068_with_realistic_message_name":
+    case "quota_probe_069_with_realistic_message_name":
+    case "quota_probe_070_with_realistic_message_name":
+    case "quota_probe_071_with_realistic_message_name":
+    case "quota_probe_072_with_realistic_message_name":
+    case "quota_probe_073_with_realistic_message_name":
+    case "quota_probe_074_with_realistic_message_name":
+    case "quota_probe_075_with_realistic_message_name":
+    case "quota_probe_076_with_realistic_message_name":
+    case "quota_probe_077_with_realistic_message_name":
+    case "quota_probe_078_with_realistic_message_name":
+    case "quota_probe_079_with_realistic_message_name":
+    case "quota_probe_080_with_realistic_message_name":
+    case "quota_probe_081_with_realistic_message_name":
+    case "quota_probe_082_with_realistic_message_name":
+    case "quota_probe_083_with_realistic_message_name":
+    case "quota_probe_084_with_realistic_message_name":
+    case "quota_probe_085_with_realistic_message_name":
+    case "quota_probe_086_with_realistic_message_name":
+    case "quota_probe_087_with_realistic_message_name":
+    case "quota_probe_088_with_realistic_message_name":
+    case "quota_probe_089_with_realistic_message_name":
+    case "quota_probe_090_with_realistic_message_name":
+    case "quota_probe_091_with_realistic_message_name":
+    case "quota_probe_092_with_realistic_message_name":
+    case "quota_probe_093_with_realistic_message_name":
+    case "quota_probe_094_with_realistic_message_name":
+    case "quota_probe_095_with_realistic_message_name":
+    case "quota_probe_096_with_realistic_message_name":
+    case "quota_probe_097_with_realistic_message_name":
+    case "quota_probe_098_with_realistic_message_name":
+    case "quota_probe_099_with_realistic_message_name":
+    case "quota_probe_100_with_realistic_message_name":
+    case "quota_probe_101_with_realistic_message_name":
+    case "quota_probe_102_with_realistic_message_name":
+    case "quota_probe_103_with_realistic_message_name":
+    case "quota_probe_104_with_realistic_message_name":
+    case "quota_probe_105_with_realistic_message_name":
+    case "quota_probe_106_with_realistic_message_name":
+    case "quota_probe_107_with_realistic_message_name":
+    case "quota_probe_108_with_realistic_message_name":
+    case "quota_probe_109_with_realistic_message_name":
+    case "quota_probe_110_with_realistic_message_name":
+    case "quota_probe_111_with_realistic_message_name":
+    case "quota_probe_112_with_realistic_message_name":
+    case "quota_probe_113_with_realistic_message_name":
+    case "quota_probe_114_with_realistic_message_name":
+    case "quota_probe_115_with_realistic_message_name":
+    case "quota_probe_116_with_realistic_message_name":
+    case "quota_probe_117_with_realistic_message_name":
+    case "quota_probe_118_with_realistic_message_name":
+    case "quota_probe_119_with_realistic_message_name":
+    case "quota_probe_120_with_realistic_message_name":
+    case "quota_probe_121_with_realistic_message_name":
+    case "quota_probe_122_with_realistic_message_name":
+    case "quota_probe_123_with_realistic_message_name":
+    case "quota_probe_124_with_realistic_message_name":
+    case "quota_probe_125_with_realistic_message_name":
+    case "quota_probe_126_with_realistic_message_name":
+    case "quota_probe_127_with_realistic_message_name":
+    case "quota_probe_128_with_realistic_message_name":
+    case "quota_probe_129_with_realistic_message_name":
+    case "quota_probe_130_with_realistic_message_name":
+    case "quota_probe_131_with_realistic_message_name":
+    case "quota_probe_132_with_realistic_message_name":
+    case "quota_probe_133_with_realistic_message_name":
+    case "quota_probe_134_with_realistic_message_name":
+    case "quota_probe_135_with_realistic_message_name":
+    case "quota_probe_136_with_realistic_message_name":
+    case "quota_probe_137_with_realistic_message_name":
+    case "quota_probe_138_with_realistic_message_name":
+    case "quota_probe_139_with_realistic_message_name":
+    case "quota_probe_140_with_realistic_message_name":
+    case "quota_probe_141_with_realistic_message_name":
+    case "quota_probe_142_with_realistic_message_name":
+    case "quota_probe_143_with_realistic_message_name":
+    case "quota_probe_144_with_realistic_message_name":
+      return [model, Cmd.none];
   }
 }

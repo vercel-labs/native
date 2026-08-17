@@ -1,6 +1,6 @@
 //! Sidecar-shim conformance: for every core in the ts-core corpus,
 //! corewire generates the mirror from that core's contract sidecar —
-//! the frontend-emitted document for the compiled fixtures, plus two
+//! the frontend-emitted document for the compiled fixtures, plus three
 //! hand-written ground truths for the schema itself — and this suite
 //! validates the generated surface:
 //!
@@ -11,7 +11,9 @@
 //!    surface and declaration-order wire tags.
 //! 2. The integer fixture's mirror decodes every slot per its attested
 //!    class over hand-computed wire vectors.
-//! 3. Every generated shim (dispatch stubs, snapshot decoder, channel
+//! 3. A committed 160-arm sidecar proves generated Msg mirrors compile
+//!    without an app- or test-side eval-branch quota.
+//! 4. Every generated shim (dispatch stubs, snapshot decoder, channel
 //!    forwarders, helper methods) fully analyzes and links against the
 //!    stub core's exported symbol set — the executable surface is
 //!    compile- and link-proven for the whole corpus without driving
@@ -30,6 +32,7 @@ const stub_core = @import("stub_core.zig");
 const corewire_rt = @import("corewire_rt");
 
 const shim_markup = @import("shim_markup_core");
+const shim_wide = @import("shim_wide_core");
 const shim_integer = @import("shim_integer_core");
 const shim_host = @import("shim_host_core");
 const shim_kanban = @import("shim_kanban_core");
@@ -38,6 +41,36 @@ const shim_monitor = @import("shim_monitor_core");
 const shim_ai_chat = @import("shim_ai_chat_core");
 
 const testing = std.testing;
+const WideAdapter = native_sdk.TsUiApp(shim_wide);
+
+// --------------------------------------------------------- wide Msg guard
+//
+// Compile-cost guard: a legal 160-arm TypeScript-core contract must compile
+// through corewire without this test (or any app) raising
+// `@setEvalBranchQuota`. The arm names are deliberately production-shaped,
+// because comptime string comparison cost scales with their total bytes.
+
+test "wide Msg mirror compiles and canonical union scans reach the final arm" {
+    comptime WideAdapter.validatePersistRoutes(.{
+        .ok = "quota_probe_message_arm_157_with_realistic_name",
+        .none = "quota_probe_message_arm_158_with_realistic_name",
+        .err = "quota_probe_message_arm_159_with_realistic_name",
+    });
+    try testing.expectEqual(@as(usize, 160), shim_wide.msg_tags.len);
+    try testing.expectEqualStrings(
+        "quota_probe_message_arm_159_with_realistic_name",
+        shim_wide.msg_tags[159],
+    );
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const value: shim_wide.Msg = .{ .quota_probe_message_arm_159_with_realistic_name = "wide" };
+    const encoded = corewire_rt.encodeAlloc(shim_wide.Msg, value, arena);
+    try testing.expectEqualSlices(u8, &.{ 159, 4, 0, 0, 0, 'w', 'i', 'd', 'e' }, encoded);
+    const decoded = corewire_rt.decodeExact(shim_wide.Msg, encoded, arena);
+    try testing.expectEqualStrings("wide", decoded.quota_probe_message_arm_159_with_realistic_name);
+}
 
 // ------------------------------------------------------ markup fixture
 // The bootstrap mirror: hand-written sidecar (independent ground truth
@@ -307,6 +340,7 @@ fn refAllDeclsRecursive(comptime T: type) void {
 
 test "every generated shim fully analyzes and links against the ABI" {
     refAllDeclsRecursive(shim_markup);
+    refAllDeclsRecursive(shim_wide);
     refAllDeclsRecursive(shim_integer);
     refAllDeclsRecursive(shim_host);
     refAllDeclsRecursive(shim_kanban);
