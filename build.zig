@@ -209,6 +209,24 @@ pub fn build(b: *std.Build) void {
     const app_runner_window_placement_mod = module(b, target, optimize, "src/app_runner/window_placement.zig");
     app_runner_window_placement_mod.addImport("native_sdk", desktop_mod);
     const app_runner_window_placement_tests = testArtifact(b, app_runner_window_placement_mod);
+    const app_runner_options = b.addOptions();
+    app_runner_options.addOption([]const u8, "platform", "null");
+    app_runner_options.addOption([]const u8, "trace", "off");
+    app_runner_options.addOption([]const u8, "web_engine", "system");
+    app_runner_options.addOption(bool, "debug_overlay", false);
+    app_runner_options.addOption(bool, "automation", false);
+    app_runner_options.addOption(bool, "web_layer", false);
+    const app_runner_mod = module(b, target, optimize, "src/app_runner/root.zig");
+    app_runner_mod.addImport("native_sdk", desktop_mod);
+    app_runner_mod.addImport("build_options", app_runner_options.createModule());
+    app_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("tests/app-runner/menu_commands_fixture.zon") }));
+    const app_runner_migrations_mod = module(b, target, optimize, "src/app_runner/no_migrations.zig");
+    app_runner_migrations_mod.addImport("native_sdk", desktop_mod);
+    app_runner_mod.addImport("relational_migrations", app_runner_migrations_mod);
+    const app_runner_tests = testArtifact(b, app_runner_mod);
+    const app_runner_test_run = b.addRunArtifact(app_runner_tests);
+    const app_runner_test_step = b.step("test-app-runner", "Run framework app-runner manifest fallback tests");
+    app_runner_test_step.dependOn(&app_runner_test_run.step);
     desktop_mod.link_libc = true;
     if (target.result.os.tag == .macos) {
         const flags: []const []const u8 = if (b.sysroot) |sysroot|
@@ -607,6 +625,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_window_placement_tests).step);
+    test_step.dependOn(&app_runner_test_run.step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);
@@ -2157,6 +2176,52 @@ pub fn build(b: *std.Build) void {
     native_shell_smoke_run.step.dependOn(&native_shell_smoke_build.step);
     native_shell_smoke_run.step.dependOn(&cli_exe.step);
     native_shell_smoke_step.dependOn(&native_shell_smoke_run.step);
+
+    const menu_bar_smoke_step = b.step("test-menu-bar-smoke", "Run zero-config TypeScript app-menu automation smoke test");
+    const menu_bar_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
+    menu_bar_smoke_build.setCwd(b.path("examples/menu-bar"));
+    const menu_bar_smoke_run = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\cd examples/menu-bar
+        \\app="zig-out/bin/menu-bar"
+        \\cli="$1"
+        \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
+        \\automation_dir=".zig-cache/native-sdk-automation"
+        \\mkdir -p "$automation_dir"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt
+        \\"$app" > .zig-cache/native-sdk-menu-bar-smoke.log 2>&1 &
+        \\pid=$!
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-menu-bar-smoke.log) ----" >&2; cat .zig-cache/native-sdk-menu-bar-smoke.log >&2 2>/dev/null || true; fi' EXIT
+        \\ready="$("$cli" automate wait 2>&1)"
+        \\case "$ready" in *"ready=true"*) ;; *) echo "menu-bar automation snapshot was not ready" >&2; exit 1 ;; esac
+        \\before="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\case "$before" in *'command id="player.next" title="Next Track" enabled=true checked=false'*) ;; *) echo "app.zon command catalog was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu title="Player" items=6'*) ;; *) echo "app.zon Player menu was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu-item label="Next Track" command="player.next" enabled=true checked=false key="n" modifiers=(primary=true,command=false,control=false,option=false,shift=false)'*) ;; *) echo "app.zon player.next menu item was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in
+        \\  *'Ambient Coast'*) expected='Night Drive' ;;
+        \\  *'Night Drive'*) expected='Paper Planes' ;;
+        \\  *'Paper Planes'*) expected='Ambient Coast' ;;
+        \\  *) echo "menu-bar snapshot did not expose the current TypeScript model track" >&2; exit 1 ;;
+        \\esac
+        \\"$cli" automate menu-command player.next >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *"$expected"*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *"$expected"*) ;; *) echo "app.zon menu command did not reach the zero-config TypeScript commandMsg mapper" >&2; exit 1 ;; esac
+        \\echo "menu-bar smoke ok"
+        ,
+        "sh",
+    });
+    menu_bar_smoke_run.addFileArg(cli_exe.getEmittedBin());
+    menu_bar_smoke_run.step.dependOn(&menu_bar_smoke_build.step);
+    menu_bar_smoke_run.step.dependOn(&cli_exe.step);
+    menu_bar_smoke_step.dependOn(&menu_bar_smoke_run.step);
 
     const gpu_surface_smoke_step = b.step("test-gpu-surface-smoke", "Run macOS GPU surface automation smoke test");
     // The GPU smoke apps are managed examples (no build.zig of their own),

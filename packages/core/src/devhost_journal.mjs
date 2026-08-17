@@ -6,7 +6,7 @@ import fs from "node:fs";
 // EffectFileOp appended `delete`; the reflected journal layout fingerprint
 // moves so older recordings refuse cleanly instead of decoding op 8 wrongly.
 export const journalFormatFingerprint = 0xc510d4b0292ac71an;
-export const automationProtocolFingerprint = 0x59d66f39803fd602n;
+export const automationProtocolFingerprint = 0x51f7889bbe3305e7n;
 
 const requestKeyBase = 0x5453525100000000n;
 const textEncoder = new TextEncoder();

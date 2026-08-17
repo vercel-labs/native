@@ -10,7 +10,10 @@ const manifest_url_schemes = if (@hasField(@TypeOf(app_manifest), "url_schemes")
 
 const window_width: f32 = 900;
 const window_height: f32 = 620;
+const window_min_width: f32 = 770;
 const statusbar_height: f32 = 34;
+const drop_canvas_label = "drop-canvas";
+const drop_target_id: native_sdk.canvas.ObjectId = 2;
 
 const html =
     \\<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -54,24 +57,30 @@ const builtin_policies = [_]native_sdk.BridgeCommandPolicy{
     .{ .name = "native-sdk.credentials.delete", .permissions = &credential_permission, .origins = &bridge_origins },
 };
 const shell_views = [_]native_sdk.ShellView{
-    .{ .label = "main", .kind = .webview, .url = "zero://inline", .fill = true },
     .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = statusbar_height, .layer = 20, .role = "Status" },
     .{ .label = "status-label", .kind = .label, .parent = "statusbar", .x = 14, .y = 8, .width = 640, .height = 18, .layer = 21, .text = "Ready." },
+    .{ .label = drop_canvas_label, .kind = .gpu_surface, .edge = .right, .width = 250, .min_width = 220, .role = "File drop canvas", .accessibility_label = "File drop target", .gpu_backend = .metal },
+    .{ .label = "main", .kind = .webview, .url = "zero://inline", .fill = true, .min_width = 520 },
 };
 const shell_windows = [_]native_sdk.ShellWindow{.{
     .label = "main",
     .title = "Native SDK Capabilities",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
     .views = &shell_views,
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 const CapabilitiesApp = struct {
     drop_count: u32 = 0,
+    widget_drop_count: u32 = 0,
     activation_count: u32 = 0,
     deactivation_count: u32 = 0,
     last_drop_paths: []const []const u8 = &.{},
+    last_drop_target_id: native_sdk.canvas.ObjectId = 0,
+    pending_drop_target_id: ?native_sdk.canvas.ObjectId = null,
+    drop_target_installed: bool = false,
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -96,8 +105,33 @@ const CapabilitiesApp = struct {
                 self.last_drop_paths = drop.paths;
                 var status_buffer: [160]u8 = undefined;
                 const first_path = if (drop.paths.len > 0) drop.paths[0] else "";
-                const status = try std.fmt.bufPrint(&status_buffer, "Received file drop {d}: {d} file(s): {s}", .{ self.drop_count, drop.paths.len, first_path });
+                const drop_target_id_value = self.pending_drop_target_id;
+                self.pending_drop_target_id = null;
+                const status = if (drop_target_id_value) |target_id|
+                    try std.fmt.bufPrint(&status_buffer, "Widget target {d} fired; app drop {d}: {d} file(s): {s}", .{ target_id, self.drop_count, drop.paths.len, first_path })
+                else
+                    try std.fmt.bufPrint(&status_buffer, "Received file drop {d}: {d} file(s): {s}", .{ self.drop_count, drop.paths.len, first_path });
                 _ = try runtime.updateView(drop.window_id, "status-label", .{ .text = status });
+            },
+            .canvas_widget_file_drop => |drop| {
+                self.widget_drop_count += 1;
+                if (drop.target) |target| {
+                    self.last_drop_target_id = target.id;
+                    self.pending_drop_target_id = target.id;
+                } else {
+                    self.pending_drop_target_id = null;
+                }
+            },
+            .gpu_surface_frame => |frame| {
+                if (!self.drop_target_installed and std.mem.eql(u8, frame.label, drop_canvas_label)) {
+                    try installDropTarget(runtime, frame.window_id, frame.label, frame.size);
+                    self.drop_target_installed = true;
+                }
+            },
+            .gpu_surface_resized => |resize| {
+                if (self.drop_target_installed and std.mem.eql(u8, resize.label, drop_canvas_label)) {
+                    try installDropTarget(runtime, resize.window_id, resize.label, resize.frame.size());
+                }
             },
             .lifecycle => |lifecycle| switch (lifecycle) {
                 .activate => {
@@ -110,10 +144,30 @@ const CapabilitiesApp = struct {
                 },
                 else => {},
             },
-            .appearance_changed, .command, .shortcut, .timer, .effects_wake, .audio, .video, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_shown, .canvas_widget_context_menu_dismissed, .canvas_widget_context_menu_request, .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance => {},
+            .appearance_changed, .command, .shortcut, .timer, .effects_wake, .audio, .video, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_scroll, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_shown, .canvas_widget_context_menu_dismissed, .canvas_widget_context_menu_request, .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance => {},
         }
     }
 };
+
+fn installDropTarget(runtime: *native_sdk.Runtime, window_id: native_sdk.WindowId, label: []const u8, size: native_sdk.geometry.SizeF) !void {
+    const canvas = native_sdk.canvas;
+    const margin: f32 = 24;
+    const target = canvas.Widget{
+        .id = drop_target_id,
+        .kind = .button,
+        .frame = native_sdk.geometry.RectF.init(margin, margin, @max(1, size.width - margin * 2), @max(1, size.height - margin * 2)),
+        .text = "Drop files here",
+        .semantics = .{ .label = "Drop files here", .actions = .{ .drop_files = true } },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .panel, .children = &.{target} },
+        native_sdk.geometry.RectF.init(0, 0, size.width, size.height),
+        &nodes,
+    );
+    _ = try runtime.setCanvasWidgetLayout(window_id, label, layout);
+    _ = try runtime.emitCanvasWidgetDisplayList(window_id, label, .{});
+}
 
 pub fn main(init: std.process.Init) !void {
     var app = CapabilitiesApp{};
@@ -139,6 +193,7 @@ pub fn main(init: std.process.Init) !void {
 test "capabilities bridge gates native services and dispatches file drops" {
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = native_sdk.geometry.SizeF.init(window_width, window_height) });
     defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
     harness.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &builtin_policies };
     harness.runtime.options.security = .{
         .permissions = &app_permissions,
@@ -154,6 +209,30 @@ test "capabilities bridge gates native services and dispatches file drops" {
     var app_state = CapabilitiesApp{};
     const app = app_state.app();
     try harness.start(app);
+
+    var views_buffer: [8]native_sdk.ViewInfo = undefined;
+    const views = harness.runtime.listViews(1, &views_buffer);
+    const webview = viewByLabel(views, "main").?;
+    const drop_canvas = viewByLabel(views, drop_canvas_label).?;
+    const statusbar = viewByLabel(views, "statusbar").?;
+    try std.testing.expect(webview.parent == null);
+    try std.testing.expect(drop_canvas.parent == null);
+    try std.testing.expectEqual(native_sdk.geometry.RectF.init(0, 0, 650, window_height - statusbar_height), webview.frame);
+    try std.testing.expectEqual(native_sdk.geometry.RectF.init(650, 0, 250, window_height - statusbar_height), drop_canvas.frame);
+    try std.testing.expectEqual(native_sdk.geometry.RectF.init(0, window_height - statusbar_height, window_width, statusbar_height), statusbar.frame);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = drop_canvas_label,
+        .size = native_sdk.geometry.SizeF.init(250, window_height - statusbar_height),
+        .frame_index = 1,
+        .nonblank = true,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
+        .window_id = 1,
+        .label = drop_canvas_label,
+        .frame = native_sdk.geometry.RectF.init(0, 0, 350, window_height - statusbar_height),
+    } });
 
     try dispatchBridge(harness, app, "{\"id\":\"notify\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"title\":\"Capabilities\",\"subtitle\":\"native-sdk\",\"body\":\"Done\"}}");
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
@@ -194,15 +273,37 @@ test "capabilities bridge gates native services and dispatches file drops" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"result\":true") != null);
 
     const dropped_paths = [_][]const u8{ "/tmp/one\nname.txt", "/tmp/two.txt" };
-    try harness.runtime.dispatchPlatformEvent(app, .{ .files_dropped = .{
-        .window_id = 1,
-        .paths = &dropped_paths,
-    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{
+        .files_dropped = .{
+            .window_id = 1,
+            .view_label = drop_canvas_label,
+            // x=300 is outside the initial 250-point surface and proves the
+            // resize event rebuilt the retained widget hit-test geometry.
+            .point = native_sdk.geometry.PointF.init(300, 40),
+            .paths = &dropped_paths,
+        },
+    });
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_drop_count);
+    try std.testing.expectEqual(drop_target_id, app_state.last_drop_target_id);
     try std.testing.expectEqual(@as(u32, 1), app_state.drop_count);
     try std.testing.expectEqual(@as(usize, 2), app_state.last_drop_paths.len);
     try std.testing.expectEqualStrings("/tmp/one\nname.txt", app_state.last_drop_paths[0]);
     try std.testing.expectEqualStrings("/tmp/two.txt", app_state.last_drop_paths[1]);
     try std.testing.expectEqualStrings("drop:files", harness.null_platform.lastWindowEventName());
+    try std.testing.expect(std.mem.startsWith(u8, nullViewText(harness, "status-label"), "Widget target 2 fired"));
+    try std.testing.expect(app_state.pending_drop_target_id == null);
+
+    const webview_paths = [_][]const u8{"/tmp/webview.txt"};
+    try harness.runtime.dispatchPlatformEvent(app, .{ .files_dropped = .{
+        .window_id = 1,
+        .view_label = "main",
+        .point = native_sdk.geometry.PointF.init(40, 40),
+        .paths = &webview_paths,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_drop_count);
+    try std.testing.expect(app_state.pending_drop_target_id == null);
+    try std.testing.expectEqual(@as(u32, 2), app_state.drop_count);
+    try std.testing.expect(std.mem.startsWith(u8, nullViewText(harness, "status-label"), "Received file drop 2"));
 
     try harness.runtime.dispatchPlatformEvent(app, .app_activated);
     try std.testing.expectEqual(@as(u32, 1), app_state.activation_count);
@@ -213,6 +314,9 @@ test "capabilities bridge gates native services and dispatches file drops" {
 }
 
 test "capabilities manifest declares package integration metadata" {
+    try std.testing.expectEqual(window_min_width, app_manifest.shell.windows[0].min_width);
+    try std.testing.expectEqual(window_min_width, shell_windows[0].min_width);
+
     try std.testing.expectEqual(@as(usize, 1), manifest_file_associations.len);
     try std.testing.expectEqualStrings("Native SDK Capability Document", manifest_file_associations[0].name);
     try std.testing.expectEqualStrings("viewer", manifest_file_associations[0].role);
@@ -230,4 +334,18 @@ fn dispatchBridge(harness: *native_sdk.TestHarness(), app: native_sdk.App, bytes
         .window_id = 1,
         .webview_label = "main",
     } });
+}
+
+fn nullViewText(harness: *native_sdk.TestHarness(), label: []const u8) []const u8 {
+    for (harness.null_platform.views[0..harness.null_platform.view_count]) |view| {
+        if (std.mem.eql(u8, view.label, label)) return view.text;
+    }
+    return "";
+}
+
+fn viewByLabel(views: []const native_sdk.ViewInfo, label: []const u8) ?native_sdk.ViewInfo {
+    for (views) |view| {
+        if (std.mem.eql(u8, view.label, label)) return view;
+    }
+    return null;
 }

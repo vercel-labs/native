@@ -1,0 +1,22 @@
+.{
+    .id = "dev.native_sdk.runner_fixture",
+    .name = "runner-fixture",
+    .commands = .{
+        .{ .id = "app.refresh", .title = "Refresh", .enabled = false, .checked = true },
+        .{ .id = "app.defaults" },
+    },
+    .shortcuts = .{
+        .{ .id = "app.refresh", .key = "r", .modifiers = .{ "primary" } },
+    },
+    .menus = .{
+        .{
+            .title = "View",
+            .items = .{
+                .{ .label = "Refresh", .command = "app.refresh", .key = "r", .modifiers = .{ "alt", "shift" }, .enabled = false, .checked = true },
+                .{ .separator = true },
+                .{ .label = "Defaults", .command = "app.defaults" },
+            },
+        },
+        .{ .title = "Help" },
+    },
+}

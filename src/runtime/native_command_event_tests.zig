@@ -253,6 +253,35 @@ test "runtime dispatches menu command events" {
     try std.testing.expectEqual(@as(platform.WindowId, 1), app_state.last_window_id);
 }
 
+test "automation snapshot exposes configured app menus" {
+    const items = [_]platform.MenuItem{
+        .{ .label = "Refresh", .command = "app.refresh" },
+        .{ .label = "Disabled", .command = "app.disabled", .enabled = false },
+        .{ .separator = true },
+    };
+    const menus = [_]platform.Menu{
+        .{ .title = "View", .items = &items },
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.menus = &menus;
+    const snapshot = harness.runtime.automationSnapshot("Menus");
+    try std.testing.expectEqual(@as(usize, 1), snapshot.menus.len);
+    try std.testing.expectEqualStrings("View", snapshot.menus[0].title);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.menus[0].items.len);
+    try std.testing.expectEqualStrings("app.refresh", snapshot.menus[0].items[0].command);
+    try std.testing.expect(!snapshot.menus[0].items[1].enabled);
+    try std.testing.expect(snapshot.menus[0].items[2].separator);
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try automation.snapshot.writeText(snapshot, &writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "app-menu title=\"View\" items=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item label=\"Refresh\" command=\"app.refresh\" enabled=true checked=false key=\"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item separator\n") != null);
+}
+
 test "runtime dispatches tray item commands" {
     const TestApp = struct {
         command_count: u32 = 0,

@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 const protocol = @import("protocol.zig");
 
@@ -290,6 +291,12 @@ pub const Input = struct {
     windows: []const Window,
     views: []const platform.ViewInfo = &.{},
     widgets: []const Widget = &.{},
+    /// Static command and app-menu catalogs configured on the runtime.
+    /// These receipts let automation prove generated/ejected runners
+    /// loaded their manifest declarations before injecting command-source
+    /// events that cannot drive an OS menu tracking loop directly.
+    commands: []const app_manifest.Command = &.{},
+    menus: []const platform.Menu = &.{},
     diagnostics: Diagnostics = .{},
     /// Per-stage frame timing, non-null while `profile on` is active —
     /// printed as the `frame_profile` line right after the header.
@@ -595,6 +602,40 @@ pub fn writeText(input: Input, writer: anytype) !void {
         try writeWidgetContextMenu(widget, writer);
         try writer.writeByte('\n');
     }
+    for (input.commands) |command| {
+        try writer.writeAll("command id=");
+        try writeQuotedSnapshotText(command.id, writer);
+        try writer.writeAll(" title=");
+        try writeQuotedSnapshotText(command.title, writer);
+        try writer.print(" enabled={any} checked={any}\n", .{ command.enabled, command.checked });
+    }
+    for (input.menus) |menu| {
+        try writer.writeAll("app-menu title=");
+        try writeQuotedSnapshotText(menu.title, writer);
+        try writer.print(" items={d}\n", .{menu.items.len});
+        for (menu.items) |item| {
+            if (item.separator) {
+                try writer.writeAll("  app-menu-item separator\n");
+                continue;
+            }
+            try writer.writeAll("  app-menu-item label=");
+            try writeQuotedSnapshotText(item.label, writer);
+            try writer.writeAll(" command=");
+            try writeQuotedSnapshotText(item.command, writer);
+            try writer.print(" enabled={any} checked={any} key=", .{
+                item.enabled,
+                item.checked,
+            });
+            try writeQuotedSnapshotText(item.key, writer);
+            try writer.print(" modifiers=(primary={any},command={any},control={any},option={any},shift={any})\n", .{
+                item.modifiers.primary,
+                item.modifiers.command,
+                item.modifiers.control,
+                item.modifiers.option,
+                item.modifiers.shift,
+            });
+        }
+    }
     for (input.trays) |tray| {
         try writer.print("tray #{d} title=\"{s}\" visible={any} items={d}\n", .{ tray.id, tray.title, tray.visible, tray.items.len });
         for (tray.items) |item| {
@@ -724,6 +765,31 @@ pub fn writeA11yText(input: Input, writer: anytype) !void {
         try writeWidgetContextMenu(widget, writer);
         try writer.writeByte('\n');
     }
+}
+
+/// Catalog values are user-authored but snapshots are line-oriented. Keep
+/// each configured command/menu record on exactly one line and preserve its
+/// byte identity with JSON-style escapes for delimiters and control bytes.
+fn writeQuotedSnapshotText(value: []const u8, writer: anytype) !void {
+    const hex = "0123456789abcdef";
+    try writer.writeByte('"');
+    for (value) |byte| {
+        switch (byte) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => if (byte < 0x20 or byte == 0x7f) {
+                try writer.writeAll("\\u00");
+                try writer.writeByte(hex[byte >> 4]);
+                try writer.writeByte(hex[byte & 0x0f]);
+            } else {
+                try writer.writeByte(byte);
+            },
+        }
+    }
+    try writer.writeByte('"');
 }
 
 fn writeWidgetParent(widget: Widget, writer: anytype) !void {
@@ -940,6 +1006,59 @@ test "snapshot emits tray title and dropdown items" {
     var empty_writer = std.Io.Writer.fixed(&empty_buffer);
     try writeText(.{ .windows = &windows }, &empty_writer);
     try std.testing.expect(std.mem.indexOf(u8, empty_writer.buffered(), "tray") == null);
+}
+
+test "snapshot emits configured command and app-menu catalogs" {
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
+    const commands = [_]app_manifest.Command{
+        .{ .id = "app.refresh", .title = "Refresh" },
+    };
+    const items = [_]platform.MenuItem{
+        .{ .label = "Refresh", .command = "app.refresh", .key = "r", .modifiers = .{ .primary = true } },
+        .{ .separator = true },
+    };
+    const menus = [_]platform.Menu{
+        .{ .title = "View", .items = &items },
+    };
+    try writeText(.{
+        .windows = &windows,
+        .commands = &commands,
+        .menus = &menus,
+    }, &writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "\ncommand id=\"app.refresh\" title=\"Refresh\" enabled=true checked=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "app-menu title=\"View\" items=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item label=\"Refresh\" command=\"app.refresh\" enabled=true checked=false key=\"r\" modifiers=(primary=true,command=false,control=false,option=false,shift=false)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item separator\n") != null);
+}
+
+test "snapshot escapes hostile command and app-menu catalog text" {
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
+    const commands = [_]app_manifest.Command{
+        .{ .id = "app.\"quoted", .title = "Line 1\nLine 2\\tail\t\x01\x7f Café" },
+    };
+    const items = [_]platform.MenuItem{
+        .{ .label = "Open \"now\"\rnext\\", .command = "app.\"run", .key = "r\t" },
+    };
+    const menus = [_]platform.Menu{
+        .{ .title = "Tools\"\nInjected", .items = &items },
+    };
+    try writeText(.{
+        .windows = &windows,
+        .commands = &commands,
+        .menus = &menus,
+    }, &writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "\ncommand id=\"app.\\\"quoted\" title=\"Line 1\\nLine 2\\\\tail\\t\\u0001\\u007f Café\" enabled=true checked=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "app-menu title=\"Tools\\\"\\nInjected\" items=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item label=\"Open \\\"now\\\"\\rnext\\\\\" command=\"app.\\\"run\" enabled=true checked=false key=\"r\\t\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
+    // Header, window, command, menu, and item: hostile values inject no
+    // additional records into the line-oriented snapshot.
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "\n"));
 }
 
 test "accessibility snapshot uses visible view text as name" {

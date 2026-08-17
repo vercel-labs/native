@@ -74,6 +74,9 @@ jobs:
       - run: zig build test-example-mobile-canvas-lib-ios-store
       - run: zig build test-webview-system-link
       - run: zig build test-webview-smoke
+      # The zero-config TypeScript runner must load app.zon menus before
+      # automation can select their registered command ids.
+      - run: zig build test-menu-bar-smoke
       # Signed-package seal pin: an ad-hoc signed package must pass
       # codesign --verify --strict (macOS runners are the only tier with
       # codesign; the step skips loudly anywhere else).

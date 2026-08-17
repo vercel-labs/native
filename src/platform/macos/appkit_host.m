@@ -483,7 +483,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value;
 @end
 
-@interface NativeSdkMetalSurfaceView : NSView <NSTextInputClient>
+@interface NativeSdkMetalSurfaceView : NSView <NSTextInputClient, NSDraggingDestination>
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
@@ -502,6 +502,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
 @property(nonatomic, strong) NSString *surfaceLabel;
+@property(nonatomic, strong) NSString *viewLabel;
 @property(nonatomic, assign) NSUInteger frameIndex;
 /* Whether this surface has completed at least one REAL present. Gates the
  * occluded short-circuit: until the first present lands, occluded frames
@@ -1100,7 +1101,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)stop;
 - (BOOL)drainPendingPreRunStop;
 - (void)emitEvent:(native_sdk_appkit_event_t)event;
-- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId;
+- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId viewLabel:(NSString *)viewLabel point:(NSPoint)point;
 - (void)startApplicationActivationObservers;
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
@@ -1199,6 +1200,14 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     }
 }
 
+// Convert an AppKit-local point to the runtime's top-left-origin space.
+// Unflipped canvas/content views need the y inversion; flipped views such as
+// WKWebView already use the runtime's orientation and must pass through.
+static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
+    if (!view.isFlipped) point.y = view.bounds.size.height - point.y;
+    return point;
+}
+
 @implementation NativeSdkWindowDelegate
 
 - (void)windowDidResize:(NSNotification *)notification {
@@ -1291,9 +1300,9 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 
 // The window is a dragging destination now that the main WebView (whose
 // registration used to catch every drop) is lazy: NSWindow forwards
-// these to its delegate, and the emit path is byte-identical to the
-// WebView's. A present main/child WebView still wins (views outrank the
-// window for registered types), and its handler emits the same event.
+// these to its delegate. A present main/child WebView or canvas surface
+// still wins (views outrank the window for registered types); the fallback
+// hit-tests anyway so adopted/layered content keeps the most specific label.
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
     (void)sender;
     return NSDragOperationCopy;
@@ -1303,7 +1312,36 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     NSPasteboard *pasteboard = sender.draggingPasteboard;
     NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[ [NSURL class] ]
                                                        options:@{ NSPasteboardURLReadingFileURLsOnlyKey : @YES }];
-    return [self.host emitDroppedFileURLs:urls windowId:self.windowId];
+    NSWindow *window = self.host.windows[@(self.windowId)] ?: (self.windowId == 1 ? self.host.window : nil);
+    NSView *contentView = window.contentView;
+    if (!contentView) return NO;
+
+    const NSPoint windowPoint = sender.draggingLocation;
+    const NSPoint contentPoint = [contentView convertPoint:windowPoint fromView:nil];
+    NSView *targetView = [contentView hitTest:contentPoint];
+    NSString *viewLabel = @"";
+    for (NSView *candidate = targetView; candidate; candidate = candidate.superview) {
+        if ([candidate isKindOfClass:[NativeSdkMetalSurfaceView class]]) {
+            NSString *label = ((NativeSdkMetalSurfaceView *)candidate).viewLabel;
+            if (label.length > 0) {
+                targetView = candidate;
+                viewLabel = label;
+                break;
+            }
+        } else if ([candidate isKindOfClass:[NativeSdkWebView class]]) {
+            NSString *label = ((NativeSdkWebView *)candidate).viewLabel;
+            if (label.length > 0) {
+                targetView = candidate;
+                viewLabel = label;
+                break;
+            }
+        }
+        if (candidate == contentView) break;
+    }
+
+    NSView *coordinateView = viewLabel.length > 0 ? targetView : contentView;
+    NSPoint point = NativeSdkViewLocalYDownPoint(coordinateView, [coordinateView convertPoint:windowPoint fromView:nil]);
+    return [self.host emitDroppedFileURLs:urls windowId:self.windowId viewLabel:viewLabel point:point];
 }
 
 // close_policy .hide: the USER's close affordance (the red button,
@@ -1407,7 +1445,8 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     NSPasteboard *pasteboard = sender.draggingPasteboard;
     NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
                                                        options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }];
-    return [self.host emitDroppedFileURLs:urls windowId:self.windowId];
+    NSPoint point = NativeSdkViewLocalYDownPoint(self, [self convertPoint:sender.draggingLocation fromView:nil]);
+    return [self.host emitDroppedFileURLs:urls windowId:self.windowId viewLabel:self.viewLabel point:point];
 }
 
 @end
@@ -3713,6 +3752,14 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 
 @implementation NativeSdkMetalSurfaceView
 
+- (NSString *)viewLabel {
+    return self.surfaceLabel;
+}
+
+- (void)setViewLabel:(NSString *)viewLabel {
+    self.surfaceLabel = viewLabel ?: @"";
+}
+
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (!self) return nil;
@@ -3761,7 +3808,7 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label {
     self.host = host;
     self.windowId = windowId;
-    self.surfaceLabel = label ?: @"";
+    self.viewLabel = label;
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
@@ -3770,6 +3817,19 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
         [strongSelf emitResizeEvent];
         [strongSelf renderFrame];
     });
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    return NSDragOperationCopy;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSPasteboard *pasteboard = sender.draggingPasteboard;
+    NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
+                                                       options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }];
+    NSPoint point = NativeSdkViewLocalYDownPoint(self, [self convertPoint:sender.draggingLocation fromView:nil]);
+    return [self.host emitDroppedFileURLs:urls windowId:self.windowId viewLabel:self.viewLabel point:point];
 }
 
 - (void)dealloc {
@@ -7019,7 +7079,7 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
     if (!self.host || self.surfaceLabel.length == 0) return;
-    CGFloat y = self.bounds.size.height - point.y;
+    const NSPoint yDownPoint = NativeSdkViewLocalYDownPoint(self, point);
     const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
     NSString *safeKeyText = keyText ?: @"";
     NSString *safeInputText = inputText ?: @"";
@@ -7029,8 +7089,8 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
         .kind = NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_INPUT,
         .window_id = self.windowId,
         .timestamp_ns = timestampNs,
-        .x = point.x,
-        .y = y,
+        .x = yDownPoint.x,
+        .y = yDownPoint.y,
         .view_label = labelBytes,
         .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .key_text = keyBytes,
@@ -8449,6 +8509,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         case NATIVE_SDK_APPKIT_VIEW_GPU_SURFACE: {
             NativeSdkMetalSurfaceView *surface = [[NativeSdkMetalSurfaceView alloc] initWithFrame:NSZeroRect];
             if (![surface isAvailable]) return nil;
+            [surface registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
             view = surface;
             break;
         }
@@ -12036,7 +12097,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     }];
 }
 
-- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId {
+- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId viewLabel:(NSString *)viewLabel point:(NSPoint)point {
     if (urls.count == 0) return NO;
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     for (NSURL *url in urls) {
@@ -12053,9 +12114,15 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         [data appendData:pathData];
     }
     if (data.length == 0) return NO;
+    NSString *safeViewLabel = viewLabel ?: @"";
+    const char *viewLabelBytes = safeViewLabel.UTF8String ?: "";
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_FILES_DROPPED,
         .window_id = windowId,
+        .x = point.x,
+        .y = point.y,
+        .view_label = viewLabelBytes,
+        .view_label_len = [safeViewLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .drop_paths = data.bytes,
         .drop_paths_len = data.length,
     }];
