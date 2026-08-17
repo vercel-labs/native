@@ -153,7 +153,7 @@ const determinism_remediations = [_]Rider{
     .{ .code = "SC4017", .text = "restart the app process: a trapped core is poisoned and never resumes in place, and the recorded session replays deterministically." },
 };
 
-pub fn emitProfile(arena: std.mem.Allocator, sidecar: Sidecar, entry: []const u8, diags: *sidecar_mod.Diagnostics) Error![]const u8 {
+pub fn emitProfile(arena: std.mem.Allocator, sidecar: Sidecar, entry: []const u8, optimization: ?[]const u8, diags: *sidecar_mod.Diagnostics) Error![]const u8 {
     // The profile is ENFORCEMENT data: a compile that succeeds under its
     // determinism fences attests deterministic, and the compilation mode
     // is structurally async-free — so a contract attesting false for
@@ -168,7 +168,7 @@ pub fn emitProfile(arena: std.mem.Allocator, sidecar: Sidecar, entry: []const u8
         diags.flag("async_free", "the contract attests async_free: false, but this profile's compilation mode is structurally async-free — a core reaching async surface refuses under it, so this contract cannot have come from the profile it asks for; remove the async surface and regenerate the contract", .{});
     }
     if (diags.hasErrors()) return error.Refused;
-    var emitter = ProfileEmitter{ .arena = arena, .sidecar = sidecar, .out = .empty };
+    var emitter = ProfileEmitter{ .arena = arena, .sidecar = sidecar, .optimization = optimization, .out = .empty };
     try emitter.run(entry);
     return emitter.out.items;
 }
@@ -176,6 +176,7 @@ pub fn emitProfile(arena: std.mem.Allocator, sidecar: Sidecar, entry: []const u8
 const ProfileEmitter = struct {
     arena: std.mem.Allocator,
     sidecar: Sidecar,
+    optimization: ?[]const u8,
     out: std.ArrayListUnmanaged(u8),
 
     fn print(self: *ProfileEmitter, comptime fmt: []const u8, args: anytype) Error!void {
@@ -195,6 +196,11 @@ const ProfileEmitter = struct {
             \\  "name": "native-sdk-core",
             \\  "entry": {s},
             \\  "emission": "llvm",
+        , .{try self.jsonString(entry)});
+        if (self.optimization) |optimization| try self.print(
+            \\  "optimization": {s},
+        , .{try self.jsonString(optimization)});
+        try self.print(
             \\  "abi": {{
             \\    "prefix": {s},
             \\    "init_symbol": {s},
@@ -205,7 +211,6 @@ const ProfileEmitter = struct {
             \\  "exports": [
             \\
         , .{
-            try self.jsonString(entry),
             try self.jsonString(prefix),
             try self.symbol(prefix, "init"),
             try self.symbol(prefix, "set_panic_sink"),
@@ -361,7 +366,7 @@ const testing = std.testing;
 fn profileFromJson(arena: std.mem.Allocator, json: []const u8, entry: []const u8) ![]const u8 {
     var diags = sidecar_mod.Diagnostics{ .arena = arena };
     const parsed = try sidecar_mod.read(arena, json, &diags);
-    return emitProfile(arena, parsed, entry, &diags);
+    return emitProfile(arena, parsed, entry, "release", &diags);
 }
 
 test "profile emission is deterministic and carries the library-mode surface" {
@@ -373,6 +378,11 @@ test "profile emission is deterministic and carries the library-mode surface" {
     try testing.expectEqualStrings(first, second);
     try testing.expect(std.mem.indexOf(u8, first, "\"profile_format\": 1") != null);
     try testing.expect(std.mem.indexOf(u8, first, "\"entry\": \"core_facade.ts\"") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "\"optimization\": \"release\"") != null);
+    var dev_diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed_for_dev = try sidecar_mod.read(arena, sidecar_mod.minimal_valid_json, &dev_diags);
+    const dev = try emitProfile(arena, parsed_for_dev, default_entry, "dev", &dev_diags);
+    try testing.expect(std.mem.indexOf(u8, dev, "\"optimization\": \"dev\"") != null);
     // Mode symbols ride the abi block under the contract's prefix.
     try testing.expect(std.mem.indexOf(u8, first, "\"init_symbol\": \"nsc_core_init\"") != null);
     try testing.expect(std.mem.indexOf(u8, first, "\"sink_register_symbol\": \"nsc_core_set_panic_sink\"") != null);
@@ -459,7 +469,7 @@ test "a non-UTF-8 entry spelling refuses instead of corrupting the JSON" {
     const arena = arena_state.allocator();
     var diags = sidecar_mod.Diagnostics{ .arena = arena };
     const parsed = try sidecar_mod.read(arena, sidecar_mod.minimal_valid_json, &diags);
-    try testing.expectError(error.Refused, emitProfile(arena, parsed, "core_\xfffacade.ts", &diags));
+    try testing.expectError(error.Refused, emitProfile(arena, parsed, "core_\xfffacade.ts", "release", &diags));
 }
 
 test "a contract attesting false for an enforced posture refuses" {
@@ -473,7 +483,7 @@ test "a contract attesting false for an enforced posture refuses" {
         const source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, case.needle, case.replacement);
         var diags = sidecar_mod.Diagnostics{ .arena = arena };
         const parsed = try sidecar_mod.read(arena, source, &diags);
-        try testing.expectError(error.Refused, emitProfile(arena, parsed, default_entry, &diags));
+        try testing.expectError(error.Refused, emitProfile(arena, parsed, default_entry, "release", &diags));
         var found = false;
         for (diags.list.items) |item| {
             if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, case.fragment) != null) found = true;
@@ -489,7 +499,7 @@ test "the emitted profile parses as JSON with the expected top-level keys" {
     const generated = try profileFromJson(arena, sidecar_mod.minimal_valid_json, default_entry);
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, generated, .{});
     const top = parsed.object;
-    for ([_][]const u8{ "profile_format", "name", "entry", "emission", "abi", "exports", "sidecar", "determinism" }) |key| {
+    for ([_][]const u8{ "profile_format", "name", "entry", "emission", "optimization", "abi", "exports", "sidecar", "determinism" }) |key| {
         try testing.expect(top.contains(key));
     }
     const determinism = top.get("determinism").?.object;

@@ -38,6 +38,8 @@ pub const Options = struct {
     url_override: ?[]const u8 = null,
     command_override: ?[]const []const u8 = null,
     timeout_ms: ?u32 = null,
+    /// Explain authored-input changes and the content-gated downstream graph.
+    explain_rebuild: bool = false,
 };
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Options) !void {
@@ -50,6 +52,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
         return error.MissingManifest;
     }
     const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+    const rebuild_snapshot = if (options.explain_rebuild)
+        try explainRebuild(allocator, io)
+    else
+        null;
+    defer if (rebuild_snapshot) |snapshot| allocator.free(snapshot);
 
     // Tree detection happens here too (the build graph re-derives it), so
     // a both-cores tree fails with one clean teaching message before any
@@ -122,6 +129,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
     switch (verb) {
         .dev => {
             if (!wants_frontend_dev) try argv.append(allocator, "run");
+            // Zig's full summary reports each named build step's duration,
+            // cache status, and peak RSS. Native's generated graph names the
+            // frontend, corewire, staging, scriptc, and final Zig phases, so
+            // slow iterative builds are attributable without reproducing
+            // them under an external profiler.
+            try argv.appendSlice(allocator, &.{ "--summary", "all" });
             if (!hasOptimizeFlag(options.forwarded_args)) {
                 // The dev loop is a Debug loop: the markup hot-reload
                 // watcher and the teaching diagnostics are compiled in only
@@ -133,6 +146,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
             }
         },
         .build => {
+            try argv.appendSlice(allocator, &.{ "--summary", "all" });
+            if (options.explain_rebuild) try argv.append(allocator, "-Dbuild-trace=true");
             if (!hasOptimizeFlag(options.forwarded_args)) {
                 // Both build shapes register -Doptimize (addApp and the
                 // expanded template each b.option it by hand).
@@ -157,6 +172,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
     }
 
     try runZig(io, verb, argv.items);
+    if (rebuild_snapshot) |snapshot| try persistRebuildSnapshot(io, snapshot);
 
     if (wants_frontend_dev) {
         // WebView apps with a dev server config: the binary is built, now
@@ -217,6 +233,111 @@ fn hasOptimizeFlag(args: []const []const u8) bool {
         if (std.mem.startsWith(u8, arg, "--release")) return true;
     }
     return false;
+}
+
+const rebuild_snapshot_path = ".native/cache/rebuild-inputs.tsv";
+
+const RebuildInput = struct {
+    path: []const u8,
+    hash: [std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
+};
+
+fn rebuildInputs(allocator: std.mem.Allocator, io: std.Io) ![]RebuildInput {
+    var inputs: std.ArrayList(RebuildInput) = .empty;
+    errdefer inputs.deinit(allocator);
+    var src = std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true }) catch return inputs.toOwnedSlice(allocator);
+    defer src.close(io);
+    var walker = try src.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".ts") and !std.mem.endsWith(u8, entry.basename, ".native") and !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+        defer allocator.free(bytes);
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        try inputs.append(allocator, .{ .path = path, .hash = std.fmt.bytesToHex(digest, .lower) });
+    }
+    std.mem.sort(RebuildInput, inputs.items, {}, struct {
+        fn less(_: void, a: RebuildInput, b: RebuildInput) bool {
+            return std.mem.order(u8, a.path, b.path) == .lt;
+        }
+    }.less);
+    return inputs.toOwnedSlice(allocator);
+}
+
+fn explainRebuild(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    const inputs = try rebuildInputs(allocator, io);
+    defer {
+        for (inputs) |input| allocator.free(input.path);
+        allocator.free(inputs);
+    }
+    const prior = std.Io.Dir.cwd().readFileAlloc(io, rebuild_snapshot_path, allocator, .limited(16 * 1024 * 1024)) catch null;
+    defer if (prior) |bytes| allocator.free(bytes);
+
+    var snapshot = std.Io.Writer.Allocating.init(allocator);
+    errdefer snapshot.deinit();
+    var changed: usize = 0;
+    for (inputs) |input| {
+        try snapshot.writer.print("{s}\t{s}\n", .{ &input.hash, input.path });
+        const old_hash: ?[]const u8 = if (prior) |bytes| old: {
+            var lines = std.mem.splitScalar(u8, bytes, '\n');
+            while (lines.next()) |line| {
+                const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+                if (std.mem.eql(u8, line[tab + 1 ..], input.path)) break :old line[0..tab];
+            }
+            break :old null;
+        } else null;
+        if (old_hash != null and std.mem.eql(u8, old_hash.?, &input.hash)) continue;
+        changed += 1;
+        std.debug.print("native rebuild: {s} {s} -> {s}\n", .{ input.path, old_hash orelse "<new>", &input.hash });
+        if (std.mem.eql(u8, input.path, "src/app.native")) {
+            std.debug.print("  invalidates markup data object -> final app link; app-code/core scriptc remain content-gated\n", .{});
+        } else if (std.mem.endsWith(u8, input.path, ".native")) {
+            std.debug.print("  invalidates staged markup source set -> app-code object -> final link; core scriptc remains content-gated\n", .{});
+        } else if (std.mem.startsWith(u8, input.path, "src/services/")) {
+            std.debug.print("  invalidates TS frontend -> service contract/source hash -> service host compile; API client/registry/core scriptc change only if API shape changes\n", .{});
+        } else if (std.mem.endsWith(u8, input.path, ".ts")) {
+            std.debug.print("  invalidates TS frontend -> core contract/facade/stage -> core scriptc -> app-code object -> final link\n", .{});
+        } else {
+            std.debug.print("  invalidates SQLite schema/migration generation -> app-code object -> final link\n", .{});
+        }
+    }
+    if (prior) |bytes| {
+        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        while (lines.next()) |line| {
+            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            const old_hash = line[0..tab];
+            const old_path = line[tab + 1 ..];
+            const present = for (inputs) |input| {
+                if (std.mem.eql(u8, input.path, old_path)) break true;
+            } else false;
+            if (present) continue;
+            changed += 1;
+            std.debug.print("native rebuild: {s} {s} -> <deleted>\n", .{ old_path, old_hash });
+            if (std.mem.startsWith(u8, old_path, "src/services/")) {
+                std.debug.print("  invalidates TS frontend -> service API/source set -> service host; core scriptc changes if the removed module changed API shape\n", .{});
+            } else if (std.mem.eql(u8, old_path, "src/app.native")) {
+                std.debug.print("  invalidates primary markup data object -> final app link\n", .{});
+            } else if (std.mem.endsWith(u8, old_path, ".native")) {
+                std.debug.print("  invalidates markup source set -> app-code object -> final link\n", .{});
+            } else {
+                std.debug.print("  invalidates TS/schema source set and its downstream generated artifacts\n", .{});
+            }
+        }
+    }
+    if (prior == null) std.debug.print("native rebuild: no prior successful snapshot; current inputs are the baseline\n", .{});
+    if (prior != null and changed == 0) std.debug.print("native rebuild: no authored input hashes changed\n", .{});
+    return snapshot.toOwnedSlice();
+}
+
+fn persistRebuildSnapshot(io: std.Io, snapshot: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(io, ".native/cache");
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, rebuild_snapshot_path, .{ .make_path = true, .replace = true });
+    defer atomic.deinit(io);
+    try atomic.file.writeStreamingAll(io, snapshot);
+    try atomic.replace(io);
 }
 
 fn runZig(io: std.Io, verb: Verb, argv: []const []const u8) !void {
@@ -317,4 +438,31 @@ test "optimize flags are detected among forwarded args" {
     try std.testing.expect(hasOptimizeFlag(&.{ "-Dautomation=true", "--release=safe" }));
     try std.testing.expect(!hasOptimizeFlag(&.{"-Dautomation=true"}));
     try std.testing.expect(!hasOptimizeFlag(&.{}));
+}
+
+test "rebuild explanations persist source hashes and distinguish service from markup edges" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const root = ".zig-cache/test-rebuild-explain";
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root ++ "/src/services");
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/core.ts", .data = "export const core = 1;\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/app.native", .data = "<column/>\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/services/work.ts", .data = "export function work(): number { return 1; }\n" });
+    const original = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(original);
+    try std.process.setCurrentPath(io, root);
+    defer std.process.setCurrentPath(io, original) catch {};
+    const first = try explainRebuild(allocator, io);
+    defer allocator.free(first);
+    try persistRebuildSnapshot(io, first);
+    const second = try explainRebuild(allocator, io);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+    try cwd.writeFile(io, .{ .sub_path = "src/services/work.ts", .data = "// comment\nexport function work(): number { return 1; }\n" });
+    const changed = try explainRebuild(allocator, io);
+    defer allocator.free(changed);
+    try std.testing.expect(!std.mem.eql(u8, first, changed));
 }

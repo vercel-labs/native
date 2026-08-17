@@ -75,8 +75,8 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "build") or std.mem.eql(u8, command, "test")) {
         const verb: tooling.verbs.Verb = if (std.mem.eql(u8, command, "build")) .build else .@"test";
         checkVerbFlags(command, args[2..], .{
-            .usage = if (verb == .build) "build [dir] [--yes] [-D... zig build flags]" else "test [dir] [--yes] [-D... zig build flags]",
-            .bool_flags = &.{"--yes"},
+            .usage = if (verb == .build) "build [dir] [--yes] [--explain-rebuild] [-D... zig build flags]" else "test [dir] [--yes] [-D... zig build flags]",
+            .bool_flags = if (verb == .build) &.{ "--yes", "--explain-rebuild" } else &.{"--yes"},
             .forwards_build_flags = true,
         });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native build|test [dir] [--yes] [-D... zig build flags]");
@@ -85,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
             .base_env = init.environ_map,
             .assume_yes = verb_args.assume_yes,
             .forwarded_args = verb_args.forwarded,
+            .explain_rebuild = flagBool(args, "--explain-rebuild"),
         }) catch |err| return failVerb(err);
     } else if (std.mem.eql(u8, command, "check")) {
         checkVerbFlags("check", args[2..], .{
@@ -454,7 +455,8 @@ fn usage() void {
         \\  dev [dir] --target ios [--device name]         build for the iOS simulator, install + launch, stream the log (experimental)
         \\  dev [dir] --target android [--device name]     build a debug APK, install + launch on an emulator via adb, stream the log (experimental)
         \\  dev [dir] --core [--script msgs.ndjson] [--watch]   run the TypeScript core's logic loop under node (update/effects transcript; not a renderer)
-        \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
+        \\  build [dir] [--yes] [--explain-rebuild] [-D... zig build flags]
+        \\                                                  build ReleaseFast; explain changed inputs and dirty steps
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
         \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.zon
         \\  db new-migration <name> | status | reset --yes manage the relational schema and development database
@@ -598,6 +600,7 @@ fn parseVerbArgs(allocator: std.mem.Allocator, args: []const []const u8, value_f
         if (std.mem.eql(u8, arg, "--strict")) continue;
         if (std.mem.eql(u8, arg, "--core")) continue;
         if (std.mem.eql(u8, arg, "--watch")) continue;
+        if (std.mem.eql(u8, arg, "--explain-rebuild")) continue;
         if (std.mem.startsWith(u8, arg, "-D") or std.mem.startsWith(u8, arg, "--release")) {
             try forwarded.append(allocator, arg);
             continue;

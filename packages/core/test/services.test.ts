@@ -90,6 +90,31 @@ test("service source hashes cover transitive shared modules", () => {
   assert.notEqual(beforeHash, afterHash);
 });
 
+test("comment-only service edits preserve core ABI and generated client artifacts", () => {
+  const check = (comment: string) => checkFiles({
+    "core.ts": serviceCore,
+    "shared.ts": `export function helper(bytes: Uint8Array): Uint8Array { return bytes; }`,
+    "services/feeds.ts": `import { helper } from "../shared.ts"; ${comment}\nexport function parse(bytes: Uint8Array): Uint8Array { return helper(bytes); }`,
+  }, { contractEntry: "src/core.ts", servicesContract: true });
+  const before = check("// implementation note one");
+  const after = check("// implementation note two");
+  assert.equal(before.ok, true, JSON.stringify(before.diagnostics));
+  assert.equal(after.ok, true, JSON.stringify(after.diagnostics));
+  assert.equal(before.contract, after.contract, "service implementation comments do not change the core ABI contract");
+  assert.equal(before.servicesClient, after.servicesClient, "service implementation comments do not change the typed client");
+  assert.notEqual(
+    JSON.parse(before.servicesContract!).operations[0].source_hash,
+    JSON.parse(after.servicesContract!).operations[0].source_hash,
+    "the service implementation lane still receives a fresh source identity",
+  );
+  const signatureChange = checkFiles({
+    "core.ts": serviceCore,
+    "services/feeds.ts": `export function parse(): Uint8Array { return new Uint8Array(0); }`,
+  }, { contractEntry: "src/core.ts", servicesContract: true });
+  assert.equal(signatureChange.ok, true, JSON.stringify(signatureChange.diagnostics));
+  assert.notEqual(before.servicesClient, signatureChange.servicesClient, "a service signature change rewrites the typed client and therefore the core compile input");
+});
+
 test("the same ambient module stays refused when it is moved into the core class", () => {
   const result = checkFiles({
     "core.ts": `

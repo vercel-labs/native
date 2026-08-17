@@ -6,6 +6,94 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Canonicalize a generated file by its CONTENT before another build step
+/// consumes it. `std.Build.Step.Run` normally places outputs under a cache
+/// directory keyed by every declared input. That is correct for the producer,
+/// but it means an unrelated input can change the output PATH even when the
+/// file's bytes are identical; downstream Run steps hash that path and miss
+/// their own caches. TypeScript's combined frontend is exactly that shape:
+/// service implementation edits re-run the checker while often leaving the
+/// core ABI contract byte-identical.
+///
+/// This narrow adapter gives equal bytes one immutable cache path. Consumers
+/// still invalidate whenever the bytes change, while producer-only churn
+/// stops here. It is public so the repository's fixture graph can exercise
+/// the same boundary as app builds.
+pub fn stabilizeGeneratedFile(b: *std.Build, source: std.Build.LazyPath, basename: []const u8, trace: bool) std.Build.LazyPath {
+    return StableGeneratedFile.create(b, source, basename, trace).lazyPath();
+}
+
+const StableGeneratedFile = struct {
+    step: std.Build.Step,
+    source: std.Build.LazyPath,
+    basename: []const u8,
+    trace: bool,
+    generated: std.Build.GeneratedFile,
+
+    fn create(b: *std.Build, source: std.Build.LazyPath, basename: []const u8, trace: bool) *StableGeneratedFile {
+        const stable = b.allocator.create(StableGeneratedFile) catch @panic("OOM");
+        stable.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = b.fmt("stabilize generated {s}", .{basename}),
+                .owner = b,
+                .makeFn = make,
+            }),
+            .source = source.dupe(b),
+            .basename = b.dupePath(basename),
+            .trace = trace,
+            .generated = undefined,
+        };
+        stable.generated = .{ .step = &stable.step };
+        source.addStepDependencies(&stable.step);
+        return stable;
+    }
+
+    fn lazyPath(self: *StableGeneratedFile) std.Build.LazyPath {
+        return .{ .generated = .{ .file = &self.generated } };
+    }
+
+    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
+        _ = options;
+        const self: *StableGeneratedFile = @fieldParentPtr("step", step);
+        const b = step.owner;
+        const io = b.graph.io;
+        const arena = b.allocator;
+        const source_path = self.source.getPath3(b, step);
+        const bytes = source_path.root_dir.handle.readFileAlloc(io, source_path.sub_path, arena, .limited(64 * 1024 * 1024)) catch |err|
+            return step.fail("cannot stabilize generated {s}: {t}", .{ self.basename, err });
+
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        const output_dir = b.pathJoin(&.{ "o", "native-stable", &hex });
+        const output_path = b.pathJoin(&.{ output_dir, self.basename });
+        self.generated.path = try b.cache_root.join(arena, &.{output_path});
+
+        var reused = false;
+        if (b.cache_root.handle.readFileAlloc(io, output_path, arena, .limited(64 * 1024 * 1024))) |existing| {
+            reused = std.mem.eql(u8, existing, bytes);
+        } else |_| {}
+        if (!reused) {
+            b.cache_root.handle.createDirPath(io, output_dir) catch |err|
+                return step.fail("cannot create the stable generated-output directory for {s}: {t}", .{ self.basename, err });
+            var atomic = b.cache_root.handle.createFileAtomic(io, output_path, .{ .replace = true }) catch |err|
+                return step.fail("cannot stage stable generated {s}: {t}", .{ self.basename, err });
+            defer atomic.deinit(io);
+            atomic.file.writeStreamingAll(io, bytes) catch |err|
+                return step.fail("cannot write stable generated {s}: {t}", .{ self.basename, err });
+            atomic.replace(io) catch |err|
+                return step.fail("cannot publish stable generated {s}: {t}", .{ self.basename, err });
+        }
+        step.result_cached = reused;
+        if (self.trace) std.debug.print("native build trace: {s} content {s} {s}\n", .{
+            self.basename,
+            &hex,
+            if (reused) "reused" else "changed",
+        });
+    }
+};
+
 /// The shared web-layer inference contract: this build graph is one thin
 /// adapter over it (the CLI's manifest tooling and the app runner are the
 /// others), feeding it the inputs only this boundary sees — the
@@ -239,15 +327,14 @@ const core_compiler_teaching =
     " that is the default.\nDelete the setting (or spell it \"external\").\n";
 
 /// The staged TypeScript-core wiring: one generated directory holding the
-/// core module (the generated mirror with its staged shim runtime), the
-/// app's markup, and the SDK's generated-wiring entry (ts_core_main.zig
-/// as main.zig) — plus the compiled-core archive the app module links
-/// behind the mirror. Built once per app build and shared by the exe
-/// and test modules.
+/// core module (the generated mirror with its staged shim runtime) and the
+/// SDK's generated-wiring entry (ts_core_main.zig as main.zig) — plus the
+/// compiled-core archive and isolated markup data object the app module
+/// links. Built once per app build and shared by the exe and test modules.
 const TsCoreStage = struct {
     main_root: std.Build.LazyPath,
     /// The staged mobile wiring (ts_core_mobile.zig beside the same
-    /// mirror/markup/registry files): the embed static library's `app`
+    /// mirror/registry files): the embed static library's `app`
     /// module roots here on iOS/Android targets.
     mobile_root: std.Build.LazyPath,
     /// The compiled-core archive: the app module links it (with libc,
@@ -262,6 +349,9 @@ const TsCoreStage = struct {
     /// carrier is selected. The app module links it beside the core's
     /// archive.
     service_archive: ?std.Build.LazyPath = null,
+    /// C source containing the primary markup bytes under stable external
+    /// symbols. Compiled as a tiny data object by the final app artifact.
+    markup_c: std.Build.LazyPath,
     migrations: std.Build.LazyPath,
 };
 
@@ -586,20 +676,20 @@ fn tsParseQuotedManifestValue(manifest_json: []const u8, comptime key: []const u
     return suffix;
 }
 
-/// The external core compiler's entry module (scriptc's dist/main.js),
+/// The external compiler's published `scriptc` binary entrypoint,
 /// resolved by node's ancestor node_modules walk from the SDK's
 /// packages/core — the same origin the frontend toolchain resolves from
 /// (tsAliasedCompilerVersion's walk, kept in lockstep). Repo checkouts
 /// install it there with `npm ci`; the npm-installed CLI carries the
 /// compiler as a regular dependency, nested under the package on global
 /// prefixes and hoisted to the project root on local ones.
-fn tsExternalCompilerJs(b: *std.Build, dep: *std.Build.Dependency) ?[]const u8 {
+fn tsExternalCompilerBin(b: *std.Build, dep: *std.Build.Dependency) ?[]const u8 {
     const io = b.graph.io;
     const sdk_root = tsSdkRoot(b.allocator, io, dep);
     var dir: []const u8 = b.pathJoin(&.{ sdk_root, "packages", "core" });
     while (true) {
         if (!std.mem.eql(u8, std.fs.path.basename(dir), "node_modules")) {
-            const candidate = b.pathJoin(&.{ dir, "node_modules", "scriptc", "dist", "main.js" });
+            const candidate = b.pathJoin(&.{ dir, "node_modules", ".bin", if (builtin.os.tag == .windows) "scriptc.cmd" else "scriptc" });
             found: {
                 std.Io.Dir.cwd().access(io, candidate, .{}) catch break :found;
                 return candidate;
@@ -609,8 +699,8 @@ fn tsExternalCompilerJs(b: *std.Build, dep: *std.Build.Dependency) ?[]const u8 {
     }
 }
 
-fn requireTsExternalCompilerJs(b: *std.Build, dep: *std.Build.Dependency) []const u8 {
-    return tsExternalCompilerJs(b, dep) orelse {
+fn requireTsExternalCompilerBin(b: *std.Build, dep: *std.Build.Dependency) []const u8 {
+    return tsExternalCompilerBin(b, dep) orelse {
         const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
         std.debug.print(
             \\
@@ -626,6 +716,27 @@ fn requireTsExternalCompilerJs(b: *std.Build, dep: *std.Build.Dependency) []cons
         , .{sdk_root});
         std.process.exit(1);
     };
+}
+
+/// PR 166 adds both the published compile-cache bootstrap and the optional
+/// library-profile optimization field. The installed bootstrap is therefore
+/// the capability marker: keep older exact pins byte-for-byte compatible;
+/// once that release is installed, Debug/native-dev gets `dev` and
+/// release/package artifacts get `release` automatically.
+fn scriptcProfileOptimization(b: *std.Build, dep: *std.Build.Dependency, optimize: std.builtin.OptimizeMode) ?[]const u8 {
+    const sdk_root = tsSdkRoot(b.allocator, b.graph.io, dep);
+    var dir: []const u8 = b.pathJoin(&.{ sdk_root, "packages", "core" });
+    while (true) {
+        if (!std.mem.eql(u8, std.fs.path.basename(dir), "node_modules")) {
+            const marker = b.pathJoin(&.{ dir, "node_modules", "scriptc", "dist", "bootstrap.js" });
+            std.Io.Dir.cwd().access(b.graph.io, marker, .{}) catch {
+                dir = std.fs.path.dirname(dir) orelse return null;
+                continue;
+            };
+            return if (optimize == .Debug) "dev" else "release";
+        }
+        dir = std.fs.path.dirname(dir) orelse return null;
+    }
 }
 
 /// The SDK dependency's real root, resolved the way both the toolchain
@@ -737,7 +848,7 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
 /// contract sidecar, and corewire generates the mirror module from THAT
 /// document — so the boot identity fence always pairs the mirror with
 /// its own compile. The staged module directory carries core.zig (the
-/// mirror) + its staged runtime + app.native + main.zig, so the
+/// mirror) + its staged runtime + main.zig, so the
 /// generated wiring imports one fixed shape.
 fn tsCoreStage(
     b: *std.Build,
@@ -754,6 +865,8 @@ fn tsCoreStage(
     service_packages: []const ServicePackageConfig,
     service_carrier_choice: ServiceCarrierOption,
     service_pool_workers: ?u8,
+    build_trace: bool,
+    scriptc_optimization: ?[]const u8,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const window_views = collectTsWindowViews(b, app_root);
@@ -819,17 +932,20 @@ fn tsCoreStage(
     // of the reachable imports: over-approximation only re-runs the
     // check, never misses a stale input).
     const check = b.addSystemCommand(&.{node});
+    check.setName("native ts frontend (core + service contracts)");
     check.addFileArg(dep.path("build/ts_run.mjs"));
     check.addFileArg(dep.path("packages/core/src/cli.ts"));
     check.addFileArg(b.path(appPath(b, app_root, "src/core.ts")));
     check.addArg("--contract");
-    const contract = check.addOutputFileArg("core.contract.json");
+    const contract_raw = check.addOutputFileArg("core.contract.json");
+    const contract = stabilizeGeneratedFile(b, contract_raw, "core.contract.json", build_trace);
     // The document's entry spelling is app-relative (the sidecar/facade
     // contract carries no machine paths).
     check.addArgs(&.{ "--contract-entry", "src/core.ts" });
     const services_contract: ?std.Build.LazyPath = if (has_services) services_contract: {
         check.addArg("--services-contract");
-        break :services_contract check.addOutputFileArg("services.contract.json");
+        const raw = check.addOutputFileArg("services.contract.json");
+        break :services_contract stabilizeGeneratedFile(b, raw, "services.contract.json", build_trace);
     } else null;
     if (persist_capability) check.addArgs(&.{ "--capability", "persist" });
     for (service_packages) |package_entry| {
@@ -869,12 +985,14 @@ fn tsCoreStage(
     // so the profile's entry spelling and the facade file can never skew.
     const corewire_exe = corewireExe(b, dep);
     const project = b.addRunArtifact(corewire_exe);
+    project.setName("native corewire (core facade + profile)");
     project.addArg("--sidecar");
     project.addFileArg(contract);
     project.addArg("--facade");
     const facade = project.addOutputFileArg("core_facade.ts");
     project.addArg("--profile");
     const profile = project.addOutputFileArg("core_profile.json");
+    if (scriptc_optimization) |value| project.addArgs(&.{ "--optimization", value });
 
     // The fourth corewire projection is intentionally driven only by the
     // service sidecar: the generated TypeScript dispatch loop and Zig
@@ -885,14 +1003,17 @@ fn tsCoreStage(
     var service_client: ?std.Build.LazyPath = null;
     if (services_contract) |service_contract| {
         const service_project = b.addRunArtifact(corewire_exe);
+        service_project.setName("native corewire (service host + ABI projections)");
         service_project.addArg("--services-sidecar");
         service_project.addFileArg(service_contract);
         service_project.addArg("--service-host-main");
         const service_host_main = service_project.addOutputFileArg("service_host_main.ts");
         service_project.addArg("--service-registry");
-        service_registry = service_project.addOutputFileArg("services.zig");
+        const service_registry_raw = service_project.addOutputFileArg("services.zig");
+        service_registry = stabilizeGeneratedFile(b, service_registry_raw, "services.zig", build_trace);
         service_project.addArg("--service-client");
-        service_client = service_project.addOutputFileArg("services.gen.ts");
+        const service_client_raw = service_project.addOutputFileArg("services.gen.ts");
+        service_client = stabilizeGeneratedFile(b, service_client_raw, "services.gen.ts", build_trace);
         const service_inproc_main: ?std.Build.LazyPath = if (service_carrier == .in_process) inproc: {
             service_project.addArg("--service-inproc-main");
             break :inproc service_project.addOutputFileArg("service_inproc_main.ts");
@@ -907,6 +1028,7 @@ fn tsCoreStage(
         // throw into the tagged Error shape the pinned compiler can catch from an
         // imported op; no deterministic profile fences participate here.
         const service_stage_run = b.addSystemCommand(&.{node});
+        service_stage_run.setName("native stage TypeScript services");
         service_stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_services.mjs"));
         service_stage_run.addArg("--src");
         service_stage_run.addDirectoryArg(b.path(appPath(b, app_root, "src")));
@@ -920,6 +1042,7 @@ fn tsCoreStage(
             service_stage_run.addArg("--inproc-profile");
             service_stage_run.addFileArg(inproc_profile);
         }
+        if (scriptc_optimization) |value| service_project.addArgs(&.{ "--optimization", value });
         service_stage_run.addArg("--contract");
         service_stage_run.addFileArg(service_contract);
         service_stage_run.addArg("--out");
@@ -929,6 +1052,8 @@ fn tsCoreStage(
         service_stage_run.has_side_effects = true;
 
         const service_compile = b.addSystemCommand(&.{node});
+        service_compile.setName("native scriptc service compile");
+        if (build_trace) service_compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
         service_compile.addFileArg(dep.path("packages/core/scripts/run_external_service_compiler.mjs"));
         service_compile.addArg("--stage");
         service_compile.addDirectoryArg(service_stage_dir);
@@ -961,15 +1086,15 @@ fn tsCoreStage(
         if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
             service_compile.addArgs(&.{ "--compiler", override });
         } else {
-            const compiler_js = requireTsExternalCompilerJs(b, dep);
-            service_compile.addArg("--compiler-js");
-            service_compile.addFileArg(.{ .cwd_relative = compiler_js });
+            const compiler_bin = requireTsExternalCompilerBin(b, dep);
+            service_compile.addArgs(&.{ "--compiler", compiler_bin });
         }
     }
 
     // The compile stage: author sources + staged SDK + static surface +
     // generated entry/profile, one scratch tree.
     const stage_run = b.addSystemCommand(&.{node});
+    stage_run.setName("native stage TypeScript core");
     stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_core.mjs"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(b.path(appPath(b, app_root, "src")));
@@ -985,6 +1110,14 @@ fn tsCoreStage(
         stage_run.addArg("--services-client");
         stage_run.addFileArg(client);
     }
+    // `addDirectoryArg` orders the stager after a generated directory but
+    // does not hash a source directory's recursively discovered contents.
+    // The old graph accidentally got core-source invalidation from changing
+    // producer cache paths. Now that generated ABI files are stabilized by
+    // content, state the author's actual core compile inputs explicitly.
+    // Services are excluded because stage_external_core.mjs excludes them;
+    // their implementation class has its own compile lane.
+    addAppCoreTsDirInputs(b, stage_run, appPath(b, app_root, "src"));
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 
@@ -992,6 +1125,8 @@ fn tsCoreStage(
     // exact pin, archive normalized, the co-emitted sidecar captured.
     const symbol_name = externalCoreSymbolName(b, app_name);
     const compile = b.addSystemCommand(&.{node});
+    compile.setName("native scriptc core compile");
+    if (build_trace) compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
     compile.addFileArg(dep.path("packages/core/scripts/run_external_core_compiler.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
@@ -1020,13 +1155,13 @@ fn tsCoreStage(
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        const compiler_js = requireTsExternalCompilerJs(b, dep);
-        compile.addArg("--compiler-js");
-        compile.addFileArg(.{ .cwd_relative = compiler_js });
+        const compiler_bin = requireTsExternalCompilerBin(b, dep);
+        compile.addArgs(&.{ "--compiler", compiler_bin });
     }
 
     // The mirror, generated from the archive's OWN co-emitted contract.
     const mirror = b.addRunArtifact(corewire_exe);
+    mirror.setName("native corewire (compiled-core mirror)");
     mirror.addArg("--sidecar");
     mirror.addFileArg(compiled_sidecar);
     mirror.addArg("--out");
@@ -1051,7 +1186,14 @@ fn tsCoreStage(
         \\
     , .{ service_carrier, service_pool_workers }));
     _ = staged.addCopyFile(migrations_zig, "migrations.zig");
-    _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
+    // Primary markup bytes live in their own tiny C translation unit. They
+    // no longer participate in Zig source analysis, so a markup edit reuses
+    // the compiled app/SDK graph and performs only C data compile + relink.
+    const markup_embed = b.addSystemCommand(&.{node});
+    markup_embed.setName("native embed primary markup data");
+    markup_embed.addFileArg(dep.path("packages/core/scripts/embed_markup_c.mjs"));
+    markup_embed.addFileArg(b.path(appPath(b, app_root, "src/app.native")));
+    const markup_c = markup_embed.addOutputFileArg("app_markup.c");
     for (window_views.sources) |source| {
         _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
     }
@@ -1067,6 +1209,7 @@ fn tsCoreStage(
         .archive = archive,
         .service_exe = service_exe,
         .service_archive = service_archive,
+        .markup_c = markup_c,
         .migrations = migrations_zig,
     };
 }
@@ -1153,6 +1296,25 @@ fn addAppTsDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, src_path: []
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
         transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
+    }
+}
+
+/// Declare exactly the author TypeScript files copied into the core compiler's
+/// scratch tree. `src/services/` is a separate compiler class and `.d.ts`
+/// files are declarations for editor/provider use, not scriptc source inputs.
+fn addAppCoreTsDirInputs(b: *std.Build, stage: *std.Build.Step.Run, src_path: []const u8) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".ts") or std.mem.endsWith(u8, entry.basename, ".d.ts")) continue;
+        const normalized = b.dupe(entry.path);
+        for (normalized) |*char| if (char.* == '\\') {
+            char.* = '/';
+        };
+        if (std.mem.startsWith(u8, normalized, "services/")) continue;
+        stage.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
     }
 }
 
@@ -1274,6 +1436,7 @@ pub const MobileTsCore = struct {
     archive: std.Build.LazyPath,
     /// The in-process service archive, when src/services exists.
     service_archive: ?std.Build.LazyPath,
+    markup_c: std.Build.LazyPath,
     /// The app.zon module the mobile wiring reads scene chrome, identity,
     /// and theme from (`app_manifest_zon`).
     manifest_mod: *std.Build.Module,
@@ -1352,6 +1515,7 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         // host link already passes).
         exports_mod.link_libc = true;
         exports_mod.addObjectFile(ts.archive);
+        exports_mod.addObjectFile(markupDataObject(b, target, optimize, ts.markup_c).getEmittedBin());
         if (ts.service_archive) |service_archive| exports_mod.addObjectFile(service_archive);
     }
     if (options.store_capability or options.relational_capability) {
@@ -1432,6 +1596,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
     const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
     const app_optimize = exampleOptimizeMode(b, optimize_request, .ReleaseFast);
+    const build_trace = b.option(bool, "build-trace", "Trace generated TypeScript ABI artifacts and cache reuse") orelse false;
+    const scriptc_optimization = scriptcProfileOptimization(b, dep, app_optimize);
 
     // The core role is detected from the tree (never a flag or config):
     // builds with a custom `main` entry declared their core explicitly and
@@ -1491,6 +1657,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_config.service_packages,
             service_carrier_choice,
             service_pool_workers,
+            build_trace,
+            scriptc_optimization,
         )
     else
         null;
@@ -1524,6 +1692,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
                 .main_root = stage.mobile_root,
                 .archive = stage.archive,
                 .service_archive = stage.service_archive,
+                .markup_c = stage.markup_c,
                 .manifest_mod = b.createModule(.{ .root_source_file = b.path(appPath(b, app_options.app_root, "app.zon")) }),
             } else null,
         });
@@ -1575,9 +1744,25 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const options_mod = options.createModule();
 
     const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod, ts_stage, relational_migrations, app_config);
+    // TypeScript app code and platform hosts are expensive Zig/Clang semantic
+    // work but do not depend on primary markup bytes. Compile them once into
+    // an object, then make the executable a link-only artifact over that
+    // cached object plus the tiny generated markup-data object. A markup edit
+    // therefore avoids re-analyzing the SDK and app runner entirely.
+    const exe_root = if (ts_stage) |stage| root: {
+        const app_code = b.addObject(.{
+            .name = b.fmt("{s}-app-code", .{app_options.name}),
+            .root_module = app_mod,
+            .use_llvm = useLlvmWorkaround(target),
+        });
+        const link_mod = b.createModule(.{ .target = target, .optimize = app_optimize });
+        link_mod.addObject(app_code);
+        link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
+        break :root link_mod;
+    } else app_mod;
     const exe = b.addExecutable(.{
         .name = app_options.name,
-        .root_module = app_mod,
+        .root_module = exe_root,
         // The app executable crosses the platform C seam on every host
         // call (the GTK host's `native_sdk_gtk_create_view` is a
         // 22-parameter mix of pointers, sizes, ints, and doubles), and
@@ -1629,7 +1814,14 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run.step);
 
-    const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, dep, target, optimize, app_options, options_mod, ts_stage, relational_migrations, app_config);
+    // TypeScript tests need their own module even when optimize modes match:
+    // the production app module feeds the cached app-code object and must not
+    // absorb the separately linked markup data object.
+    const test_app_mod = if (ts_stage != null or app_optimize != optimize)
+        appModule(b, dep, target, optimize, app_options, options_mod, ts_stage, relational_migrations, app_config)
+    else
+        app_mod;
+    if (ts_stage) |stage| test_app_mod.addObject(markupDataObject(b, target, optimize, stage.markup_c));
     const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -1820,7 +2012,7 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
     const app_mod = if (ts_stage) |stage|
         // TypeScript core: the app module roots at the staged generated
         // wiring (ts_core_main.zig beside the mirror core.zig, its shim
-        // runtime, and the app's markup).
+        // runtime; primary markup bytes link as a separate data object).
         b.createModule(.{
             .root_source_file = stage.main_root,
             .target = target,
@@ -1857,6 +2049,15 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
     }
     addMacosInfoPlist(b, app_mod, target, app_config);
     return app_mod;
+}
+
+/// Compile primary markup bytes independently from the Zig app graph. The
+/// final artifact sees this as an object-file input, so a markup edit dirties
+/// only this tiny C compile and the final link.
+fn markupDataObject(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, source: std.Build.LazyPath) *std.Build.Step.Compile {
+    const mod = b.createModule(.{ .target = target, .optimize = optimize });
+    mod.addCSourceFile(.{ .file = source, .flags = &.{} });
+    return b.addObject(.{ .name = "native-app-markup-data", .root_module = mod });
 }
 
 /// Bare Mach-O executables launched by the dev loop do not have an app

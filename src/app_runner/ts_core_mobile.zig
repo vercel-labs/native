@@ -46,7 +46,11 @@ const Adapter = native_sdk.TsUiApp(core);
 pub const Model = core.Model;
 pub const Msg = core.Msg;
 
-pub const app_markup = @embedFile("app.native");
+extern const native_sdk_app_markup: u8;
+extern const native_sdk_app_markup_len: usize;
+pub fn appMarkup() []const u8 {
+    return @as([*]const u8, @ptrCast(&native_sdk_app_markup))[0..native_sdk_app_markup_len];
+}
 
 comptime {
     // The build graph resolves the carrier before staging this file; a
@@ -97,7 +101,7 @@ pub fn mobileOptions() Adapter.Options {
         .name = manifest.name,
         .scene = mobile_scene,
         .canvas_label = native_sdk.embed.mobile_gpu_surface_label,
-        .markup = .{ .source = app_markup },
+        .markup = .{ .source = appMarkup() },
         // app.zon's theme pack and one-accent override, same as desktop.
         .theme = comptime manifestThemePack(),
         .theme_accent = comptime manifestThemeAccent(),
