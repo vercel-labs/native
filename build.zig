@@ -105,10 +105,15 @@ test "root TypeScript markup discovery classification and resolver budgets" {
     try std.testing.expect(!app_build.isRootMarkupSourcePath("windows/settings.native"));
     try std.testing.expect(!app_build.isRootMarkupSourcePath("components/card.ts"));
 
-    try std.testing.expect(app_build.markupSourcePathWithinBudget("a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"));
-    try std.testing.expect(!app_build.markupSourcePathWithinBudget("a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"));
-    try std.testing.expect(app_build.markupSourcePathWithinBudget("a" ** 200));
-    try std.testing.expect(!app_build.markupSourcePathWithinBudget("a" ** 201));
+    // The authored paths are relative to src/, while native check and the
+    // desktop hot-reload resolver see the leading `src/` too. Pin the exact
+    // source-relative boundaries that keep those full paths within 24
+    // segments and 200 bytes.
+    const max_segments_path = "a/" ** 22 ++ "a";
+    try std.testing.expect(app_build.markupSourcePathWithinBudget(max_segments_path));
+    try std.testing.expect(!app_build.markupSourcePathWithinBudget(max_segments_path ++ "/a"));
+    try std.testing.expect(app_build.markupSourcePathWithinBudget("a" ** 196));
+    try std.testing.expect(!app_build.markupSourcePathWithinBudget("a" ** 197));
 }
 
 test "generated TypeScript runners install the compiled root markup view" {

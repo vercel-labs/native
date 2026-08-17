@@ -105,18 +105,25 @@ const TsAppMarkupSources = struct {
 
 const max_markup_source_path_len = 200;
 const max_markup_source_path_segments = 24;
+const root_markup_source_prefix = "src/";
 
+/// Whether a path relative to `src/` fits the markup resolver once the
+/// generated desktop watch and `native check` address it as `src/<path>`.
+/// The compiled source set drops that prefix, but accepting a path only the
+/// compiled resolver can represent would make development and release
+/// disagree at the boundary.
 pub fn markupSourcePathWithinBudget(path: []const u8) bool {
-    var segments: usize = 0;
+    var segments: usize = 1; // the disk resolver's leading `src` segment
     var it = std.mem.tokenizeScalar(u8, path, '/');
     while (it.next() != null) segments += 1;
-    return path.len <= max_markup_source_path_len and segments <= max_markup_source_path_segments;
+    return root_markup_source_prefix.len + path.len <= max_markup_source_path_len and
+        segments <= max_markup_source_path_segments;
 }
 
 fn validateMarkupSourcePath(path: []const u8) void {
     if (!markupSourcePathWithinBudget(path)) {
         std.debug.panic(
-            "\nTypeScript markup source path `{s}` exceeds the import resolver budget: keep every src/-relative .native path at most {d} bytes and {d} segments\n",
+            "\nTypeScript markup source path `src/{s}` exceeds the import resolver budget: the full app-relative path, including `src/`, must be at most {d} bytes and {d} segments\n",
             .{ path, max_markup_source_path_len, max_markup_source_path_segments },
         );
     }
