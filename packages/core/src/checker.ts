@@ -1467,12 +1467,13 @@ export class SubsetChecker {
       return candidate?.type.k === "optional" && ["number", "i64", "f64", "numAlias"].includes(candidate.type.inner.k);
     };
     const valid =
-      names.join(",") === "activateOnShow,allowsFullscreen,alwaysOnTop,canvasLabel,clickThrough,closePolicy,height,label,minHeight,minWidth,onCloseCommand,resizable,title,titlebar,transparent,width,x,y" &&
+      names.join(",") === "activateOnShow,allowsFullscreen,alwaysOnTop,canvasLabel,clickThrough,closePolicy,height,label,minHeight,minWidth,onCloseCommand,resizable,restorePolicy,title,titlebar,transparent,width,x,y" &&
       field("label")?.type.k === "bytes" &&
       field("canvasLabel")?.type.k === "bytes" &&
       field("title")?.type.k === "bytes" &&
       numeric("width") && numeric("height") && optionalNumeric("x") && optionalNumeric("y") &&
-      field("resizable")?.type.k === "bool" && numeric("minWidth") && numeric("minHeight") &&
+      field("resizable")?.type.k === "bool" && enumMembersAre("restorePolicy", ["clamp_to_visible_screen", "center_on_primary"]) &&
+      numeric("minWidth") && numeric("minHeight") &&
       enumMembersAre("titlebar", ["standard", "hidden_inset", "hidden_inset_tall", "chromeless"]) &&
       field("transparent")?.type.k === "bool" && field("alwaysOnTop")?.type.k === "bool" &&
       field("clickThrough")?.type.k === "bool" && field("activateOnShow")?.type.k === "bool" &&

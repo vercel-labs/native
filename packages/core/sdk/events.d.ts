@@ -55,6 +55,7 @@ export interface StatusItemDescriptor {
 }
 export type WindowClosePolicy = "quit" | "hide";
 export type WindowTitlebarStyle = "standard" | "hidden_inset" | "hidden_inset_tall" | "chromeless";
+export type WindowRestorePolicy = "clamp_to_visible_screen" | "center_on_primary";
 export interface WindowDescriptorSpec {
     readonly label: Uint8Array;
     readonly canvasLabel: Uint8Array;
@@ -64,6 +65,7 @@ export interface WindowDescriptorSpec {
     readonly x?: number | null;
     readonly y?: number | null;
     readonly resizable?: boolean;
+    readonly restorePolicy?: WindowRestorePolicy;
     readonly minWidth?: number;
     readonly minHeight?: number;
     readonly titlebar?: WindowTitlebarStyle;
@@ -84,6 +86,7 @@ export interface WindowDescriptor {
     readonly x: number | null;
     readonly y: number | null;
     readonly resizable: boolean;
+    readonly restorePolicy: WindowRestorePolicy;
     readonly minWidth: number;
     readonly minHeight: number;
     readonly titlebar: WindowTitlebarStyle;

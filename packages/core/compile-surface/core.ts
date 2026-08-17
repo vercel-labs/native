@@ -96,6 +96,7 @@ export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {
     x: spec.x ?? null,
     y: spec.y ?? null,
     resizable: spec.resizable ?? true,
+    restorePolicy: spec.restorePolicy ?? "clamp_to_visible_screen",
     minWidth: spec.minWidth ?? 0,
     minHeight: spec.minHeight ?? 0,
     titlebar: spec.titlebar ?? "standard",

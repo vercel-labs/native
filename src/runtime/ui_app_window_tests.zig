@@ -21,6 +21,7 @@ const settings_window_label = "settings";
 const PanelModel = struct {
     settings_open: bool = false,
     position_settings: bool = true,
+    center_settings: bool = false,
     transparent_settings: bool = false,
     bumps: u32 = 0,
     user_closes: u32 = 0,
@@ -63,6 +64,7 @@ fn panelWindows(model: *const PanelModel, scratch: *PanelApp.WindowsScratch) []c
             .height = 240,
             .x = if (model.position_settings) 84 else null,
             .y = if (model.position_settings) 126 else null,
+            .restore_policy = if (model.center_settings) .center_on_primary else .clamp_to_visible_screen,
             .min_width = 280,
             .min_height = 200,
             .titlebar = if (model.transparent_settings) .chromeless else .standard,
@@ -243,6 +245,27 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
         if (window.id != reopened.id) continue;
         try std.testing.expectEqual(support.platform.WindowInitialPlacement.default, fixture.harness.null_platform.window_placement[index]);
     }
+}
+
+test "a windows_fn restore policy reaches fresh WindowOptions" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    fixture.app_state.model.position_settings = false;
+    fixture.app_state.model.center_settings = true;
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id != info.id) continue;
+        // Model-declared windows deliberately set restore_state=false. With
+        // no authored origin this remains a fresh/default placement while
+        // preserving the descriptor's policy at WindowOptions.
+        try std.testing.expectEqual(support.platform.WindowInitialPlacement.default, fixture.harness.null_platform.window_placement[index]);
+        try std.testing.expectEqual(support.platform.WindowRestorePolicy.center_on_primary, fixture.harness.null_platform.window_restore_policy[index]);
+        return;
+    }
+    return error.WindowNotFound;
 }
 
 test "a transparent descriptor selects premultiplied canvas alpha and an alpha-zero clear" {

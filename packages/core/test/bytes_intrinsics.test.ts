@@ -34,6 +34,7 @@ test("windowDescriptor fills canonical window defaults", () => {
   assert.equal(descriptor.width, 480);
   assert.equal(descriptor.height, 360);
   assert.equal(descriptor.resizable, true);
+  assert.equal(descriptor.restorePolicy, "clamp_to_visible_screen");
   assert.equal(descriptor.titlebar, "chromeless");
   assert.equal(descriptor.closePolicy, "hide");
   assert.equal(descriptor.onCloseCommand.length, 0);

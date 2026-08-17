@@ -720,6 +720,7 @@ pub fn TsUiApp(comptime core: type) type {
                     .x = optionalWindowFloat(window.x),
                     .y = optionalWindowFloat(window.y),
                     .resizable = window.resizable,
+                    .restore_policy = windowRestorePolicy(window.restorePolicy),
                     .min_width = statusItemFloat(window.minWidth),
                     .min_height = statusItemFloat(window.minHeight),
                     .titlebar = windowTitlebar(window.titlebar),
@@ -746,6 +747,14 @@ pub fn TsUiApp(comptime core: type) type {
 
         fn windowTitlebar(value: anytype) @import("app_manifest").WindowTitlebarStyle {
             const Target = @import("app_manifest").WindowTitlebarStyle;
+            inline for (std.meta.fields(Target)) |field| {
+                if (std.mem.eql(u8, @tagName(value), field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn windowRestorePolicy(value: anytype) @import("app_manifest").WindowRestorePolicy {
+            const Target = @import("app_manifest").WindowRestorePolicy;
             inline for (std.meta.fields(Target)) |field| {
                 if (std.mem.eql(u8, @tagName(value), field.name)) return @enumFromInt(field.value);
             }
@@ -1018,9 +1027,10 @@ pub fn TsUiApp(comptime core: type) type {
             if (return_info != .pointer or return_info.pointer.size != .slice or !return_info.pointer.is_const) @compileError(teaching);
             const Window = statusItemRecordType(return_info.pointer.child, teaching);
             const info = @typeInfo(Window).@"struct";
-            if (info.fields.len != 18 or !@hasField(Window, "label") or !@hasField(Window, "canvasLabel") or
+            if (info.fields.len != 19 or !@hasField(Window, "label") or !@hasField(Window, "canvasLabel") or
                 !@hasField(Window, "title") or !@hasField(Window, "width") or !@hasField(Window, "height") or
                 !@hasField(Window, "x") or !@hasField(Window, "y") or !@hasField(Window, "resizable") or
+                !@hasField(Window, "restorePolicy") or
                 !@hasField(Window, "minWidth") or !@hasField(Window, "minHeight") or !@hasField(Window, "titlebar") or
                 !@hasField(Window, "transparent") or !@hasField(Window, "alwaysOnTop") or !@hasField(Window, "clickThrough") or
                 !@hasField(Window, "activateOnShow") or !@hasField(Window, "allowsFullscreen") or
@@ -1029,6 +1039,7 @@ pub fn TsUiApp(comptime core: type) type {
                 @FieldType(Window, "title") != []const u8 or !statusItemNumericType(@FieldType(Window, "width")) or
                 !statusItemNumericType(@FieldType(Window, "height")) or !optionalNumericType(@FieldType(Window, "x")) or
                 !optionalNumericType(@FieldType(Window, "y")) or @FieldType(Window, "resizable") != bool or
+                !statusItemEnumType(@FieldType(Window, "restorePolicy"), &.{ "clamp_to_visible_screen", "center_on_primary" }) or
                 !statusItemNumericType(@FieldType(Window, "minWidth")) or !statusItemNumericType(@FieldType(Window, "minHeight")) or
                 !statusItemEnumType(@FieldType(Window, "titlebar"), &.{ "standard", "hidden_inset", "hidden_inset_tall", "chromeless" }) or
                 @FieldType(Window, "transparent") != bool or @FieldType(Window, "alwaysOnTop") != bool or
@@ -1637,6 +1648,7 @@ test "TypeScript statusItems adapter validates and projects canonical descriptor
 
 const WindowsAdapterTestCore = struct {
     const Titlebar = enum { standard, hidden_inset, hidden_inset_tall, chromeless };
+    const RestorePolicy = enum { clamp_to_visible_screen, center_on_primary };
     const ClosePolicy = enum { quit, hide };
     const Descriptor = struct {
         label: []const u8,
@@ -1647,6 +1659,7 @@ const WindowsAdapterTestCore = struct {
         x: ?f64,
         y: ?f64,
         resizable: bool,
+        restorePolicy: RestorePolicy,
         minWidth: f64,
         minHeight: f64,
         titlebar: Titlebar,
@@ -1660,11 +1673,11 @@ const WindowsAdapterTestCore = struct {
     };
 
     const descriptors = [_]Descriptor{
-        .{ .label = "one", .canvasLabel = "one-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .chromeless, .transparent = true, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "two", .canvasLabel = "two-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "three", .canvasLabel = "three-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "four", .canvasLabel = "four-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "excess", .canvasLabel = "excess-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "one", .canvasLabel = "one-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .center_on_primary, .minWidth = 0, .minHeight = 0, .titlebar = .chromeless, .transparent = true, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "two", .canvasLabel = "two-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "three", .canvasLabel = "three-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "four", .canvasLabel = "four-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "excess", .canvasLabel = "excess-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
     };
 
     pub const Msg = union(enum) { noop };
@@ -1723,6 +1736,7 @@ test "TypeScript windows adapter keeps the declared prefix on overflow and proje
     try std.testing.expectEqual(Adapter.App.max_ui_windows, descriptors.len);
     try std.testing.expectEqualStrings("one", descriptors[0].label);
     try std.testing.expectEqual(@import("app_manifest").WindowTitlebarStyle.chromeless, descriptors[0].titlebar);
+    try std.testing.expectEqual(@import("app_manifest").WindowRestorePolicy.center_on_primary, descriptors[0].restore_policy);
     try std.testing.expect(descriptors[0].transparent);
     try std.testing.expectEqualStrings("four", descriptors[3].label);
 }
