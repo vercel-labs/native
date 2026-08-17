@@ -242,9 +242,26 @@ const RebuildInput = struct {
     hash: [std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
 };
 
+fn appendRebuildInput(allocator: std.mem.Allocator, io: std.Io, inputs: *std.ArrayList(RebuildInput), path: []const u8) !void {
+    const owned_path = try allocator.dupe(u8, path);
+    errdefer allocator.free(owned_path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    try inputs.append(allocator, .{ .path = owned_path, .hash = std.fmt.bytesToHex(digest, .lower) });
+}
+
 fn rebuildInputs(allocator: std.mem.Allocator, io: std.Io) ![]RebuildInput {
     var inputs: std.ArrayList(RebuildInput) = .empty;
-    errdefer inputs.deinit(allocator);
+    errdefer {
+        for (inputs.items) |input| allocator.free(input.path);
+        inputs.deinit(allocator);
+    }
+    // app.zon is authored build truth just as much as src/: capabilities,
+    // windows, services, web-layer selection, and packaging metadata all
+    // alter the generated graph or final artifact.
+    try appendRebuildInput(allocator, io, &inputs, "app.zon");
     var src = std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true }) catch return inputs.toOwnedSlice(allocator);
     defer src.close(io);
     var walker = try src.walk(allocator);
@@ -253,11 +270,8 @@ fn rebuildInputs(allocator: std.mem.Allocator, io: std.Io) ![]RebuildInput {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".ts") and !std.mem.endsWith(u8, entry.basename, ".native") and !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
-        defer allocator.free(bytes);
-        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-        try inputs.append(allocator, .{ .path = path, .hash = std.fmt.bytesToHex(digest, .lower) });
+        defer allocator.free(path);
+        try appendRebuildInput(allocator, io, &inputs, path);
     }
     std.mem.sort(RebuildInput, inputs.items, {}, struct {
         fn less(_: void, a: RebuildInput, b: RebuildInput) bool {
@@ -292,7 +306,9 @@ fn explainRebuild(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
         if (old_hash != null and std.mem.eql(u8, old_hash.?, &input.hash)) continue;
         changed += 1;
         std.debug.print("native rebuild: {s} {s} -> {s}\n", .{ input.path, old_hash orelse "<new>", &input.hash });
-        if (std.mem.eql(u8, input.path, "src/app.native")) {
+        if (std.mem.eql(u8, input.path, "app.zon")) {
+            std.debug.print("  invalidates manifest-derived configuration -> affected contracts, app-code/platform link, and final artifact\n", .{});
+        } else if (std.mem.eql(u8, input.path, "src/app.native")) {
             std.debug.print("  invalidates markup data object -> final app link; app-code/core scriptc remain content-gated\n", .{});
         } else if (std.mem.endsWith(u8, input.path, ".native")) {
             std.debug.print("  invalidates staged markup source set -> app-code object -> final link; core scriptc remains content-gated\n", .{});
@@ -440,7 +456,7 @@ test "optimize flags are detected among forwarded args" {
     try std.testing.expect(!hasOptimizeFlag(&.{}));
 }
 
-test "rebuild explanations persist source hashes and distinguish service from markup edges" {
+test "rebuild explanations persist manifest and source hashes" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const root = ".zig-cache/test-rebuild-explain";
@@ -448,6 +464,7 @@ test "rebuild explanations persist source hashes and distinguish service from ma
     cwd.deleteTree(io, root) catch {};
     defer cwd.deleteTree(io, root) catch {};
     try cwd.createDirPath(io, root ++ "/src/services");
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/app.zon", .data = ".{ .name = \"rebuild-test\" }\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/src/core.ts", .data = "export const core = 1;\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/src/app.native", .data = "<column/>\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/src/services/work.ts", .data = "export function work(): number { return 1; }\n" });
@@ -457,6 +474,7 @@ test "rebuild explanations persist source hashes and distinguish service from ma
     defer std.process.setCurrentPath(io, original) catch {};
     const first = try explainRebuild(allocator, io);
     defer allocator.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\tapp.zon\n") != null);
     try persistRebuildSnapshot(io, first);
     const second = try explainRebuild(allocator, io);
     defer allocator.free(second);
@@ -465,4 +483,8 @@ test "rebuild explanations persist source hashes and distinguish service from ma
     const changed = try explainRebuild(allocator, io);
     defer allocator.free(changed);
     try std.testing.expect(!std.mem.eql(u8, first, changed));
+    try cwd.writeFile(io, .{ .sub_path = "app.zon", .data = ".{ .name = \"rebuild-test\", .capabilities = .{\"store\"} }\n" });
+    const manifest_changed = try explainRebuild(allocator, io);
+    defer allocator.free(manifest_changed);
+    try std.testing.expect(!std.mem.eql(u8, changed, manifest_changed));
 }

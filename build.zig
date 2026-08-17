@@ -1,6 +1,13 @@
 const std = @import("std");
 const web_engine_tool = @import("src/tooling/web_engine.zig");
 
+fn repositoryScriptcBin(b: *std.Build) []const u8 {
+    return b.pathFromRoot(if (b.graph.host.result.os.tag == .windows)
+        "packages/core/node_modules/.bin/scriptc.cmd"
+    else
+        "packages/core/node_modules/.bin/scriptc");
+}
+
 const PlatformOption = enum {
     auto,
     null,
@@ -851,7 +858,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
         .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
         .{ .path = "packages/core/scripts/compiler_command.mjs", .pattern = "npmTarget !== null" },
+        .{ .path = "build.zig", .pattern = "fn repositoryScriptcBin" },
+        .{ .path = "build.zig", .pattern = "packages/core/node_modules/.bin/scriptc.cmd" },
+        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--compiler\", repositoryScriptcBin(b) });" },
         .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "appendRebuildInput(allocator, io, &inputs, \"app.zon\")" },
         .{ .path = "tools/native-sdk/main.zig", .pattern = "--explain-rebuild" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
@@ -3257,7 +3268,7 @@ fn tsCoreE2eArtifact(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER") == null) {
         b.build_root.handle.access(
             b.graph.io,
-            "packages/core/node_modules/.bin/scriptc",
+            repositoryScriptcBin(b),
             .{},
         ) catch return null;
     }
@@ -3810,7 +3821,7 @@ fn externalServiceFixture(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArgs(&.{ "--compiler", b.pathFromRoot("packages/core/node_modules/.bin/scriptc") });
+        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
     }
 
     return .{
@@ -4061,7 +4072,7 @@ fn externalCoreFixtureModule(
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArgs(&.{ "--compiler", b.pathFromRoot("packages/core/node_modules/.bin/scriptc") });
+        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
     }
 
     // The mirror, generated from the archive's OWN co-emitted contract,
