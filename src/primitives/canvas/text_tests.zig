@@ -430,6 +430,11 @@ test "text edit state applies utf8-aware caret insert and delete events" {
     try std.testing.expectEqualDeep(TextSelection.collapsed(0), state.selection);
 
     state = TextEditState{ .text = "first\nsecond line", .selection = TextSelection.collapsed(12) };
+    state = try state.apply(.delete_to_start, &storage_b);
+    try std.testing.expectEqualStrings(" line", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(0), state.selection);
+
+    state = TextEditState{ .text = "first\nsecond line", .selection = TextSelection.collapsed(12) };
     state = try state.apply(.delete_to_line_start, &storage_a);
     try std.testing.expectEqualStrings("first\n line", state.text);
     try std.testing.expectEqualDeep(TextSelection.collapsed(6), state.selection);
@@ -758,7 +763,12 @@ test "widget keyboard events map to text edit events" {
     } else {
         try std.testing.expect(command_backspace == null);
     }
-    try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .super = true, .shift = true } }).textEditEvent() == null);
+    const shifted_command_backspace = (WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .super = true, .shift = true } }).textEditEvent();
+    if (comptime @import("builtin").os.tag == .macos) {
+        try std.testing.expectEqual(TextInputEvent.delete_to_line_start, shifted_command_backspace.?);
+    } else {
+        try std.testing.expect(shifted_command_backspace == null);
+    }
 
     const folded_control_backspace = (WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .super = true, .control = true } }).textEditEvent();
     if (comptime @import("builtin").os.tag == .macos) {

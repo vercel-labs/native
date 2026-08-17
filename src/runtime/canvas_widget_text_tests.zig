@@ -1401,6 +1401,57 @@ test "single-line history replay restores exact retained bytes" {
     try std.testing.expect(harness.runtime.views[0].canvasWidgetTextHistoryAvailability(2).can_redo);
 }
 
+test "macOS Command Backspace treats model-provided newlines as single-line presentation bytes" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-input-command-backspace-raw-newline", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 100),
+    });
+
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{canvas.Widget{
+        .id = 2,
+        .kind = .input,
+        .frame = geometry.RectF.init(12, 16, 180, 32),
+        .text = "one\ntwo",
+        .text_selection = canvas.TextSelection.collapsed(7),
+    }} }, geometry.RectF.init(0, 0, 240, 100), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].focused = true;
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .command = true, .shift = true },
+    } });
+
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), retained.nodes[1].widget.text_selection.?);
+    try dispatchTextareaHistoryShortcut(harness, app, false);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("one\ntwo", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(7), retained.nodes[1].widget.text_selection.?);
+}
+
 test "textarea history replays newly completed CRLF atomically" {
     const TestApp = struct {
         fn app(self: *@This()) App {

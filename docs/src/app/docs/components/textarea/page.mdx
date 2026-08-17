@@ -5,7 +5,7 @@ import { AttrTable } from "@/components/attr-table";
 
 Multi-line text entry. Like [input](/docs/components/input), `text` and `placeholder` bind from the model and `on-input` names a Msg variant that receives every edit as a text-input event — see [input](/docs/components/input) for the core-side contract in both languages. By default, Enter (and Shift+Enter) inserts a newline; when a textarea carries `on-submit`, submission rides Cmd+Enter on macOS or Ctrl+Enter elsewhere. Chat composers can set `submit-on-enter="true"`: plain Enter then submits, Shift+Enter still inserts a newline, and the primary chord still submits. Give it a definite `width` and `height` (or a `grow`) to size the editing box.
 
-Textarea editing uses the same platform shortcuts as [input](/docs/components/input#editing-keys). On macOS, Command+Backspace deletes from the caret to the beginning of the current hard-newline-delimited line (or deletes the active selection); soft-wrapped visual lines use their logical line start in this first version.
+Textarea editing uses the same platform shortcuts as [input](/docs/components/input#editing-keys). On macOS, Command+Backspace (with or without Shift) deletes from the caret to the beginning of the current hard-newline-delimited line (or deletes the active selection); soft-wrapped visual lines use their logical line start in this first version.
 
 <ComponentPreview name="textarea" alt="A textarea rendered by the engine" />
 

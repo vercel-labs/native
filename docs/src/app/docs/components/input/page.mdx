@@ -45,7 +45,7 @@ pub fn email(model: *const Model) []const u8 {
 
 ## Editing keys
 
-The built-in editor follows the platform keymap in `input`, `text-field`, `search-field`, and `combobox`: Backspace/Delete remove one caret unit, Option+Backspace/Delete on macOS (Ctrl+Backspace/Delete elsewhere) remove one word, and Command+Backspace on macOS deletes from the caret to the beginning of the line. A non-empty selection always wins and is deleted by itself. The semantic edit still arrives through `on-input`, so `applyTextInputEvent` and `TextBuffer` keep controlled fields synchronized and one undo restores the whole deletion.
+The built-in editor follows the platform keymap in `input`, `text-field`, `search-field`, and `combobox`: Backspace/Delete remove one caret unit, Option+Backspace/Delete on macOS (Ctrl+Backspace/Delete elsewhere) remove one word, and Command+Backspace on macOS (with or without Shift) deletes from the caret to the beginning of the field. A non-empty selection always wins and is deleted by itself. The semantic edit still arrives through `on-input`, so `applyTextInputEvent` and `TextBuffer` keep controlled fields synchronized and one undo restores the whole deletion.
 
 ## Search field
 

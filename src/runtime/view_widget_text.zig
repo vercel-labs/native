@@ -412,7 +412,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return .{ .move_caret = .{ .direction = .end, .extend = keyboard.modifiers.shift } };
             }
 
-            return keyboard.textEditEvent();
+            return canvas.widgetKeyboardTextEditEventForWidget(widget, keyboard);
         }
 
         /// Resolve Command/Ctrl+Z against the focused editor's delta

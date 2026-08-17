@@ -80,6 +80,16 @@ test("text reducer deletes to hard line start", () => {
   assert.deepEqual(crlf.selection, { anchor: 5, focus: 5 });
 });
 
+test("text reducer deletes to field start across raw line breaks", () => {
+  const collapsed = apply(state("first\nsecond line", 12), { kind: "delete_to_start" });
+  assert.equal(decoder.decode(collapsed.text), " line");
+  assert.deepEqual(collapsed.selection, { anchor: 0, focus: 0 });
+
+  const selection = apply(state("first\nsecond", 7, 10), { kind: "delete_to_start" });
+  assert.equal(decoder.decode(selection.text), "first\nsnd");
+  assert.deepEqual(selection.selection, { anchor: 7, focus: 7 });
+});
+
 test("text reducer retains exact composition ownership across CRLF", () => {
   const initial = state("a\nb", 1);
   const preview = apply(initial, {

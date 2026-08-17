@@ -106,9 +106,10 @@ pub fn isZeroArgFn(comptime T: type, comptime DeclType: type) bool {
 /// declared-shape predicate below stays std-only. A drift test in
 /// `ui_markup_contract_tests.zig` holds this list equal to the real union.
 pub const text_input_event_tags = [_][]const u8{
-    "insert_text",         "delete_backward",      "delete_forward",     "delete_word_backward",
-    "delete_word_forward", "delete_to_line_start", "clear",              "move_caret",
-    "set_selection",       "set_composition",      "commit_composition", "cancel_composition",
+    "insert_text",         "delete_backward", "delete_forward",       "delete_word_backward",
+    "delete_word_forward", "delete_to_start", "delete_to_line_start", "clear",
+    "move_caret",          "set_selection",   "set_composition",      "commit_composition",
+    "cancel_composition",
 };
 
 /// The caret-direction member vocabulary (`canvas.TextCaretDirection`).
@@ -125,8 +126,8 @@ pub const text_caret_affinity_members = [_][]const u8{
 /// where the emitted module declares its own mirror union (type identity
 /// cannot cross the emission boundary). Matched structurally, by the same
 /// contract everywhere markup resolves `on-input`:
-///   - a tagged union carrying exactly the twelve canvas event tags;
-///   - `insert_text` a bytes payload; the eight verb arms void;
+///   - a tagged union carrying exactly the thirteen canvas event tags;
+///   - `insert_text` a bytes payload; the nine verb arms void;
 ///   - `move_caret` a record of `direction` (an enum with exactly the six
 ///     caret-direction member names) and `extend: bool`;
 ///   - `set_selection` a record of numeric `anchor`/`focus`, optionally

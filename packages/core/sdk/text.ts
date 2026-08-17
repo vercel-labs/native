@@ -56,6 +56,7 @@ export type TextInputEvent =
   | { readonly kind: "delete_forward" }
   | { readonly kind: "delete_word_backward" }
   | { readonly kind: "delete_word_forward" }
+  | { readonly kind: "delete_to_start" }
   | { readonly kind: "delete_to_line_start" }
   | { readonly kind: "clear" }
   | { readonly kind: "move_caret"; readonly move: TextCaretMove }
@@ -424,6 +425,25 @@ function textLineStartOffset(text: Uint8Array, offset: number): number {
   return cursor;
 }
 
+function deleteToStartTextEdit(state: TextEditState, capacity: number): TextEditState | null {
+  const range = activeTextReplaceRange(state);
+  if (!rangeIsCollapsed(range, state.text.length)) {
+    return replaceTextEditRange(state, range, new Uint8Array(0), capacity, null, 0);
+  }
+  const caret = snapTextCaretOffset(state.text, state.selection.focus);
+  if (caret === 0) {
+    return { text: state.text, selection: caretSelectionAt(0, 0), composition: null };
+  }
+  return replaceTextEditRange(
+    state,
+    { start: 0, end: caret },
+    new Uint8Array(0),
+    capacity,
+    null,
+    0,
+  );
+}
+
 function deleteToLineStartTextEdit(state: TextEditState, capacity: number): TextEditState | null {
   const range = activeTextReplaceRange(state);
   if (!rangeIsCollapsed(range, state.text.length)) {
@@ -499,6 +519,8 @@ export function applyTextInputEvent(
       return deleteWordBackwardTextEdit(normalized, capacity);
     case "delete_word_forward":
       return deleteWordForwardTextEdit(normalized, capacity);
+    case "delete_to_start":
+      return deleteToStartTextEdit(normalized, capacity);
     case "delete_to_line_start":
       return deleteToLineStartTextEdit(normalized, capacity);
     case "clear":

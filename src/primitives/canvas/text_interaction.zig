@@ -103,6 +103,7 @@ pub const TextInputEvent = union(enum) {
     delete_forward,
     delete_word_backward,
     delete_word_forward,
+    delete_to_start,
     delete_to_line_start,
     clear,
     move_caret: TextCaretMove,
@@ -137,6 +138,7 @@ pub fn applyTextInputEvent(state: TextEditState, event: TextInputEvent, output: 
         .delete_forward => deleteForwardTextEdit(normalized, output),
         .delete_word_backward => deleteWordBackwardTextEdit(normalized, output),
         .delete_word_forward => deleteWordForwardTextEdit(normalized, output),
+        .delete_to_start => deleteToStartTextEdit(normalized, output),
         .delete_to_line_start => deleteToLineStartTextEdit(normalized, output),
         .clear => .{
             .text = "",
@@ -251,6 +253,15 @@ fn deleteWordForwardTextEdit(state: TextEditState, output: []u8) Error!TextEditS
     const caret = snapTextCaretOffset(state.text, state.selection.focus);
     if (caret >= state.text.len) return .{ .text = state.text, .selection = TextSelection.collapsed(state.text.len), .composition = null };
     return replaceTextEditRange(state, TextRange.init(caret, nextTextWordOffset(state.text, caret)), "", output, null, 0);
+}
+
+fn deleteToStartTextEdit(state: TextEditState, output: []u8) Error!TextEditState {
+    const range = activeTextReplaceRange(state);
+    if (!range.isCollapsed(state.text.len)) return replaceTextEditRange(state, range, "", output, null, 0);
+
+    const caret = snapTextCaretOffset(state.text, state.selection.focus);
+    if (caret == 0) return .{ .text = state.text, .selection = TextSelection.collapsed(0), .composition = null };
+    return replaceTextEditRange(state, TextRange.init(0, caret), "", output, null, 0);
 }
 
 fn deleteToLineStartTextEdit(state: TextEditState, output: []u8) Error!TextEditState {

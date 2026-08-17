@@ -134,9 +134,10 @@ pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescript
 /// could journal a wider value the old feed paths accepted, which
 /// would now be misreported as damage instead of refusing as a
 /// different generation. Epoch 6: macOS Command+Backspace gained its
-/// platform text-editor meaning (delete to hard line start). The raw
-/// gpu-surface key record is byte-identical, but replay now derives a
-/// text edit where older builds derived none.
+/// platform text-editor meaning (delete to field start in single-line
+/// editors, or hard line start in textareas). The raw gpu-surface key record
+/// is byte-identical, but replay now derives a text edit where older builds
+/// derived none.
 pub const format_semantic_epoch: u32 = 6;
 
 /// The canonical description `format_fingerprint` hashes: everything
@@ -1616,7 +1617,8 @@ test "event codec round-trips every payload variant" {
     }
     {
         // Command+Backspace journals as the raw platform key chord; replay
-        // re-derives the semantic delete_to_line_start edit from it.
+        // re-derives the semantic delete_to_start/delete_to_line_start edit
+        // from the focused widget kind.
         const decoded = try roundTripEvent(.{ .gpu_surface_input = .{
             .label = "editor-canvas",
             .kind = .key_down,

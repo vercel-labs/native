@@ -596,9 +596,19 @@ fn widgetKeyboardLineDeleteTextEditEventForPlatform(comptime os_tag: @TypeOf(bui
     // Textareas deliberately use the hard newline boundary in v1; visual
     // soft-wrap deletion can layer on runtime geometry in a follow-up.
     if (comptime os_tag != .macos) return null;
-    if (!event.modifiers.super or event.modifiers.control or event.modifiers.alt or event.modifiers.shift) return null;
+    if (!event.modifiers.super or event.modifiers.control or event.modifiers.alt) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_to_line_start;
     return null;
+}
+
+/// Resolve the generic keyboard vocabulary against a concrete editor kind.
+/// A single-line field presents model-provided line breaks as spaces, so its
+/// Command+Backspace target is always offset 0; a textarea keeps the hard-line
+/// boundary carried by `.delete_to_line_start`.
+pub fn widgetKeyboardTextEditEventForWidget(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
+    const edit = event.textEditEvent() orelse return null;
+    if (edit == .delete_to_line_start and widgetKindSingleLineTextEntry(widget.kind)) return .delete_to_start;
+    return edit;
 }
 
 fn widgetKeyboardSelectAllTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
@@ -782,7 +792,10 @@ test "line delete is macOS-only and folded Ctrl-primary remains word delete else
         .key = "backspace",
         .modifiers = .{ .super = true, .shift = true },
     };
-    try std.testing.expect(widgetKeyboardLineDeleteTextEditEventForPlatform(.macos, shifted_command_backspace) == null);
+    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardLineDeleteTextEditEventForPlatform(.macos, shifted_command_backspace).?);
+
+    try std.testing.expectEqual(TextInputEvent.delete_to_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .input }, command_backspace).?);
+    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .textarea }, command_backspace).?);
 }
 
 /// The arrow keys that open a closed select/combobox trigger's picker
