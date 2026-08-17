@@ -7590,6 +7590,12 @@ int native_sdk_windows_update_view(Host *host, uint64_t window_id, const char *l
         applyNativeViewFrame(host, view);
         applyNativeChildFrames(host, window_id, view.label);
     }
+    /* A supplied layer is not a CHANGED layer. The shell relayout patches
+     * every view with both a frame and its layer on every WM_SIZE, so
+     * keying the Z-order rebuild off `has_layer` reordered every child of
+     * the window once per view per resize step — measured at ~300
+     * SetWindowPos calls a step, and the dominant cost of a live resize. */
+    const bool layer_changed = has_layer && view.layer != layer;
     if (has_layer) view.layer = layer;
     if (has_visible) view.visible = visible != 0;
     if (has_enabled) view.enabled = enabled != 0;
@@ -7604,7 +7610,7 @@ int native_sdk_windows_update_view(Host *host, uint64_t window_id, const char *l
     bool update_text = has_text || (has_role && !view.explicit_text);
     std::string display_text = has_text ? view.text : nativeViewDisplayText(view);
     if (has_visible || has_enabled || has_role || has_accessibility_label || update_text) applyNativeViewState(view, update_text, display_text);
-    if (has_layer) reorderWindowChildren(host, window_id);
+    if (layer_changed) reorderWindowChildren(host, window_id);
     if (view.kind == kViewGpuSurface && (has_frame || has_layer || has_visible)) {
         auto window = host->windows.find(window_id);
         if (window != host->windows.end() && window->second.transparent) {
