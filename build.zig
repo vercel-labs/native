@@ -97,6 +97,20 @@ test "service archive support matches ScriptC localized object formats" {
     try std.testing.expect(app_build.serviceArchiveSupported(windows_host, native_windows_msvc));
 }
 
+test "root TypeScript markup discovery classification and resolver budgets" {
+    const app_build = @import("build/app.zig");
+    try std.testing.expect(app_build.isRootMarkupSourcePath("components/card.native"));
+    try std.testing.expect(app_build.isRootMarkupSourcePath("feature/nested/panel.native"));
+    try std.testing.expect(!app_build.isRootMarkupSourcePath("app.native"));
+    try std.testing.expect(!app_build.isRootMarkupSourcePath("windows/settings.native"));
+    try std.testing.expect(!app_build.isRootMarkupSourcePath("components/card.ts"));
+
+    try std.testing.expect(app_build.markupSourcePathWithinBudget("a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"));
+    try std.testing.expect(!app_build.markupSourcePathWithinBudget("a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"));
+    try std.testing.expect(app_build.markupSourcePathWithinBudget("a" ** 200));
+    try std.testing.expect(!app_build.markupSourcePathWithinBudget("a" ** 201));
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const host_target = b.graph.host;
@@ -658,6 +672,9 @@ pub fn build(b: *std.Build) void {
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
         const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
+        const markup_components_e2e_step = b.step("test-ts-markup-components-e2e", "Run root component-file compiled, interpreter, automation, and replay coverage");
+        markup_components_e2e_step.dependOn(&markup_e2e_run.step);
+        markup_components_e2e_step.dependOn(&kanban_e2e_run.step);
         ts_services_e2e_step.dependOn(&feed_reader_e2e_run.step);
         ts_services_e2e_step.dependOn(&services_e2e_run.step);
         // The same fixture through the in-process carrier (ServicePool over
@@ -2348,12 +2365,12 @@ pub fn build(b: *std.Build) void {
         \\provenance="$("$cli" automate provenance kanban-canvas "$button_id" 2>/dev/null)"
         \\case "$provenance" in *"authored=markup"*"root=src/app.native"*) ;; *) echo "writeback smoke: button provenance was not markup-authored: $provenance" >&2; exit 1 ;; esac
         \\case "$provenance" in *"node file=src/app.native"*) ;; *) echo "writeback smoke: button provenance named the wrong file: $provenance" >&2; exit 1 ;; esac
-        \\# 2. Loop provenance: the boot view is deliberately self-contained,
-        \\# so a card title reports its node in app.native plus its iteration key.
+        \\# 2. Imported-loop provenance: a card title reports its authored
+        \\# component file plus its iteration key.
         \\card_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Retry failed agent runs".*/\1/p' | head -n 1)"
         \\case "$card_id" in ''|*[!0-9]*) echo "writeback smoke: card text id was missing from the snapshot" >&2; exit 1 ;; esac
         \\card_provenance="$("$cli" automate provenance kanban-canvas "$card_id" 2>/dev/null)"
-        \\case "$card_provenance" in *"node file=src/app.native"*) ;; *) echo "writeback smoke: card provenance named the wrong file: $card_provenance" >&2; exit 1 ;; esac
+        \\case "$card_provenance" in *"node file=src/components/board-column.native"*) ;; *) echo "writeback smoke: card provenance named the wrong file: $card_provenance" >&2; exit 1 ;; esac
         \\case "$card_provenance" in *"keys="*) ;; *) echo "writeback smoke: card provenance missed the iteration key: $card_provenance" >&2; exit 1 ;; esac
         \\# 3. Write-back: flip the Todo heading through the verb; the app's own
         \\# hot-reload watch picks the file change up and repaints.
@@ -3308,9 +3325,17 @@ fn tsCoreE2eArtifact(
     e2e_mod.addImport("native_sdk", desktop_mod);
     e2e_mod.addImport("ts_core_fixture", fixture_mod);
 
-    // The markup battery: the .native view + automation + record/replay
-    // guarantees over the markup fixture's compiled core.
-    const markup_e2e_mod = module(b, target, optimize, "tests/ts-core/markup_e2e_tests.zig");
+    // The markup battery: the imported .native view + automation +
+    // record/replay guarantees over the markup fixture's compiled core.
+    const markup_view_stage = b.addWriteFiles();
+    const markup_view_root = markup_view_stage.addCopyFile(b.path("tests/ts-core/markup_e2e_tests.zig"), "markup_e2e_tests.zig");
+    _ = markup_view_stage.addCopyFile(b.path("tests/ts-core/markup_view.native"), "markup_view.native");
+    _ = markup_view_stage.addCopyFile(b.path("tests/ts-core/components/actions.native"), "components/actions.native");
+    const markup_e2e_mod = b.createModule(.{
+        .root_source_file = markup_view_root,
+        .target = target,
+        .optimize = optimize,
+    });
     markup_e2e_mod.addImport("native_sdk", desktop_mod);
     markup_e2e_mod.addImport("ts_markup_fixture", markup_fixture_mod);
 
@@ -3326,6 +3351,7 @@ fn tsCoreE2eArtifact(
     const kanban_stage = b.addWriteFiles();
     const kanban_root = kanban_stage.addCopyFile(b.path("tests/ts-core/kanban_e2e_tests.zig"), "kanban_e2e_tests.zig");
     _ = kanban_stage.addCopyFile(b.path("examples/kanban/src/app.native"), "app.native");
+    _ = kanban_stage.addCopyFile(b.path("examples/kanban/src/components/board-column.native"), "components/board-column.native");
     const kanban_mod = b.createModule(.{
         .root_source_file = kanban_root,
         .target = target,

@@ -38,6 +38,7 @@ const manifest = @import("app_manifest_zon");
 pub const core = @import("core.zig");
 const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
+const app_sources = @import("app_sources.zig");
 
 const Adapter = native_sdk.TsUiApp(core);
 
@@ -97,7 +98,7 @@ pub fn mobileOptions() Adapter.Options {
         .name = manifest.name,
         .scene = mobile_scene,
         .canvas_label = native_sdk.embed.mobile_gpu_surface_label,
-        .markup = .{ .source = app_markup },
+        .markup = .{ .source = app_markup, .sources = &app_sources.sources },
         // app.zon's theme pack and one-accent override, same as desktop.
         .theme = comptime manifestThemePack(),
         .theme_accent = comptime manifestThemeAccent(),

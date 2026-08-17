@@ -2235,6 +2235,14 @@ const watch_import_parts_markup_v2 =
     \\</template>
 ;
 
+const watch_nested_import_root_markup =
+    \\<import src="components/actions.native"/>
+    \\<column gap="8" padding="12">
+    \\  <text>Count {count}</text>
+    \\  <use template="actions" />
+    \\</column>
+;
+
 test "the markup watch reloads when an IMPORTED file changes on disk" {
     const io = std.testing.io;
     const watch_path = ".zig-cache/ui-app-markup-watch-import-test.native";
@@ -2309,26 +2317,27 @@ test "the markup watch reloads when an IMPORTED file changes on disk" {
 }
 
 const watch_import_sources = [_]canvas.ui_markup.SourceFile{
-    .{ .path = "ui-app-markup-watch-import-baseline.native", .source = watch_import_root_markup },
-    .{ .path = "ui-app-markup-watch-parts.native", .source = watch_import_parts_markup },
+    .{ .path = "app.native", .source = watch_nested_import_root_markup },
+    .{ .path = "components/actions.native", .source = watch_import_parts_markup },
 };
 
 const CompiledImportCounterView = canvas.CompiledMarkupImports(
     CounterModel,
     CounterMsg,
-    "ui-app-markup-watch-import-baseline.native",
+    "app.native",
     &watch_import_sources,
 );
 
 test "with imports the compiled view stays the baseline until the watched closure changes" {
     const io = std.testing.io;
-    const watch_path = ".zig-cache/ui-app-markup-watch-import-baseline.native";
-    const parts_path = ".zig-cache/ui-app-markup-watch-parts.native";
+    const watch_root = ".zig-cache/ui-app-markup-watch-root";
+    const watch_path = watch_root ++ "/app.native";
+    const parts_path = watch_root ++ "/components/actions.native";
     const cwd = std.Io.Dir.cwd();
-    try cwd.writeFile(io, .{ .sub_path = watch_path, .data = watch_import_root_markup });
-    defer cwd.deleteFile(io, watch_path) catch {};
+    try cwd.createDirPath(io, watch_root ++ "/components");
+    defer cwd.deleteTree(io, watch_root) catch {};
+    try cwd.writeFile(io, .{ .sub_path = watch_path, .data = watch_nested_import_root_markup });
     try cwd.writeFile(io, .{ .sub_path = parts_path, .data = watch_import_parts_markup });
-    defer cwd.deleteFile(io, parts_path) catch {};
 
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
@@ -2337,7 +2346,7 @@ test "with imports the compiled view stays the baseline until the watched closur
     var options = markupCounterOptions();
     options.view = CompiledImportCounterView.build;
     options.markup = .{
-        .source = watch_import_root_markup,
+        .source = watch_nested_import_root_markup,
         .sources = &watch_import_sources,
         .watch_path = watch_path,
         .io = io,

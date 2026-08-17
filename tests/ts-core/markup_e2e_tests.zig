@@ -34,7 +34,11 @@ const App = Adapter.App;
 const Bridge = Adapter.Host;
 
 const board_markup = @embedFile("markup_view.native");
-const CompiledBoardView = canvas.CompiledMarkupView(board.Model, board.Msg, board_markup);
+const board_markup_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "markup_view.native", .source = board_markup },
+    .{ .path = "components/actions.native", .source = @embedFile("components/actions.native") },
+};
+const CompiledBoardView = canvas.CompiledMarkupImports(board.Model, board.Msg, "markup_view.native", &board_markup_sources);
 
 const canvas_label = "ts-markup-canvas";
 
@@ -66,6 +70,7 @@ fn boardOptions() App.Options {
         // The comptime-compiled engine over the EMITTED model — markup
         // is the whole view tier of this app.
         .view = CompiledBoardView.build,
+        .markup = .{ .source = board_markup, .sources = &board_markup_sources },
         .on_command = boardCommand,
     };
 }
@@ -355,7 +360,10 @@ test "the runtime markup interpreter builds the emitted model exactly like the c
     };
 
     const BoardUi = canvas.Ui(board.Msg);
-    var interpreter_view = try canvas.MarkupView(board.Model, board.Msg).init(arena, board_markup);
+    var source_loader = canvas.ui_markup.SourceSetLoader{ .set = &board_markup_sources };
+    var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+    const document = try canvas.ui_markup.resolveImports(arena, "markup_view.native", board_markup, source_loader.loader(), &diagnostic);
+    var interpreter_view = canvas.MarkupView(board.Model, board.Msg).fromDocument(document);
     var interpreter_ui = BoardUi.init(arena);
     const interpreted = try interpreter_ui.finalize(try interpreter_view.build(&interpreter_ui, &model));
     var compiled_ui = BoardUi.init(arena);

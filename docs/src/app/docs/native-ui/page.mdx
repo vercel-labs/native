@@ -161,15 +161,7 @@ Templates become shared components through `<import>`, which goes at the very to
 
 Paths resolve relative to the importing file, subdirectories and transitive imports included, and everything must stay under the markup root (the root view file's directory) — absolute paths and escapes are rejected. An imported file defines templates only: it is a component file, valid on its own for `native markup check`, and a view root inside one is an error. Importing splices the file's templates (and transitively its imports') before yours, in import order — exactly as if pasted at the import site — so the define-before-use rule is the only ordering rule to learn. Cycles are reported with the cycle path spelled out, and a template name defined twice is an error naming both definition sites: imports never shadow silently.
 
-Each engine resolves imports through its own source access. The runtime interpreter re-resolves from disk on hot reload, so `native dev` picks up edits to imported files too. The compiled engine takes an embedded source set — one `@embedFile` entry per file — which also feeds the app's markup options, so both engines see the same document:
-
-```zig
-pub const board_markup_files = [_]canvas.ui_markup.SourceFile{
-    .{ .path = "board.native", .source = @embedFile("board.native") },
-    .{ .path = "components/board-column.native", .source = @embedFile("components/board-column.native") },
-};
-pub const CompiledBoardView = canvas.CompiledMarkupImports(Model, Msg, "board.native", &board_markup_files);
-```
+In a default TypeScript app, `src/app.native` may import any component file under `src/`. The generated build discovers and embeds every other `.native` file for the runtime and compiled engines, including mobile builds. `native dev` re-resolves the imported closure from disk, so editing a component file refreshes the view without restarting. Secondary-window roots keep their narrower `src/windows/` import root.
 
 A template can also take markup children. The body marks the insertion point with a single `<slot/>`, and the use site's children build in the consumer's scope — they see the model paths and loop variables where the `<use>` is written — then land at the slot's position:
 
@@ -484,7 +476,7 @@ For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std
 
 ## Secondary windows
 
-In a default TypeScript app, export `windows(model): readonly WindowDescriptor[]` and put each possible window's markup at `src/windows/<label>.native`; the generated launcher compiles those files, maps descriptor labels to them, and includes shared components they import from nested paths under `src/windows/`. Construct descriptors with `windowDescriptor`. `closePolicy: "quit"` routes `onCloseCommand` through `commandMsg`; `"hide"` retains the window and dispatches no close command. `titlebar` includes `"chromeless"` for fully skinned windows. `examples/system-monitor-ts` is the complete default-path reference.
+In a default TypeScript app, export `windows(model): readonly WindowDescriptor[]` and put each possible window's markup at `src/windows/<label>.native`; the generated launcher compiles those files, maps descriptor labels to them, and includes components they import from nested paths under `src/windows/`. The main `src/app.native` view can import components anywhere under `src/`. Construct descriptors with `windowDescriptor`. `closePolicy: "quit"` routes `onCloseCommand` through `commandMsg`; `"hide"` retains the window and dispatches no close command. `titlebar` includes `"chromeless"` for fully skinned windows. `examples/system-monitor-ts` is the complete default-path reference.
 
 In Zig cores and custom wiring, windows are model-declared exactly like the tray: `Options.windows_fn` returns the window descriptors that should exist right now (presence IS liveness), and `Options.window_view` builds each declared window's whole canvas tree, keyed by the descriptor's window label. After every dispatched Msg the runtime reconciles: windows the model started declaring are created (a source-less native window wearing one `gpu_surface` view with the descriptor's `canvas_label`, inheriting the main canvas's gpu options), windows it stopped declaring close, and every open window's view rebuilds from the same model — a theme picked in the settings window restyles the main window on the same dispatch. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring a window to really close it and release its retained views.
 

@@ -1,7 +1,6 @@
+<import src="components/board-column.native"/>
 <!-- The TypeScript Kanban view. Native file drops are handled by core.ts's
-     dropMsg channel; every dropped basename becomes a Todo card. Keep this
-     initial document self-contained: generated TS wiring embeds app.native
-     as the boot view, before the development disk watcher is armed. -->
+     dropMsg channel; every dropped basename becomes a Todo card. -->
 <column background="background">
   <!-- The header IS the titlebar (tall hidden-inset chrome). chromeMsg
        keeps its controls clear of the traffic lights. -->
@@ -11,77 +10,23 @@
     <button size="icon" variant="ghost" icon="plus" label="Add card" on-press="add"></button>
   </row>
   <row grow="1" gap="12" padding="16">
-    <column grow="1" gap="8" padding="10" label="Todo">
+    <use template="board-column" title="Todo">
       <text foreground="text_muted">Todo</text>
       <scroll grow="1" value="{todoScroll}" on-scroll="todo_scrolled" label="Todo cards">
-        <column gap="8">
-          <for each="todoCards" key="id" as="c">
-            <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
-              <column grow="1" gap="8">
-                <text>{c.title}</text>
-                <row height="24" gap="6" cross="center">
-                  <text size="sm" foreground="text_muted">NAT-{c.ticketNumber}</text>
-                  <spacer grow="1" />
-                  <if test="{c.assignee == 'openai'}">
-                    <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
-                  </if>
-                  <else>
-                    <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
-                  </else>
-                </row>
-              </column>
-            </row>
-          </for>
-        </column>
+        <use template="board-card-list" cards="{todoCards}" />
       </scroll>
-    </column>
-    <column grow="1" gap="8" padding="10" label="Doing">
+    </use>
+    <use template="board-column" title="Doing">
       <text foreground="text_muted">Doing</text>
       <scroll grow="1" value="{doingScroll}" on-scroll="doing_scrolled" label="Doing cards">
-        <column gap="8">
-          <for each="doingCards" key="id" as="c">
-            <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
-              <column grow="1" gap="8">
-                <text>{c.title}</text>
-                <row height="24" gap="6" cross="center">
-                  <text size="sm" foreground="text_muted">NAT-{c.ticketNumber}</text>
-                  <spacer grow="1" />
-                  <if test="{c.assignee == 'openai'}">
-                    <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
-                  </if>
-                  <else>
-                    <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
-                  </else>
-                </row>
-              </column>
-            </row>
-          </for>
-        </column>
+        <use template="board-card-list" cards="{doingCards}" />
       </scroll>
-    </column>
-    <column grow="1" gap="8" padding="10" label="Done">
+    </use>
+    <use template="board-column" title="Done">
       <text foreground="text_muted">Done</text>
       <scroll grow="1" value="{doneScroll}" on-scroll="done_scrolled" label="Done cards">
-        <column gap="8">
-          <for each="doneCards" key="id" as="c">
-            <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
-              <column grow="1" gap="8">
-                <text>{c.title}</text>
-                <row height="24" gap="6" cross="center">
-                  <text size="sm" foreground="text_muted">NAT-{c.ticketNumber}</text>
-                  <spacer grow="1" />
-                  <if test="{c.assignee == 'openai'}">
-                    <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
-                  </if>
-                  <else>
-                    <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
-                  </else>
-                </row>
-              </column>
-            </row>
-          </for>
-        </column>
+        <use template="board-card-list" cards="{doneCards}" />
       </scroll>
-    </column>
+    </use>
   </row>
 </column>

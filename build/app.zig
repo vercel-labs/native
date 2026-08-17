@@ -81,7 +81,7 @@ const TsWindowView = struct {
     staged_path: []const u8,
 };
 
-const TsWindowSource = struct {
+const TsMarkupSource = struct {
     set_path: []const u8,
     source_path: []const u8,
     staged_path: []const u8,
@@ -89,8 +89,44 @@ const TsWindowSource = struct {
 
 const TsWindowViews = struct {
     views: []const TsWindowView,
-    sources: []const TsWindowSource,
+    sources: []const TsMarkupSource,
 };
+
+const TsAppMarkupSources = struct {
+    /// Non-root, non-window files discovered under src/. Window files are
+    /// staged by the existing secondary-window registry and must not be
+    /// copied a second time.
+    files: []const TsMarkupSource,
+    /// The root view's embedded resolver set. Its path keys are relative to
+    /// src/, matching the root disk watcher; existing window sources are
+    /// projected under their staged `windows/...` names.
+    sources: []const TsMarkupSource,
+};
+
+const max_markup_source_path_len = 200;
+const max_markup_source_path_segments = 24;
+
+pub fn markupSourcePathWithinBudget(path: []const u8) bool {
+    var segments: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next() != null) segments += 1;
+    return path.len <= max_markup_source_path_len and segments <= max_markup_source_path_segments;
+}
+
+fn validateMarkupSourcePath(path: []const u8) void {
+    if (!markupSourcePathWithinBudget(path)) {
+        std.debug.panic(
+            "\nTypeScript markup source path `{s}` exceeds the import resolver budget: keep every src/-relative .native path at most {d} bytes and {d} segments\n",
+            .{ path, max_markup_source_path_len, max_markup_source_path_segments },
+        );
+    }
+}
+
+pub fn isRootMarkupSourcePath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".native") and
+        !std.mem.eql(u8, path, "app.native") and
+        !std.mem.startsWith(u8, path, "windows/");
+}
 
 /// Default TypeScript secondary-window views are statically discovered under
 /// `src/windows/`: `settings.native` serves descriptor label `settings`.
@@ -104,7 +140,7 @@ fn collectTsWindowViews(b: *std.Build, app_root: []const u8) TsWindowViews {
     var walker = dir.walk(b.allocator) catch return .{ .views = &.{}, .sources = &.{} };
     defer walker.deinit();
     var views: std.ArrayList(TsWindowView) = .empty;
-    var sources: std.ArrayList(TsWindowSource) = .empty;
+    var sources: std.ArrayList(TsMarkupSource) = .empty;
     while (walker.next(b.graph.io) catch null) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".native")) continue;
         const normalized_path = b.dupe(entry.path);
@@ -141,12 +177,83 @@ fn collectTsWindowViews(b: *std.Build, app_root: []const u8) TsWindowViews {
     }.than;
     std.mem.sort(TsWindowView, views.items, {}, less);
     const source_less = struct {
-        fn than(_: void, a: TsWindowSource, z: TsWindowSource) bool {
+        fn than(_: void, a: TsMarkupSource, z: TsMarkupSource) bool {
             return std.mem.order(u8, a.set_path, z.set_path) == .lt;
         }
     }.than;
-    std.mem.sort(TsWindowSource, sources.items, {}, source_less);
+    std.mem.sort(TsMarkupSource, sources.items, {}, source_less);
     return .{ .views = views.items, .sources = sources.items };
+}
+
+/// The root TypeScript view resolves imports from every `.native` file under
+/// `src/` except itself. Window files already come from collectTsWindowViews;
+/// append those under `windows/...` keys so this set matches the root disk
+/// resolver without changing the separate window resolver root.
+fn collectAppMarkupSources(b: *std.Build, app_root: []const u8, window_views: TsWindowViews) TsAppMarkupSources {
+    const src_path = appPath(b, app_root, "src");
+    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch
+        return .{ .files = &.{}, .sources = &.{} };
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return .{ .files = &.{}, .sources = &.{} };
+    defer walker.deinit();
+
+    var files: std.ArrayList(TsMarkupSource) = .empty;
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".native")) continue;
+        const normalized_path = b.dupe(entry.path);
+        for (normalized_path) |*char| {
+            if (char.* == '\\') char.* = '/';
+        }
+        if (!isRootMarkupSourcePath(normalized_path)) continue;
+        validateMarkupSourcePath(normalized_path);
+        files.append(b.allocator, .{
+            .set_path = normalized_path,
+            .source_path = b.fmt("src/{s}", .{normalized_path}),
+            .staged_path = normalized_path,
+        }) catch @panic("OOM");
+    }
+
+    const less = struct {
+        fn than(_: void, a: TsMarkupSource, z: TsMarkupSource) bool {
+            return std.mem.order(u8, a.set_path, z.set_path) == .lt;
+        }
+    }.than;
+    std.mem.sort(TsMarkupSource, files.items, {}, less);
+
+    var sources: std.ArrayList(TsMarkupSource) = .empty;
+    sources.ensureTotalCapacity(b.allocator, files.items.len + window_views.sources.len) catch @panic("OOM");
+    sources.appendSliceAssumeCapacity(files.items);
+    for (window_views.sources) |source| {
+        validateMarkupSourcePath(source.staged_path);
+        sources.appendAssumeCapacity(.{
+            .set_path = source.staged_path,
+            .source_path = source.source_path,
+            .staged_path = source.staged_path,
+        });
+    }
+    std.mem.sort(TsMarkupSource, sources.items, {}, less);
+    return .{ .files = files.items, .sources = sources.items };
+}
+
+fn tsAppMarkupSourcesSource(b: *std.Build, registry: TsAppMarkupSources) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(b.allocator,
+        \\//! Generated by build/app.zig from src/**/*.native.
+        \\const native_sdk = @import("native_sdk");
+        \\const canvas = native_sdk.canvas;
+        \\pub const sources = [_]canvas.ui_markup.SourceFile{
+        \\
+    ) catch @panic("OOM");
+    for (registry.sources) |source| {
+        const line = std.fmt.allocPrint(
+            b.allocator,
+            "    .{{ .path = \"{f}\", .source = @embedFile(\"{f}\") }},\n",
+            .{ std.zig.fmtString(source.set_path), std.zig.fmtString(source.staged_path) },
+        ) catch @panic("OOM");
+        out.appendSlice(b.allocator, line) catch @panic("OOM");
+    }
+    out.appendSlice(b.allocator, "};\n") catch @panic("OOM");
+    return out.items;
 }
 
 fn tsWindowRegistrySource(b: *std.Build, registry: TsWindowViews) []const u8 {
@@ -757,6 +864,7 @@ fn tsCoreStage(
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const window_views = collectTsWindowViews(b, app_root);
+    const app_markup_sources = collectAppMarkupSources(b, app_root, window_views);
     const has_services = appHasServiceFiles(b, app_root);
     if (!scriptcCompileSupported(b.graph.host.result, target)) {
         panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
@@ -1052,9 +1160,13 @@ fn tsCoreStage(
     , .{ service_carrier, service_pool_workers }));
     _ = staged.addCopyFile(migrations_zig, "migrations.zig");
     _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
+    for (app_markup_sources.files) |source| {
+        _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
+    }
     for (window_views.sources) |source| {
         _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
     }
+    _ = staged.add("app_sources.zig", tsAppMarkupSourcesSource(b, app_markup_sources));
     _ = staged.add("window_views.zig", tsWindowRegistrySource(b, window_views));
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
     // The mobile wiring stages beside the desktop entry: same mirror, same

@@ -65,6 +65,7 @@ pub const core = @import("core.zig");
 const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
 const relational_migrations = @import("migrations.zig");
+const app_sources = @import("app_sources.zig");
 const window_views = @import("window_views.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
@@ -90,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
+        .markup = .{ .source = app_markup, .sources = &app_sources.sources, .watch_path = "src/app.native", .io = init.io },
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no

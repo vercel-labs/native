@@ -1,5 +1,5 @@
 //! End-to-end proof for examples/kanban: the real TypeScript core and
-//! shipping self-contained markup driven through TsUiApp. Native file drops
+//! shipping component-file markup driven through TsUiApp. Native file drops
 //! cross the platform/runtime/adapter boundary, add every basename to Todo, and
 //! the resulting cards keep their global-key identity while a live
 //! blank insertion slot reflows either column with retained drag motion and
@@ -16,7 +16,11 @@ const App = Adapter.App;
 const Bridge = Adapter.Host;
 
 const app_markup = @embedFile("app.native");
-const CompiledAppView = canvas.CompiledMarkupView(core.Model, core.Msg, app_markup);
+const app_markup_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "app.native", .source = app_markup },
+    .{ .path = "components/board-column.native", .source = @embedFile("components/board-column.native") },
+};
+const CompiledAppView = canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
 
 const canvas_label = "kanban-canvas";
 const app_views = [_]native_sdk.ShellView{
@@ -37,6 +41,14 @@ const Harness = struct {
     app: native_sdk.App,
 
     fn create() !*Harness {
+        return createConfigured(null);
+    }
+
+    fn createAutomated(directory: []const u8) !*Harness {
+        return createConfigured(directory);
+    }
+
+    fn createConfigured(automation_directory: ?[]const u8) !*Harness {
         const self = try std.testing.allocator.create(Harness);
         errdefer std.testing.allocator.destroy(self);
         self.harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
@@ -44,6 +56,9 @@ const Harness = struct {
         });
         errdefer self.harness.destroy(std.testing.allocator);
         self.harness.null_platform.gpu_surfaces = true;
+        if (automation_directory) |directory| {
+            self.harness.runtime.options.automation = native_sdk.automation.Server.init(std.testing.io, directory, "Kanban");
+        }
         self.app_state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.app_state);
         self.app_state.* = Adapter.init(std.heap.page_allocator, .{}, .{
@@ -51,6 +66,7 @@ const Harness = struct {
             .scene = app_scene,
             .canvas_label = canvas_label,
             .view = CompiledAppView.build,
+            .markup = .{ .source = app_markup, .sources = &app_markup_sources },
         });
         self.app = self.app_state.app();
         try self.harness.start(self.app);
@@ -136,6 +152,21 @@ const Harness = struct {
         try self.harness.runtime.dispatchAutomationCommand(self.app, command);
     }
 };
+
+test "automation force reload resolves the root component source set" {
+    const directory = ".zig-cache/tmp/kanban-component-automation";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, directory) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, directory) catch {};
+
+    const h = try Harness.createAutomated(directory);
+    defer h.destroy();
+
+    // Automation asks UiApp to take the interpreter path on the first build.
+    // The imported board templates must resolve from the same embedded set
+    // the release-compiled view uses.
+    try std.testing.expect(h.app_state.markup_view != null);
+    try std.testing.expect(h.hasText("Retry failed agent runs"));
+}
 
 fn findTextIn(widget: canvas.Widget, text: []const u8) bool {
     if (std.mem.indexOf(u8, widget.text, text) != null) return true;
