@@ -20,9 +20,9 @@
 //!                    path with no `cachePath` in the core.
 //!   update loop      the transpiled core through `TsUiApp(core)` — the
 //!                    committed TS model IS the app model.
-//!   view             app.native over the model's own field names (the
-//!                    emitted Zig keeps the TS spellings), hot-reloaded
-//!                    from src/app.native in Debug.
+//!   view             app.native and its imported component closure,
+//!                    compiled at comptime over the model's own field
+//!                    names; Debug also hot-reloads from src/app.native.
 //!   menus/shortcuts  a core exporting `commandMsg(name): Msg | null`
 //!                    receives command events (menus, shortcuts, chrome
 //!                    tabs, status-item rows) as ordinary Msgs; without
@@ -58,6 +58,7 @@
 //! regenerates from the SDK on every build.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const manifest = @import("app_manifest_zon");
@@ -75,12 +76,17 @@ pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 pub const Model = core.Model;
 pub const Msg = core.Msg;
 
-const Adapter = native_sdk.TsUiApp(core);
+const dev = builtin.mode == .Debug;
+const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev });
 const App = Adapter.App;
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
 const canvas_label = native_sdk.app_manifest.firstGpuSurfaceLabel(shell_scene);
 pub const app_markup = @embedFile("app.native");
+const app_markup_sources = [_]native_sdk.canvas.ui_markup.SourceFile{
+    .{ .path = "app.native", .source = app_markup },
+} ++ app_sources.sources;
+const CompiledAppView = native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
@@ -91,7 +97,8 @@ pub fn main(init: std.process.Init) !void {
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .markup = .{ .source = app_markup, .sources = &app_sources.sources, .watch_path = "src/app.native", .io = init.io },
+        .view = CompiledAppView.build,
+        .markup = if (dev) .{ .source = app_markup, .sources = &app_markup_sources, .watch_path = "src/app.native", .io = init.io } else null,
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no

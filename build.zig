@@ -111,6 +111,19 @@ test "root TypeScript markup discovery classification and resolver budgets" {
     try std.testing.expect(!app_build.markupSourcePathWithinBudget("a" ** 201));
 }
 
+test "generated TypeScript runners install the compiled root markup view" {
+    const desktop = @embedFile("src/app_runner/ts_core_main.zig");
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, ".view = CompiledAppView.build") != null);
+
+    const mobile = @embedFile("src/app_runner/ts_core_mobile.zig");
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "TsUiAppWithFeatures(core, .{ .runtime_markup = false })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, ".view = CompiledAppView.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, ".markup =") == null);
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const host_target = b.graph.host;
@@ -404,6 +417,13 @@ pub fn build(b: *std.Build) void {
     const evals_cmdview_mod = module(b, target, optimize, "evals/harness-lib/cmdview.zig");
     const evals_cmdview_tests = testArtifact(b, evals_cmdview_mod);
     const build_graph_tests = testArtifact(b, module(b, host_target, optimize, "build.zig"));
+    const invalid_import_compile_mod = module(b, target, optimize, "tests/ts-core/invalid_import_compile.zig");
+    invalid_import_compile_mod.addImport("canvas", canvas_mod);
+    const invalid_import_compile = b.addObject(.{
+        .name = "ts-invalid-import-compile",
+        .root_module = invalid_import_compile_mod,
+    });
+    invalid_import_compile.expect_errors = .{ .contains = "imported files define templates only - this file has a view root element; move the view to its own file and import just the templates" };
 
     // `native version` names the commit the binary was built from, so
     // binary/framework skew ("your native binary may be stale") is a
@@ -628,6 +648,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    test_step.dependOn(&invalid_import_compile.step);
     test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(assets_tests).step);
@@ -675,6 +696,7 @@ pub fn build(b: *std.Build) void {
         const markup_components_e2e_step = b.step("test-ts-markup-components-e2e", "Run root component-file compiled, interpreter, automation, and replay coverage");
         markup_components_e2e_step.dependOn(&markup_e2e_run.step);
         markup_components_e2e_step.dependOn(&kanban_e2e_run.step);
+        markup_components_e2e_step.dependOn(&invalid_import_compile.step);
         ts_services_e2e_step.dependOn(&feed_reader_e2e_run.step);
         ts_services_e2e_step.dependOn(&services_e2e_run.step);
         // The same fixture through the in-process carrier (ServicePool over

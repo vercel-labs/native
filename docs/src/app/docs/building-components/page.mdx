@@ -95,7 +95,7 @@ This is the container-component pattern: the template owns the frame, the caller
 
 Templates own structure, not state. Keep state transitions in `update`, expose reusable derived values as exported TypeScript helpers, and bind those values into the component. A component never runs an app callback while the view builds.
 
-When the closed markup vocabulary does not expose a lower-level engine capability yet, there is no app-side escape element or required Zig file. Use the nearest built-in composition and track the missing grammar admission. Toolkit extensions remain an SDK implementation concern.
+When the closed markup vocabulary does not expose a lower-level engine capability, keep the TypeScript core and extend only the view tier with a Zig view function over `canvas.Ui`. This is the app-side escape hatch for shapes such as `data_grid` cell renderers or lower-level floating surfaces; it is toolkit-extension work, not a reason to migrate the app's core. Prefer markup while its grammar covers the component, because templates keep `native check` and hot reload automatic.
 
 ## Theming your component
 
@@ -103,7 +103,7 @@ Your component themes the same way the built-ins do: through the token system, n
 
 In markup, the style attributes (`background`, `foreground`, `border-color`, `radius`, ...) are token **references** — the stat card above says `background="surface"`, not a hex value. References resolve against the app's live tokens on every rebuild, so the card follows dark mode, a theme-pack switch, and every override with zero component code. Unknown token names are check/compile errors.
 
-State washes follow the built-in controls' behavior. Markup components customize their token references and compose the appropriate control kinds; app components do not add a second per-state styling channel.
+State washes follow the built-in controls' behavior. Markup components customize their token references and compose the appropriate control kinds. A Zig view extension may use `ElementOptions.style` for a state-specific visual the token vocabulary does not expose; keep that exception local to the extension.
 
 And the parts of your component that are built-in controls stay themed for free: the `<button>` inside the empty-state template wears `controls.button_primary` from the active theme, the `text` leaves read the typography rungs, the focus ring follows the token geometry. A template composes primitives, so it inherits the whole register through them — retheme the app and your components move with it. That inheritance is the reason to reach for tokens before props: a component that takes a `color` arg has opted out of every future theme.
 
@@ -124,4 +124,4 @@ Three moves, in order of preference:
 
 **Eject it.** When you need to own a composite's *shape* — reorder its parts, change its structure, grow it a feature — `native eject component <name>` writes the library composite's canonical source into `src/components/`, and from then on it is your code: edit freely, SDK updates never touch it. Markup templates are reached through `<use template="...">`, never a new element name, so the built-in element keeps working at unmigrated call sites. Ejecting twice errors instead of overwriting your edits. Engine controls (buttons, text fields, tabs, ...) are deliberately not on the menu: their behavior lives in the runtime, and the way to change them is the token system, not a fork.
 
-**Build it.** When the library has no shape for it, compose one from markup primitives — the stat card and empty-state above. Your component then themes, tests, and automates exactly like a built-in, because it is made of the same parts.
+**Build it.** When the library has no shape for it, compose one from markup primitives — the stat card and empty-state above — or use a Zig view function when the closed markup grammar cannot express the shape. Your component then themes, tests, and automates through the same widget tree as a built-in.

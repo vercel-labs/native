@@ -194,6 +194,7 @@ pub const ts_core_file_stream_key_base = runtime_ts_core_host.file_stream_key_ba
 
 const runtime_ts_ui_app = @import("ts_ui_app.zig");
 pub const TsUiApp = runtime_ts_ui_app.TsUiApp;
+pub const TsUiAppWithFeatures = runtime_ts_ui_app.TsUiAppWithFeatures;
 
 const runtime_session_journal = @import("session_journal.zig");
 const runtime_session_record = @import("session_record.zig");

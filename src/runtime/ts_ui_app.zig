@@ -69,6 +69,10 @@
 //! process contract is the bridge's: one live app per core module (two
 //! apps over one core would share a committed root), and one compiled
 //! archive per process (the fixed-prefix C ABI symbol set).
+//!
+//! Generated launchers use `TsUiAppWithFeatures` to compile the runtime
+//! markup interpreter out of release and mobile artifacts while preserving
+//! `TsUiApp` as the full-featured default for hand wiring and tests.
 
 const std = @import("std");
 const canvas = @import("canvas");
@@ -103,6 +107,13 @@ fn scaledTypeScanQuota(comptime T: type, comptime scans: usize) u32 {
 }
 
 pub fn TsUiApp(comptime core: type) type {
+    return TsUiAppWithFeatures(core, .{});
+}
+
+/// Feature-selectable counterpart used by generated wiring: Debug desktop
+/// apps keep the runtime markup interpreter for hot reload, while release and
+/// mobile apps compile it out after installing the same comptime view.
+pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppFeatures) type {
     return struct {
         /// The effect bridge — shared with any direct `TsCoreHost(core)`
         /// instantiation (comptime memoization), so harnesses can read
@@ -110,7 +121,7 @@ pub fn TsUiApp(comptime core: type) type {
         pub const Host = ts_core_host.TsCoreHost(core);
         pub const Model = core.Model;
         pub const Msg = core.Msg;
-        pub const App = ui_app.UiApp(Model, Msg);
+        pub const App = ui_app.UiAppWithFeatures(Model, Msg, features);
         pub const Options = App.Options;
         pub const Effects = App.Effects;
         pub const Ui = App.Ui;
