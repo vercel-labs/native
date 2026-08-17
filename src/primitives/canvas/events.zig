@@ -794,8 +794,15 @@ test "line delete is macOS-only and folded Ctrl-primary remains word delete else
     };
     try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardLineDeleteTextEditEventForPlatform(.macos, shifted_command_backspace).?);
 
-    try std.testing.expectEqual(TextInputEvent.delete_to_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .input }, command_backspace).?);
-    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .textarea }, command_backspace).?);
+    // Widget-kind resolution is downstream of platform recognition. Stamp
+    // the recognized semantic edit so these assertions stay host-neutral;
+    // the explicit-platform assertions above own the macOS chord mapping.
+    const recognized_line_delete = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .edit = .delete_to_line_start,
+    };
+    try std.testing.expectEqual(TextInputEvent.delete_to_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .input }, recognized_line_delete).?);
+    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .textarea }, recognized_line_delete).?);
 }
 
 /// The arrow keys that open a closed select/combobox trigger's picker
