@@ -10,6 +10,7 @@ const manifest_url_schemes = if (@hasField(@TypeOf(app_manifest), "url_schemes")
 
 const window_width: f32 = 900;
 const window_height: f32 = 620;
+const window_min_width: f32 = 770;
 const statusbar_height: f32 = 34;
 const drop_canvas_label = "drop-canvas";
 const drop_target_id: native_sdk.canvas.ObjectId = 2;
@@ -66,6 +67,7 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Capabilities",
     .width = window_width,
     .height = window_height,
+    .min_width = window_min_width,
     .views = &shell_views,
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
@@ -312,6 +314,9 @@ test "capabilities bridge gates native services and dispatches file drops" {
 }
 
 test "capabilities manifest declares package integration metadata" {
+    try std.testing.expectEqual(window_min_width, app_manifest.shell.windows[0].min_width);
+    try std.testing.expectEqual(window_min_width, shell_windows[0].min_width);
+
     try std.testing.expectEqual(@as(usize, 1), manifest_file_associations.len);
     try std.testing.expectEqualStrings("Native SDK Capability Document", manifest_file_associations[0].name);
     try std.testing.expectEqualStrings("viewer", manifest_file_associations[0].role);

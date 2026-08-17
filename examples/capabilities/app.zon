@@ -40,6 +40,7 @@
                 .title = "Native SDK Capabilities",
                 .width = 900,
                 .height = 620,
+                .min_width = 770,
                 .restore_policy = "center_on_primary",
                 .views = .{
                     .{ .label = "statusbar", .kind = "statusbar", .edge = "bottom", .height = 34, .role = "Status" },
