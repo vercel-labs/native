@@ -42,11 +42,10 @@
                 .height = 620,
                 .restore_policy = "center_on_primary",
                 .views = .{
-                    .{ .label = "body", .kind = "split", .fill = true, .axis = "row" },
-                    .{ .label = "main", .kind = "webview", .parent = "body", .url = "zero://inline", .width = 650, .min_width = 520 },
-                    .{ .label = "drop-canvas", .kind = "gpu_surface", .parent = "body", .fill = true, .min_width = 220, .role = "File drop canvas", .accessibility_label = "File drop target", .gpu_backend = "metal" },
                     .{ .label = "statusbar", .kind = "statusbar", .edge = "bottom", .height = 34, .role = "Status" },
                     .{ .label = "status-label", .kind = "label", .parent = "statusbar", .x = 14, .y = 8, .width = 640, .height = 18, .text = "Ready." },
+                    .{ .label = "drop-canvas", .kind = "gpu_surface", .edge = "right", .width = 250, .min_width = 220, .role = "File drop canvas", .accessibility_label = "File drop target", .gpu_backend = "metal" },
+                    .{ .label = "main", .kind = "webview", .url = "zero://inline", .fill = true, .min_width = 520 },
                 },
             },
         },

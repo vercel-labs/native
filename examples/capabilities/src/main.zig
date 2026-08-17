@@ -56,11 +56,10 @@ const builtin_policies = [_]native_sdk.BridgeCommandPolicy{
     .{ .name = "native-sdk.credentials.delete", .permissions = &credential_permission, .origins = &bridge_origins },
 };
 const shell_views = [_]native_sdk.ShellView{
-    .{ .label = "body", .kind = .split, .fill = true, .axis = .row },
-    .{ .label = "main", .kind = .webview, .parent = "body", .url = "zero://inline", .width = 650, .min_width = 520 },
-    .{ .label = drop_canvas_label, .kind = .gpu_surface, .parent = "body", .fill = true, .min_width = 220, .role = "File drop canvas", .accessibility_label = "File drop target", .gpu_backend = .metal },
     .{ .label = "statusbar", .kind = .statusbar, .edge = .bottom, .height = statusbar_height, .layer = 20, .role = "Status" },
     .{ .label = "status-label", .kind = .label, .parent = "statusbar", .x = 14, .y = 8, .width = 640, .height = 18, .layer = 21, .text = "Ready." },
+    .{ .label = drop_canvas_label, .kind = .gpu_surface, .edge = .right, .width = 250, .min_width = 220, .role = "File drop canvas", .accessibility_label = "File drop target", .gpu_backend = .metal },
+    .{ .label = "main", .kind = .webview, .url = "zero://inline", .fill = true, .min_width = 520 },
 };
 const shell_windows = [_]native_sdk.ShellWindow{.{
     .label = "main",
@@ -208,6 +207,18 @@ test "capabilities bridge gates native services and dispatches file drops" {
     var app_state = CapabilitiesApp{};
     const app = app_state.app();
     try harness.start(app);
+
+    var views_buffer: [8]native_sdk.ViewInfo = undefined;
+    const views = harness.runtime.listViews(1, &views_buffer);
+    const webview = viewByLabel(views, "main").?;
+    const drop_canvas = viewByLabel(views, drop_canvas_label).?;
+    const statusbar = viewByLabel(views, "statusbar").?;
+    try std.testing.expect(webview.parent == null);
+    try std.testing.expect(drop_canvas.parent == null);
+    try std.testing.expectEqual(native_sdk.geometry.RectF.init(0, 0, 650, window_height - statusbar_height), webview.frame);
+    try std.testing.expectEqual(native_sdk.geometry.RectF.init(650, 0, 250, window_height - statusbar_height), drop_canvas.frame);
+    try std.testing.expectEqual(native_sdk.geometry.RectF.init(0, window_height - statusbar_height, window_width, statusbar_height), statusbar.frame);
+
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
         .window_id = 1,
         .label = drop_canvas_label,
@@ -325,4 +336,11 @@ fn nullViewText(harness: *native_sdk.TestHarness(), label: []const u8) []const u
         if (std.mem.eql(u8, view.label, label)) return view.text;
     }
     return "";
+}
+
+fn viewByLabel(views: []const native_sdk.ViewInfo, label: []const u8) ?native_sdk.ViewInfo {
+    for (views) |view| {
+        if (std.mem.eql(u8, view.label, label)) return view;
+    }
+    return null;
 }
