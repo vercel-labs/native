@@ -7431,6 +7431,17 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
                 InvalidateRect(view.hwnd, &info.dirty_rects[index], FALSE);
             }
         }
+        /* Service that invalidation NOW rather than leaving it to the
+         * message queue. WM_PAINT is synthesized only when the queue has
+         * nothing else to deliver, so a resize — which floods the queue —
+         * starves it: measured at 15 surfaces re-rendering per step and
+         * barely one of them reaching the glass, every other panel showing
+         * pixels laid out for a size the window no longer has. Rendering a
+         * frame nobody sees is worse than not rendering it, and the frame
+         * is already in the target here; UpdateWindow just spends the blit
+         * that makes it count. No-op when the update region is empty, so a
+         * render that changed nothing still costs nothing. */
+        UpdateWindow(view.hwnd);
     }
 
     const bool first_present = !view.gpu_presented;
