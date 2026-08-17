@@ -23,6 +23,8 @@ export type TextInputEvent = {
 } | {
     readonly kind: "delete_word_forward";
 } | {
+    readonly kind: "delete_to_line_start";
+} | {
     readonly kind: "clear";
 } | {
     readonly kind: "move_caret";

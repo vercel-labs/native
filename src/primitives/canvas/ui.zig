@@ -1044,6 +1044,7 @@ pub fn Ui(comptime Msg: type) type {
                         .delete_forward => @unionInit(Payload, "delete_forward", {}),
                         .delete_word_backward => @unionInit(Payload, "delete_word_backward", {}),
                         .delete_word_forward => @unionInit(Payload, "delete_word_forward", {}),
+                        .delete_to_line_start => @unionInit(Payload, "delete_to_line_start", {}),
                         .clear => @unionInit(Payload, "clear", {}),
                         .move_caret => |move| blk: {
                             const Move = @FieldType(Payload, "move_caret");

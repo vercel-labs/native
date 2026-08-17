@@ -43,6 +43,10 @@ pub fn email(model: *const Model) []const u8 {
 
 </CodeToggle>
 
+## Editing keys
+
+The built-in editor follows the platform keymap in `input`, `text-field`, `search-field`, and `combobox`: Backspace/Delete remove one caret unit, Option+Backspace/Delete on macOS (Ctrl+Backspace/Delete elsewhere) remove one word, and Command+Backspace on macOS deletes from the caret to the beginning of the line. A non-empty selection always wins and is deleted by itself. The semantic edit still arrives through `on-input`, so `applyTextInputEvent` and `TextBuffer` keep controlled fields synchronized and one undo restores the whole deletion.
+
 ## Search field
 
 `search-field` renders the search affordance but binds exactly like an input; pair it with a model-filtered list. Whenever the field holds text it also shows a built-in clear affordance — a small x inside its trailing edge — and pressing it (or pressing Escape while focused) clears through the standard text-edit path, so the `on-input` handler receives the clear like any other edit and a model-owned buffer empties with it. No attribute enables or disables this; searchable fields simply carry it. For text entry that opens a menu of suggestions, see [combobox](/docs/components/combobox).

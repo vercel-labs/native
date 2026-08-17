@@ -56,6 +56,7 @@ export type TextInputEvent =
   | { readonly kind: "delete_forward" }
   | { readonly kind: "delete_word_backward" }
   | { readonly kind: "delete_word_forward" }
+  | { readonly kind: "delete_to_line_start" }
   | { readonly kind: "clear" }
   | { readonly kind: "move_caret"; readonly move: TextCaretMove }
   | { readonly kind: "set_selection"; readonly selection: TextSelection }
@@ -417,6 +418,32 @@ function deleteWordForwardTextEdit(state: TextEditState, capacity: number): Text
   );
 }
 
+function textLineStartOffset(text: Uint8Array, offset: number): number {
+  let cursor = snapTextOffset(text, offset);
+  while (cursor > 0 && text[cursor - 1] !== 0x0a) cursor -= 1;
+  return cursor;
+}
+
+function deleteToLineStartTextEdit(state: TextEditState, capacity: number): TextEditState | null {
+  const range = activeTextReplaceRange(state);
+  if (!rangeIsCollapsed(range, state.text.length)) {
+    return replaceTextEditRange(state, range, new Uint8Array(0), capacity, null, 0);
+  }
+  const caret = snapTextCaretOffset(state.text, state.selection.focus);
+  const lineStart = textLineStartOffset(state.text, caret);
+  if (lineStart === caret) {
+    return { text: state.text, selection: caretSelectionAt(caret, caret), composition: null };
+  }
+  return replaceTextEditRange(
+    state,
+    { start: lineStart, end: caret },
+    new Uint8Array(0),
+    capacity,
+    null,
+    0,
+  );
+}
+
 function moveTextCaret(state: TextEditState, move: TextCaretMove): TextEditState {
   const range = selectionRange(state.selection, state.text.length);
   const focus = snapTextCaretOffset(state.text, state.selection.focus);
@@ -472,6 +499,8 @@ export function applyTextInputEvent(
       return deleteWordBackwardTextEdit(normalized, capacity);
     case "delete_word_forward":
       return deleteWordForwardTextEdit(normalized, capacity);
+    case "delete_to_line_start":
+      return deleteToLineStartTextEdit(normalized, capacity);
     case "clear":
       return { text: new Uint8Array(0), selection: { anchor: 0, focus: 0 }, composition: null };
     case "move_caret":

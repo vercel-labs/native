@@ -4424,6 +4424,7 @@ test "text-input selection saturates signed and unsigned select-all sentinels" {
         \\      {"name": "delete_forward", "payload": {"kind": "void"}},
         \\      {"name": "delete_word_backward", "payload": {"kind": "void"}},
         \\      {"name": "delete_word_forward", "payload": {"kind": "void"}},
+        \\      {"name": "delete_to_line_start", "payload": {"kind": "void"}},
         \\      {"name": "clear", "payload": {"kind": "void"}},
         \\      {"name": "move_caret", "member": "move", "payload": {"kind": "value", "name": "Move"}},
         \\      {"name": "set_selection", "member": "selection", "payload": {"kind": "value", "name": "Sel"}},

@@ -90,7 +90,7 @@ test "markup fixture: mirror layout fingerprints stay pinned" {
         std.debug.print("mirror Model describe:\n{s}\n", .{model_desc});
         return err;
     };
-    testing.expectEqual(@as(u64, 0x643e34ab6a9bcb8a), lf.hash(msg_desc)) catch |err| {
+    testing.expectEqual(@as(u64, 0x8391a17f5daffa37), lf.hash(msg_desc)) catch |err| {
         std.debug.print("mirror Msg describe:\n{s}\n", .{msg_desc});
         return err;
     };

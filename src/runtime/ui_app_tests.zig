@@ -3142,6 +3142,73 @@ test "automation composition and selection verbs keep the model mirror consisten
     try std.testing.expectEqualStrings("", canceled_layout.findById(field_id).?.widget.text);
 }
 
+test "macOS Command Backspace keeps the controlled TextBuffer mirror and history in lockstep" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(SearchMirrorApp);
+    defer std.testing.allocator.destroy(app_state);
+    try startSearchMirror(harness, app_state);
+    defer app_state.deinit();
+    const app = app_state.app();
+    const field_id = findWidgetIdByKind(app_state.tree.?.root, .search_field).?;
+
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = search_mirror_canvas_label,
+        .id = field_id,
+        .action = .set_text,
+        .value = "second line",
+    });
+    for (0..5) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = search_mirror_canvas_label,
+            .kind = .key_down,
+            .key = "arrowleft",
+        } });
+    }
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(6), app_state.model.query.selection);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+    try std.testing.expectEqualStrings(" line", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), app_state.model.query.selection);
+    var retained = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings(app_state.model.query.text(), retained.findById(field_id).?.widget.text);
+    try std.testing.expectEqualDeep(app_state.model.query.selection, retained.findById(field_id).?.widget.text_selection.?);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "z",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+    try std.testing.expectEqualStrings("second line", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(6), app_state.model.query.selection);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "z",
+        .modifiers = .{ .primary = true, .command = true, .shift = true },
+    } });
+    try std.testing.expectEqualStrings(" line", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), app_state.model.query.selection);
+    retained = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings(app_state.model.query.text(), retained.findById(field_id).?.widget.text);
+    try std.testing.expectEqualDeep(app_state.model.query.selection, retained.findById(field_id).?.widget.text_selection.?);
+}
+
 // --------------------------------- combobox open-arrow (mirror invariant)
 
 const combo_mirror_canvas_label = "combo-mirror-canvas";

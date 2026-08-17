@@ -429,6 +429,26 @@ test "text edit state applies utf8-aware caret insert and delete events" {
     try std.testing.expectEqualStrings(" cafe", state.text);
     try std.testing.expectEqualDeep(TextSelection.collapsed(0), state.selection);
 
+    state = TextEditState{ .text = "first\nsecond line", .selection = TextSelection.collapsed(12) };
+    state = try state.apply(.delete_to_line_start, &storage_a);
+    try std.testing.expectEqualStrings("first\n line", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(6), state.selection);
+
+    state = TextEditState{ .text = "first\nsecond", .selection = TextSelection.collapsed(6) };
+    state = try state.apply(.delete_to_line_start, &storage_b);
+    try std.testing.expectEqualStrings("first\nsecond", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(6), state.selection);
+
+    state = TextEditState{ .text = "first\nsecond", .selection = .{ .anchor = 7, .focus = 10 } };
+    state = try state.apply(.delete_to_line_start, &storage_a);
+    try std.testing.expectEqualStrings("first\nsnd", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(7), state.selection);
+
+    state = TextEditState{ .text = "one\r\ntwo", .selection = TextSelection.collapsed(8) };
+    state = try state.apply(.delete_to_line_start, &storage_b);
+    try std.testing.expectEqualStrings("one\r\n", state.text);
+    try std.testing.expectEqualDeep(TextSelection.collapsed(5), state.selection);
+
     state = TextEditState.init("");
     state = try state.apply(.{ .insert_text = "AxB" }, &storage_b);
     try std.testing.expectEqualStrings("AxB", state.text);
@@ -731,6 +751,21 @@ test "widget keyboard events map to text edit events" {
     nav_state = try nav_state.apply(option_backspace, &nav_storage);
     try std.testing.expectEqualStrings("hello brave ", nav_state.text);
     try std.testing.expectEqualDeep(TextSelection.collapsed(12), nav_state.selection);
+
+    const command_backspace = (WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .super = true } }).textEditEvent();
+    if (comptime @import("builtin").os.tag == .macos) {
+        try std.testing.expectEqual(TextInputEvent.delete_to_line_start, command_backspace.?);
+    } else {
+        try std.testing.expect(command_backspace == null);
+    }
+    try std.testing.expect((WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .super = true, .shift = true } }).textEditEvent() == null);
+
+    const folded_control_backspace = (WidgetKeyboardEvent{ .phase = .key_down, .key = "backspace", .modifiers = .{ .super = true, .control = true } }).textEditEvent();
+    if (comptime @import("builtin").os.tag == .macos) {
+        try std.testing.expect(folded_control_backspace == null);
+    } else {
+        try std.testing.expectEqual(TextInputEvent.delete_word_backward, folded_control_backspace.?);
+    }
 
     nav_state = TextEditState{ .text = "hello brave world", .selection = TextSelection.collapsed(0) };
     const control_delete = (WidgetKeyboardEvent{ .phase = .key_down, .key = "delete", .modifiers = .{ .control = true } }).textEditEvent().?;

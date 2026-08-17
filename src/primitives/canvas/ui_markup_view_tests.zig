@@ -4664,6 +4664,7 @@ pub const MirrorTextInputEvent = union(enum) {
     delete_forward,
     delete_word_backward,
     delete_word_forward,
+    delete_to_line_start,
     clear,
     move_caret: MirrorCaretMove,
     set_selection: MirrorSelection,
@@ -4691,6 +4692,7 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_line_start,
         clear,
         move_caret: MirrorCaretMove,
         set_selection: MirrorSelectionWithAffinity,
@@ -4707,6 +4709,7 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_line_start,
         clear,
         move_caret: MirrorCaretMove,
         set_selection: MirrorSelection,
@@ -4720,6 +4723,7 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_line_start,
         clear,
         move_caret: MirrorCaretMove,
         set_selection: MirrorSelection,
@@ -4735,6 +4739,7 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_line_start,
         clear,
         move_caret: struct { direction: WrongDirection, extend: bool },
         set_selection: MirrorSelection,
@@ -4988,6 +4993,7 @@ test "the interpreter binds on-input to a declared mirror union and translates e
     try testing.expectEqualStrings("abc", inserted.edit.insert_text);
     // Void verbs map by tag.
     try testing.expectEqual(MirrorTextInputEvent.delete_backward, tree.msgForTextEdit(field.id, .delete_backward).?.edit);
+    try testing.expectEqual(MirrorTextInputEvent.delete_to_line_start, tree.msgForTextEdit(field.id, .delete_to_line_start).?.edit);
     // Caret moves translate the direction enum by member name.
     const moved = tree.msgForTextEdit(field.id, .{ .move_caret = .{ .direction = .previous_word, .extend = true } }).?;
     try testing.expectEqual(MirrorCaretDirection.previous_word, moved.edit.move_caret.direction);

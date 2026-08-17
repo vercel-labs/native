@@ -92,6 +92,7 @@ const script = [_]shim_core.Msg{
     .{ .banner_set = "parity" },
     .{ .draft_edit = .{ .insert_text = "hi" } },
     .{ .draft_edit = .delete_backward },
+    .{ .draft_edit = .delete_to_line_start },
     .{ .draft_edit = .{ .move_caret = .{ .direction = .next_word, .extend = true } } },
     .{ .draft_edit = .{ .set_selection = selection_sample } },
     .{ .draft_edit = .{ .set_composition = .{ .text = "ab", .cursor = 1 } } },

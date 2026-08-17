@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_model = @import("text.zig");
@@ -540,6 +541,7 @@ fn widgetKeyboardKeyDownTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEven
     if (widgetKeyboardCommandTextNavigationEvent(event)) |edit| return edit;
     if (widgetKeyboardWordTextNavigationEvent(event)) |edit| return edit;
     if (widgetKeyboardWordDeleteTextEditEvent(event)) |edit| return edit;
+    if (widgetKeyboardLineDeleteTextEditEvent(event)) |edit| return edit;
     if (event.modifiers.hasNavigationModifier()) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_backward;
     if (std.ascii.eqlIgnoreCase(event.key, "delete")) return .delete_forward;
@@ -566,10 +568,36 @@ fn widgetKeyboardWordTextNavigationEvent(event: WidgetKeyboardEvent) ?TextInputE
 }
 
 fn widgetKeyboardWordDeleteTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
-    if (event.modifiers.super or event.modifiers.shift) return null;
+    return widgetKeyboardWordDeleteTextEditEventForPlatform(builtin.os.tag, event);
+}
+
+fn widgetKeyboardWordDeleteTextEditEventForPlatform(comptime os_tag: @TypeOf(builtin.os.tag), event: WidgetKeyboardEvent) ?TextInputEvent {
+    // Ctrl-primary hosts project Ctrl into BOTH `control` and `super`.
+    // Accept that folded shape off macOS so Ctrl+Backspace keeps its
+    // platform word-delete meaning; a bare Super/Meta chord stays inert.
+    if (event.modifiers.shift) return null;
+    if (event.modifiers.super) {
+        if (comptime os_tag == .macos) return null;
+        if (!event.modifiers.control) return null;
+    }
     if (event.modifiers.alt == event.modifiers.control) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_word_backward;
     if (std.ascii.eqlIgnoreCase(event.key, "delete")) return .delete_word_forward;
+    return null;
+}
+
+fn widgetKeyboardLineDeleteTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
+    return widgetKeyboardLineDeleteTextEditEventForPlatform(builtin.os.tag, event);
+}
+
+fn widgetKeyboardLineDeleteTextEditEventForPlatform(comptime os_tag: @TypeOf(builtin.os.tag), event: WidgetKeyboardEvent) ?TextInputEvent {
+    // Command+Backspace is Cocoa's deleteToBeginningOfLine:. Keep it
+    // macOS-only: elsewhere Primary is Ctrl and belongs to word delete.
+    // Textareas deliberately use the hard newline boundary in v1; visual
+    // soft-wrap deletion can layer on runtime geometry in a follow-up.
+    if (comptime os_tag != .macos) return null;
+    if (!event.modifiers.super or event.modifiers.control or event.modifiers.alt or event.modifiers.shift) return null;
+    if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_to_line_start;
     return null;
 }
 
@@ -728,6 +756,33 @@ pub fn isWidgetTextEntry(widget: Widget) bool {
         .input, .text_field, .search_field, .combobox, .textarea => true,
         else => false,
     };
+}
+
+test "line delete is macOS-only and folded Ctrl-primary remains word delete elsewhere" {
+    const command_backspace = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .super = true },
+    };
+    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardLineDeleteTextEditEventForPlatform(.macos, command_backspace).?);
+    try std.testing.expect(widgetKeyboardLineDeleteTextEditEventForPlatform(.linux, command_backspace) == null);
+    try std.testing.expect(widgetKeyboardLineDeleteTextEditEventForPlatform(.windows, command_backspace) == null);
+
+    const folded_control_backspace = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .super = true, .control = true },
+    };
+    try std.testing.expect(widgetKeyboardWordDeleteTextEditEventForPlatform(.macos, folded_control_backspace) == null);
+    try std.testing.expectEqual(TextInputEvent.delete_word_backward, widgetKeyboardWordDeleteTextEditEventForPlatform(.linux, folded_control_backspace).?);
+    try std.testing.expectEqual(TextInputEvent.delete_word_backward, widgetKeyboardWordDeleteTextEditEventForPlatform(.windows, folded_control_backspace).?);
+
+    const shifted_command_backspace = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .super = true, .shift = true },
+    };
+    try std.testing.expect(widgetKeyboardLineDeleteTextEditEventForPlatform(.macos, shifted_command_backspace) == null);
 }
 
 /// The arrow keys that open a closed select/combobox trigger's picker

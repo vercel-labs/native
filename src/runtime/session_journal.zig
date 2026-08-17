@@ -133,8 +133,11 @@ pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescript
 /// out-of-window audio record as journal damage — an older recording
 /// could journal a wider value the old feed paths accepted, which
 /// would now be misreported as damage instead of refusing as a
-/// different generation.
-pub const format_semantic_epoch: u32 = 5;
+/// different generation. Epoch 6: macOS Command+Backspace gained its
+/// platform text-editor meaning (delete to hard line start). The raw
+/// gpu-surface key record is byte-identical, but replay now derives a
+/// text edit where older builds derived none.
+pub const format_semantic_epoch: u32 = 6;
 
 /// The canonical description `format_fingerprint` hashes: everything
 /// that defines the on-disk record layout. Reflection covers the record
@@ -1610,6 +1613,20 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqual(@as(?usize, 3), decoded.gpu_surface_input.composition_cursor);
         try testing.expect(decoded.gpu_surface_input.modifiers.control);
         try testing.expectEqual(@as(f32, 0), decoded.gpu_surface_input.scale);
+    }
+    {
+        // Command+Backspace journals as the raw platform key chord; replay
+        // re-derives the semantic delete_to_line_start edit from it.
+        const decoded = try roundTripEvent(.{ .gpu_surface_input = .{
+            .label = "editor-canvas",
+            .kind = .key_down,
+            .key = "backspace",
+            .modifiers = .{ .primary = true, .command = true },
+        } });
+        try testing.expectEqualStrings("backspace", decoded.gpu_surface_input.key);
+        try testing.expect(decoded.gpu_surface_input.modifiers.primary);
+        try testing.expect(decoded.gpu_surface_input.modifiers.command);
+        try testing.expect(!decoded.gpu_surface_input.modifiers.control);
     }
     {
         // v5: pinch records carry the magnification delta and the
