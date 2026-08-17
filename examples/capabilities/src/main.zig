@@ -78,6 +78,7 @@ const CapabilitiesApp = struct {
     deactivation_count: u32 = 0,
     last_drop_paths: []const []const u8 = &.{},
     last_drop_target_id: native_sdk.canvas.ObjectId = 0,
+    pending_drop_target_id: ?native_sdk.canvas.ObjectId = null,
     drop_target_installed: bool = false,
 
     fn app(self: *@This()) native_sdk.App {
@@ -103,15 +104,22 @@ const CapabilitiesApp = struct {
                 self.last_drop_paths = drop.paths;
                 var status_buffer: [160]u8 = undefined;
                 const first_path = if (drop.paths.len > 0) drop.paths[0] else "";
-                const status = if (self.widget_drop_count > 0)
-                    try std.fmt.bufPrint(&status_buffer, "Widget target {d} fired; app drop {d}: {d} file(s): {s}", .{ self.last_drop_target_id, self.drop_count, drop.paths.len, first_path })
+                const drop_target_id_value = self.pending_drop_target_id;
+                self.pending_drop_target_id = null;
+                const status = if (drop_target_id_value) |target_id|
+                    try std.fmt.bufPrint(&status_buffer, "Widget target {d} fired; app drop {d}: {d} file(s): {s}", .{ target_id, self.drop_count, drop.paths.len, first_path })
                 else
                     try std.fmt.bufPrint(&status_buffer, "Received file drop {d}: {d} file(s): {s}", .{ self.drop_count, drop.paths.len, first_path });
                 _ = try runtime.updateView(drop.window_id, "status-label", .{ .text = status });
             },
             .canvas_widget_file_drop => |drop| {
                 self.widget_drop_count += 1;
-                self.last_drop_target_id = if (drop.target) |target| target.id else 0;
+                if (drop.target) |target| {
+                    self.last_drop_target_id = target.id;
+                    self.pending_drop_target_id = target.id;
+                } else {
+                    self.pending_drop_target_id = null;
+                }
             },
             .gpu_surface_frame => |frame| {
                 if (!self.drop_target_installed and std.mem.eql(u8, frame.label, drop_canvas_label)) {
@@ -255,6 +263,20 @@ test "capabilities bridge gates native services and dispatches file drops" {
     try std.testing.expectEqualStrings("/tmp/one\nname.txt", app_state.last_drop_paths[0]);
     try std.testing.expectEqualStrings("/tmp/two.txt", app_state.last_drop_paths[1]);
     try std.testing.expectEqualStrings("drop:files", harness.null_platform.lastWindowEventName());
+    try std.testing.expect(std.mem.startsWith(u8, nullViewText(harness, "status-label"), "Widget target 2 fired"));
+    try std.testing.expect(app_state.pending_drop_target_id == null);
+
+    const webview_paths = [_][]const u8{"/tmp/webview.txt"};
+    try harness.runtime.dispatchPlatformEvent(app, .{ .files_dropped = .{
+        .window_id = 1,
+        .view_label = "main",
+        .point = native_sdk.geometry.PointF.init(40, 40),
+        .paths = &webview_paths,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.widget_drop_count);
+    try std.testing.expect(app_state.pending_drop_target_id == null);
+    try std.testing.expectEqual(@as(u32, 2), app_state.drop_count);
+    try std.testing.expect(std.mem.startsWith(u8, nullViewText(harness, "status-label"), "Received file drop 2"));
 
     try harness.runtime.dispatchPlatformEvent(app, .app_activated);
     try std.testing.expectEqual(@as(u32, 1), app_state.activation_count);
@@ -282,4 +304,11 @@ fn dispatchBridge(harness: *native_sdk.TestHarness(), app: native_sdk.App, bytes
         .window_id = 1,
         .webview_label = "main",
     } });
+}
+
+fn nullViewText(harness: *native_sdk.TestHarness(), label: []const u8) []const u8 {
+    for (harness.null_platform.views[0..harness.null_platform.view_count]) |view| {
+        if (std.mem.eql(u8, view.label, label)) return view.text;
+    }
+    return "";
 }

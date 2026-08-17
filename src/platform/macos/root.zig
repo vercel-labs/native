@@ -3205,7 +3205,7 @@ test "mac file drops and pointer input share the host y-down conversion" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         host_source,
-        "point.y = view.bounds.size.height - point.y;",
+        "if (!view.isFlipped) point.y = view.bounds.size.height - point.y;",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

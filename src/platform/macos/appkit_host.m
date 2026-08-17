@@ -1200,11 +1200,11 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     }
 }
 
-// AppKit view coordinates are bottom-left-origin. Every canvas input edge
-// crosses this one flip before entering the runtime's top-left-origin space;
-// file drops use it too so a drop and pointer at the same view point agree.
+// Convert an AppKit-local point to the runtime's top-left-origin space.
+// Unflipped canvas/content views need the y inversion; flipped views such as
+// WKWebView already use the runtime's orientation and must pass through.
 static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
-    point.y = view.bounds.size.height - point.y;
+    if (!view.isFlipped) point.y = view.bounds.size.height - point.y;
     return point;
 }
 
