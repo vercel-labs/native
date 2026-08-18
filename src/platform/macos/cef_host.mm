@@ -607,6 +607,10 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+@interface NativeSdkCefTraySegmentedControl : NSSegmentedControl
+@property(nonatomic, assign) NSInteger sourceSelectedSegment;
+@end
+
 @interface NativeSdkChromiumStatusItemEntry : NSObject
 @property(nonatomic, assign) uint32_t identifier;
 @property(nonatomic, strong) NSStatusItem *item;
@@ -780,6 +784,9 @@ static const char *NativeSdkCefBridgeScript() {
 @end
 
 @implementation NativeSdkChromiumShortcut
+@end
+
+@implementation NativeSdkCefTraySegmentedControl
 @end
 
 @implementation NativeSdkChromiumStatusItemEntry
@@ -2140,6 +2147,12 @@ static const char *NativeSdkCefBridgeScript() {
     if (selected < 0 || !self.trayCallback) return;
     NSInteger itemId = [control tagForSegment:selected];
     if (itemId <= 0) return;
+    // Keep the native control on the model-declared selection until the
+    // dispatched command commits a new model and rebuilds this menu row.
+    NSInteger sourceSelected = [(NativeSdkCefTraySegmentedControl *)control sourceSelectedSegment];
+    for (NSInteger index = 0; index < control.segmentCount; index++) {
+        [control setSelected:index == sourceSelected forSegment:index];
+    }
     self.trayCallback(self.trayContext, (uint32_t)control.tag, (uint32_t)itemId);
 }
 
@@ -3749,18 +3762,20 @@ static NSString *NativeSdkCefTrayString(const char *bytes, size_t len) {
 
 static NSView *NativeSdkCefTraySegmentedView(NativeSdkChromiumHost *object, uint32_t statusItemId, const native_sdk_appkit_tray_segment_option_t *options, size_t count) {
     NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 38)];
-    NSSegmentedControl *control = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(14, 5, 292, 28)];
+    NativeSdkCefTraySegmentedControl *control = [[NativeSdkCefTraySegmentedControl alloc] initWithFrame:NSMakeRect(14, 5, 292, 28)];
     control.segmentCount = count;
     control.trackingMode = NSSegmentSwitchTrackingSelectOne;
     control.target = object;
     control.action = @selector(traySegmentChanged:);
     control.tag = (NSInteger)statusItemId;
+    control.sourceSelectedSegment = -1;
     control.autoresizingMask = NSViewWidthSizable;
     for (size_t i = 0; i < count; i++) {
         [control setLabel:NativeSdkCefTrayString(options[i].label, options[i].label_len) forSegment:i];
         [control setEnabled:options[i].enabled != 0 forSegment:i];
         [control setTag:(NSInteger)options[i].item_id forSegment:i];
         [control setSelected:options[i].selected != 0 forSegment:i];
+        if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;
     }
     [row addSubview:control];
     return row;

@@ -1532,6 +1532,14 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/root.zig", .pattern = ".high_contrast = event.high_contrast != 0" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".appearance_changed => state.emit" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-tray-segment-source-selection", "Verify both macOS tray hosts keep segmented selection model-owned", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
         .{ .path = "docs/src/app/docs/security/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
         .{ .path = "docs/src/app/docs/bridge/builtin-commands/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },

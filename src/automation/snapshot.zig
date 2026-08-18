@@ -649,34 +649,32 @@ pub fn writeText(input: Input, writer: anytype) !void {
             if (item.segmented) |segmented| {
                 try writer.print("  tray-item #{d} role=segmented options={d}\n", .{ item.id, segmented.options.len });
                 for (segmented.options) |option| {
-                    try writer.print("    tray-segment #{d} label=\"{s}\" command=\"{s}\" selected={any} enabled={any}\n", .{
-                        option.id,
-                        option.label,
-                        option.command,
-                        option.selected,
-                        option.enabled,
-                    });
+                    try writer.print("    tray-segment #{d} label=", .{option.id});
+                    try writeQuotedSnapshotText(option.label, writer);
+                    try writer.writeAll(" command=");
+                    try writeQuotedSnapshotText(option.command, writer);
+                    try writer.print(" selected={any} enabled={any}\n", .{ option.selected, option.enabled });
                 }
                 continue;
             }
             if (item.metric) |metric| {
-                try writer.print("  tray-item #{d} role=metric primary=\"{s}\" secondary=\"{s}\" accessibility=\"{s}\"\n", .{
-                    item.id,
-                    metric.primary_text,
-                    metric.secondary_text,
-                    metric.accessibility_label,
-                });
+                try writer.print("  tray-item #{d} role=metric primary=", .{item.id});
+                try writeQuotedSnapshotText(metric.primary_text, writer);
+                try writer.writeAll(" secondary=");
+                try writeQuotedSnapshotText(metric.secondary_text, writer);
+                try writer.writeAll(" accessibility=");
+                try writeQuotedSnapshotText(metric.accessibility_label, writer);
+                try writer.writeByte('\n');
                 continue;
             }
             if (item.chart) |chart| {
-                try writer.print("  tray-item #{d} role=chart caption=\"{s}\" summary=\"{s}\" accessibility=\"{s}\" domain=({d},{d}) values=", .{
-                    item.id,
-                    chart.leading_caption,
-                    chart.trailing_summary,
-                    chart.accessibility_label,
-                    chart.min_value,
-                    chart.max_value,
-                });
+                try writer.print("  tray-item #{d} role=chart caption=", .{item.id});
+                try writeQuotedSnapshotText(chart.leading_caption, writer);
+                try writer.writeAll(" summary=");
+                try writeQuotedSnapshotText(chart.trailing_summary, writer);
+                try writer.writeAll(" accessibility=");
+                try writeQuotedSnapshotText(chart.accessibility_label, writer);
+                try writer.print(" domain=({d},{d}) values=", .{ chart.min_value, chart.max_value });
                 for (chart.values, 0..) |value, index| {
                     if (index > 0) try writer.writeByte(',');
                     try writer.print("{d}", .{value});
@@ -1059,6 +1057,43 @@ test "snapshot emits tray title and typed dropdown items" {
     var empty_writer = std.Io.Writer.fixed(&empty_buffer);
     try writeText(.{ .windows = &windows }, &empty_writer);
     try std.testing.expect(std.mem.indexOf(u8, empty_writer.buffered(), "tray") == null);
+}
+
+test "snapshot escapes hostile typed tray row text" {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
+    const segments = [_]platform.TraySegmentOption{.{
+        .id = 20,
+        .label = "Day\"\nnext\\",
+        .command = "range.\"day\n",
+    }};
+    const chart_values = [_]f32{0.5};
+    const items = [_]TrayItem{
+        .{ .role = .segmented, .segmented = .{ .options = &segments } },
+        .{ .role = .hero, .metric = .{
+            .primary_text = "2\"\nrequests",
+            .secondary_text = "Today\r\\production",
+            .accessibility_label = "metric\t\x01",
+        } },
+        .{ .role = .chart, .chart = .{
+            .values = &chart_values,
+            .leading_caption = "CPU\"\n",
+            .trailing_summary = "50%\\\r",
+            .accessibility_label = "chart\t\x7f",
+        } },
+    };
+    try writeText(.{
+        .windows = &windows,
+        .trays = &.{.{ .items = &items }},
+    }, &writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "tray-segment #20 label=\"Day\\\"\\nnext\\\\\" command=\"range.\\\"day\\n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "role=metric primary=\"2\\\"\\nrequests\" secondary=\"Today\\r\\\\production\" accessibility=\"metric\\t\\u0001\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "role=chart caption=\"CPU\\\"\\n\" summary=\"50%\\\\\\r\" accessibility=\"chart\\t\\u007f\"") != null);
+    // Header, window, tray, segmented wrapper, segment, metric, and chart:
+    // hostile values inject no additional line-oriented records.
+    try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, text, "\n"));
 }
 
 test "snapshot emits configured command and app-menu catalogs" {
