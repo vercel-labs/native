@@ -10,6 +10,7 @@ pub fn convertAlloc(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     defer arena.deinit();
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), source, .{});
     if (root != .object) return error.ExpectedObject;
+    try validateValue(root);
 
     var out = std.Io.Writer.Allocating.init(allocator);
     errdefer out.deinit();
@@ -18,9 +19,33 @@ pub fn convertAlloc(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
+pub fn validateSource(allocator: std.mem.Allocator, source: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), source, .{});
+    if (root != .object) return error.ExpectedObject;
+    try validateValue(root);
+}
+
+pub fn isJsonPath(path: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".json");
+}
+
+fn validateValue(value: std.json.Value) !void {
+    switch (value) {
+        .null => return error.NullNotAllowed,
+        .array => |array| for (array.items) |item| try validateValue(item),
+        .object => |object| {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| try validateValue(entry.value_ptr.*);
+        },
+        else => {},
+    }
+}
+
 fn writeValue(writer: *std.Io.Writer, value: std.json.Value, depth: usize) !void {
     switch (value) {
-        .null => try writer.writeAll("null"),
+        .null => return error.NullNotAllowed,
         .bool => |boolean| try writer.writeAll(if (boolean) "true" else "false"),
         .integer => |integer| try writer.print("{d}", .{integer}),
         .float => |float| try writer.print("{d}", .{float}),
@@ -59,7 +84,7 @@ fn indent(writer: *std.Io.Writer, depth: usize) !void {
     try writer.splatByteAll(' ', depth * 4);
 }
 
-test "converts the complete JSON value vocabulary to a Zig manifest module" {
+test "converts a JSON manifest to a Zig manifest module" {
     const converted = try convertAlloc(std.testing.allocator,
         \\{
         \\  "$schema": "https://native-sdk.dev/schemas/app.schema.json",
@@ -67,13 +92,20 @@ test "converts the complete JSON value vocabulary to a Zig manifest module" {
         \\  "name": "example",
         \\  "version": "1.0.0",
         \\  "dock_visible": true,
-        \\  "windows": [{ "label": "main", "width": 480.5 }],
-        \\  "frontend": null
+        \\  "windows": [{ "label": "main", "width": 480.5 }]
         \\}
     );
     defer std.testing.allocator.free(converted);
     try std.testing.expect(std.mem.indexOf(u8, converted, "$schema") == null);
     try std.testing.expect(std.mem.indexOf(u8, converted, ".id = \"dev.example.app\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, converted, ".windows = .{") != null);
-    try std.testing.expect(std.mem.indexOf(u8, converted, ".frontend = null") != null);
+}
+
+test "JSON manifests reject explicit null and recognize extension case-insensitively" {
+    try std.testing.expectError(error.NullNotAllowed, convertAlloc(std.testing.allocator,
+        \\{ "id": "dev.example.app", "name": "example", "version": "1.0.0", "theme": null }
+    ));
+    try std.testing.expect(isJsonPath("app.json"));
+    try std.testing.expect(isJsonPath("config/APP.JSON"));
+    try std.testing.expect(!isJsonPath("app.zon"));
 }

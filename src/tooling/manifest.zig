@@ -2,6 +2,7 @@ const std = @import("std");
 const app_icon_tool = @import("app_icon");
 const app_manifest = @import("app_manifest");
 const diagnostics = @import("diagnostics");
+const json_to_zon = @import("json_to_zon.zig");
 const raw_manifest = @import("raw_manifest.zig");
 const web_engine_tool = @import("web_engine.zig");
 
@@ -483,7 +484,7 @@ fn pathExists(io: std.Io, path: []const u8) bool {
 }
 
 pub fn isJsonPath(path: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".json");
+    return json_to_zon.isJsonPath(path);
 }
 
 pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !ValidationResult {
@@ -640,6 +641,7 @@ fn zonParseFailureMessage(allocator: std.mem.Allocator, source: []const u8) ?[]c
 
 fn parseFailureMessage(allocator: std.mem.Allocator, path: []const u8, source: []const u8, err: anyerror) []const u8 {
     if (!isJsonPath(path)) return zonParseFailureMessage(allocator, source) orelse "app.zon metadata could not be parsed";
+    if (err == error.NullNotAllowed) return "app.json cannot contain null values - omit optional fields instead";
     return std.fmt.allocPrint(allocator, "{s} could not be parsed as a Native SDK manifest ({s})", .{ std.fs.path.basename(path), @errorName(err) }) catch "app.json metadata could not be parsed";
 }
 
@@ -663,6 +665,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
 }
 
 pub fn parseJsonText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
+    try json_to_zon.validateSource(allocator, source);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const raw = try std.json.parseFromSliceLeaky(RawManifest, arena.allocator(), source, .{ .ignore_unknown_fields = false });
@@ -2454,6 +2457,24 @@ test "JSON manifest parser accepts schema metadata and rejects unknown fields" {
     try std.testing.expectError(error.UnknownField, parseJsonText(std.testing.allocator,
         \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "typo": true }
     ));
+    try std.testing.expectError(error.NullNotAllowed, parseJsonText(std.testing.allocator,
+        \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "theme": null }
+    ));
+}
+
+test "JSON file validation rejects null with a teaching diagnostic regardless of extension case" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-json-null";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/APP.JSON", .data =
+        \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "theme": null }
+    });
+
+    const result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/APP.JSON");
+    try std.testing.expect(!result.ok);
+    try std.testing.expectEqualStrings("app.json cannot contain null values - omit optional fields instead", result.message);
 }
 
 test "manifest metadata parser reads identity version and lists" {

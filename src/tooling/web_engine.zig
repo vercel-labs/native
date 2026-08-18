@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_to_zon = @import("json_to_zon.zig");
 const raw_manifest = @import("raw_manifest.zig");
 
 pub const default_engine: Engine = .system;
@@ -72,7 +73,7 @@ pub fn resolve(manifest: ManifestConfig, overrides: Overrides) Error!Resolved {
 pub fn readManifestConfig(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !ManifestConfig {
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(source);
-    return if (std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".json"))
+    return if (json_to_zon.isJsonPath(path))
         parseJsonManifestConfig(allocator, source)
     else
         parseManifestConfig(allocator, source);
@@ -89,6 +90,7 @@ pub fn parseManifestConfig(allocator: std.mem.Allocator, source: []const u8) !Ma
 }
 
 pub fn parseJsonManifestConfig(allocator: std.mem.Allocator, source: []const u8) !ManifestConfig {
+    try json_to_zon.validateSource(allocator, source);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const raw = try std.json.parseFromSliceLeaky(raw_manifest.RawManifest, arena.allocator(), source, .{ .ignore_unknown_fields = false });

@@ -1,6 +1,6 @@
 # Packaging
 
-The Native SDK provides tooling to bundle your app into distributable packages for macOS, Linux, and Windows. A native-rendered app packages as a single binary plus icons, metadata, and whatever lives in your `assets/` directory — no browser runtime. On macOS the asset tree is mirrored into the bundle at its app-relative path (`Contents/Resources/assets/`), and the packaged app resolves relative asset paths (audio files, bundled fonts) against `Contents/Resources`, so a path like `assets/music/track.mp3` names the same file in a dev run and in the installed app. Keep large optional data out of `assets/` when you package, or it ships. The frontend-asset and CEF sections below apply only to apps that [embed web content](/docs/frontend); Chromium packaging is currently supported for macOS and includes the CEF runtime when `.web_engine = "chromium"` and the matching CEF layout is installed.
+The Native SDK provides tooling to bundle your app into distributable packages for macOS, Linux, and Windows. A native-rendered app packages as a single binary plus icons, metadata, and whatever lives in your `assets/` directory — no browser runtime. On macOS the asset tree is mirrored into the bundle at its app-relative path (`Contents/Resources/assets/`), and the packaged app resolves relative asset paths (audio files, bundled fonts) against `Contents/Resources`, so a path like `assets/music/track.mp3` names the same file in a dev run and in the installed app. Keep large optional data out of `assets/` when you package, or it ships. The frontend-asset and CEF sections below apply only to apps that [embed web content](/docs/frontend); Chromium packaging is currently supported for macOS and includes the CEF runtime when `"web_engine": "chromium"` and the matching CEF layout is installed.
 
 ## Quick start
 
@@ -11,7 +11,7 @@ native build
 native package --target macos
 ```
 
-`native package` picks up the manifest at `app.zon` and the binary at `zig-out/bin/<name>` automatically; pass `--manifest`, `--binary`, or the other flags below for more control. Zero-config apps package without ejecting: the two commands above are the complete path from source to distributable, and `native eject` exists only for apps that want to own their build files. Apps that do own their build ([ejected](/docs/cli) or scaffolded with `--full`) also get a `zig build package` step that wires the same thing into the build graph.
+`native package` picks up `app.json` (falling back to `app.zon`) and the binary at `zig-out/bin/<name>` automatically; pass `--manifest`, `--binary`, or the other flags below for more control. Zero-config apps package without ejecting: the two commands above are the complete path from source to distributable, and `native eject` exists only for apps that want to own their build files. Apps that do own their build ([ejected](/docs/cli) or scaffolded with `--full`) also get a `zig build package` step that wires the same thing into the build graph.
 
 ## Build options
 
@@ -36,7 +36,7 @@ The build system exposes options that control platform, web engine, and build fe
     <tr>
       <td><code>-Dweb-engine</code></td>
       <td><code>system</code>, <code>chromium</code></td>
-      <td><code>app.zon</code></td>
+      <td>App manifest</td>
       <td>Temporary WebView engine override; Chromium is currently macOS-only</td>
     </tr>
     <tr>
@@ -72,27 +72,27 @@ The build system exposes options that control platform, web engine, and build fe
   </tbody>
 </table>
 
-## app.zon packaging fields
+## App manifest packaging fields
 
 The manifest drives packaging metadata:
 
-```zig
-.{
-    .id = "com.example.myapp",
-    .name = "myapp",
-    .display_name = "My App",
-    .version = "1.0.0",
-    .icons = .{"assets/icon.png"},
-    .platforms = .{ "macos", "linux" },
-    .web_engine = "system",
-    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
-    .dmg = .{
-        .background = "assets/dmg-background.png",
-        .window_width = 660,
-        .window_height = 400,
-        .app_position = .{ .x = 166, .y = 182 },
-        .applications_position = .{ .x = 486, .y = 182 },
-    },
+```json:app.json
+{
+  "id": "com.example.myapp",
+  "name": "myapp",
+  "display_name": "My App",
+  "version": "1.0.0",
+  "icons": ["assets/icon.png"],
+  "platforms": ["macos", "linux"],
+  "web_engine": "system",
+  "cef": { "dir": "third_party/cef/macos", "auto_install": false },
+  "dmg": {
+    "background": "assets/dmg-background.png",
+    "window_width": 660,
+    "window_height": 400,
+    "app_position": { "x": 166, "y": 182 },
+    "applications_position": { "x": 486, "y": 182 }
+  }
 }
 ```
 
@@ -141,7 +141,7 @@ The manifest drives packaging metadata:
 
 ## App icons
 
-Drop one square image in your project — `assets/icon.png` (1:1, ideally 1024x1024) or `assets/icon.svg` — list it in `.icons`, and packaging generates what each platform needs: a complete `.icns` for macOS (with the platform's rounded-rectangle icon shape and margins applied automatically, so full-bleed artwork looks native in the Dock), a multi-size `.ico` for Windows, and hicolor PNG size sets for Linux, plus asset-catalog and launcher-mipmap images for the mobile host skeletons. Artwork that already has transparent corners is treated as pre-shaped and ships unmasked. For art-directed control, a prebuilt `.icns` (macOS) or `.ico` (Windows) in `.icons` always wins untouched. Everything is generated by the SDK's own rasterizer and encoders — no external tools. `native validate` checks the source up front (square, decodable, large enough) with the same messages packaging prints.
+Drop one square image in your project — `assets/icon.png` (1:1, ideally 1024x1024) or `assets/icon.svg` — list it in `icons`, and packaging generates what each platform needs: a complete `.icns` for macOS (with the platform's rounded-rectangle icon shape and margins applied automatically, so full-bleed artwork looks native in the Dock), a multi-size `.ico` for Windows, and hicolor PNG size sets for Linux, plus asset-catalog and launcher-mipmap images for the mobile host skeletons. Artwork that already has transparent corners is treated as pre-shaped and ships unmasked. For art-directed control, a prebuilt `.icns` (macOS) or `.ico` (Windows) in `icons` always wins untouched. Everything is generated by the SDK's own rasterizer and encoders — no external tools. `native validate` checks the source up front (square, decodable, large enough) with the same messages packaging prints.
 
 ## macOS
 
@@ -151,7 +151,7 @@ Drop one square image in your project — `assets/icon.png` (1:1, ideally 1024x1
 
 - `Contents/MacOS/<binary>` -- the compiled executable
 - `Contents/Resources/AppIcon.icns` -- the app icon, generated from your icon source (or your prebuilt `.icns`, copied untouched under its own name)
-- `Contents/Info.plist` -- generated from `app.zon`
+- `Contents/Info.plist` -- generated from the app manifest
 - `Contents/Resources/assets/` -- the app's asset tree, mirrored at its app-relative path so runtime asset paths resolve inside the bundle
 - `Contents/Resources/dist/` -- frontend assets (if configured; replaces the `assets/` mirror)
 
@@ -170,19 +170,19 @@ native package --target macos --archive
 
 Without any extra configuration, Native creates a 660×400 Finder window with a quiet generated background and arrow, packages matching 1× and 2× representations for crisp Retina rendering, positions the app and an `/Applications` alias on either side, hides the Finder chrome, and compresses the result as a `.dmg`. The package diagnostic prints both the `.app` and `.dmg` paths.
 
-Customize the presentation in `app.zon`:
+Customize the presentation in `app.json`:
 
-```zig
-.dmg = .{
-    .volume_name = "My App",
-    .background = "assets/dmg-background.png",
-    .window_width = 720,
-    .window_height = 440,
-    .icon_size = 144,
-    .app_position = .{ .x = 180, .y = 210 },
-    .applications_position = .{ .x = 540, .y = 210 },
-    .applications_link = true,
-},
+```json:app.json
+"dmg": {
+  "volume_name": "My App",
+  "background": "assets/dmg-background.png",
+  "window_width": 720,
+  "window_height": 440,
+  "icon_size": 144,
+  "app_position": { "x": 180, "y": 210 },
+  "applications_position": { "x": 540, "y": 210 },
+  "applications_link": true
+}
 ```
 
 The window dimensions are the usable background canvas, excluding Finder's title bar. Positions are icon centers measured from the canvas's top-left corner. The background must be a project-relative PNG, JPEG, or TIFF at the configured window size; Finder displays it at its natural size. `native validate` and packaging reject malformed images or dimensions that do not match the configured canvas. For Retina artwork, put a double-sized sibling next to it using the `@2x` convention—for example, `dmg-background.png` at 720×440 and `dmg-background@2x.png` at 1440×880. Native discovers the pair, verifies that the sibling is exactly double-sized, and packages both representations. A prebuilt multi-resolution TIFF also works.
@@ -191,19 +191,19 @@ Omitting `background` keeps Native's generated Retina-aware gradient and draws t
 
 For complete control over which Finder items appear and where they sit, replace the fixed app/Applications pair with `items`:
 
-```zig
-.dmg = .{
-    .background = "assets/dmg-background.png",
-    .window_width = 760,
-    .window_height = 480,
-    .icon_size = 112,
-    .items = .{
-        .{ .kind = "app", .position = .{ .x = 150, .y = 180 } },
-        .{ .kind = "applications", .position = .{ .x = 610, .y = 180 } },
-        .{ .kind = "file", .path = "README.pdf", .name = "Read Me.pdf", .position = .{ .x = 250, .y = 370 } },
-        .{ .kind = "link", .path = "/Library/QuickLook", .name = "QuickLook", .position = .{ .x = 510, .y = 370 } },
-    },
-},
+```json:app.json
+"dmg": {
+  "background": "assets/dmg-background.png",
+  "window_width": 760,
+  "window_height": 480,
+  "icon_size": 112,
+  "items": [
+    { "kind": "app", "position": { "x": 150, "y": 180 } },
+    { "kind": "applications", "position": { "x": 610, "y": 180 } },
+    { "kind": "file", "path": "README.pdf", "name": "Read Me.pdf", "position": { "x": 250, "y": 370 } },
+    { "kind": "link", "path": "/Library/QuickLook", "name": "QuickLook", "position": { "x": 510, "y": 370 } }
+  ]
+}
 ```
 
 An explicit list must contain exactly one `app`; its optional `name` changes only the bundle name shown in the DMG. `applications` creates the `/Applications` alias. `file` copies a project-relative file or directory, with an optional display `name`, while `link` creates a named symbolic link to an absolute path. When `items` is present, it replaces `app_position`, `applications_position`, and `applications_link`. The generated background draws its arrow whenever the list includes both `app` and `applications`.
@@ -220,7 +220,7 @@ Linux packaging creates an install tree:
 - `share/mime/packages/<name>.xml` -- shared MIME metadata when file associations are configured
 
 ```bash
-native package --target linux --manifest app.zon --binary zig-out/bin/MyApp
+native package --target linux --manifest app.json --binary zig-out/bin/MyApp
 ```
 
 Configured file associations and URL schemes are added to the desktop file `MimeType` list. Extension-only associations get generated `application/x-...` MIME types with glob patterns in the shared MIME package.
@@ -228,7 +228,7 @@ Configured file associations and URL schemes are added to the desktop file `Mime
 ## Windows
 
 ```bash
-native package --target windows --manifest app.zon --binary zig-out/bin/MyApp.exe
+native package --target windows --manifest app.json --binary zig-out/bin/MyApp.exe
 ```
 
 Windows packaging is in early development. The packager copies the binary and assets into a distributable directory structure and writes a multi-size `app-icon.ico` generated from your icon source (or copies a prebuilt `.ico` from `.icons` untouched). When file associations or URL schemes are configured, the artifact also includes `install/register-file-types.ps1`, which registers the package-local executable under the current user's `HKCU\Software\Classes` registry keys.
@@ -245,13 +245,13 @@ zig build bundle-assets
 
 This copies the configured `dist` directory into the build output. Production packages serve these through `zero://app/`, so paths like `/assets/app.js` work without `file://` URLs.
 
-### Configure in app.zon
+### Configure in app.json
 
-```zig
-.frontend = .{
-    .dist = "dist",
-    .entry = "index.html",
-    .spa_fallback = true,
+```json:app.json
+"frontend": {
+  "dist": "dist",
+  "entry": "index.html",
+  "spa_fallback": true
 }
 ```
 
@@ -296,7 +296,7 @@ zig build
 native package --target macos
 ```
 
-Set `.web_engine = "chromium"` and `.cef = .{ .dir = "third_party/cef/macos", .auto_install = false }` in `app.zon` for the normal Chromium package path. Use `-Dweb-engine`, `--web-engine`, `-Dcef-dir`, or `--cef-dir` only when you need a one-off override.
+Set `"web_engine": "chromium"` and `"cef": { "dir": "third_party/cef/macos", "auto_install": false }` in `app.json` for the normal Chromium package path. Use `-Dweb-engine`, `--web-engine`, `-Dcef-dir`, or `--cef-dir` only when you need a one-off override.
 
 Verify the Chromium macOS package layout locally with:
 
@@ -321,8 +321,8 @@ This renders the full icon family (16 through 1024 px with @2x variants) through
 Check that your manifest and environment are ready for packaging:
 
 ```bash
-native doctor --manifest app.zon --strict
-native validate app.zon
+native doctor --manifest app.json --strict
+native validate app.json
 ```
 
 `doctor` checks the host environment, WebView availability, manifest validity, log paths, and optional CEF paths. Add `--strict` to fail on any warning. See [Debugging](/docs/debugging) for details on what `native doctor` checks.

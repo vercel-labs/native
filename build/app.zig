@@ -182,13 +182,15 @@ fn appManifestPath(b: *std.Build, app_root: []const u8, manifest_name: []const u
 /// into a generated module, keeping one runtime feature path for both formats.
 fn appManifestModule(b: *std.Build, app_root: []const u8, manifest_name: []const u8) *std.Build.Module {
     const path = appManifestPath(b, app_root, manifest_name);
-    if (!std.mem.endsWith(u8, path, ".json")) {
+    if (!json_to_zon.isJsonPath(path)) {
         return b.createModule(.{ .root_source_file = b.path(path) });
     }
     const source = b.build_root.handle.readFileAlloc(b.graph.io, path, b.allocator, .limited(1024 * 1024)) catch
         @panic("cannot read app.json");
-    const zon = json_to_zon.convertAlloc(b.allocator, source) catch
-        @panic("cannot convert app.json into the build-time manifest module; run `native check` for a precise diagnostic");
+    const zon = json_to_zon.convertAlloc(b.allocator, source) catch |err| switch (err) {
+        error.NullNotAllowed => @panic("app.json cannot contain null values; omit optional fields instead"),
+        else => @panic("cannot convert app.json into the build-time manifest module; run `native check` for a precise diagnostic"),
+    };
     const generated = b.addWriteFiles().add("app_manifest.zon", zon);
     return b.createModule(.{ .root_source_file = generated });
 }

@@ -2123,15 +2123,19 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\fn appManifestModule(b: *std.Build) *std.Build.Module {
         \\    const root = std.json.parseFromSliceLeaky(std.json.Value, b.allocator, @embedFile("app.json"), .{}) catch
         \\        @panic("cannot parse app.json; run `native check` for a precise diagnostic");
+        \\    if (root != .object) @panic("app.json must contain one object");
         \\    var out = std.Io.Writer.Allocating.init(b.allocator);
-        \\    writeManifestValue(&out.writer, root, 0) catch @panic("out of memory converting app.json");
+        \\    writeManifestValue(&out.writer, root, 0) catch |err| switch (err) {
+        \\        error.NullNotAllowed => @panic("app.json cannot contain null values; omit optional fields instead"),
+        \\        else => @panic("out of memory converting app.json"),
+        \\    };
         \\    const generated = b.addWriteFiles().add("app_manifest.zon", out.written());
         \\    return b.createModule(.{ .root_source_file = generated });
         \\}
         \\
         \\fn writeManifestValue(writer: *std.Io.Writer, value: std.json.Value, depth: usize) !void {
         \\    switch (value) {
-        \\        .null => try writer.writeAll("null"),
+        \\        .null => return error.NullNotAllowed,
         \\        .bool => |v| try writer.writeAll(if (v) "true" else "false"),
         \\        .integer => |v| try writer.print("{d}", .{v}),
         \\        .float => |v| try writer.print("{d}", .{v}),
@@ -4192,6 +4196,7 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "options.addOption(bool, \"web_layer\", web_layer)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.json.parseFromSliceLeaky(InferenceManifest") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "fn appManifestModule") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".null => return error.NullNotAllowed") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "the web layer is excluded ({s}) but the app declares web use ({s})") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".system => if (web_layer) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"") != null);

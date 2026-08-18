@@ -74,7 +74,7 @@ jobs:
       - run: zig build test-example-mobile-canvas-lib-ios-store
       - run: zig build test-webview-system-link
       - run: zig build test-webview-smoke
-      # The zero-config TypeScript runner must load app.zon menus before
+      # The zero-config TypeScript runner must load app manifest menus before
       # automation can select their registered command ids.
       - run: zig build test-menu-bar-smoke
       # Signed-package seal pin: an ad-hoc signed package must pass
@@ -498,7 +498,7 @@ jobs:
             app=".zig-cache/scaffold-${frontend}"
             rm -rf "$app"
             ./zig-out/bin/native init "$app" --frontend "$frontend" --full
-            (cd "$app" && zig build test -Dplatform=null && ../../zig-out/bin/native validate app.zon)
+            (cd "$app" && zig build test -Dplatform=null && ../../zig-out/bin/native validate app.json)
             # Every scaffold ships a CI workflow; parse it as real YAML.
             test -s "$app/.github/workflows/ci.yml"
             python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$app/.github/workflows/ci.yml"
