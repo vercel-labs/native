@@ -2,9 +2,26 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.3
+## 0.9.4
 
 <!-- release:start -->
+
+### New Features
+
+- **Model-driven window restore policies**: TypeScript apps can now declare whether each model-driven window restores saved geometry or opens fresh, including center-on-primary placement, with matching defaults, validation, runtime forwarding, tests, and documentation (#381).
+
+### Improvements
+
+- **Faster, more predictable iterative rebuilds**: Generated core and service ABI artifacts now change only when their contents do, markup and app code compile into independently cached objects, SDK module edits invalidate the right inputs, and rebuild diagnostics expose phase timing, memory use, and cache decisions across platforms (#382).
+- **Updated TypeScript compiler integration**: ScriptC advances to 0.0.33 with published compile-cache bootstrapping, explicit development and release library profiles, synchronized compiler-surface artifacts, and Node 24 throughout the TypeScript build and CI toolchain (#384).
+
+### Contributors
+
+- @ctate
+
+<!-- release:end -->
+
+## 0.9.3
 
 ### New Features
 
@@ -22,8 +39,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @MohakBajaj
-
-<!-- release:end -->
 
 ## 0.9.2
 
