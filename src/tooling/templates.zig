@@ -1158,7 +1158,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
     const node_setup =
         \\      - uses: actions/setup-node@v4
         \\        with:
-        \\          node-version: 22
+        \\          node-version: 24
         \\
     ;
     const compiler_install =
@@ -4531,6 +4531,10 @@ test "writeDefaultApp --full ts-core emits a CI workflow with the node tier" {
     // frontend + compiler install inside the fetched SDK's packages/core,
     // in BOTH jobs (each builds the app, so each compiles the core).
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "actions/setup-node@v4") != null);
+    const node_24 = "node-version: 24";
+    const first_node = std.mem.indexOf(u8, ci_yaml_text, node_24).?;
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text[first_node + node_24.len ..], node_24) != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "node-version: 22") == null);
     const npm_ci = "npm ci --prefix \"$NATIVE_SDK_PATH/packages/core\"";
     const first = std.mem.indexOf(u8, ci_yaml_text, npm_ci).?;
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text[first + npm_ci.len ..], npm_ci) != null);
