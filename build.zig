@@ -848,6 +848,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tools/corewire/emit_service.zig", .pattern = "native-sdk.services.abi.v3" },
         .{ .path = "tools/corewire/emit_service.zig", .pattern = "implementation-only fingerprint" },
         .{ .path = "build/app.zig", .pattern = "link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));" },
+        .{ .path = "build/app.zig", .pattern = "addPlatformLinkSearchPaths(b, selected_platform, web_engine, cef_dir, link_mod);" },
+        .{ .path = "build/app.zig", .pattern = "mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, \"System/Library/Frameworks\" }) });" },
         .{ .path = "build/app.zig", .pattern = "b.fmt(\"{s}-app-code\", .{app_options.name})" },
         .{ .path = "src/app_runner/ts_core_main.zig", .pattern = "extern const native_sdk_app_markup: u8;" },
         .{ .path = "packages/core/scripts/embed_markup_c.mjs", .pattern = "const unsigned char native_sdk_app_markup[]" },
@@ -862,7 +864,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build.zig", .pattern = "packages/core/node_modules/.bin/scriptc.cmd" },
         .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--compiler\", repositoryScriptcBin(b) });" },
         .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
-        .{ .path = "src/tooling/verbs.zig", .pattern = "appendRebuildInput(allocator, io, &inputs, \"app.zon\")" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "fn rebuildPathIgnored" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "var walker = try root.walkSelectively(allocator);" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "if (!rebuildPathIgnored(path)) try walker.enter(io, entry);" },
         .{ .path = "tools/native-sdk/main.zig", .pattern = "--explain-rebuild" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{

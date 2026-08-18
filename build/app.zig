@@ -1760,6 +1760,12 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         const link_mod = b.createModule(.{ .target = target, .optimize = app_optimize });
         link_mod.addObject(app_code);
         link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
+        // Object dependencies propagate framework/system-library NAMES, but
+        // Zig does not propagate the search paths or rpaths recorded on the
+        // module that produced an object. Restate those path-only facts on
+        // the final link module so the cached app-code split remains link-
+        // equivalent to compiling the app module directly.
+        addPlatformLinkSearchPaths(b, selected_platform, web_engine, cef_dir, link_mod);
         break :root link_mod;
     } else app_mod;
     const exe = b.addExecutable(.{
@@ -2419,6 +2425,7 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
 // 26.0 SDKs. Release builds never hit it (no UBSan), which is why only
 // Debug-built examples (standardOptimizeOption default) crashed.
 fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, cef_dir: []const u8, cef_auto_install: bool) void {
+    addPlatformLinkSearchPaths(b, platform, web_engine, cef_dir, app_mod);
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
@@ -2443,13 +2450,8 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", include_arg, define_arg };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/cef_host.mm"), .flags = flags });
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));
-                app_mod.addFrameworkPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
                 app_mod.linkFramework("Chromium Embedded Framework", .{});
-                app_mod.addRPath(.{ .cwd_relative = "@executable_path/Frameworks" });
             },
-        }
-        if (b.sysroot) |sysroot| {
-            app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         }
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
@@ -2511,9 +2513,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 const define_arg = b.fmt("-DNATIVE_SDK_CEF_DIR=\"{s}\"", .{cef_dir});
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/cef_host.cpp"), .flags = &.{ "-std=c++17", include_arg, define_arg } });
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));
-                app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
                 app_mod.linkSystemLibrary("cef", .{});
-                app_mod.addRPath(.{ .cwd_relative = "$ORIGIN" });
             },
         }
         app_mod.linkSystemLibrary("c", .{});
@@ -2572,7 +2572,6 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/cef_host.cpp"), .flags = &.{ "-std=c++17", include_arg, define_arg } });
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib", .{cef_dir})));
-                app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
             },
         }
         app_mod.linkSystemLibrary("c", .{});
@@ -2602,6 +2601,27 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("mfplat", .{});
         app_mod.linkSystemLibrary("winhttp", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
+    }
+}
+
+/// Link-search metadata is not inherited through a compiled object in Zig's
+/// build graph. Keep every path-only platform setting in this one helper so a
+/// TypeScript app's cached app-code object and its final link receive the same
+/// framework/library lookup and runtime-search policy.
+fn addPlatformLinkSearchPaths(b: *std.Build, platform: PlatformOption, web_engine: WebEngineOption, cef_dir: []const u8, mod: *std.Build.Module) void {
+    if (platform == .macos) {
+        if (b.sysroot) |sysroot| {
+            mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+        }
+        if (web_engine == .chromium) {
+            mod.addFrameworkPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
+            mod.addRPath(.{ .cwd_relative = "@executable_path/Frameworks" });
+        }
+    } else if (platform == .linux and web_engine == .chromium) {
+        mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
+        mod.addRPath(.{ .cwd_relative = "$ORIGIN" });
+    } else if (platform == .windows and web_engine == .chromium) {
+        mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
     }
 }
 

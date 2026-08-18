@@ -245,11 +245,31 @@ const RebuildInput = struct {
 fn appendRebuildInput(allocator: std.mem.Allocator, io: std.Io, inputs: *std.ArrayList(RebuildInput), path: []const u8) !void {
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
-    defer allocator.free(bytes);
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var read_buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const len = try reader.interface.readSliceShort(&chunk);
+        hasher.update(chunk[0..len]);
+        if (len < chunk.len) break;
+    }
+    const digest = hasher.finalResult();
     try inputs.append(allocator, .{ .path = owned_path, .hash = std.fmt.bytesToHex(digest, .lower) });
+}
+
+fn rebuildPathIgnored(path: []const u8) bool {
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".git") or
+            std.mem.eql(u8, component, ".native") or
+            std.mem.eql(u8, component, ".zig-cache") or
+            std.mem.eql(u8, component, "zig-out") or
+            std.mem.eql(u8, component, "node_modules")) return true;
+    }
+    return false;
 }
 
 fn rebuildInputs(allocator: std.mem.Allocator, io: std.Io) ![]RebuildInput {
@@ -258,19 +278,28 @@ fn rebuildInputs(allocator: std.mem.Allocator, io: std.Io) ![]RebuildInput {
         for (inputs.items) |input| allocator.free(input.path);
         inputs.deinit(allocator);
     }
-    // app.zon is authored build truth just as much as src/: capabilities,
-    // windows, services, web-layer selection, and packaging metadata all
-    // alter the generated graph or final artifact.
-    try appendRebuildInput(allocator, io, &inputs, "app.zon");
-    var src = std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true }) catch return inputs.toOwnedSlice(allocator);
-    defer src.close(io);
-    var walker = try src.walk(allocator);
+    // Ejected builds can consume any authored file, and even the standard
+    // graph has non-extension inputs: Zig sources, migration lock JSON,
+    // vendored service packages, assets, and frontend configuration. Hash the
+    // app tree instead of maintaining an inevitably incomplete suffix list;
+    // exclude only directories owned by VCS, dependency installs, and build
+    // outputs (including this snapshot itself under .native/).
+    var root = try std.Io.Dir.cwd().openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    var walker = try root.walkSelectively(allocator);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".ts") and !std.mem.endsWith(u8, entry.basename, ".native") and !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
-        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        const path = try allocator.dupe(u8, entry.path);
         defer allocator.free(path);
+        for (path) |*char| if (char.* == '\\') {
+            char.* = '/';
+        };
+        if (entry.kind == .directory) {
+            if (!rebuildPathIgnored(path)) try walker.enter(io, entry);
+            continue;
+        }
+        if (entry.kind != .file) continue;
+        if (rebuildPathIgnored(path)) continue;
         try appendRebuildInput(allocator, io, &inputs, path);
     }
     std.mem.sort(RebuildInput, inputs.items, {}, struct {
@@ -308,6 +337,8 @@ fn explainRebuild(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
         std.debug.print("native rebuild: {s} {s} -> {s}\n", .{ input.path, old_hash orelse "<new>", &input.hash });
         if (std.mem.eql(u8, input.path, "app.zon")) {
             std.debug.print("  invalidates manifest-derived configuration -> affected contracts, app-code/platform link, and final artifact\n", .{});
+        } else if (std.mem.eql(u8, input.path, "build.zig") or std.mem.eql(u8, input.path, "build.zig.zon")) {
+            std.debug.print("  invalidates the owned build graph -> graph-selected compilation and final artifact\n", .{});
         } else if (std.mem.eql(u8, input.path, "src/app.native")) {
             std.debug.print("  invalidates markup data object -> final app link; app-code/core scriptc remain content-gated\n", .{});
         } else if (std.mem.endsWith(u8, input.path, ".native")) {
@@ -316,8 +347,16 @@ fn explainRebuild(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
             std.debug.print("  invalidates TS frontend -> service contract/source hash -> service host compile; API client/registry/core scriptc change only if API shape changes\n", .{});
         } else if (std.mem.endsWith(u8, input.path, ".ts")) {
             std.debug.print("  invalidates TS frontend -> core contract/facade/stage -> core scriptc -> app-code object -> final link\n", .{});
-        } else {
+        } else if (std.mem.endsWith(u8, input.path, ".zig")) {
+            std.debug.print("  invalidates Zig build/app code -> affected compile and final link\n", .{});
+        } else if (std.mem.endsWith(u8, input.path, ".sql") or std.mem.endsWith(u8, input.path, "/migrations.lock.json")) {
             std.debug.print("  invalidates SQLite schema/migration generation -> app-code object -> final link\n", .{});
+        } else if (std.mem.startsWith(u8, input.path, "frontend/")) {
+            std.debug.print("  invalidates frontend build inputs -> bundled web assets and final package\n", .{});
+        } else if (std.mem.startsWith(u8, input.path, "assets/")) {
+            std.debug.print("  invalidates authored assets -> affected runtime/package artifact\n", .{});
+        } else {
+            std.debug.print("  changes an authored app input -> the build graph determines affected downstream steps\n", .{});
         }
     }
     if (prior) |bytes| {
@@ -338,8 +377,10 @@ fn explainRebuild(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
                 std.debug.print("  invalidates primary markup data object -> final app link\n", .{});
             } else if (std.mem.endsWith(u8, old_path, ".native")) {
                 std.debug.print("  invalidates markup source set -> app-code object -> final link\n", .{});
+            } else if (std.mem.endsWith(u8, old_path, ".zig")) {
+                std.debug.print("  invalidates Zig build/app code -> affected compile and final link\n", .{});
             } else {
-                std.debug.print("  invalidates TS/schema source set and its downstream generated artifacts\n", .{});
+                std.debug.print("  removes an authored app input -> the build graph determines affected downstream steps\n", .{});
             }
         }
     }
@@ -464,10 +505,20 @@ test "rebuild explanations persist manifest and source hashes" {
     cwd.deleteTree(io, root) catch {};
     defer cwd.deleteTree(io, root) catch {};
     try cwd.createDirPath(io, root ++ "/src/services");
+    try cwd.createDirPath(io, root ++ "/src/schema");
+    try cwd.createDirPath(io, root ++ "/assets");
+    try cwd.createDirPath(io, root ++ "/.native/cache");
+    try cwd.createDirPath(io, root ++ "/node_modules/package");
     try cwd.writeFile(io, .{ .sub_path = root ++ "/app.zon", .data = ".{ .name = \"rebuild-test\" }\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/build.zig", .data = "pub fn build() void {}\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/src/core.ts", .data = "export const core = 1;\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/main.zig", .data = "pub fn main() void {}\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/src/app.native", .data = "<column/>\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/src/services/work.ts", .data = "export function work(): number { return 1; }\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/src/schema/migrations.lock.json", .data = "{}\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/assets/icon.bin", .data = "authored asset\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/.native/cache/generated", .data = "generated\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/node_modules/package/index.js", .data = "dependency\n" });
     const original = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(original);
     try std.process.setCurrentPath(io, root);
@@ -475,6 +526,12 @@ test "rebuild explanations persist manifest and source hashes" {
     const first = try explainRebuild(allocator, io);
     defer allocator.free(first);
     try std.testing.expect(std.mem.indexOf(u8, first, "\tapp.zon\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\tbuild.zig\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\tsrc/main.zig\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\tsrc/schema/migrations.lock.json\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\tassets/icon.bin\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\t.native/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\tnode_modules/") == null);
     try persistRebuildSnapshot(io, first);
     const second = try explainRebuild(allocator, io);
     defer allocator.free(second);
