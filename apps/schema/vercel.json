@@ -2,8 +2,14 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "outputDirectory": "public",
   "rewrites": [
-    { "source": "/app.json", "destination": "/app/v1.json" },
-    { "source": "/(.*)", "destination": "https://native-sdk.dev" }
+    { "source": "/app.json", "destination": "/app/v1.json" }
+  ],
+  "redirects": [
+    {
+      "source": "/((?!app(?:\\.json|/v1\\.json)$).*)",
+      "destination": "https://native-sdk.dev",
+      "statusCode": 302
+    }
   ],
   "headers": [
     {

@@ -27,13 +27,22 @@ assert.equal(schema.$defs.dmg.properties.icon_size.maximum, 256);
 assert.deepEqual(fs.readFileSync(legacyPath), publishedBytes, "legacy docs schema differs from canonical v1");
 assert.deepEqual(fs.readFileSync(packagePath), publishedBytes, "published and npm-packaged app schemas differ");
 assert.equal(deployment.outputDirectory, "public");
-// /app.json aliases the canonical schema; every other path 302-redirects
-// away from the single-purpose schema domain (files like /app/v1.json are
-// served directly and take precedence over this rewrites list).
-assert.deepEqual(deployment.rewrites, [
-  { source: "/app.json", destination: "/app/v1.json" },
-  { source: "/(.*)", destination: "https://native-sdk.dev" },
+// /app.json aliases the canonical schema; the redirect's negative lookahead
+// keeps both schema URLs local while every other path returns an actual 302.
+assert.deepEqual(deployment.rewrites, [{ source: "/app.json", destination: "/app/v1.json" }]);
+assert.deepEqual(deployment.redirects, [
+  {
+    source: "/((?!app(?:\\.json|/v1\\.json)$).*)",
+    destination: "https://native-sdk.dev",
+    statusCode: 302,
+  },
 ]);
+const redirectPattern = new RegExp(`^${deployment.redirects[0].source}$`);
+assert.equal(redirectPattern.test("/app.json"), false);
+assert.equal(redirectPattern.test("/app/v1.json"), false);
+assert.equal(redirectPattern.test("/"), true);
+assert.equal(redirectPattern.test("/docs"), true);
+assert.equal(redirectPattern.test("/app/v2.json"), true);
 assert.ok(deployment.headers.some((entry) => entry.source === "/app/v1.json"));
 assert.ok(deployment.headers.some((entry) => entry.source === "/app.json"));
 
