@@ -1,6 +1,6 @@
 # Config
 
-The `app.json` manifest declares app metadata, permissions, security rules, window layout, and packaging inputs. It is read by the CLI and tooling at build, package, and validation time. New projects use JSON so TypeScript developers get familiar syntax, completion, and inline validation through [`$schema`](https://native-sdk.dev/schemas/app.schema.json). Existing `app.zon` manifests remain fully supported and expose the same fields—there is no reduced JSON feature set.
+The `app.json` manifest declares app metadata, permissions, security rules, window layout, and packaging inputs. It is read by the CLI and tooling at build, package, and validation time. New projects use JSON so TypeScript developers get familiar syntax, completion, and inline validation through [`$schema`](https://schema.native-sdk.dev/app/v1.json). Existing `app.zon` manifests remain fully supported and expose the same fields—there is no reduced JSON feature set. The versioned URL stays compatible for the lifetime of the v1 manifest contract; `/app.json` is the current-version alias.
 
 ## Example: native-rendered app
 
@@ -8,7 +8,7 @@ The manifest `native init` generates — identity, one shell window with a GPU s
 
 ```json:app.json
 {
-  "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
   "id": "dev.native_sdk.my-app",
   "name": "my-app",
   "display_name": "My App",

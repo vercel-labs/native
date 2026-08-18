@@ -89,7 +89,7 @@ fn indent(writer: *std.Io.Writer, depth: usize) !void {
 test "converts a JSON manifest to a Zig manifest module" {
     const converted = try convertAlloc(std.testing.allocator,
         \\{
-        \\  "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+        \\  "$schema": "https://schema.native-sdk.dev/app/v1.json",
         \\  "id": "dev.example.app",
         \\  "name": "example",
         \\  "version": "1.0.0",

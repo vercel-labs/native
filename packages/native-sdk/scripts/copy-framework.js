@@ -27,7 +27,7 @@
 // in the same transaction and resolved from packages/core by node's
 // ancestor walk. test/ stays out: repo-dev surface, never build inputs.
 
-import { cpSync, copyFileSync, rmSync } from 'fs';
+import { cpSync, copyFileSync, mkdirSync, rmSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -44,11 +44,13 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
 }
 
 {
-  const source = join(repoRoot, 'docs', 'public', 'schemas');
-  const target = join(projectRoot, 'schemas');
-  rmSync(target, { recursive: true, force: true });
+  const source = join(repoRoot, 'apps', 'schema', 'public', 'app', 'v1.json');
+  const targetDir = join(projectRoot, 'schemas');
+  const target = join(targetDir, 'app.schema.json');
+  rmSync(targetDir, { recursive: true, force: true });
+  mkdirSync(targetDir, { recursive: true });
   cpSync(source, target, { recursive: true });
-  console.log(`✓ Copied docs/public/schemas/ to ${target}`);
+  console.log(`✓ Copied apps/schema/public/app/v1.json to ${target}`);
 }
 
 {

@@ -593,7 +593,7 @@ test("incremental vendoring preserves prior package facts and lets explicit upda
 
 test("app.json vendoring preserves schema metadata and package facts", () => {
   const source = JSON.stringify({
-    $schema: "https://native-sdk.dev/schemas/app.schema.json",
+    $schema: "https://schema.native-sdk.dev/app/v1.json",
     id: "dev.example.fixture",
     name: "fixture",
     version: "1.0.0",
@@ -602,7 +602,7 @@ test("app.json vendoring preserves schema metadata and package facts", () => {
   assert.deepEqual(mergePackageSpecs(source, ["beta@2.0.0"], "json"), ["alpha@1.2.3", "beta@2.0.0"]);
   const replaced = replaceServicePackages(source, [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }], "json");
   const parsed = JSON.parse(replaced);
-  assert.equal(parsed.$schema, "https://native-sdk.dev/schemas/app.schema.json");
+  assert.equal(parsed.$schema, "https://schema.native-sdk.dev/app/v1.json");
   assert.deepEqual(readServicePackages(replaced, "json"), [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }]);
 });
 

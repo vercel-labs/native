@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://native-sdk.dev/schemas/app.schema.json",
+  "$id": "https://schema.native-sdk.dev/app/v1.json",
   "title": "Native SDK app manifest",
   "description": "Complete app.json manifest for a Native SDK application. app.zon remains supported as a legacy alternative.",
   "type": "object",

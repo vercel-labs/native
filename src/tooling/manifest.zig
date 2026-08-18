@@ -2441,7 +2441,7 @@ fn parseVersionNumber(value: []const u8) !u32 {
 test "JSON manifest parser accepts schema metadata and rejects unknown fields" {
     const metadata = try parseJsonText(std.testing.allocator,
         \\{
-        \\  "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+        \\  "$schema": "https://schema.native-sdk.dev/app/v1.json",
         \\  "id": "com.example.json",
         \\  "name": "json-app",
         \\  "version": "1.2.3",

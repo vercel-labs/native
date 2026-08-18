@@ -1028,7 +1028,7 @@ fn nativeAppJson(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
         \\{
-        \\    "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+        \\    "$schema": "https://schema.native-sdk.dev/app/v1.json",
         \\    "id":
     );
     try out.appendSlice(allocator, " ");
@@ -3252,7 +3252,7 @@ fn appJson(allocator: std.mem.Allocator, names: TemplateNames, frontend: Fronten
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
         \\{
-        \\    "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+        \\    "$schema": "https://schema.native-sdk.dev/app/v1.json",
         \\    "id":
     );
     try appendJsonString(&out, allocator, names.app_id);
@@ -4151,7 +4151,7 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "frontend/dist") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "npm") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"windows\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"$schema\": \"https://native-sdk.dev/schemas/app.schema.json\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"$schema\": \"https://schema.native-sdk.dev/app/v1.json\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-install") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"npm\", \"install\", \"--prefix\", \"frontend\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-build") != null);

@@ -34,6 +34,7 @@ Do not edit `CHANGELOG.md` as part of regular feature or fix work. The release a
 ## Where things live
 
 - `src/` — the engine and runtime; `src/primitives/canvas/` holds the widget, markup, and vector core.
+- `apps/schema/` — the standalone static Vercel project for `schema.native-sdk.dev`.
 - `examples/` — the showcase apps, many predating the JSON default (`app.zon` + `src/`).
 - `docs/` — the documentation site; `docs/AGENTS.md` has its MDX conventions.
 - `skills/` and `skill-data/` — the agent skills the CLI ships (`native skills list`).

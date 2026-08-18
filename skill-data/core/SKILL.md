@@ -112,7 +112,7 @@ Keep `app.json` as the source of truth for app-level behavior. Existing `app.zon
 
 ```json
 {
-  "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
   "id": "com.example.my-app",
   "name": "my-app",
   "display_name": "My App",
