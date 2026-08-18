@@ -27,7 +27,13 @@ assert.equal(schema.$defs.dmg.properties.icon_size.maximum, 256);
 assert.deepEqual(fs.readFileSync(legacyPath), publishedBytes, "legacy docs schema differs from canonical v1");
 assert.deepEqual(fs.readFileSync(packagePath), publishedBytes, "published and npm-packaged app schemas differ");
 assert.equal(deployment.outputDirectory, "public");
-assert.deepEqual(deployment.rewrites, [{ source: "/app.json", destination: "/app/v1.json" }]);
+// /app.json aliases the canonical schema; every other path 302-redirects
+// away from the single-purpose schema domain (files like /app/v1.json are
+// served directly and take precedence over this rewrites list).
+assert.deepEqual(deployment.rewrites, [
+  { source: "/app.json", destination: "/app/v1.json" },
+  { source: "/(.*)", destination: "https://native-sdk.dev" },
+]);
 assert.ok(deployment.headers.some((entry) => entry.source === "/app/v1.json"));
 assert.ok(deployment.headers.some((entry) => entry.source === "/app.json"));
 
