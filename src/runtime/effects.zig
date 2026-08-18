@@ -7044,11 +7044,14 @@ pub fn Effects(comptime Msg: type) type {
         /// `max_effects` slots and the key space with spawns and fetches.
         pub fn writeFile(self: *Self, options: WriteFileOptions) void {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes or
-                options.bytes.len > max_effect_file_bytes)
+                options.bytes.len > max_effect_file_bytes or pathEndsWithSeparator(options.path))
             {
                 return self.rejectFile(options.key, .write, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{
+                .create_parents = true,
+                .preserve_final_component = true,
+            }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
             self.startFile(options.key, .write, &access, options.bytes, options.on_result);
         }
 
@@ -16432,6 +16435,38 @@ pub fn Effects(comptime Msg: type) type {
             return .{ .dir = parent, .basename = std.fs.path.basename(file_path) };
         }
 
+        fn pathEndsWithSeparator(path: []const u8) bool {
+            const last = path[path.len - 1];
+            return last == '/' or (builtin.os.tag == .windows and last == '\\');
+        }
+
+        fn writeThroughOpenedParent(dir: std.Io.Dir, io: std.Io, basename: []const u8, bytes: []const u8) !void {
+            const kind = if (dir.statFile(io, basename, .{ .follow_symlinks = false })) |stat|
+                stat.kind
+            else |err| switch (err) {
+                error.FileNotFound => null,
+                else => return err,
+            };
+            // Preserve writes to FIFOs and other special files, but open the
+            // retained final entry without following a substituted symlink.
+            if (kind != null and kind.? != .file and kind.? != .sym_link) {
+                var file = try dir.openFile(io, basename, .{
+                    .mode = .write_only,
+                    .allow_directory = false,
+                    .follow_symlinks = false,
+                });
+                defer file.close(io);
+                try file.writeStreamingAll(io, bytes);
+                return;
+            }
+
+            var atomic = try dir.createFileAtomic(io, basename, .{ .replace = true });
+            defer atomic.deinit(io);
+            try atomic.file.writePositionalAll(io, bytes, 0);
+            try atomic.file.sync(io);
+            try atomic.replace(io);
+        }
+
         fn runFileOp(ctx: *FileWorkerContext, io: std.Io) EffectFileOutcome {
             if (ctx.missing) return if (ctx.op == .stat) .ok else .not_found;
             const dir = ctx.parent orelse std.Io.Dir.cwd();
@@ -16441,7 +16476,7 @@ pub fn Effects(comptime Msg: type) type {
                     if (ctx.parent == null) {
                         var opened_parent = openOrCreateFileParent(io, file_path) catch |err| return fileOpFailure(err);
                         defer opened_parent.dir.close(io);
-                        opened_parent.dir.writeFile(io, .{ .sub_path = opened_parent.basename, .data = ctx.payload() }) catch |err| return fileOpFailure(err);
+                        writeThroughOpenedParent(opened_parent.dir, io, opened_parent.basename, ctx.payload()) catch |err| return fileOpFailure(err);
                         return .ok;
                     }
                     var atomic = dir.createFileAtomic(io, file_path, .{ .make_path = ctx.parent == null, .replace = true }) catch |err| return fileOpFailure(err);

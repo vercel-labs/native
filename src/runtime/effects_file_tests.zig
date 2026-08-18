@@ -464,6 +464,120 @@ test "real executor writes through an existing symlinked parent" {
     try std.testing.expectEqualStrings("through parent link", on_disk);
 }
 
+test "real executor creates missing descendants below a symlinked parent" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "target", .default_dir);
+    try tmp.dir.symLink(io, "target", "alias", .{ .is_directory = true });
+
+    var h = try Harness.create();
+    defer h.destroy();
+    var path_buffer: [256]u8 = undefined;
+    test_path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/alias/missing/nested/session.json", .{tmp.sub_path[0..]});
+    test_bytes = "nested through parent link";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try waitForRealResult(&h, 1);
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    const on_disk = try tmp.dir.readFileAlloc(io, "target/missing/nested/session.json", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(on_disk);
+    try std.testing.expectEqualStrings("nested through parent link", on_disk);
+}
+
+test "real executor writes an absolute path" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var absolute_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const absolute_len = try tmp.dir.realPath(io, &absolute_storage);
+
+    var h = try Harness.create();
+    defer h.destroy();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    test_path = try std.fmt.bufPrint(&path_buffer, "{s}/absolute.json", .{absolute_storage[0..absolute_len]});
+    test_bytes = "absolute";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try waitForRealResult(&h, 1);
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    const on_disk = try tmp.dir.readFileAlloc(io, "absolute.json", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(on_disk);
+    try std.testing.expectEqualStrings("absolute", on_disk);
+}
+
+test "real executor rejects write paths with trailing separators" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Harness.create();
+    defer h.destroy();
+
+    var path_buffer: [256]u8 = undefined;
+    test_path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/destination/", .{tmp.sub_path[0..]});
+    test_bytes = "not written";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try waitForRealResult(&h, 1);
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.rejected, h.app_state.model.last_outcome.?);
+}
+
+test "real executor replaces a final symlink without overwriting its target" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "target.bin", .data = "keep me" });
+    try tmp.dir.symLink(io, "target.bin", "alias.bin", .{});
+
+    var h = try Harness.create();
+    defer h.destroy();
+    var path_buffer: [256]u8 = undefined;
+    test_path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/alias.bin", .{tmp.sub_path[0..]});
+    test_bytes = "replacement";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try waitForRealResult(&h, 1);
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    const target = try tmp.dir.readFileAlloc(io, "target.bin", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("keep me", target);
+    const replacement_stat = try tmp.dir.statFile(io, "alias.bin", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.file, replacement_stat.kind);
+}
+
+test "bound real executor replaces a final symlink without overwriting its target" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "app-data", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "app-data/target.bin", .data = "keep me" });
+    try tmp.dir.symLink(io, "target.bin", "app-data/alias.bin", .{});
+
+    var root_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}/app-data", .{tmp.sub_path[0..]});
+    var path_buffer: [256]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&path_buffer, "{s}/alias.bin", .{root});
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.bindFileAccess(.{ .roots = &.{root}, .permitted = false, .enforce = true });
+    test_path = alias;
+    test_bytes = "replacement";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try waitForRealResult(&h, 1);
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    const target = try tmp.dir.readFileAlloc(io, "app-data/target.bin", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("keep me", target);
+    const replacement = try tmp.dir.readFileAlloc(io, "app-data/alias.bin", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(replacement);
+    try std.testing.expectEqualStrings("replacement", replacement);
+    const replacement_stat = try tmp.dir.statFile(io, "app-data/alias.bin", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.file, replacement_stat.kind);
+}
+
 test "real executor reports missing files as not_found" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
