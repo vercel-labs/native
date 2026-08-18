@@ -2,9 +2,30 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.4
+## 0.9.5
 
 <!-- release:start -->
+
+### New Features
+
+- **JSON manifests by default**: New TypeScript, Zig, web, full, and ejected apps now scaffold with `app.json`, backed by full parsing, discovery, build conversion, validation, vendoring, a published versioned schema, and seamless `app.zon` fallback for existing projects (#385).
+- **Registered-image source cropping**: Canvas image options and Native markup can now select atomic source rectangles from registered images for texture-atlas rendering, with schema, compiler, validation, documentation, and sampling-bleed coverage (#390).
+
+### Bug Fixes
+
+- **Reliable installed TypeScript toolchains**: Core and service builds now resolve ScriptC across nested, hoisted, and global sibling npm layouts, generate the complete SQLite SDK module family, and validate library imports against their actual directories (#389).
+
+### Improvements
+
+- **Focused schema hosting**: `schema.native-sdk.dev` now serves only the versioned app schema and its current-version alias, redirecting every non-schema route to the main Native SDK site (#388).
+
+### Contributors
+
+- @ctate
+
+<!-- release:end -->
+
+## 0.9.4
 
 ### New Features
 
@@ -18,8 +39,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 ### Contributors
 
 - @ctate
-
-<!-- release:end -->
 
 ## 0.9.3
 
