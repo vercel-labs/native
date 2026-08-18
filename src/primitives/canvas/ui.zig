@@ -583,7 +583,9 @@ pub fn Ui(comptime Msg: type) type {
             /// image-bearing widgets. Null draws the whole registered
             /// image; a rectangle draws only that sub-region, clipped to
             /// the registered image bounds — the texture-atlas path.
-            /// The destination remains the widget's resolved frame.
+            /// Crops use nearest sampling so filtering cannot bleed an
+            /// adjacent atlas region. The destination remains the
+            /// widget's resolved frame.
             image_src: ?geometry.RectF = null,
             /// Vector icon name drawn inside icon-bearing controls
             /// (`button`, `toggle_button`, `icon_button`, `list_item`,

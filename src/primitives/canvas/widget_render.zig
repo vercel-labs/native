@@ -2697,7 +2697,10 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
         .dst = widget.frame,
         .opacity = widget.image_opacity,
         .fit = widget.image_fit,
-        .sampling = widget.image_sampling,
+        // Packet hosts expose filtering but no per-draw sampler-address
+        // mode. Nearest sampling keeps an atlas crop from filtering
+        // across its source boundary; whole-image draws stay linear.
+        .sampling = if (widget.image_src != null) .nearest else widget.image_sampling,
     });
     if (clips_image) try builder.popClip();
 }
@@ -2987,7 +2990,9 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
             .dst = widget.frame,
             .opacity = widget.image_opacity,
             .fit = widget.image_fit,
-            .sampling = widget.image_sampling,
+            // See emitImageWidget: a cropped avatar is an atlas draw and
+            // must not sample neighboring regions on packet hosts.
+            .sampling = if (widget.image_src != null) .nearest else widget.image_sampling,
             // The render plan flattens the clip stack to rects, so the
             // pill clip above only crops the bounds; the draw's own
             // radius mask is what actually rounds the image.

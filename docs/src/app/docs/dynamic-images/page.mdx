@@ -104,7 +104,7 @@ A loaded image occupies one of the registry's **16 slots** until you release it,
 
 Unlike a load, unregister is **synchronous registry surgery, not an effect**: no result Msg follows (registration by `imageLoad` has a terminal because I/O and decode can fail; releasing a slot cannot), and aimed at an id with no registration it no-ops — `imageCancel`'s idle rule. It frees only the **current** registration: a load in flight under the id is untouched, and its terminal still registers the pixels, re-occupying the id. To evict an id whose load is still running, `Cmd.imageCancel(id)` first, then unregister.
 
-When many small visuals ship together, one slot can hold a texture atlas instead: `<image>` and `<avatar>` accept `source-x`, `source-y`, `source-width`, and `source-height` together, in decoded-image pixel coordinates. Zig views set the equivalent `ElementOptions.image_src` rectangle. Every atlas region references the same registered ImageId, so it consumes one registry slot; use the dimensions reported by the load result because decode-to-fit may change the atlas geometry.
+When many small visuals ship together, one slot can hold a texture atlas instead: `<image>` and `<avatar>` accept `source-x`, `source-y`, `source-width`, and `source-height` together, in decoded-image pixel coordinates. Zig views set the equivalent `ElementOptions.image_src` rectangle. Cropped widgets use nearest sampling so adjacent regions cannot bleed into the tile. Every atlas region references the same registered ImageId, so it consumes one registry slot; use the dimensions reported by the load result because decode-to-fit may change the atlas geometry.
 
 ## Limits, honestly
 

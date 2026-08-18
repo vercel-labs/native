@@ -981,7 +981,8 @@ The view binds that model-owned id in either tier; `0` is the no-image sentinel 
 
 One registered image can be a texture atlas. The source rectangle uses
 decoded-image pixel coordinates; declare all four markup attributes, or set
-the equivalent `ElementOptions.image_src` `geometry.RectF` in a Zig view:
+the equivalent `ElementOptions.image_src` `geometry.RectF` in a Zig view.
+Cropped widgets use nearest sampling so adjacent atlas regions cannot bleed:
 
 ```html
 <image image="{atlas}" source-x="64" source-y="32"

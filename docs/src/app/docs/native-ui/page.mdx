@@ -573,7 +573,7 @@ ui.image(.{ .image = model.chart_image, .width = 120, .height = 80, .semantics =
 <avatar image="{avatar_image}" label="Octocat">OC</avatar>
 ```
 
-One registered image can be a texture atlas. `ElementOptions.image_src` is an optional `geometry.RectF` in decoded-image pixel coordinates; Native markup spells the same rectangle with all four source attributes. The widget frame stays the destination, and a source rectangle crossing the registered image bounds is clipped:
+One registered image can be a texture atlas. `ElementOptions.image_src` is an optional `geometry.RectF` in decoded-image pixel coordinates; Native markup spells the same rectangle with all four source attributes. The widget frame stays the destination, a source rectangle crossing the registered image bounds is clipped, and cropped widgets use nearest sampling so adjacent atlas regions cannot bleed into the tile:
 
 ```zig
 ui.image(.{
