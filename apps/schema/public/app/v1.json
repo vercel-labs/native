@@ -408,9 +408,9 @@
       "properties": {
         "volume_name": { "type": "string" },
         "background": { "type": "string" },
-        "window_width": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 660 },
-        "window_height": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 400 },
-        "icon_size": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 128 },
+        "window_width": { "type": "integer", "minimum": 320, "maximum": 2000, "default": 660 },
+        "window_height": { "type": "integer", "minimum": 240, "maximum": 1400, "default": 400 },
+        "icon_size": { "type": "integer", "minimum": 32, "maximum": 256, "default": 128 },
         "app_position": { "$ref": "#/$defs/position" },
         "applications_position": { "$ref": "#/$defs/position" },
         "applications_link": { "type": "boolean", "default": true },

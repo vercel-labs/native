@@ -592,18 +592,31 @@ test("incremental vendoring preserves prior package facts and lets explicit upda
 });
 
 test("app.json vendoring preserves schema metadata and package facts", () => {
-  const source = JSON.stringify({
-    $schema: "https://schema.native-sdk.dev/app/v1.json",
-    id: "dev.example.fixture",
-    name: "fixture",
-    version: "1.0.0",
-    service_packages: [{ name: "alpha", version: "1.2.3", content_hash: "a".repeat(64) }],
-  });
+  const source = `{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.example.fixture",
+  "name": "fixture",
+  "version": "1.0.0",
+  "assets": { "images": [{ "id": 9007199254740993, "path": "assets/cover.png" }] },
+  "frontend": { "dev": { "url": "http://127.0.0.1:5173/", "timeout_ms": 1e3 } },
+  "service_packages": [{ "name": "alpha", "version": "1.2.3", "content_hash": "${"a".repeat(64)}" }]
+}\n`;
   assert.deepEqual(mergePackageSpecs(source, ["beta@2.0.0"], "json"), ["alpha@1.2.3", "beta@2.0.0"]);
   const replaced = replaceServicePackages(source, [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }], "json");
   const parsed = JSON.parse(replaced);
   assert.equal(parsed.$schema, "https://schema.native-sdk.dev/app/v1.json");
   assert.deepEqual(readServicePackages(replaced, "json"), [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }]);
+  assert.match(replaced, /"id": 9007199254740993/);
+  assert.match(replaced, /"timeout_ms": 1e3/);
+
+  const inserted = replaceServicePackages(`{
+  "id": "dev.example.fixture",
+  "name": "fixture",
+  "version": "1.0.0",
+  "assets": { "images": [{ "id": 9007199254740993, "path": "assets/cover.png" }] }
+}\n`, [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }], "json");
+  assert.match(inserted, /"id": 9007199254740993/);
+  assert.deepEqual(readServicePackages(inserted, "json"), [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }]);
 });
 
 test("service staging lowers tagged throws across the service-host graph", () => {

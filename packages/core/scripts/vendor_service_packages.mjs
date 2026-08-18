@@ -86,6 +86,89 @@ function parseJsonManifest(source) {
   return manifest;
 }
 
+function skipJsonWhitespace(source, start) {
+  let at = start;
+  while (/\s/.test(source[at] ?? "")) at++;
+  return at;
+}
+
+function scanJsonString(source, start) {
+  let escaped = false;
+  for (let at = start + 1; at < source.length; at++) {
+    const char = source[at];
+    if (escaped) escaped = false;
+    else if (char === "\\") escaped = true;
+    else if (char === '"') return at + 1;
+  }
+  throw new Error("app.json contains an unterminated string");
+}
+
+function scanJsonValue(source, start) {
+  const first = source[start];
+  if (first === '"') return scanJsonString(source, start);
+  if (first === "{" || first === "[") {
+    const close = first === "{" ? "}" : "]";
+    let depth = 1;
+    let string = false;
+    let escaped = false;
+    for (let at = start + 1; at < source.length; at++) {
+      const char = source[at];
+      if (string) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') string = false;
+        continue;
+      }
+      if (char === '"') string = true;
+      else if (char === first) depth++;
+      else if (char === close && --depth === 0) return at + 1;
+    }
+    throw new Error("app.json contains an unterminated value");
+  }
+  let at = start;
+  while (at < source.length && !/[\s,}\]]/.test(source[at])) at++;
+  return at;
+}
+
+function jsonObjectField(source, fieldName) {
+  let at = skipJsonWhitespace(source, 0);
+  if (source[at] !== "{") throw new Error("app.json must contain one object");
+  at = skipJsonWhitespace(source, at + 1);
+  let memberCount = 0;
+  let match = null;
+  while (source[at] !== "}") {
+    if (source[at] !== '"') throw new Error("app.json contains an invalid object key");
+    const keyStart = at;
+    const keyEnd = scanJsonString(source, keyStart);
+    const key = JSON.parse(source.slice(keyStart, keyEnd));
+    at = skipJsonWhitespace(source, keyEnd);
+    if (source[at] !== ":") throw new Error("app.json contains an invalid object field");
+    const valueStart = skipJsonWhitespace(source, at + 1);
+    const valueEnd = scanJsonValue(source, valueStart);
+    memberCount++;
+    if (key === fieldName) {
+      if (match !== null) throw new Error(`app.json contains duplicate ${fieldName} fields`);
+      match = { valueStart, valueEnd };
+    }
+    at = skipJsonWhitespace(source, valueEnd);
+    if (source[at] === ",") at = skipJsonWhitespace(source, at + 1);
+    else if (source[at] !== "}") throw new Error("app.json contains an invalid object separator");
+  }
+  return { match, close: at, memberCount };
+}
+
+function jsonTopLevelIndent(source, close) {
+  const firstKey = source.indexOf('"', source.indexOf("{") + 1);
+  const key = firstKey >= 0 && firstKey < close ? firstKey : close;
+  const lineStart = source.lastIndexOf("\n", key - 1) + 1;
+  const indent = source.slice(lineStart, key);
+  return /^[ \t]+$/.test(indent) ? indent : "  ";
+}
+
+function renderJsonValue(value, indent) {
+  return JSON.stringify(value, null, 2).replaceAll("\n", `\n${indent}`);
+}
+
 export function readServicePackages(source, format = "zon") {
   if (format === "json") {
     const entries = parseJsonManifest(source).service_packages ?? [];
@@ -128,9 +211,15 @@ export function mergePackageSpecs(source, requested, format = "zon") {
 
 export function replaceServicePackages(source, entries, format = "zon") {
   if (format === "json") {
-    const manifest = parseJsonManifest(source);
-    manifest.service_packages = entries;
-    return `${JSON.stringify(manifest, null, 2)}\n`;
+    parseJsonManifest(source);
+    const field = jsonObjectField(source, "service_packages");
+    const indent = jsonTopLevelIndent(source, field.close);
+    const rendered = renderJsonValue(entries, indent);
+    if (field.match) {
+      return source.slice(0, field.match.valueStart) + rendered + source.slice(field.match.valueEnd);
+    }
+    const comma = field.memberCount === 0 ? "" : ",";
+    return `${source.slice(0, field.close).trimEnd()}${comma}\n${indent}"service_packages": ${rendered}\n${source.slice(field.close)}`;
   }
   const rendered = [
     "    .service_packages = .{",
