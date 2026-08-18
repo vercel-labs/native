@@ -8,7 +8,9 @@ const std = @import("std");
 pub fn convertAlloc(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), source, .{});
+    // Keep numeric tokens as authored. Parsing through f64 first can round a
+    // valid u64 manifest value before the generated ZON module sees it.
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), source, .{ .parse_numbers = false });
     if (root != .object) return error.ExpectedObject;
     try validateValue(root);
 
@@ -22,7 +24,7 @@ pub fn convertAlloc(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
 pub fn validateSource(allocator: std.mem.Allocator, source: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), source, .{});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), source, .{ .parse_numbers = false });
     if (root != .object) return error.ExpectedObject;
     try validateValue(root);
 }
@@ -108,4 +110,27 @@ test "JSON manifests reject explicit null and recognize extension case-insensiti
     try std.testing.expect(isJsonPath("app.json"));
     try std.testing.expect(isJsonPath("config/APP.JSON"));
     try std.testing.expect(!isJsonPath("app.zon"));
+}
+
+test "JSON-to-ZON conversion preserves numeric tokens exactly" {
+    const converted = try convertAlloc(std.testing.allocator,
+        \\{
+        \\  "assets": { "images": [{ "id": 9007199254740993.0, "path": "assets/cover.png" }] },
+        \\  "frontend": { "dev": { "url": "http://127.0.0.1:5173/", "timeout_ms": 1e3 } }
+        \\}
+    );
+    defer std.testing.allocator.free(converted);
+    try std.testing.expect(std.mem.indexOf(u8, converted, ".id = 9007199254740993.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, converted, ".timeout_ms = 1e3") != null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source_z = try arena.allocator().dupeZ(u8, converted);
+    const Parsed = struct {
+        assets: struct { images: []const struct { id: u64, path: []const u8 } },
+        frontend: struct { dev: struct { url: []const u8, timeout_ms: u32 } },
+    };
+    const parsed = try std.zon.parse.fromSliceAlloc(Parsed, arena.allocator(), source_z, null, .{});
+    try std.testing.expectEqual(@as(u64, 9_007_199_254_740_993), parsed.assets.images[0].id);
+    try std.testing.expectEqual(@as(u32, 1000), parsed.frontend.dev.timeout_ms);
 }

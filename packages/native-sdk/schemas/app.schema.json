@@ -100,7 +100,7 @@
       "required": ["version", "restore"],
       "properties": {
         "version": { "type": "integer", "minimum": 1 },
-        "debounce_ms": { "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 500 },
+        "debounce_ms": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 500 },
         "restore": {
           "type": "object",
           "additionalProperties": false,
@@ -172,7 +172,7 @@
             "url": { "type": "string", "format": "uri" },
             "command": { "$ref": "#/$defs/stringArray" },
             "ready_path": { "type": "string", "default": "/" },
-            "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 30000 }
+            "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 30000 }
           }
         }
       }

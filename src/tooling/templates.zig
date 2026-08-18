@@ -2121,7 +2121,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\}
         \\
         \\fn appManifestModule(b: *std.Build) *std.Build.Module {
-        \\    const root = std.json.parseFromSliceLeaky(std.json.Value, b.allocator, @embedFile("app.json"), .{}) catch
+        \\    const root = std.json.parseFromSliceLeaky(std.json.Value, b.allocator, @embedFile("app.json"), .{ .parse_numbers = false }) catch
         \\        @panic("cannot parse app.json; run `native check` for a precise diagnostic");
         \\    if (root != .object) @panic("app.json must contain one object");
         \\    var out = std.Io.Writer.Allocating.init(b.allocator);
@@ -4196,6 +4196,7 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "options.addOption(bool, \"web_layer\", web_layer)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.json.parseFromSliceLeaky(InferenceManifest") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "fn appManifestModule") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".{ .parse_numbers = false }") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".null => return error.NullNotAllowed") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "the web layer is excluded ({s}) but the app declares web use ({s})") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".system => if (web_layer) {") != null);
