@@ -185,7 +185,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("refresh"),
     alternateActivationCommand: asciiBytes("toggle"),
     openCommand: asciiBytes("refresh"),
-    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
+    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
     items: [{ id: 1, label: asciiBytes("Toggle"), command: asciiBytes("toggle"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } }],
   };
 }
@@ -203,6 +203,13 @@ export function statusItem(model: Model): StatusItemState {
   assert.ok(structs.includes("StatusItemSegmentOption"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemMetricRow"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemChartRow"), `structs: ${structs.join(", ")}`);
+  const presentation = (doc.types as { structs: { name: string; fields: { name: string; type: unknown }[] }[] }).structs
+    .find((record) => record.name === "StatusItemPresentation");
+  assert.ok(presentation);
+  assert.deepEqual(presentation.fields.slice(-2), [
+    { name: "fontSize", type: { kind: "optional", inner: { kind: "i64" } } },
+    { name: "fontWeight", type: { kind: "optional", inner: { kind: "enum", name: "StatusItemFontWeight" } } },
+  ]);
 });
 
 test("themeState projects optional pack, scheme, and string accent as a launcher-bound record", () => {

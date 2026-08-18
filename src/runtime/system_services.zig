@@ -236,6 +236,22 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return false;
         }
 
+        /// Whether automation may invoke this row exactly as a user can.
+        /// Disabled native menu items and segmented choices cannot emit a
+        /// platform action, so the automation seam must reject them too.
+        pub fn statusItemMenuItemActionable(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
+            const status_item = findStatusItemConst(self, status_item_id) orelse return false;
+            for (status_item.items[0..status_item.item_count]) |item| {
+                if (item.id == item_id) return !item.separator and item.enabled and (item.role == .command or item.role == .agent);
+                if (item.segmented) |segmented| {
+                    for (segmented.options) |option| {
+                        if (option.id == item_id) return option.enabled;
+                    }
+                }
+            }
+            return false;
+        }
+
         pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {
             return self.statusItemMenuItemExists(platform.primary_status_item_id, item_id);
         }

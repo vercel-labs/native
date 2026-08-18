@@ -850,8 +850,8 @@ pub fn TsUiApp(comptime core: type) type {
                     .tone = statusItemTone(presentation.tone),
                     .icon_opacity = statusItemFloat(presentation.iconOpacity),
                     .monospaced = presentation.monospaced,
-                    .font_size = statusItemFloat(presentation.fontSize),
-                    .font_weight = statusItemFontWeight(presentation.fontWeight),
+                    .font_size = if (presentation.fontSize) |value| statusItemFloat(value) else 0,
+                    .font_weight = if (presentation.fontWeight) |value| statusItemFontWeight(value) else .regular,
                 },
                 .icon_path = state.iconPath,
                 .tooltip = state.tooltip,
@@ -952,8 +952,8 @@ pub fn TsUiApp(comptime core: type) type {
             if (@FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
                 !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
                 !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool or
-                !statusItemNumericType(@FieldType(Presentation, "fontSize")) or
-                !statusItemEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
+                !optionalNumericType(@FieldType(Presentation, "fontSize")) or
+                !optionalEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
             {
                 @compileError(teaching);
             }
@@ -1028,8 +1028,8 @@ pub fn TsUiApp(comptime core: type) type {
                 @FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
                 !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
                 !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool or
-                !statusItemNumericType(@FieldType(Presentation, "fontSize")) or
-                !statusItemEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
+                !optionalNumericType(@FieldType(Presentation, "fontSize")) or
+                !optionalEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
             {
                 @compileError(teaching);
             }
@@ -1661,8 +1661,8 @@ const StatusItemsAdapterTestCore = struct {
         tone: Tone,
         iconOpacity: f64,
         monospaced: bool,
-        fontSize: f64,
-        fontWeight: enum { regular, medium, semibold, bold },
+        fontSize: ?f64,
+        fontWeight: ?enum { regular, medium, semibold, bold },
     };
     const SegmentOption = struct {
         id: f64,
@@ -1733,7 +1733,7 @@ const StatusItemsAdapterTestCore = struct {
         .activationCommand = "spend.open",
         .alternateActivationCommand = "",
         .openCommand = "spend.refresh",
-        .presentation = .{ .title = "$7", .width = 52, .tone = .warning, .iconOpacity = 0.75, .monospaced = true, .fontSize = 13, .fontWeight = .semibold },
+        .presentation = .{ .title = "$7", .width = 52, .tone = .warning, .iconOpacity = 0.75, .monospaced = true, .fontSize = null, .fontWeight = null },
         .items = &rows,
     }};
 
@@ -1755,6 +1755,8 @@ test "TypeScript statusItems adapter validates and projects canonical descriptor
     try std.testing.expectEqual(@as(platform.StatusItemId, 7), descriptors[0].id);
     try std.testing.expect(!descriptors[0].visible);
     try std.testing.expectEqualStrings("$7", descriptors[0].state.presentation.title);
+    try std.testing.expectEqual(@as(f32, 0), descriptors[0].state.presentation.font_size);
+    try std.testing.expectEqual(platform.TrayFontWeight.regular, descriptors[0].state.presentation.font_weight);
     try std.testing.expectEqualStrings("spend.png", descriptors[0].state.icon_path);
     try std.testing.expectEqual(@as(usize, 1), descriptors[0].state.items.len);
     try std.testing.expectEqual(@as(platform.TrayItemId, 3), descriptors[0].state.items[0].id);

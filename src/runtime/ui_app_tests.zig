@@ -4540,9 +4540,72 @@ test "ui app tray state rides automation snapshots and tray-action drives a row"
 
     // Unknown or malformed item ids are loud driver misuse, never a
     // silent no-op or a fallback command dispatch.
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action 11"));
     try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action 99"));
     try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action open"));
     try std.testing.expectEqual(@as(u32, 1), app_state.model.selected_issue);
+}
+
+const SegmentedAutomationModel = struct { selected: bool = true };
+const SegmentedAutomationMsg = union(enum) { enable, disable };
+const SegmentedAutomationApp = ui_app_model.UiApp(SegmentedAutomationModel, SegmentedAutomationMsg);
+
+fn segmentedAutomationUpdate(model: *SegmentedAutomationModel, msg: SegmentedAutomationMsg) void {
+    switch (msg) {
+        .enable => model.selected = true,
+        .disable => model.selected = false,
+    }
+}
+
+fn segmentedAutomationView(ui: *SegmentedAutomationApp.Ui, _: *const SegmentedAutomationModel) SegmentedAutomationApp.Ui.Node {
+    return ui.text(.{}, "Segments");
+}
+
+fn segmentedAutomationCommand(name: []const u8) ?SegmentedAutomationMsg {
+    if (std.mem.eql(u8, name, "segment.enable")) return .enable;
+    if (std.mem.eql(u8, name, "segment.disable")) return .disable;
+    return null;
+}
+
+fn segmentedAutomationStatusItem(model: *const SegmentedAutomationModel, scratch: *SegmentedAutomationApp.StatusItemScratch) SegmentedAutomationApp.StatusItemState {
+    scratch.segment_options[0] = .{ .id = 20, .label = "On", .command = "segment.enable", .selected = model.selected, .enabled = false };
+    scratch.segment_options[1] = .{ .id = 21, .label = "Off", .command = "segment.disable", .selected = !model.selected };
+    scratch.items[0] = .{ .role = .segmented, .segmented = .{ .options = scratch.segment_options[0..2] } };
+    return .{ .items = scratch.items[0..1] };
+}
+
+test "automation tray-action rejects disabled segmented options" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(SegmentedAutomationApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = SegmentedAutomationApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-tray-segmented-automation",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = segmentedAutomationUpdate,
+        .view = segmentedAutomationView,
+        .on_command = segmentedAutomationCommand,
+        .status_item_fn = segmentedAutomationStatusItem,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action 20"));
+    try std.testing.expect(app_state.model.selected);
+    try harness.runtime.dispatchAutomationCommand(app, "tray-action 21");
+    try std.testing.expect(!app_state.model.selected);
 }
 
 const TaskModel = struct {

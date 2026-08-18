@@ -1012,7 +1012,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     // stale or unknown item id is loud driver misuse,
                     // like widget-click on an unmounted widget.
                     const target = try parseAutomationTrayTarget(command.value);
-                    if (!SystemServiceMethods().statusItemMenuItemExists(self, target.status_item_id, target.item_id)) return error.InvalidCommand;
+                    if (!SystemServiceMethods().statusItemMenuItemActionable(self, target.status_item_id, target.item_id)) return error.InvalidCommand;
                     try dispatchPlatformEvent(self, app, .{ .tray_action = .{
                         .status_item_id = target.status_item_id,
                         .item_id = target.item_id,

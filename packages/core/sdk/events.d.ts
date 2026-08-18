@@ -16,15 +16,15 @@ export interface StatusItemModifiers {
     readonly option: boolean;
     readonly shift: boolean;
 }
-export interface StatusItemPresentation {
+export type StatusItemPresentation = {
     readonly title: Uint8Array;
     readonly width: number;
     readonly tone: StatusItemTone;
     readonly iconOpacity: number;
     readonly monospaced: boolean;
-    readonly fontSize: number;
-    readonly fontWeight: StatusItemFontWeight;
-}
+    readonly fontSize?: number;
+    readonly fontWeight?: StatusItemFontWeight;
+};
 export interface StatusItemSegmentOption {
     readonly id: number;
     readonly label: Uint8Array;

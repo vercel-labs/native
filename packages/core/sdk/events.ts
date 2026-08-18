@@ -63,8 +63,9 @@ export type ThemeState = {
 /// One row in a menu-bar status item's menu. Non-separator rows need a
 /// unique non-zero `id`, a non-empty `label`, and (when actionable) a
 /// command name accepted by `commandMsg`. Rich readout roles may carry
-/// secondary `detail`; command rows may carry a key equivalent. Spell
-/// every field explicitly because app-core records have one exact shape.
+/// secondary `detail`; command rows may carry a key equivalent. Core row
+/// records have one exact shape; only the documented rich payloads and
+/// presentation typography may be omitted.
 /// A status item may expose at most 32 rows.
 export type StatusItemTone = "normal" | "warning" | "critical";
 export type StatusItemFontWeight = "regular" | "medium" | "semibold" | "bold";
@@ -79,15 +80,17 @@ export interface StatusItemModifiers {
   readonly shift: boolean;
 }
 
-export interface StatusItemPresentation {
+export type StatusItemPresentation = {
   readonly title: Uint8Array;
   readonly width: number;
   readonly tone: StatusItemTone;
   readonly iconOpacity: number;
   readonly monospaced: boolean;
-  readonly fontSize: number;
-  readonly fontWeight: StatusItemFontWeight;
-}
+  /// Omit to keep the platform menu-bar default size.
+  readonly fontSize?: number;
+  /// Omit to keep regular weight.
+  readonly fontWeight?: StatusItemFontWeight;
+};
 
 export interface StatusItemSegmentOption {
   readonly id: number;

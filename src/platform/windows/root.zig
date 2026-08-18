@@ -1519,6 +1519,34 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
 
 const max_tray_items: usize = 32;
 
+const TrayFallbackText = struct {
+    label: []const u8,
+    detail: []const u8,
+};
+
+/// Project a rich row onto Win32's plain label/detail menu surface. Chart
+/// captions are optional, but the accessibility label is required, so a
+/// captionless chart must still remain visible instead of becoming a blank
+/// disabled row.
+fn trayFallbackText(item: platform_mod.TrayMenuItem) TrayFallbackText {
+    if (item.metric) |metric| return .{
+        .label = metric.primary_text,
+        .detail = metric.secondary_text,
+    };
+    if (item.chart) |chart| {
+        if (chart.leading_caption.len > 0) return .{
+            .label = chart.leading_caption,
+            .detail = chart.trailing_summary,
+        };
+        if (chart.trailing_summary.len > 0) return .{
+            .label = chart.trailing_summary,
+            .detail = "",
+        };
+        return .{ .label = chart.accessibility_label, .detail = "" };
+    }
+    return .{ .label = item.label, .detail = item.detail };
+}
+
 fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, options: platform_mod.TrayOptions) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (status_item_id != platform_mod.primary_status_item_id) return error.UnsupportedService;
@@ -1583,10 +1611,9 @@ fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemI
             }
             continue;
         }
-        const raw_label = if (item.metric) |metric| metric.primary_text else if (item.chart) |chart| chart.leading_caption else item.label;
-        const raw_detail = if (item.metric) |metric| metric.secondary_text else if (item.chart) |chart| chart.trailing_summary else item.detail;
-        const label = escapeMenuLabelAmpersands(raw_label, &label_pool, &pool_used);
-        const detail = escapeMenuLabelAmpersands(raw_detail, &label_pool, &pool_used);
+        const fallback = trayFallbackText(item);
+        const label = escapeMenuLabelAmpersands(fallback.label, &label_pool, &pool_used);
+        const detail = escapeMenuLabelAmpersands(fallback.detail, &label_pool, &pool_used);
         ids[count] = item.id;
         labels[count] = label.ptr;
         label_lens[count] = label.len;
@@ -2203,6 +2230,30 @@ test "windows tray carries lifecycle commands rich rows and key equivalents into
     try std.testing.expect(std.mem.indexOf(u8, host_source, "emitTrayActionForCommandId(host, displayed_items, command_id);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "return emitTrayActionForCommandId(host, host->tray_items, item.command_id);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP") != null);
+}
+
+test "windows chart fallback uses accessibility text when captions are absent" {
+    const values = [_]f32{0.5};
+    const fallback = trayFallbackText(.{
+        .role = .chart,
+        .chart = .{
+            .values = &values,
+            .accessibility_label = "CPU history, 50 percent",
+        },
+    });
+    try std.testing.expectEqualStrings("CPU history, 50 percent", fallback.label);
+    try std.testing.expectEqualStrings("", fallback.detail);
+
+    const summarized = trayFallbackText(.{
+        .role = .chart,
+        .chart = .{
+            .values = &values,
+            .trailing_summary = "50%",
+            .accessibility_label = "CPU history, 50 percent",
+        },
+    });
+    try std.testing.expectEqualStrings("50%", summarized.label);
+    try std.testing.expectEqualStrings("", summarized.detail);
 }
 
 test "windows refuses a tray-less .hide main window at platform init instead of stranding it hidden" {

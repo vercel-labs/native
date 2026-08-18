@@ -1039,7 +1039,13 @@ export class SubsetChecker {
     const numericId = id !== undefined && ["number", "i64", "f64", "numAlias"].includes(id.type.k);
     const numericWidth = width !== undefined && ["number", "i64", "f64", "numAlias"].includes(width.type.k);
     const numericOpacity = iconOpacity !== undefined && ["number", "i64", "f64", "numAlias"].includes(iconOpacity.type.k);
-    const numericFontSize = fontSize !== undefined && ["number", "i64", "f64", "numAlias"].includes(fontSize.type.k);
+    const optionalNumeric = (field: typeof fontSize): boolean =>
+      field?.type.k === "optional" && ["number", "i64", "f64", "numAlias"].includes(field.type.inner.k);
+    const optionalEnumMembersAre = (field: typeof fontWeight, expected: readonly string[]): boolean => {
+      if (field?.type.k !== "optional" || field.type.inner.k !== "enum") return false;
+      const found = this.table.enums.get(field.type.inner.name)?.members.slice().sort() ?? [];
+      return found.join(",") === expected.slice().sort().join(",");
+    };
     const valid =
       stateNames.join(",") === "activationCommand,alternateActivationCommand,iconPath,items,openCommand,presentation,tooltip" &&
       allByteFields &&
@@ -1049,8 +1055,8 @@ export class SubsetChecker {
       enumMembersAre(tone, ["normal", "warning", "critical"]) &&
       numericOpacity &&
       monospaced?.type.k === "bool" &&
-      numericFontSize &&
-      enumMembersAre(fontWeight, ["regular", "medium", "semibold", "bold"]) &&
+      optionalNumeric(fontSize) &&
+      optionalEnumMembersAre(fontWeight, ["regular", "medium", "semibold", "bold"]) &&
       item !== undefined &&
       itemNames.join(",") === "chart,command,detail,enabled,id,key,label,metric,modifiers,role,segmented,separator" &&
       numericId &&
@@ -1435,10 +1441,16 @@ export class SubsetChecker {
     const numericItemId = itemId !== undefined && ["number", "i64", "f64", "numAlias"].includes(itemId.type.k);
     const numericWidth = width !== undefined && ["number", "i64", "f64", "numAlias"].includes(width.type.k);
     const numericOpacity = iconOpacity !== undefined && ["number", "i64", "f64", "numAlias"].includes(iconOpacity.type.k);
-    const numericFontSize = fontSize !== undefined && ["number", "i64", "f64", "numAlias"].includes(fontSize.type.k);
+    const optionalNumeric = (candidate: typeof fontSize): boolean =>
+      candidate?.type.k === "optional" && ["number", "i64", "f64", "numAlias"].includes(candidate.type.inner.k);
     const enumMembersAre = (candidate: typeof tone, expected: readonly string[]): boolean => {
       if (candidate?.type.k !== "enum") return false;
       const found = this.table.enums.get(candidate.type.name)?.members.slice().sort() ?? [];
+      return found.join(",") === expected.slice().sort().join(",");
+    };
+    const optionalEnumMembersAre = (candidate: typeof fontWeight, expected: readonly string[]): boolean => {
+      if (candidate?.type.k !== "optional" || candidate.type.inner.k !== "enum") return false;
+      const found = this.table.enums.get(candidate.type.inner.name)?.members.slice().sort() ?? [];
       return found.join(",") === expected.slice().sort().join(",");
     };
     const boolModifierFields = modifiers !== undefined && modifiers.fields.every((candidate) => candidate.type.k === "bool");
@@ -1453,8 +1465,8 @@ export class SubsetChecker {
       enumMembersAre(tone, ["normal", "warning", "critical"]) &&
       numericOpacity &&
       monospaced?.type.k === "bool" &&
-      numericFontSize &&
-      enumMembersAre(fontWeight, ["regular", "medium", "semibold", "bold"]) &&
+      optionalNumeric(fontSize) &&
+      optionalEnumMembersAre(fontWeight, ["regular", "medium", "semibold", "bold"]) &&
       itemNames.join(",") === "chart,command,detail,enabled,id,key,label,metric,modifiers,role,segmented,separator" &&
       numericItemId &&
       label?.type.k === "bytes" &&

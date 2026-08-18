@@ -92,8 +92,6 @@ export function statusItem(model: Model): StatusItemState {
       tone: "normal",
       iconOpacity: 1,
       monospaced: true,
-      fontSize: 0,
-      fontWeight: "regular",
     },
     items: [
       { id: 1, label: utf8Bytes("Open Player"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },

@@ -324,10 +324,15 @@ const NullStatusItem = struct {
     presentation: TrayPresentation = .{},
     items: [max_tray_items]TrayMenuItem = undefined,
     segment_options: [max_tray_items * max_tray_segment_options]types.TraySegmentOption = undefined,
+    segment_option_label_storage: [max_tray_items * max_tray_segment_options][max_tray_segment_label_bytes]u8 = undefined,
+    segment_option_command_storage: [max_tray_items * max_tray_segment_options][max_tray_item_command_bytes]u8 = undefined,
     metric_primary_storage: [max_tray_items][max_tray_item_label_bytes]u8 = undefined,
     metric_secondary_storage: [max_tray_items][types.max_tray_item_detail_bytes]u8 = undefined,
     metric_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
     chart_values: [max_tray_items * max_tray_chart_values]f32 = undefined,
+    chart_leading_caption_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_trailing_summary_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
     item_count: usize = 0,
 };
 
@@ -1802,7 +1807,16 @@ pub const NullPlatform = struct {
             status_item.items[index] = item;
             if (item.segmented) |segmented| {
                 const start = index * max_tray_segment_options;
-                @memcpy(status_item.segment_options[start .. start + segmented.options.len], segmented.options);
+                for (segmented.options, 0..) |option, option_index| {
+                    const flat_index = start + option_index;
+                    status_item.segment_options[flat_index] = .{
+                        .id = option.id,
+                        .label = try copyInto(&status_item.segment_option_label_storage[flat_index], option.label),
+                        .command = try copyInto(&status_item.segment_option_command_storage[flat_index], option.command),
+                        .selected = option.selected,
+                        .enabled = option.enabled,
+                    };
+                }
                 status_item.items[index].segmented = .{ .options = status_item.segment_options[start .. start + segmented.options.len] };
             }
             if (item.metric) |metric| {
@@ -1815,7 +1829,14 @@ pub const NullPlatform = struct {
             if (item.chart) |chart| {
                 const start = index * max_tray_chart_values;
                 @memcpy(status_item.chart_values[start .. start + chart.values.len], chart.values);
-                status_item.items[index].chart.?.values = status_item.chart_values[start .. start + chart.values.len];
+                status_item.items[index].chart = .{
+                    .values = status_item.chart_values[start .. start + chart.values.len],
+                    .min_value = chart.min_value,
+                    .max_value = chart.max_value,
+                    .leading_caption = try copyInto(&status_item.chart_leading_caption_storage[index], chart.leading_caption),
+                    .trailing_summary = try copyInto(&status_item.chart_trailing_summary_storage[index], chart.trailing_summary),
+                    .accessibility_label = try copyInto(&status_item.chart_accessibility_storage[index], chart.accessibility_label),
+                };
             }
         }
         status_item.item_count = items.len;

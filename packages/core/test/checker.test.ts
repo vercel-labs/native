@@ -1240,7 +1240,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("refresh"),
     alternateActivationCommand: asciiBytes("toggle"),
     openCommand: asciiBytes("refresh"),
-    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
+    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
     items: [
       { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: false, detail: asciiBytes(""), role: "hero", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, metric: { primaryText: asciiBytes("2,494 requests"), secondaryText: asciiBytes("Today"), accessibilityLabel: asciiBytes("2,494 requests today") } },
       { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: true, detail: asciiBytes(""), role: "segmented", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, segmented: { options: [{ id: 11, label: asciiBytes("On"), command: asciiBytes("enable"), selected: model.playing, enabled: true }] } },
