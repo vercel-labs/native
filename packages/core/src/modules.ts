@@ -83,7 +83,6 @@ export function resolveModuleGraph(
   const entryPath = path.resolve(entry);
   const boundary = path.dirname(entryPath);
   const servicesBoundary = path.join(boundary, "services");
-  const sdkBoundary = path.dirname(coreModulePath);
   const diagnostics: SubsetDiagnostic[] = [];
   const files: string[] = [];
   const coreFiles: string[] = [];
@@ -133,7 +132,12 @@ export function resolveModuleGraph(
     const text = fs.readFileSync(filePath, "utf8");
     const parsed = ts.createSourceFile(filePath, text, ts.ScriptTarget.ESNext, true);
     const isSdk = sdkFiles.has(filePath);
-    const root = isSdk ? sdkBoundary : boundary;
+    // A generated relational core may live under .native/cache while the
+    // published library modules still resolve from the SDK package. Fence a
+    // library module against its own module directory, not the generated
+    // intrinsic core's directory; otherwise events.ts's valid ./text.ts
+    // re-export is falsely diagnosed as escaping the SDK.
+    const root = isSdk ? path.dirname(filePath) : boundary;
 
     for (const edge of edgesOf(parsed)) {
       const spec = edge.specifier;

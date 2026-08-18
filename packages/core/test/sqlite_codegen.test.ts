@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { analyzeSqlite, checkMigrationState, generateCoreSurface, generateMigrationsZig } from "../src/sqlite_codegen.ts";
 import { inspectRelationalSql } from "../src/sqlite_runtime_policy.ts";
 
@@ -21,6 +23,43 @@ UPDATE note SET folder_id = :to WHERE id = :id;
 `);
   return root;
 }
+
+test("the SQLite CLI emits a complete loadable SDK module directory", async () => {
+  const src = fixture();
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "native-sqlite-sdk-"));
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  try {
+    const args = [
+      path.join(packageDir, "src", "sqlite_cli.ts"),
+      "--src", src,
+      "--sdk-in", path.join(packageDir, "sdk", "core.ts"),
+      "--static-in", path.join(packageDir, "compile-surface", "core.ts"),
+      "--sdk-out", path.join(out, "core.ts"),
+      "--dts-out", path.join(out, "core.d.ts"),
+      "--static-out", path.join(out, "core_static.ts"),
+      "--sdk-events-out", path.join(out, "events.ts"),
+      "--sdk-text-out", path.join(out, "text.ts"),
+      "--sdk-bytes-text-methods-out", path.join(out, "bytes_text_methods.d.ts"),
+      "--sdk-events-dts-out", path.join(out, "events.d.ts"),
+      "--sdk-text-dts-out", path.join(out, "text.d.ts"),
+      "--zig-out", path.join(out, "migrations.zig"),
+      "--metadata-out", path.join(out, "metadata.json"),
+    ];
+    const run = spawnSync(process.execPath, args, { encoding: "utf8" });
+    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+    for (const file of [
+      "core.ts", "core.d.ts", "core_static.ts", "events.ts", "text.ts",
+      "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts", "migrations.zig", "metadata.json",
+    ]) {
+      assert.equal(fs.existsSync(path.join(out, file)), true, `${file} was not generated`);
+    }
+    const generated = await import(`${pathToFileURL(path.join(out, "core.ts")).href}?test=${Date.now()}`);
+    assert.equal(typeof generated.windowDescriptor, "function");
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
 
 test("real SQLite validates migrations and emits typed query/live constructors", () => {
   const root = fixture();

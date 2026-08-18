@@ -676,48 +676,6 @@ fn tsParseQuotedManifestValue(manifest_json: []const u8, comptime key: []const u
     return suffix;
 }
 
-/// The external compiler's published `scriptc` binary entrypoint,
-/// resolved by node's ancestor node_modules walk from the SDK's
-/// packages/core — the same origin the frontend toolchain resolves from
-/// (tsAliasedCompilerVersion's walk, kept in lockstep). Repo checkouts
-/// install it there with `npm ci`; the npm-installed CLI carries the
-/// compiler as a regular dependency, nested under the package on global
-/// prefixes and hoisted to the project root on local ones.
-fn tsExternalCompilerBin(b: *std.Build, dep: *std.Build.Dependency) ?[]const u8 {
-    const io = b.graph.io;
-    const sdk_root = tsSdkRoot(b.allocator, io, dep);
-    var dir: []const u8 = b.pathJoin(&.{ sdk_root, "packages", "core" });
-    while (true) {
-        if (!std.mem.eql(u8, std.fs.path.basename(dir), "node_modules")) {
-            const candidate = b.pathJoin(&.{ dir, "node_modules", ".bin", if (builtin.os.tag == .windows) "scriptc.cmd" else "scriptc" });
-            found: {
-                std.Io.Dir.cwd().access(io, candidate, .{}) catch break :found;
-                return candidate;
-            }
-        }
-        dir = std.fs.path.dirname(dir) orelse return null;
-    }
-}
-
-fn requireTsExternalCompilerBin(b: *std.Build, dep: *std.Build.Dependency) []const u8 {
-    return tsExternalCompilerBin(b, dep) orelse {
-        const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
-        std.debug.print(
-            \\
-            \\error: the external TypeScript compiler is not installed (cores and services
-            \\compile through it). It ships as an exact-pinned dependency of the SDK's
-            \\packages/core — install it once with:
-            \\  cd {s}/packages/core && npm ci
-            \\(or point NATIVE_SDK_CORE_COMPILER at the pinned release's command; an
-            \\npm-installed @native-sdk/cli carries the compiler automatically — if it is
-            \\missing there, the install is broken: reinstall @native-sdk/cli).
-            \\
-            \\
-        , .{sdk_root});
-        std.process.exit(1);
-    };
-}
-
 /// PR 166 adds both the published compile-cache bootstrap and the optional
 /// library-profile optimization field. The installed bootstrap is therefore
 /// the capability marker: keep older exact pins byte-for-byte compatible;
@@ -902,6 +860,16 @@ fn tsCoreStage(
         sqlite_check.addFileArg(dep.path("packages/core/compile-surface/core.ts"));
         sqlite_check.addArg("--sdk-out");
         checked_sdk_core = sqlite_check.addOutputFileArg("core.ts");
+        sqlite_check.addArg("--sdk-events-out");
+        _ = sqlite_check.addOutputFileArg("events.ts");
+        sqlite_check.addArg("--sdk-text-out");
+        _ = sqlite_check.addOutputFileArg("text.ts");
+        sqlite_check.addArg("--sdk-bytes-text-methods-out");
+        _ = sqlite_check.addOutputFileArg("bytes_text_methods.d.ts");
+        sqlite_check.addArg("--sdk-events-dts-out");
+        _ = sqlite_check.addOutputFileArg("events.d.ts");
+        sqlite_check.addArg("--sdk-text-dts-out");
+        _ = sqlite_check.addOutputFileArg("text.d.ts");
         sqlite_check.addArg("--static-out");
         checked_static_core = sqlite_check.addOutputFileArg("core_static.ts");
         sqlite_check.addArg("--zig-out");
@@ -914,6 +882,9 @@ fn tsCoreStage(
         }
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
+        for ([_][]const u8{ "events.ts", "text.ts", "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts" }) |source| {
+            sqlite_check.addFileInput(dep.path(b.fmt("packages/core/sdk/{s}", .{source})));
+        }
         addAppSqlDirInputs(b, sqlite_check, appPath(b, app_root, "src"));
     }
 
@@ -1087,8 +1058,11 @@ fn tsCoreStage(
         if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
             service_compile.addArgs(&.{ "--compiler", override });
         } else {
-            const compiler_bin = requireTsExternalCompilerBin(b, dep);
-            service_compile.addArgs(&.{ "--compiler", compiler_bin });
+            // Let Node resolve the dependency from the SDK package origin:
+            // this is npm's own nested/hoisted/global-sibling walk, and the
+            // driver follows scriptc's published `bin` declaration.
+            service_compile.addArg("--compiler-package-origin");
+            service_compile.addFileArg(dep.path("packages/core/package.json"));
         }
     }
 
@@ -1158,8 +1132,8 @@ fn tsCoreStage(
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        const compiler_bin = requireTsExternalCompilerBin(b, dep);
-        compile.addArgs(&.{ "--compiler", compiler_bin });
+        compile.addArg("--compiler-package-origin");
+        compile.addFileArg(dep.path("packages/core/package.json"));
     }
 
     // The mirror, generated from the archive's OWN co-emitted contract.

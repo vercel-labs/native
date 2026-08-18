@@ -61,7 +61,11 @@ test("a generated SQLite SDK surface and typed services share one checked progra
   try {
     fs.cpSync(path.join(packageDir, "sdk"), generatedDir, { recursive: true });
     const result = checkFiles({
-      "core.ts": serviceCore,
+      "core.ts": `
+import type { WindowDescriptor } from "@native-sdk/core/events";
+${serviceCore}
+export function windows(_model: Model): readonly WindowDescriptor[] { return []; }
+`,
       "services/feeds.ts": `export function parse(bytes: Uint8Array): Uint8Array { return bytes; }`,
     }, {
       contractEntry: "src/core.ts",

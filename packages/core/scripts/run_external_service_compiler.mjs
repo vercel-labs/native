@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { compilerArgv } from "./compiler_command.mjs";
+import { compilerArgv, publishedScriptcArgv } from "./compiler_command.mjs";
 
 function parseArgs(argv) {
   const args = {};
@@ -25,7 +25,7 @@ function parseArgs(argv) {
     const key = argv[i];
     const value = argv[i + 1];
     if (!key?.startsWith("--") || value === undefined) {
-      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> (--out-exe <file> | --out-archive <file>) --host-platform <arch-os-abi> --target-platform <arch-os-abi> [--zig-exe <path>] [--android-ndk <dir>] (--compiler <cmd> | --compiler-js <main.js>)");
+      console.error("usage: run_external_service_compiler.mjs --stage <dir> --manifest <package.json> --contract <services.contract.json> (--out-exe <file> | --out-archive <file>) --host-platform <arch-os-abi> --target-platform <arch-os-abi> [--zig-exe <path>] [--android-ndk <dir>] (--compiler <cmd> | --compiler-js <main.js> | --compiler-package-origin <package.json>)");
       process.exit(2);
     }
     args[key.slice(2)] = value;
@@ -40,8 +40,9 @@ function parseArgs(argv) {
     console.error("run_external_service_compiler.mjs: supply --out-exe, --out-archive, or both");
     process.exit(2);
   }
-  if (!args.compiler && !args["compiler-js"]) {
-    console.error("run_external_service_compiler.mjs: supply --compiler or --compiler-js");
+  const compilerModes = [args.compiler, args["compiler-js"], args["compiler-package-origin"]].filter(Boolean);
+  if (compilerModes.length !== 1) {
+    console.error("run_external_service_compiler.mjs: supply exactly one of --compiler, --compiler-js, or --compiler-package-origin");
     process.exit(2);
   }
   return args;
@@ -140,12 +141,20 @@ if (args["out-archive"]) {
     process.exit(2);
   }
 }
-for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "compiler-js", "zig-exe", "android-ndk"]) {
+for (const key of ["stage", "manifest", "contract", "out-exe", "out-archive", "compiler-js", "compiler-package-origin", "zig-exe", "android-ndk"]) {
   if (args[key]) args[key] = path.resolve(args[key]);
 }
-const argv0 = args.compiler
-  ? compilerArgv(args.compiler)
-  : [process.execPath, args["compiler-js"]];
+let argv0;
+try {
+  argv0 = args.compiler
+    ? compilerArgv(args.compiler)
+    : args["compiler-js"]
+      ? [process.execPath, args["compiler-js"]]
+      : publishedScriptcArgv(args["compiler-package-origin"]);
+} catch (error) {
+  console.error(`the external TypeScript compiler is not installed or has no valid published bin: ${error instanceof Error ? error.message : String(error)} — reinstall @native-sdk/cli, or point NATIVE_SDK_CORE_COMPILER at the pinned release's command`);
+  process.exit(2);
+}
 
 // Cross compiles hand the compiler its zig-cc lane: the target triple as
 // SCRIPTC_TARGET (the compiler's own mobile spellings for iOS/Android), and

@@ -7,6 +7,59 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { scriptcPin } from "./helpers.ts";
 
+test("the external core compile lane resolves a global-sibling scriptc package", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-global-scriptc-"));
+  try {
+    const globalModules = path.join(root, "lib", "node_modules");
+    const sdkCore = path.join(globalModules, "@native-sdk", "cli", "packages", "core");
+    const scriptcRoot = path.join(globalModules, "scriptc");
+    const compiler = path.join(scriptcRoot, "dist", "bootstrap.js");
+    const stage = path.join(root, "stage");
+    fs.mkdirSync(sdkCore, { recursive: true });
+    fs.mkdirSync(path.dirname(compiler), { recursive: true });
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, "profile.json"), "{}\n");
+    const manifest = path.join(sdkCore, "package.json");
+    fs.writeFileSync(manifest, JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
+    fs.writeFileSync(path.join(scriptcRoot, "package.json"), JSON.stringify({
+      name: "scriptc",
+      version: scriptcPin,
+      type: "module",
+      bin: { scriptc: "dist/bootstrap.js" },
+    }));
+    fs.writeFileSync(compiler, `
+import fs from "node:fs";
+if (process.argv.includes("-v")) { console.log(${JSON.stringify(scriptcPin)}); process.exit(0); }
+const output = process.argv[process.argv.indexOf("-o") + 1];
+fs.writeFileSync(output + ".lib.a", "global sibling archive");
+fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "global-sibling", model_unbound: [], msg: { unbound: [] } }));
+`);
+    const frontendSidecar = path.join(root, "frontend.contract.json");
+    fs.writeFileSync(frontendSidecar, JSON.stringify({
+      model_fingerprint: "0123456789abcdef",
+      has_migrate: false,
+      model_unbound: [],
+      msg: { unbound: [] },
+    }));
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
+    const archive = path.join(root, "libfixture_core.a");
+    const result = spawnSync(process.execPath, [
+      script,
+      "--stage", stage,
+      "--name", "fixture_core",
+      "--manifest", manifest,
+      "--frontend-sidecar", frontendSidecar,
+      "--out-archive", archive,
+      "--out-sidecar", path.join(root, "compiled.contract.json"),
+      "--compiler-package-origin", manifest,
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(fs.readFileSync(archive, "utf8"), "global sibling archive");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the external core compile lane uses the target-aware zig-cc environment", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-cross-"));
   try {
