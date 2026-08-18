@@ -844,6 +844,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "const contract = stabilizeGeneratedFile(b, contract_raw, \"core.contract.json\", build_trace);" },
         .{ .path = "build/app.zig", .pattern = "break :services_contract stabilizeGeneratedFile(b, raw, \"services.contract.json\", build_trace);" },
         .{ .path = "build/app.zig", .pattern = "addAppCoreTsDirInputs(b, stage_run, appPath(b, app_root, \"src\"));" },
+        .{ .path = "build/app.zig", .pattern = "addStagedCoreSdkInputs(b, dep.builder, stage_run);" },
+        .{ .path = "build/app.zig", .pattern = "for ([_][]const u8{ \"text.ts\", \"events.ts\" }) |source|" },
+        .{ .path = "build.zig", .pattern = "app_build.addStagedCoreSdkInputs(b, b, stage_run);" },
+        .{ .path = "packages/core/scripts/stage_external_core.mjs", .pattern = "for (const sdkFile of [\"text.ts\", \"events.ts\"])" },
         .{ .path = "build/app.zig", .pattern = "if (std.mem.startsWith(u8, normalized, \"services/\")) continue;" },
         .{ .path = "tools/corewire/emit_service.zig", .pattern = "native-sdk.services.abi.v3" },
         .{ .path = "tools/corewire/emit_service.zig", .pattern = "implementation-only fingerprint" },
@@ -4042,6 +4046,7 @@ fn externalCoreFixtureModule(
         stage_run.addFileArg(client);
     }
     tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".");
+    app_build.addStagedCoreSdkInputs(b, b, stage_run);
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 

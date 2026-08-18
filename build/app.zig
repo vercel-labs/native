@@ -1112,13 +1112,14 @@ fn tsCoreStage(
         stage_run.addFileArg(client);
     }
     // `addDirectoryArg` orders the stager after a generated directory but
-    // does not hash a source directory's recursively discovered contents.
-    // The old graph accidentally got core-source invalidation from changing
-    // producer cache paths. Now that generated ABI files are stabilized by
-    // content, state the author's actual core compile inputs explicitly.
-    // Services are excluded because stage_external_core.mjs excludes them;
-    // their implementation class has its own compile lane.
+    // does not hash a source directory's discovered contents. The old graph
+    // accidentally got core-source invalidation from changing producer cache
+    // paths. Now that generated ABI files are stabilized by content, state
+    // every source the stager copies explicitly: authored core files plus the
+    // two SDK implementation modules. Services are excluded because they have
+    // their own compile lane.
     addAppCoreTsDirInputs(b, stage_run, appPath(b, app_root, "src"));
+    addStagedCoreSdkInputs(b, dep.builder, stage_run);
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 
@@ -1317,6 +1318,18 @@ fn addAppCoreTsDirInputs(b: *std.Build, stage: *std.Build.Step.Run, src_path: []
         };
         if (std.mem.startsWith(u8, normalized, "services/")) continue;
         stage.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
+    }
+}
+
+/// Declare the SDK implementation modules copied by
+/// stage_external_core.mjs. A directory LazyPath supplies ordering only for
+/// this source tree; these file inputs make implementation-only SDK edits
+/// invalidate the staged tree and compiled core archive even when the public
+/// contract remains byte-identical. Public for the repository fixture graph,
+/// which exercises the same compiler boundary as app builds.
+pub fn addStagedCoreSdkInputs(b: *std.Build, sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
+    for ([_][]const u8{ "text.ts", "events.ts" }) |source| {
+        stage.addFileInput(sdk_builder.path(b.fmt("packages/core/sdk/{s}", .{source})));
     }
 }
 
