@@ -442,6 +442,28 @@ test "real executor writes a file (creating parent dirs) and reads it back" {
     }
 }
 
+test "real executor writes through an existing symlinked parent" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "target", .default_dir);
+    try tmp.dir.symLink(io, "target", "alias", .{ .is_directory = true });
+
+    var h = try Harness.create();
+    defer h.destroy();
+    var path_buffer: [256]u8 = undefined;
+    test_path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/alias/session.json", .{tmp.sub_path[0..]});
+    test_bytes = "through parent link";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try waitForRealResult(&h, 1);
+
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    const on_disk = try tmp.dir.readFileAlloc(io, "target/session.json", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(on_disk);
+    try std.testing.expectEqualStrings("through parent link", on_disk);
+}
+
 test "real executor reports missing files as not_found" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

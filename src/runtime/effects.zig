@@ -16413,6 +16413,25 @@ pub fn Effects(comptime Msg: type) type {
             ctx.done.store(true, .release);
         }
 
+        const OpenedFileParent = struct {
+            dir: std.Io.Dir,
+            basename: []const u8,
+        };
+
+        fn openOrCreateFileParent(io: std.Io, file_path: []const u8) !OpenedFileParent {
+            const parent_path = std.fs.path.dirname(file_path) orelse ".";
+            const parent = std.Io.Dir.cwd().openDir(io, parent_path, .{ .follow_symlinks = true }) catch |err| switch (err) {
+                error.FileNotFound => create: {
+                    try std.Io.Dir.cwd().createDirPath(io, parent_path);
+                    // A newly created final component must still be a directory,
+                    // not a symlink substituted between creation and opening.
+                    break :create try std.Io.Dir.cwd().openDir(io, parent_path, .{ .follow_symlinks = false });
+                },
+                else => return err,
+            };
+            return .{ .dir = parent, .basename = std.fs.path.basename(file_path) };
+        }
+
         fn runFileOp(ctx: *FileWorkerContext, io: std.Io) EffectFileOutcome {
             if (ctx.missing) return if (ctx.op == .stat) .ok else .not_found;
             const dir = ctx.parent orelse std.Io.Dir.cwd();
@@ -16420,10 +16439,9 @@ pub fn Effects(comptime Msg: type) type {
             switch (ctx.op) {
                 .write => {
                     if (ctx.parent == null) {
-                        if (std.fs.path.dirname(file_path)) |parent| {
-                            dir.createDirPath(io, parent) catch |err| return fileOpFailure(err);
-                        }
-                        dir.writeFile(io, .{ .sub_path = file_path, .data = ctx.payload() }) catch |err| return fileOpFailure(err);
+                        var opened_parent = openOrCreateFileParent(io, file_path) catch |err| return fileOpFailure(err);
+                        defer opened_parent.dir.close(io);
+                        opened_parent.dir.writeFile(io, .{ .sub_path = opened_parent.basename, .data = ctx.payload() }) catch |err| return fileOpFailure(err);
                         return .ok;
                     }
                     var atomic = dir.createFileAtomic(io, file_path, .{ .make_path = ctx.parent == null, .replace = true }) catch |err| return fileOpFailure(err);
