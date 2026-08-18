@@ -33,8 +33,8 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 
 if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
   compiler="$NATIVE_SDK_CORE_COMPILER"
-elif [ -f "$repo/packages/core/node_modules/scriptc/dist/main.js" ]; then
-  compiler="node $repo/packages/core/node_modules/scriptc/dist/main.js"
+elif [ -x "$repo/packages/core/node_modules/.bin/scriptc" ]; then
+  compiler="$repo/packages/core/node_modules/.bin/scriptc"
 else
   echo "the external core compiler is not installed — run \`npm ci --prefix $repo/packages/core\` (or point NATIVE_SDK_CORE_COMPILER at the pinned release's command)" >&2
   exit 2

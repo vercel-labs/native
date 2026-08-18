@@ -503,7 +503,7 @@ fn tsSlimReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\
         \\## Requirements
         \\
-        \\Node.js 22.15+ (on the 23 line: 23.5+) on PATH (the TypeScript frontend
+        \\Node.js 24+ on PATH (the TypeScript frontend
         \\and the core compiler run at build time; your shipped binary carries
         \\none of it).
         \\

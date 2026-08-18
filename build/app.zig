@@ -754,11 +754,11 @@ const TsToolingConsumer = enum { app_core, sqlite_schema };
 fn tsToolingPreflight(b: *std.Build, dep: *std.Build.Dependency, consumer: TsToolingConsumer) []const u8 {
     const node = b.findProgram(&.{"node"}, &.{}) catch switch (consumer) {
         .app_core => @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core frontend checks the" ++
-            " core at build time; the binary you ship carries no JS runtime).\nInstall Node.js 22.15+ (on the 23" ++
-            " line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n"),
+            " core at build time; the binary you ship carries no JS runtime).\nInstall Node.js 24+" ++
+            " — https://nodejs.org or `brew install node` — and re-run.\n"),
         .sqlite_schema => @panic("\nbuilding relational SQLite migrations needs node on PATH (the schema checker and" ++
             " migration generator run at build time; the binary you ship carries no JS runtime).\nInstall Node.js" ++
-            " 22.15+ (on the 23 line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n"),
+            " 24+ — https://nodejs.org or `brew install node` — and re-run.\n"),
     };
     switch (tsToolchainResolution(b, dep)) {
         .resolved => {},

@@ -600,9 +600,12 @@ pub fn emitInprocProfile(arena: std.mem.Allocator, optimization: ?[]const u8) ![
         \\  "entry": "service_inproc_main.ts",
         \\  "emission": "llvm",
     );
-    if (optimization) |value| try w.print(
-        \\  "optimization": "{s}",
-    , .{value});
+    if (optimization) |value| {
+        try w.print(
+            \\  "optimization": "{s}",
+        , .{value});
+        try w.writeByte('\n');
+    }
     try w.print(
         \\  "abi": {{
         \\    "prefix": "{s}",

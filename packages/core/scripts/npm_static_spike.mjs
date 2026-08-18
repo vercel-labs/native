@@ -7,13 +7,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { publishedScriptcArgv } from "./compiler_command.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const coreRoot = path.resolve(here, "..");
 const repoRoot = path.resolve(coreRoot, "..", "..");
-const compilerJs = createRequire(path.join(coreRoot, "package.json")).resolve("scriptc/dist/main.js");
+const compilerArgv = publishedScriptcArgv(path.join(coreRoot, "package.json"));
 const compilerVersion = JSON.parse(fs.readFileSync(path.join(coreRoot, "package.json"), "utf8")).dependencies.scriptc;
 
 const candidates = [
@@ -38,7 +38,7 @@ for (const candidate of candidates) {
     fs.symlinkSync(pnpmNodeModules(candidate), path.join(scratch, "node_modules"), "dir");
     const entry = path.join(scratch, "probe.ts");
     fs.writeFileSync(entry, candidate.source);
-    const probe = spawnSync(process.execPath, [compilerJs, "coverage", entry, "--npm-static", candidate.name], { encoding: "utf8" });
+    const probe = spawnSync(compilerArgv[0], [...compilerArgv.slice(1), "coverage", entry, "--npm-static", candidate.name], { encoding: "utf8" });
     const output = `${probe.stdout ?? ""}${probe.stderr ?? ""}`;
     if (process.env.NATIVE_NPM_STATIC_SPIKE_VERBOSE === "1") {
       process.stderr.write(`\n===== ${candidate.name}@${candidate.version} =====\n${output}\n`);

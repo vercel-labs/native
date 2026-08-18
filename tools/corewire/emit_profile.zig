@@ -197,9 +197,12 @@ const ProfileEmitter = struct {
             \\  "entry": {s},
             \\  "emission": "llvm",
         , .{try self.jsonString(entry)});
-        if (self.optimization) |optimization| try self.print(
-            \\  "optimization": {s},
-        , .{try self.jsonString(optimization)});
+        if (self.optimization) |optimization| {
+            try self.print(
+                \\  "optimization": {s},
+            , .{try self.jsonString(optimization)});
+            try self.raw("\n");
+        }
         try self.print(
             \\  "abi": {{
             \\    "prefix": {s},

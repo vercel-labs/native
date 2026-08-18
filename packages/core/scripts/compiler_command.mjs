@@ -6,6 +6,7 @@
 // (for example dist/main.js -> dist/bootstrap.js) without a shell boundary.
 
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 function npmBinJavaScript(command) {
@@ -45,4 +46,26 @@ export function compilerArgv(command, options = {}) {
   // Development overrides may name an arbitrary batch file rather than an
   // npm bin. cmd.exe is the Windows executable format's required launcher.
   return [env.ComSpec ?? env.COMSPEC ?? "cmd.exe", "/d", "/s", "/c", argv[0]];
+}
+
+/// Resolve scriptc through its published package `bin` declaration. This is
+/// intentionally not `scriptc/dist/main.js`: 0.0.33's bin points at the Node
+/// 24 compile-cache bootstrap, and future package entrypoint changes should
+/// reach every Native check/build invocation automatically.
+export function publishedScriptcArgv(origin, options = {}) {
+  const node = options.node ?? process.execPath;
+  const packageJson = createRequire(origin).resolve("scriptc/package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8"));
+  const declared = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.scriptc;
+  if (typeof declared !== "string" || declared.length === 0 || path.isAbsolute(declared)) {
+    throw new Error("scriptc package has no safe published binary entrypoint");
+  }
+  const packageRoot = path.dirname(packageJson);
+  const target = path.resolve(packageRoot, declared);
+  const relative = path.relative(packageRoot, target);
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("scriptc package's published binary entrypoint escapes its package");
+  }
+  if (!fs.statSync(target).isFile()) throw new Error("scriptc package's published binary entrypoint is missing");
+  return [node, target];
 }

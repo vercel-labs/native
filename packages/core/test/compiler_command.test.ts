@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { compilerArgv } from "../scripts/compiler_command.mjs";
+import { fileURLToPath } from "node:url";
+import { compilerArgv, publishedScriptcArgv } from "../scripts/compiler_command.mjs";
 
 test("Windows npm scriptc shims execute the package's published bin through Node", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-command-"));
@@ -41,4 +42,11 @@ test("Windows batch-file compiler overrides use cmd.exe while other commands sta
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("published scriptc command follows the package bin bootstrap", () => {
+  const coreRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  const argv = publishedScriptcArgv(path.join(coreRoot, "package.json"), { node: "node24" });
+  assert.equal(argv[0], "node24");
+  assert.match(argv[1], /scriptc[/\\]dist[/\\]bootstrap\.js$/);
 });

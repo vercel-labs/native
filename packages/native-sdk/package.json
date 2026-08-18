@@ -3,6 +3,9 @@
   "version": "0.9.3",
   "description": "The Native SDK: the complete toolkit for building native desktop applications — declarative markup, native rendering, WebView surfaces, and OS capabilities",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "bin": {
     "native": "bin/native.js"
   },
@@ -32,7 +35,7 @@
   ],
   "dependencies": {
     "@typescript/old": "npm:typescript@6.0.3",
-    "scriptc": "0.0.31"
+    "scriptc": "0.0.33"
   },
   "optionalDependencies": {
     "@native-sdk/cli-darwin-arm64": "0.9.3",
