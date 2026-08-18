@@ -20,7 +20,7 @@ cd my_app
 native dev
 ```
 
-A native window opens with a working counter. The primary scaffold is three files of truth and no build config: `src/core.ts` (`Model`, `Msg`, `update`), `src/app.native` (the UI), and `app.zon` (the manifest). `native dev|build|test` own the generated build; `src/app.native` hot-reloads while the app runs, keeping your state; `native dev --core` runs the TypeScript logic loop under node; and `native check` validates the core and every view in milliseconds without building. Prefer a Zig core? Use `native init my_app --template zig-core`.
+A native window opens with a working counter. The primary scaffold is three files of truth and no build config: `src/core.ts` (`Model`, `Msg`, `update`), `src/app.native` (the UI), and `app.json` (the manifest, with JSON Schema completion). Existing `app.zon` manifests remain supported. `native dev|build|test` own the generated build; `src/app.native` hot-reloads while the app runs, keeping your state; `native dev --core` runs the TypeScript logic loop under node; and `native check` validates the core and every view in milliseconds without building. Prefer a Zig core? Use `native init my_app --template zig-core`.
 
 When part of your product is the web, WebView surfaces coexist with the native canvas; web-frontend scaffolds (`--frontend next`, `--frontend vite`, and more) install their generated frontend dependencies automatically on first run.
 
@@ -34,11 +34,11 @@ Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick
 | `native dev [dir]` | Build and run the app (markup hot reload; managed frontend dev server when configured) |
 | `native build [dir]` | Build a ReleaseFast binary into `zig-out/bin/` |
 | `native test [dir]` | Run the app's test suite |
-| `native check [dir]` | Validate `src/**.native` markup and `app.zon` against the model contract |
+| `native check [dir]` | Validate `src/**.native` markup and `app.json`/`app.zon` against the model contract |
 | `native markup check\|lsp` | Check individual markup files, or serve diagnostics, completion, and hover to your editor |
 | `native eject [dir]` | Write an owned build.zig/build.zig.zon into the app |
 | `native doctor` | Check host environment, WebView, manifest, and CEF |
-| `native validate` | Validate `app.zon` against the manifest schema |
+| `native validate` | Validate `app.json` (or `app.zon`) against the manifest schema |
 | `native package` | Package the app for distribution |
 | `native bundle-assets` | Copy frontend assets into the build output |
 | `native automate` | Drive a running app: snapshots, widgets, assertions, screenshots, record/replay |

@@ -44,6 +44,14 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
 }
 
 {
+  const source = join(repoRoot, 'docs', 'public', 'schemas');
+  const target = join(projectRoot, 'schemas');
+  rmSync(target, { recursive: true, force: true });
+  cpSync(source, target, { recursive: true });
+  console.log(`✓ Copied docs/public/schemas/ to ${target}`);
+}
+
+{
   rmSync(join(projectRoot, 'third_party'), { recursive: true, force: true });
   for (const dir of ['webview2', 'sqlite']) {
     const source = join(repoRoot, 'third_party', dir);

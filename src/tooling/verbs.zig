@@ -1,7 +1,7 @@
 //! The canonical app verbs: `native dev|build|test` work in any app
 //! directory. If the app owns a build.zig (ejected, and every example),
 //! the verbs drive it through plain `zig build` — zero behavior change.
-//! Otherwise (app.zon + src/ only) the CLI synthesizes the build graph
+//! Otherwise (app.json/app.zon + src/ only) the CLI synthesizes the build graph
 //! into `<app>/.native/build/` (see buildgraph.zig) and drives that.
 //!
 //! Callers are expected to have chdir'd into the app directory: every
@@ -43,15 +43,15 @@ pub const Options = struct {
 };
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Options) !void {
-    if (!buildgraph.fileExists(io, "app.zon")) {
+    const manifest_path = manifest_tool.defaultPath(io) orelse {
         std.debug.print(
-            \\no app.zon here — `native {s}` runs inside an app directory
+            \\no app.json or app.zon here — `native {s}` runs inside an app directory
             \\(or pass one: `native {s} path/to/app`). Start one with `native init`.
             \\
         , .{ @tagName(verb), @tagName(verb) });
         return error.MissingManifest;
-    }
-    const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+    };
+    const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path);
     const rebuild_snapshot = if (options.explain_rebuild)
         try explainRebuild(allocator, io)
     else
@@ -112,6 +112,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
         build_file = try buildgraph.ensureGeneratedBuild(allocator, io, ".", .{
             .app_name = metadata.name,
             .framework_root = framework_root,
+            .manifest_name = manifest_path,
         });
         // Keep artifacts where users expect them: the generated build root
         // is .native/build/, so without a prefix the binary would hide in
@@ -335,7 +336,7 @@ fn explainRebuild(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
         if (old_hash != null and std.mem.eql(u8, old_hash.?, &input.hash)) continue;
         changed += 1;
         std.debug.print("native rebuild: {s} {s} -> {s}\n", .{ input.path, old_hash orelse "<new>", &input.hash });
-        if (std.mem.eql(u8, input.path, "app.zon")) {
+        if (std.mem.eql(u8, input.path, "app.json") or std.mem.eql(u8, input.path, "app.zon")) {
             std.debug.print("  invalidates manifest-derived configuration -> affected contracts, app-code/platform link, and final artifact\n", .{});
         } else if (std.mem.eql(u8, input.path, "build.zig") or std.mem.eql(u8, input.path, "build.zig.zon")) {
             std.debug.print("  invalidates the owned build graph -> graph-selected compilation and final artifact\n", .{});

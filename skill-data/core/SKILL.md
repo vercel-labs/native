@@ -1,6 +1,6 @@
 ---
 name: core
-description: Core Native SDK guide for AI agents. Read this before explaining the Native SDK or changing a Native SDK app. Establishes TypeScript + Native markup as the default app-authoring path, routes default app work to the native-ui and ts-core skills, and covers the shared foundation: project structure, app.zon, lower-level App and Runtime patterns, frontend integration, web engines, JavaScript bridge commands, permissions, windows, WebViews, dialogs, packaging, debugging, and testing. Use when the user asks what the Native SDK is, how to build or modify an app, how to package or debug it, or how to add native capabilities.
+description: Core Native SDK guide for AI agents. Read this before explaining the Native SDK or changing a Native SDK app. Establishes TypeScript + Native markup as the default app-authoring path, routes default app work to the native-ui and ts-core skills, and covers the shared foundation: project structure, app.json and legacy app.zon, lower-level App and Runtime patterns, frontend integration, web engines, JavaScript bridge commands, permissions, windows, WebViews, dialogs, packaging, debugging, and testing. Use when the user asks what the Native SDK is, how to build or modify an app, how to package or debug it, or how to add native capabilities.
 ---
 
 # Build Native SDK apps
@@ -13,13 +13,13 @@ Agents should assume they do not know the Native SDK from general model knowledg
 
 ## Mental model
 
-- The default app has three files of truth: `src/core.ts` (`Model`, `Msg`, `update`), `src/app.native` (UI), and `app.zon` (manifest).
+- The default app has three files of truth: `src/core.ts` (`Model`, `Msg`, `update`), `src/app.native` (UI), and `app.json` (manifest).
 - Native markup binds model values and dispatches typed messages; only `update` changes state.
 - The TypeScript core compiles to native code. Node is a build/check/dev tool, not an app runtime.
 - `App` is the lower-level product/runtime interface used by generated wiring, Zig-core apps, WebView shells, and extensions.
 - `Runtime` owns the event loop, windows, bridge dispatch, security checks, automation, tracing, platform services, and window state.
 - `WebViewSource` tells the runtime what to load: inline HTML, a URL, or packaged assets from a local app origin.
-- `app.zon` is the app manifest: identity, icons, windows, frontend assets, web engine, permissions, bridge policy, security policy, and packaging inputs.
+- `app.json` is the default app manifest: identity, icons, windows, frontend assets, web engine, permissions, bridge policy, security policy, and packaging inputs. `app.zon` remains supported.
 - `src/runner.zig` and `src/main.zig` appear only when an app explicitly owns lower-level Zig wiring (for example a `zig-core` app or a WebView shell). `--full` makes a TypeScript app own `build.zig` but still does not give it Zig app logic. Do not add Zig sources to a default TypeScript app merely because SDK examples contain them.
 - `frontend/` is normal web code. It talks to native Zig through `window.zero.invoke()` or builtin helpers when those are enabled.
 
@@ -48,13 +48,13 @@ cd my_app
 native dev
 ```
 
-This creates `src/core.ts`, `src/app.native`, and `app.zon`; a native window opens with `native dev`. Use `native init my_app --template zig-core` only when the user chooses Zig. Frontend choices (`--frontend next|vite|react|svelte|vue`) are the separate WebView migration/integration path.
+This creates `src/core.ts`, `src/app.native`, and `app.json`; a native window opens with `native dev`. Use `native init my_app --template zig-core` only when the user chooses Zig. Frontend choices (`--frontend next|vite|react|svelte|vue`) are the separate WebView migration/integration path.
 
 ## Workflow for existing apps
 
 Before editing an existing Native SDK app:
 
-1. Read `app.zon` and inspect `src/` before assuming a core language. Read `src/core.ts` + `src/app.native` for the default path; read `src/main.zig`, `src/runner.zig`, and `build.zig` only when they exist.
+1. Read `app.json` or `app.zon` and inspect `src/` before assuming a core language. Read `src/core.ts` + `src/app.native` for the default path; read `src/main.zig`, `src/runner.zig`, and `build.zig` only when they exist.
 2. Identify whether the app is TypeScript + Native markup (default), an explicitly chosen Zig core, or a WebView frontend, then identify the layer the change belongs to.
 3. Follow the generated code and examples in the repository instead of inventing a new app layout.
 4. Prefer exact security policy changes over broad allowances.
@@ -62,7 +62,7 @@ Before editing an existing Native SDK app:
 
 Common file ownership:
 
-- `app.zon`: app identity, version, icons, windows, permissions, capabilities, bridge command policy, allowed origins, frontend dist/dev config, web engine, CEF config.
+- `app.json` / `app.zon`: app identity, version, icons, windows, permissions, capabilities, bridge command policy, allowed origins, frontend dist/dev config, web engine, CEF config.
 - `src/core.ts`: default app state and behavior — `Model`, `Msg`, `update`, pure helpers, `Cmd`, and `Sub`.
 - `src/app.native`: default app UI — elements, layout, bindings, and message dispatch.
 - `src/main.zig`: explicitly chosen Zig-core logic or lower-level `App` behavior, source selection, lifecycle callbacks, and custom bridge handlers.
@@ -106,9 +106,47 @@ fn source(context: *anyopaque) anyerror!native_sdk.WebViewSource {
 
 `sourceFromEnv` reads `NATIVE_SDK_FRONTEND_URL`; otherwise it serves the configured asset directory. Use it for most framework apps.
 
-## app.zon essentials
+## app.json essentials
 
-Keep `app.zon` as the source of truth for app-level behavior:
+Keep `app.json` as the source of truth for app-level behavior. Existing `app.zon` projects use the same fields in ZON syntax.
+
+```json
+{
+  "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+  "id": "com.example.my-app",
+  "name": "my-app",
+  "display_name": "My App",
+  "description": "One line about the app, shown in the About panel.",
+  "version": "0.1.0",
+  "icons": ["assets/icon.png"],
+  "platforms": ["macos", "linux"],
+  "permissions": [],
+  "capabilities": ["webview"],
+  "frontend": {
+    "dist": "frontend/dist",
+    "entry": "index.html",
+    "spa_fallback": true,
+    "dev": {
+      "url": "http://127.0.0.1:5173/",
+      "command": ["npm", "--prefix", "frontend", "run", "dev", "--", "--host", "127.0.0.1"],
+      "ready_path": "/",
+      "timeout_ms": 30000
+    }
+  },
+  "security": {
+    "navigation": {
+      "allowed_origins": ["zero://app", "http://127.0.0.1:5173"],
+      "external_links": { "action": "deny" }
+    }
+  },
+  "web_engine": "system",
+  "windows": [
+    { "label": "main", "title": "My App", "width": 960, "height": 640, "restore_state": true }
+  ]
+}
+```
+
+Legacy ZON equivalent:
 
 ```zig
 .{
@@ -151,13 +189,13 @@ Use exact local origins for dev servers. Add `zero://inline` only for inline HTM
 
 ### Add a new framework app
 
-Use `native init <path> --frontend <next|vite|react|svelte|vue>`. Then inspect the generated `app.zon`, `src/main.zig`, and `build.zig` before customizing. For framework behavior, keep frontend work in `frontend/` and use `sourceFromEnv` so development and packaged builds share one app shell.
+Use `native init <path> --frontend <next|vite|react|svelte|vue>`. Then inspect the generated `app.json`, `src/main.zig`, and `build.zig` before customizing. For framework behavior, keep frontend work in `frontend/` and use `sourceFromEnv` so development and packaged builds share one app shell.
 
 ### Add a native bridge command
 
 1. Add state and a handler in `src/main.zig`.
 2. Register the handler in `bridge()`.
-3. Allow the command in `app.zon` and in the runtime bridge policy if the runner reads manifest policy into runtime.
+3. Allow the command in the app manifest and in the runtime bridge policy if the runner reads manifest policy into runtime.
 4. Call it from JavaScript with `window.zero.invoke("namespace.command", payload)`.
 5. Return valid JSON from Zig. Use `native_sdk.bridge.writeJsonStringValue()` for user-controlled strings.
 
@@ -182,11 +220,11 @@ native package --target macos --archive
 
 On macOS, `--archive` adds a zero-config drag-to-Applications DMG with a generated 1×/2× Retina background. The optional `app.zon` `.dmg` block controls its volume name, PNG/JPEG/TIFF background, usable Finder canvas/icon geometry, and Applications link. An adjacent `name@2x.png`/`.jpg` is discovered automatically. Use `.dmg.items` only for a fully art-directed list: exactly one `app`, plus optional `applications`, project-relative `file`, and absolute `link` entries, each with its own icon-center position.
 
-Apps that own their build (ejected or scaffolded `--full`) wire the same step into the build graph: keep package metadata in `app.zon`, build the frontend assets, build the native binary, then package:
+Apps that own their build (ejected or scaffolded `--full`) wire the same step into the build graph: keep package metadata in the app manifest, build the frontend assets, build the native binary, then package:
 
 ```bash
 zig build package
-native doctor --manifest app.zon --strict
+native doctor --manifest app.json --strict
 ```
 
 Use signing and CEF options only when the product requires them.
@@ -211,7 +249,7 @@ zig build dev
 Or run the CLI directly after building the binary:
 
 ```bash
-native dev --manifest app.zon --binary zig-out/bin/MyApp
+native dev --manifest app.json --binary zig-out/bin/MyApp
 ```
 
 Vite usually uses `http://127.0.0.1:5173/`; Next.js usually uses `http://127.0.0.1:3000/`. The app WebView loads the dev URL directly, so framework HMR remains owned by Vite, Next.js, or the selected dev server.
@@ -247,8 +285,8 @@ zig build run
 zig build dev
 zig build test
 zig build test-tooling
-native validate app.zon
-native doctor --manifest app.zon --strict
+native validate app.json
+native doctor --manifest app.json --strict
 zig build package
 ```
 

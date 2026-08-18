@@ -11,6 +11,7 @@
     "bin/native.js",
     "assets",
     "skill-data",
+    "schemas",
     "skills",
     "src",
     "build",

@@ -1,6 +1,6 @@
 ---
 name: native-sdk
-description: Discovery skill for the Native SDK, the complete toolkit for building native desktop applications. Apps are authored in TypeScript + declarative Native markup (.native) by default and compiled to native code with no JS runtime in the binary; Zig cores are an explicit alternative, and WebViews are the optional web-content path. Use when the user asks what the Native SDK is, how to build a Native SDK app, author native UI, scaffold an app, configure app.zon, add bridge commands, embed web content, package an app, test a running app, or automate a Native SDK app.
+description: Discovery skill for the Native SDK, the complete toolkit for building native desktop applications. Apps are authored in TypeScript + declarative Native markup (.native) by default and compiled to native code with no JS runtime in the binary; Zig cores are an explicit alternative, and WebViews are the optional web-content path. Use when the user asks what the Native SDK is, how to build a Native SDK app, author native UI, scaffold an app, configure app.json or legacy app.zon, add bridge commands, embed web content, package an app, test a running app, or automate a Native SDK app.
 allowed-tools: Bash(native:*), Bash(npx @native-sdk/cli:*)
 hidden: true
 ---
@@ -31,4 +31,4 @@ cd my_app
 native dev
 ```
 
-`native init my_app` generates the primary three-file app: `app.zon`, `src/app.native` (the markup view), and `src/core.ts` (`Model`, `Msg`, `update`). Inspect the tree before editing an existing app and preserve the core language it already uses. `src/main.zig` means the app explicitly uses the Zig-core template; web-frontend shells additionally carry `frontend/` and usually owned build/runtime wiring.
+`native init my_app` generates the primary three-file app: `app.json`, `src/app.native` (the markup view), and `src/core.ts` (`Model`, `Msg`, `update`). Existing `app.zon` manifests remain supported. Inspect the tree before editing an existing app and preserve the core language it already uses. `src/main.zig` means the app explicitly uses the Zig-core template; web-frontend shells additionally carry `frontend/` and usually owned build/runtime wiring.

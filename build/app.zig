@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const json_to_zon = @import("../src/tooling/json_to_zon.zig");
 
 /// Canonicalize a generated file by its CONTENT before another build step
 /// consumes it. `std.Build.Step.Run` normally places outputs under a cache
@@ -121,6 +122,9 @@ const WebLayerOption = web_layer_contract.WebViewLayer;
 
 pub const AppOptions = struct {
     name: []const u8,
+    /// Explicit manifest path. Null auto-detects app.json first, then app.zon,
+    /// so older owned build.zig files can adopt JSON without a build edit.
+    manifest: ?[]const u8 = null,
     /// App entry point; defaults to src/main.zig (relative to `app_root`).
     main: []const u8 = "src/main.zig",
     /// Root of the app source tree, relative to the build root. "." for a
@@ -161,6 +165,32 @@ fn detectCoreTree(b: *std.Build, app_root: []const u8) CoreTree {
 fn appFileExists(b: *std.Build, app_root: []const u8, sub_path: []const u8) bool {
     b.build_root.handle.access(b.graph.io, appPath(b, app_root, sub_path), .{}) catch return false;
     return true;
+}
+
+fn appManifestName(b: *std.Build, app_root: []const u8, requested: ?[]const u8) []const u8 {
+    if (requested) |name| return name;
+    if (appFileExists(b, app_root, "app.json")) return "app.json";
+    return "app.zon";
+}
+
+fn appManifestPath(b: *std.Build, app_root: []const u8, manifest_name: []const u8) []const u8 {
+    return appPath(b, app_root, manifest_name);
+}
+
+/// Produce the Zig module consumed by the existing comptime manifest wiring.
+/// ZON manifests are already modules; JSON manifests are converted losslessly
+/// into a generated module, keeping one runtime feature path for both formats.
+fn appManifestModule(b: *std.Build, app_root: []const u8, manifest_name: []const u8) *std.Build.Module {
+    const path = appManifestPath(b, app_root, manifest_name);
+    if (!std.mem.endsWith(u8, path, ".json")) {
+        return b.createModule(.{ .root_source_file = b.path(path) });
+    }
+    const source = b.build_root.handle.readFileAlloc(b.graph.io, path, b.allocator, .limited(1024 * 1024)) catch
+        @panic("cannot read app.json");
+    const zon = json_to_zon.convertAlloc(b.allocator, source) catch
+        @panic("cannot convert app.json into the build-time manifest module; run `native check` for a precise diagnostic");
+    const generated = b.addWriteFiles().add("app_manifest.zon", zon);
+    return b.createModule(.{ .root_source_file = generated });
 }
 
 const TsWindowView = struct {
@@ -1627,7 +1657,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " src/main.zig,\nor keep src/main.zig and delete src/core.ts. (Other Zig files under" ++
             " src/ are fine either way.)\n");
     }
-    const app_config = appManifestBuildConfig(b, app_options.app_root);
+    const manifest_name = appManifestName(b, app_options.app_root, app_options.manifest);
+    const app_config = appManifestBuildConfig(b, app_options.app_root, manifest_name);
     // The core-compiler setting names the one lane there is; the flag
     // overrides app.zon's `.core_compiler` and both exist so a stated
     // choice stays stateable (and so the removed lane's spelling teaches
@@ -1708,7 +1739,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
                 .archive = stage.archive,
                 .service_archive = stage.service_archive,
                 .markup_c = stage.markup_c,
-                .manifest_mod = b.createModule(.{ .root_source_file = b.path(appPath(b, app_options.app_root, "app.zon")) }),
+                .manifest_mod = appManifestModule(b, app_options.app_root, manifest_name),
             } else null,
         });
     }
@@ -1758,7 +1789,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
-    const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod, ts_stage, relational_migrations, app_config);
+    const app_mod = appModule(b, dep, target, app_optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config);
     // TypeScript app code and platform hosts are expensive Zig/Clang semantic
     // work but do not depend on primary markup bytes. Compile them once into
     // an object, then make the executable a link-only artifact over that
@@ -1839,7 +1870,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // the production app module feeds the cached app-code object and must not
     // absorb the separately linked markup data object.
     const test_app_mod = if (ts_stage != null or app_optimize != optimize)
-        appModule(b, dep, target, optimize, app_options, options_mod, ts_stage, relational_migrations, app_config)
+        appModule(b, dep, target, optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config)
     else
         app_mod;
     if (ts_stage) |stage| test_app_mod.addObject(markupDataObject(b, target, optimize, stage.markup_c));
@@ -1938,7 +1969,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // WebView2 loader) from the framework root; the cached artifact's
         // own location cannot derive it, so hand it over explicitly.
         package_run.setEnvironmentVariable("NATIVE_SDK_PATH", dep.builder.pathFromRoot("."));
-        package_run.addArgs(&.{ "package", "--target", package_target_name, "--manifest", "app.zon", "--output" });
+        package_run.addArgs(&.{ "package", "--target", package_target_name, "--manifest", manifest_name, "--output" });
         package_run.addArg(if (host_os == .macos)
             b.fmt("zig-out/package/{s}.app", .{app_options.name})
         else
@@ -2015,14 +2046,14 @@ fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, defa
     };
 }
 
-fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, relational_migrations: std.Build.LazyPath, app_config: AppManifestBuildConfig) *std.Build.Module {
+fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, manifest_name: []const u8, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, relational_migrations: std.Build.LazyPath, app_config: AppManifestBuildConfig) *std.Build.Module {
     const native_sdk_mod = nativeSdkModuleWithTerminal(b, dep, target, optimize, app_options.terminal_sessions);
     const runner_mod = b.createModule(.{
         .root_source_file = dep.path("src/app_runner/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const manifest_mod = b.createModule(.{ .root_source_file = b.path(appPath(b, app_options.app_root, "app.zon")) });
+    const manifest_mod = appManifestModule(b, app_options.app_root, manifest_name);
     runner_mod.addImport("native_sdk", native_sdk_mod);
     runner_mod.addImport("build_options", options_mod);
     runner_mod.addImport("app_manifest_zon", manifest_mod);
@@ -2805,15 +2836,19 @@ fn appPath(b: *std.Build, app_root: []const u8, sub_path: []const u8) []const u8
     return b.pathJoin(&.{ app_root, sub_path });
 }
 
-fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildConfig {
+fn appManifestBuildConfig(b: *std.Build, app_root: []const u8, manifest_name: []const u8) AppManifestBuildConfig {
     // The fallback for a manifest this lenient parse cannot read keeps
     // the web layer (see AppManifestBuildConfig): a shape mismatch here
     // is not proof the app declares no web use.
     const fallback: AppManifestBuildConfig = .{ .web_declaration = .unreadable_manifest };
-    const source = b.build_root.handle.readFileAlloc(b.graph.io, appPath(b, app_root, "app.zon"), b.allocator, .limited(1024 * 1024)) catch return fallback;
-    const source_z = b.allocator.dupeZ(u8, source) catch return fallback;
+    const source = b.build_root.handle.readFileAlloc(b.graph.io, appPath(b, app_root, manifest_name), b.allocator, .limited(1024 * 1024)) catch return fallback;
     @setEvalBranchQuota(2000);
-    const raw = std.zon.parse.fromSliceAlloc(InferenceManifest, b.allocator, source_z, null, .{ .ignore_unknown_fields = true }) catch return fallback;
+    const raw = if (std.ascii.eqlIgnoreCase(std.fs.path.extension(manifest_name), ".json"))
+        std.json.parseFromSliceLeaky(InferenceManifest, b.allocator, source, .{ .ignore_unknown_fields = true }) catch return fallback
+    else zon: {
+        const source_z = b.allocator.dupeZ(u8, source) catch return fallback;
+        break :zon std.zon.parse.fromSliceAlloc(InferenceManifest, b.allocator, source_z, null, .{ .ignore_unknown_fields = true }) catch return fallback;
+    };
     // `.core_compiler` names the one lane there is; validated here so
     // the removed transpiled lane's spelling teaches at configure time.
     if (!std.mem.eql(u8, raw.core_compiler, "external")) {

@@ -464,104 +464,126 @@ const RawUrlScheme = raw_manifest.RawUrlScheme;
 const RawDmg = raw_manifest.RawDmg;
 const RawDmgItem = raw_manifest.RawDmgItem;
 
+pub const json_name = "app.json";
+pub const zon_name = "app.zon";
+
+/// Resolve the conventional manifest in the current app directory. JSON is
+/// the authoring default; app.zon remains a fully supported fallback. When a
+/// project temporarily contains both (for example while migrating), app.json
+/// is authoritative so every CLI boundary makes the same choice.
+pub fn defaultPath(io: std.Io) ?[]const u8 {
+    if (pathExists(io, json_name)) return json_name;
+    if (pathExists(io, zon_name)) return zon_name;
+    return null;
+}
+
+fn pathExists(io: std.Io, path: []const u8) bool {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return stat.kind == .file;
+}
+
+pub fn isJsonPath(path: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".json");
+}
+
 pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !ValidationResult {
     const source = try readFile(allocator, io, path);
     defer allocator.free(source);
 
-    const metadata = parseText(allocator, source) catch return .{
+    const metadata = parseTextForPath(allocator, path, source) catch |err| return .{
         .ok = false,
-        .message = zonParseFailureMessage(allocator, source) orelse "app.zon metadata could not be parsed",
+        .message = parseFailureMessage(allocator, path, source, err),
     };
     defer metadata.deinit(allocator);
 
     if (metadata.description) |description| {
         app_manifest.validateDescription(description) catch return .{
             .ok = false,
-            .message = "app.zon description is invalid - it must be one non-empty line of at most 256 bytes with no control characters (it becomes the About panel credits line)",
+            .message = "app manifest description is invalid - it must be one non-empty line of at most 256 bytes with no control characters (it becomes the About panel credits line)",
         };
     }
     if (metadata.theme) |theme_name| {
         if (!isKnownThemePack(theme_name)) return .{
             .ok = false,
-            .message = "app.zon theme is invalid - expected one of: house, geist",
+            .message = "app manifest theme is invalid - expected one of: house, geist",
         };
     }
     if (metadata.theme_accent) |accent| {
         if (!isHexColor(accent)) return .{
             .ok = false,
-            .message = "app.zon theme_accent is invalid - expected a #rrggbb hex color (e.g. \"#df2670\")",
+            .message = "app manifest theme_accent is invalid - expected a #rrggbb hex color (e.g. \"#df2670\")",
         };
     }
-    validateIconPaths(metadata.icons) catch return .{ .ok = false, .message = "app.zon icons are invalid" };
+    validateIconPaths(metadata.icons) catch return .{ .ok = false, .message = "app manifest icons are invalid" };
     if (try checkIconSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.icons)) |icon_message| {
         return .{ .ok = false, .message = icon_message };
     }
-    const permissions = parsePermissions(allocator, metadata.permissions) catch return .{ .ok = false, .message = "app.zon permissions are invalid" };
+    const permissions = parsePermissions(allocator, metadata.permissions) catch return .{ .ok = false, .message = "app manifest permissions are invalid" };
     defer allocator.free(permissions);
-    const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app.zon capabilities are invalid" };
+    const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app manifest capabilities are invalid" };
     defer allocator.free(capabilities);
     const persist = convertPersist(metadata.persist);
     app_manifest.validateImages(.{ .max_image_pixel_bytes = metadata.images.max_image_pixel_bytes }) catch return .{
         .ok = false,
-        .message = "app.zon images.max_image_pixel_bytes must be between 1048576 (the default) and 8388608 bytes; allocation is lazy once per used slot, up to 16 slots",
+        .message = "app manifest images.max_image_pixel_bytes must be between 1048576 (the default) and 8388608 bytes; allocation is lazy once per used slot, up to 16 slots",
     };
     if (!validServicePackages(metadata.service_packages)) return .{
         .ok = false,
-        .message = "app.zon service_packages must use safe npm names, exact X.Y.Z versions, unique names, and lowercase SHA-256 content hashes",
+        .message = "app manifest service_packages must use safe npm names, exact X.Y.Z versions, unique names, and lowercase SHA-256 content hashes",
     };
     if (!validServiceCarrier(metadata.service_carrier)) return .{
         .ok = false,
-        .message = "app.zon service_carrier must be \"auto\", \"in_process\", or \"child\"",
+        .message = "app manifest service_carrier must be \"auto\", \"in_process\", or \"child\"",
     };
     if (metadata.service_pool_size) |pool_size| {
         if (pool_size < 1 or pool_size > 16) return .{
             .ok = false,
-            .message = "app.zon service_pool_size must be between 1 and 16",
+            .message = "app manifest service_pool_size must be between 1 and 16",
         };
     }
-    const bridge_commands = parseBridgeCommands(allocator, metadata.bridge_commands) catch return .{ .ok = false, .message = "app.zon bridge commands are invalid" };
+    const bridge_commands = parseBridgeCommands(allocator, metadata.bridge_commands) catch return .{ .ok = false, .message = "app manifest bridge commands are invalid" };
     defer {
         for (bridge_commands) |command| allocator.free(command.permissions);
         allocator.free(bridge_commands);
     }
     const frontend = if (metadata.frontend) |frontend_value| convertFrontend(frontend_value) else null;
-    const security = convertSecurity(metadata.security) catch return .{ .ok = false, .message = "app.zon security policy is invalid" };
-    const windows = convertWindows(allocator, metadata.windows) catch return .{ .ok = false, .message = "app.zon windows are invalid" };
+    const security = convertSecurity(metadata.security) catch return .{ .ok = false, .message = "app manifest security policy is invalid" };
+    const windows = convertWindows(allocator, metadata.windows) catch return .{ .ok = false, .message = "app manifest windows are invalid" };
     defer allocator.free(windows);
-    const shell = parseShell(allocator, metadata.shell) catch return .{ .ok = false, .message = "app.zon shell is invalid" };
+    const shell = parseShell(allocator, metadata.shell) catch return .{ .ok = false, .message = "app manifest shell is invalid" };
     defer deinitParsedShell(allocator, shell);
-    const commands = parseCommands(allocator, metadata.commands) catch return .{ .ok = false, .message = "app.zon commands are invalid" };
+    const commands = parseCommands(allocator, metadata.commands) catch return .{ .ok = false, .message = "app manifest commands are invalid" };
     defer allocator.free(commands);
-    const menus = parseMenus(allocator, metadata.menus) catch return .{ .ok = false, .message = "app.zon menus are invalid" };
+    const menus = parseMenus(allocator, metadata.menus) catch return .{ .ok = false, .message = "app manifest menus are invalid" };
     defer deinitParsedMenus(allocator, menus);
-    const shortcuts = parseShortcuts(allocator, metadata.shortcuts) catch return .{ .ok = false, .message = "app.zon shortcuts are invalid" };
+    const shortcuts = parseShortcuts(allocator, metadata.shortcuts) catch return .{ .ok = false, .message = "app manifest shortcuts are invalid" };
     defer allocator.free(shortcuts);
-    const file_associations = parseFileAssociations(allocator, metadata.file_associations) catch return .{ .ok = false, .message = "app.zon file associations are invalid" };
+    const file_associations = parseFileAssociations(allocator, metadata.file_associations) catch return .{ .ok = false, .message = "app manifest file associations are invalid" };
     defer allocator.free(file_associations);
-    const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app.zon URL schemes are invalid" };
+    const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app manifest URL schemes are invalid" };
     defer allocator.free(url_schemes);
     // General manifest validation owns only values the app explicitly
     // declared. Archive-time fallbacks (notably display_name as the volume
     // name) are validated when a macOS archive is actually requested, so an
     // otherwise valid display name does not make every `native check` fail.
-    validateDmgSettings(metadata.dmg) catch return .{ .ok = false, .message = "app.zon dmg settings are invalid - check the volume/bundle names, window/icon geometry, and positions; an explicit items list needs exactly one app and unique safe destination names" };
+    validateDmgSettings(metadata.dmg) catch return .{ .ok = false, .message = "app manifest dmg settings are invalid - check the volume/bundle names, window/icon geometry, and positions; an explicit items list needs exactly one app and unique safe destination names" };
     if (try checkDmgSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.dmg)) |dmg_message| {
         return .{ .ok = false, .message = dmg_message };
     }
-    const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app.zon web engine is invalid" };
-    const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app.zon webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
+    const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app manifest web engine is invalid" };
+    const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app manifest webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
     if (!std.mem.eql(u8, metadata.core_compiler, "external")) {
         if (std.mem.eql(u8, metadata.core_compiler, "transpiler")) {
-            return .{ .ok = false, .message = "app.zon core_compiler = \"transpiler\" names the removed TS-to-Zig transpiled lane (v0.7.0 removed it) - TypeScript cores compile through the external core compiler now; delete the setting (or spell it \"external\")" };
+            return .{ .ok = false, .message = "app manifest core_compiler = \"transpiler\" names the removed TS-to-Zig transpiled lane (v0.7.0 removed it) - TypeScript cores compile through the external core compiler now; delete the setting (or spell it \"external\")" };
         }
-        return .{ .ok = false, .message = "app.zon core_compiler is invalid - expected \"external\" (the default and only lane)" };
+        return .{ .ok = false, .message = "app manifest core_compiler is invalid - expected \"external\" (the default and only lane)" };
     }
-    const platform_settings = parsePlatformSettings(allocator, metadata.platforms) catch return .{ .ok = false, .message = "app.zon platforms are invalid" };
+    const platform_settings = parsePlatformSettings(allocator, metadata.platforms) catch return .{ .ok = false, .message = "app manifest platforms are invalid" };
     defer allocator.free(platform_settings);
 
     const manifest: app_manifest.Manifest = .{
         .identity = .{ .id = metadata.id, .name = metadata.name, .display_name = metadata.display_name, .description = metadata.description },
-        .version = parseVersion(metadata.version) catch return .{ .ok = false, .message = "app.zon version is invalid" },
+        .version = parseVersion(metadata.version) catch return .{ .ok = false, .message = "app manifest version is invalid" },
         .permissions = permissions,
         .capabilities = capabilities,
         .dock_visible = metadata.dock_visible,
@@ -585,12 +607,12 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     app_manifest.validateManifest(manifest) catch |err| return .{
         .ok = false,
         .message = switch (err) {
-            error.MissingTrayCapability => "app.zon dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to .capabilities and install a status item, or keep dock_visible = true (the default)",
+            error.MissingTrayCapability => "app manifest dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to capabilities and install a status item, or keep dock_visible = true (the default)",
             error.WebViewLayerConflict => web_layer_conflict_message,
             else => "manifest fields failed semantic validation",
         },
     };
-    return .{ .ok = true, .message = "app.zon is valid" };
+    return .{ .ok = true, .message = if (isJsonPath(path)) "app.json is valid" else "app.zon is valid" };
 }
 
 /// Re-parse a failed manifest with std.zon diagnostics enabled so the
@@ -616,12 +638,20 @@ fn zonParseFailureMessage(allocator: std.mem.Allocator, source: []const u8) ?[]c
     }
 }
 
+fn parseFailureMessage(allocator: std.mem.Allocator, path: []const u8, source: []const u8, err: anyerror) []const u8 {
+    if (!isJsonPath(path)) return zonParseFailureMessage(allocator, source) orelse "app.zon metadata could not be parsed";
+    return std.fmt.allocPrint(allocator, "{s} could not be parsed as a Native SDK manifest ({s})", .{ std.fs.path.basename(path), @errorName(err) }) catch "app.json metadata could not be parsed";
+}
+
 pub fn readMetadata(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Metadata {
     const source = try readFile(allocator, io, path);
     defer allocator.free(source);
-    return parseText(allocator, source);
+    return parseTextForPath(allocator, path, source);
 }
 
+/// Parse legacy ZON text. Kept as the focused test/helper API; file-backed
+/// callers use parseTextForPath so app.json and app.zon share one conversion
+/// and semantic-validation pipeline.
 pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -629,6 +659,21 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
     const source_z = try scratch.dupeZ(u8, source);
     @setEvalBranchQuota(4000);
     const raw = try std.zon.parse.fromSliceAlloc(RawManifest, scratch, source_z, null, .{});
+    return metadataFromRaw(allocator, raw);
+}
+
+pub fn parseJsonText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const raw = try std.json.parseFromSliceLeaky(RawManifest, arena.allocator(), source, .{ .ignore_unknown_fields = false });
+    return metadataFromRaw(allocator, raw);
+}
+
+pub fn parseTextForPath(allocator: std.mem.Allocator, path: []const u8, source: []const u8) !Metadata {
+    return if (isJsonPath(path)) parseJsonText(allocator, source) else parseText(allocator, source);
+}
+
+fn metadataFromRaw(allocator: std.mem.Allocator, raw: RawManifest) !Metadata {
     return .{
         .id = try allocator.dupe(u8, raw.id),
         .name = try allocator.dupe(u8, raw.name),
@@ -1685,7 +1730,7 @@ fn parseWebViewLayer(value: []const u8) !app_manifest.WebViewLayer {
 /// The teaching message every boundary prints for the same
 /// contradiction: a manifest that excludes the web layer while declaring
 /// web content.
-pub const web_layer_conflict_message = "app.zon sets .webview_layer = \"exclude\" but the app declares web content (a .frontend block, the \"webview\" capability, a .shell webview view, or the Chromium web engine - from .web_engine or --web-engine) - remove the web declarations or drop the exclude";
+pub const web_layer_conflict_message = "the app manifest sets webview_layer = \"exclude\" but the app declares web content (a frontend block, the \"webview\" capability, a shell webview view, or the Chromium web engine - from web_engine or --web-engine) - remove the web declarations or drop the exclude";
 
 /// The same contradiction arriving through the CLI flag instead of the
 /// manifest field: `--web-layer exclude` against an app that declares
@@ -2388,6 +2433,27 @@ fn validatePathSegment(segment: []const u8) !void {
 fn parseVersionNumber(value: []const u8) !u32 {
     if (value.len == 0) return error.InvalidVersion;
     return std.fmt.parseUnsigned(u32, value, 10);
+}
+
+test "JSON manifest parser accepts schema metadata and rejects unknown fields" {
+    const metadata = try parseJsonText(std.testing.allocator,
+        \\{
+        \\  "$schema": "https://native-sdk.dev/schemas/app.schema.json",
+        \\  "id": "com.example.json",
+        \\  "name": "json-app",
+        \\  "version": "1.2.3",
+        \\  "capabilities": ["native_views"],
+        \\  "windows": [{ "label": "main", "width": 640, "height": 480 }]
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("com.example.json", metadata.id);
+    try std.testing.expectEqualStrings("native_views", metadata.capabilities[0]);
+    try std.testing.expectEqual(@as(f32, 640), metadata.windows[0].width);
+
+    try std.testing.expectError(error.UnknownField, parseJsonText(std.testing.allocator,
+        \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "typo": true }
+    ));
 }
 
 test "manifest metadata parser reads identity version and lists" {
@@ -3296,7 +3362,7 @@ test "validate rejects a web-declaring manifest that excludes the web layer" {
 
     const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
     try std.testing.expect(!result.ok);
-    try std.testing.expect(std.mem.indexOf(u8, result.message, ".webview_layer = \"exclude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "webview_layer = \"exclude\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.message, "declares web content") != null);
 
     // A native-only manifest with the same exclude is valid.
