@@ -340,8 +340,8 @@ pub const Server = struct {
                     for (span_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "span attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "reactions")) {
                     for (reactions_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "reactions attribute", doc.doc);
-                } else if (std.mem.eql(u8, element_name, "avatar")) {
-                    for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "avatar") or std.mem.eql(u8, element_name, "image")) {
+                    for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar/image attribute", doc.doc);
                     for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markup attribute", doc.doc);
                     for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "markup event", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "dropdown-menu")) {
@@ -718,6 +718,10 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
         "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{" ++
         "\"uri\":\"file:///tmp/app.native\",\"version\":3},\"contentChanges\":[{" ++
         "\"text\":\"<avatar >CT</avatar>\"}]}}";
+    const image_doc =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{" ++
+        "\"uri\":\"file:///tmp/app.native\",\"version\":4},\"contentChanges\":[{" ++
+        "\"text\":\"<image image=\\\"{cover}\\\" />\"}]}}";
 
     var input: std.Io.Writer.Allocating = .init(arena);
     for ([_][]const u8{
@@ -729,7 +733,9 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":2}}}",
         avatar_doc,
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":8}}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"shutdown\"}",
+        image_doc,
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":23}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"shutdown\"}",
         "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}",
     }) |body| {
         const framed = try frame(arena, body);
@@ -754,8 +760,8 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
     }
     // initialize response, diagnostics (broken), diagnostics (clean),
     // completion, hover, diagnostics (avatar), avatar completion,
-    // shutdown.
-    try testing.expectEqual(@as(usize, 8), bodies.items.len);
+    // diagnostics (image), image completion, shutdown.
+    try testing.expectEqual(@as(usize, 10), bodies.items.len);
 
     try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"id\":1") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"capabilities\"") != null);
@@ -785,15 +791,20 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
     // Hover over `row` returns the element doc.
     try testing.expect(std.mem.indexOf(u8, bodies.items[4], "Flex container") != null);
 
-    // Completion inside `<avatar ` offers the image binding alongside the
-    // generic attributes and events.
+    // Both registered-image elements receive their shared attributes.
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"image\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"source-x\"") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"label\"") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"on-press\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"image\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"source-x\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"source-height\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"label\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"on-press\"") != null);
 
     // Shutdown response.
-    try testing.expect(std.mem.indexOf(u8, bodies.items[7], "\"id\":5") != null);
-    try testing.expect(std.mem.indexOf(u8, bodies.items[7], "\"result\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[9], "\"id\":6") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[9], "\"result\":null") != null);
 }
 
 test "analyze reports parser and validation findings with positions" {

@@ -104,6 +104,8 @@ A loaded image occupies one of the registry's **16 slots** until you release it,
 
 Unlike a load, unregister is **synchronous registry surgery, not an effect**: no result Msg follows (registration by `imageLoad` has a terminal because I/O and decode can fail; releasing a slot cannot), and aimed at an id with no registration it no-ops — `imageCancel`'s idle rule. It frees only the **current** registration: a load in flight under the id is untouched, and its terminal still registers the pixels, re-occupying the id. To evict an id whose load is still running, `Cmd.imageCancel(id)` first, then unregister.
 
+When many small visuals ship together, one slot can hold a texture atlas instead: `<image>` and `<avatar>` accept `source-x`, `source-y`, `source-width`, and `source-height` together, in decoded-image pixel coordinates. Zig views set the equivalent `ElementOptions.image_src` rectangle. Cropped widgets use nearest sampling so adjacent regions cannot bleed into the tile. Every atlas region references the same registered ImageId, so it consumes one registry slot; use the dimensions reported by the load result because decode-to-fit may change the atlas geometry.
+
 ## Limits, honestly
 
 The default is **16 slots** with a **1 MiB decoded-pixel target per slot**. That target is not a refusal: platform codecs decode photo-scale sources down, preserving aspect, until `width × height × 4` fits. A wide 1024×256 image already fits and stays that size; a 640×480 image registers at a smaller geometry, and the result's `width`/`height` report exactly what views draw. The encoded source has its own flat **8 MiB** bound; an over-bound source fails whole with `too_large`, never as truncated bytes.

@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm typecheck && pnpm build && node scripts/check-doc-routes.mjs && node scripts/check-code-toggle.mjs && node scripts/check-wasm-preview.mjs"
+    "check": "node scripts/check-app-schema.mjs && pnpm typecheck && pnpm build && node scripts/check-doc-routes.mjs && node scripts/check-code-toggle.mjs && node scripts/check-wasm-preview.mjs"
   },
   "dependencies": {
     "@mdx-js/loader": "^3",

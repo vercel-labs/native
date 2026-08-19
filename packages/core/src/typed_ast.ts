@@ -343,8 +343,10 @@ export class TypedAst {
   /// identifier-named, annotated property signature), so
   /// a shape this walk cannot carry whole refuses as an unsupported
   /// alias instead of registering a struct with silently missing fields.
-  /// The one omission-carrying value record is the SDK-owned ThemeState;
-  /// its caller opts in explicitly so authored/service records keep the
+  /// A tiny closed set of SDK-owned shell records carries omission
+  /// intentionally (ThemeState inheritance, optional tray typography, and
+  /// optional rich tray payloads);
+  /// their caller opts in explicitly so authored/service records keep the
   /// fixed-shape rule.
   propsOfTypeLiteral(node: tsImpl.TypeLiteralNode, allowOptional = false): PropInfo[] | null {
     const out: PropInfo[] = [];

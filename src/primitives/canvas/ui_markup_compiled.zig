@@ -1820,6 +1820,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         // ---------------------------------------------------- attributes
 
         fn applyAttrs(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
+            applyImageSourceAttrs(node, entries, ui, model, scope, options);
             inline for (0..node.attrs.len) |attr_index| {
                 const attribute = comptime node.attrs[attr_index];
                 if (comptime std.mem.eql(u8, attribute.name, "kind")) {
@@ -1840,6 +1841,8 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     };
                 } else if (comptime std.mem.eql(u8, attribute.name, "image")) {
                     applyImageAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime markup.imageSourceAttrName(attribute.name)) {
+                    // Consumed atomically by applyImageSourceAttrs above.
                 } else if (comptime std.mem.eql(u8, attribute.name, "surface")) {
                     applySurfaceAttr(node, attribute.value, entries, ui, model, scope, options);
                 } else if (comptime std.mem.eql(u8, attribute.name, "pty")) {
@@ -1940,6 +1943,35 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             options.image = switch (bindingValue(node, entries, path, ui, model, scope, true)) {
                 .integer => |int| if (int < 0) runtimeFail(canvas.ImageId, ui) else @intCast(int),
                 else => runtimeFail(canvas.ImageId, ui),
+            };
+        }
+
+        /// Comptime mirror of the interpreter's atomic source-rectangle
+        /// construction. Source-known shape mistakes are compile errors;
+        /// bound numeric values evaluate through the shared expression
+        /// path at runtime.
+        fn applyImageSourceAttrs(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
+            const has_any = comptime blk: {
+                for (markup.image_source_attr_names) |name| {
+                    if (node.attr(name) != null) break :blk true;
+                }
+                break :blk false;
+            };
+            if (comptime !has_any) return;
+            comptime {
+                if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                    fail(node, markup.image_source_element_message);
+                }
+                if (node.attr("image") == null) fail(node, markup.image_source_binding_message);
+                for (markup.image_source_attr_names) |name| {
+                    if (node.attr(name) == null) fail(node, markup.image_source_complete_message);
+                }
+            }
+            options.image_src = .{
+                .x = floatAttr(node, entries, comptime node.attr("source-x").?, ui, model, scope),
+                .y = floatAttr(node, entries, comptime node.attr("source-y").?, ui, model, scope),
+                .width = floatAttr(node, entries, comptime node.attr("source-width").?, ui, model, scope),
+                .height = floatAttr(node, entries, comptime node.attr("source-height").?, ui, model, scope),
             };
         }
 

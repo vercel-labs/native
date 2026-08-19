@@ -1,6 +1,7 @@
 pub const templates = @import("templates.zig");
 pub const manifest = @import("manifest.zig");
 pub const raw_manifest = @import("raw_manifest.zig");
+pub const json_to_zon = @import("json_to_zon.zig");
 pub const assets = @import("assets.zig");
 pub const codesign = @import("codesign.zig");
 pub const doctor = @import("doctor.zig");

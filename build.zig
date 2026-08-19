@@ -1,6 +1,13 @@
 const std = @import("std");
 const web_engine_tool = @import("src/tooling/web_engine.zig");
 
+fn repositoryScriptcBin(b: *std.Build) []const u8 {
+    return b.pathFromRoot(if (b.graph.host.result.os.tag == .windows)
+        "packages/core/node_modules/.bin/scriptc.cmd"
+    else
+        "packages/core/node_modules/.bin/scriptc");
+}
+
 const PlatformOption = enum {
     auto,
     null,
@@ -877,6 +884,43 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
         .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-ts-build-invalidation-boundaries", "Verify generated TypeScript contracts stabilize by content and service implementation inputs cannot dirty the core compiler lane", &.{
+        .{ .path = "build/app.zig", .pattern = "pub fn stabilizeGeneratedFile" },
+        .{ .path = "build/app.zig", .pattern = "const contract = stabilizeGeneratedFile(b, contract_raw, \"core.contract.json\", build_trace);" },
+        .{ .path = "build/app.zig", .pattern = "break :services_contract stabilizeGeneratedFile(b, raw, \"services.contract.json\", build_trace);" },
+        .{ .path = "build/app.zig", .pattern = "addAppCoreTsDirInputs(b, stage_run, appPath(b, app_root, \"src\"));" },
+        .{ .path = "build/app.zig", .pattern = "addStagedCoreSdkInputs(b, dep.builder, stage_run);" },
+        .{ .path = "build/app.zig", .pattern = "for ([_][]const u8{ \"text.ts\", \"events.ts\" }) |source|" },
+        .{ .path = "build.zig", .pattern = "app_build.addStagedCoreSdkInputs(b, b, stage_run);" },
+        .{ .path = "packages/core/scripts/stage_external_core.mjs", .pattern = "for (const sdkFile of [\"text.ts\", \"events.ts\"])" },
+        .{ .path = "build/app.zig", .pattern = "if (std.mem.startsWith(u8, normalized, \"services/\")) continue;" },
+        .{ .path = "tools/corewire/emit_service.zig", .pattern = "native-sdk.services.abi.v3" },
+        .{ .path = "tools/corewire/emit_service.zig", .pattern = "implementation-only fingerprint" },
+        .{ .path = "build/app.zig", .pattern = "link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));" },
+        .{ .path = "build/app.zig", .pattern = "addPlatformLinkSearchPaths(b, selected_platform, web_engine, cef_dir, link_mod);" },
+        .{ .path = "build/app.zig", .pattern = "mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, \"System/Library/Frameworks\" }) });" },
+        .{ .path = "build/app.zig", .pattern = "b.fmt(\"{s}-app-code\", .{app_options.name})" },
+        .{ .path = "src/app_runner/ts_core_main.zig", .pattern = "extern const native_sdk_app_markup: u8;" },
+        .{ .path = "packages/core/scripts/embed_markup_c.mjs", .pattern = "const unsigned char native_sdk_app_markup[]" },
+        .{ .path = "build/app.zig", .pattern = "node_modules\", \"scriptc\", \"dist\", \"bootstrap.js\"" },
+        .{ .path = "build/app.zig", .pattern = "setEnvironmentVariable(\"SCRIPTC_TIMING\", \"1\")" },
+        .{ .path = "build/app.zig", .pattern = "service_compile.addArg(\"--compiler-package-origin\")" },
+        .{ .path = "build/app.zig", .pattern = "compile.addArg(\"--compiler-package-origin\")" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "publishedScriptcArgv(args[\"compiler-package-origin\"])" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "publishedScriptcArgv(args[\"compiler-package-origin\"])" },
+        .{ .path = "build/app.zig", .pattern = "addFileInput(dep.path(\"packages/core/scripts/compiler_command.mjs\"))" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/compiler_command.mjs", .pattern = "npmTarget !== null" },
+        .{ .path = "build.zig", .pattern = "fn repositoryScriptcBin" },
+        .{ .path = "build.zig", .pattern = "packages/core/node_modules/.bin/scriptc.cmd" },
+        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--compiler\", repositoryScriptcBin(b) });" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "fn rebuildPathIgnored" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "var walker = try root.walkSelectively(allocator);" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "if (!rebuildPathIgnored(path)) try walker.enter(io, entry);" },
+        .{ .path = "tools/native-sdk/main.zig", .pattern = "--explain-rebuild" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
         .{ .path = "build/app.zig", .pattern = ".linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64" },
         .{ .path = "build/app.zig", .pattern = ".windows => !cross or target.result.abi == .gnu" },
@@ -1576,6 +1620,14 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/root.zig", .pattern = ".reduce_motion = event.reduce_motion != 0" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".high_contrast = event.high_contrast != 0" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".appearance_changed => state.emit" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-tray-segment-source-selection", "Verify both macOS tray hosts keep segmented selection model-owned", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
         .{ .path = "docs/src/app/docs/security/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
@@ -3280,7 +3332,7 @@ fn tsCoreE2eArtifact(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER") == null) {
         b.build_root.handle.access(
             b.graph.io,
-            "packages/core/node_modules/scriptc/dist/main.js",
+            repositoryScriptcBin(b),
             .{},
         ) catch return null;
     }
@@ -3813,6 +3865,7 @@ fn externalServiceFixture(
 
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_service_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArg("--manifest");
@@ -3841,8 +3894,7 @@ fn externalServiceFixture(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArg("--compiler-js");
-        compile.addFileArg(b.path("packages/core/node_modules/scriptc/dist/main.js"));
+        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
     }
 
     return .{
@@ -3989,12 +4041,14 @@ fn externalCoreFixtureModule(
     check.addFileArg(b.path("packages/core/src/cli.ts"));
     check.addFileArg(b.path(spec.entry));
     check.addArg("--contract");
-    const contract = check.addOutputFileArg("core.contract.json");
+    const contract_raw = check.addOutputFileArg("core.contract.json");
+    const contract = app_build.stabilizeGeneratedFile(b, contract_raw, "core.contract.json", false);
     check.addArg("--contract-entry");
     check.addArg(spec.entry);
     const services_contract: ?std.Build.LazyPath = if (spec.emit_services) services: {
         check.addArg("--services-contract");
-        break :services check.addOutputFileArg("services.contract.json");
+        const raw = check.addOutputFileArg("services.contract.json");
+        break :services app_build.stabilizeGeneratedFile(b, raw, "services.contract.json", false);
     } else null;
     for (spec.service_packages) |package_entry| check.addArgs(&.{ "--service-package", package_entry });
     const services_client: ?std.Build.LazyPath = if (services_contract) |service_contract| client: {
@@ -4002,7 +4056,8 @@ fn externalCoreFixtureModule(
         service_project.addArg("--services-sidecar");
         service_project.addFileArg(service_contract);
         service_project.addArg("--service-client");
-        break :client service_project.addOutputFileArg("services.gen.ts");
+        const client_raw = service_project.addOutputFileArg("services.gen.ts");
+        break :client app_build.stabilizeGeneratedFile(b, client_raw, "services.gen.ts", false);
     } else null;
     if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
@@ -4055,6 +4110,8 @@ fn externalCoreFixtureModule(
         stage_run.addArg("--services-client");
         stage_run.addFileArg(client);
     }
+    tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".");
+    app_build.addStagedCoreSdkInputs(b, b, stage_run);
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 
@@ -4062,6 +4119,7 @@ fn externalCoreFixtureModule(
     // pin, archive normalized, the co-emitted sidecar captured.
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_core_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArgs(&.{ "--name", spec.name });
@@ -4088,8 +4146,7 @@ fn externalCoreFixtureModule(
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArg("--compiler-js");
-        compile.addFileArg(b.path("packages/core/node_modules/scriptc/dist/main.js"));
+        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
     }
 
     // The mirror, generated from the archive's OWN co-emitted contract,
@@ -4134,6 +4191,24 @@ fn tsCoreAddDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, dir_path: [
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
         transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
+    }
+}
+
+/// The source set stage_external_core.mjs copies: every ordinary `.ts` file,
+/// excluding the independent services compiler class and declaration files.
+fn tsCoreAddCoreDirInputs(b: *std.Build, stage: *std.Build.Step.Run, dir_path: []const u8) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".ts") or std.mem.endsWith(u8, entry.basename, ".d.ts")) continue;
+        const normalized = b.dupe(entry.path);
+        for (normalized) |*char| if (char.* == '\\') {
+            char.* = '/';
+        };
+        if (std.mem.startsWith(u8, normalized, "services/")) continue;
+        stage.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
     }
 }
 

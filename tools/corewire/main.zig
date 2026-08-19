@@ -59,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
     var profile_path: ?[]const u8 = null;
     var effective_sidecar_path: ?[]const u8 = null;
     var check_only = false;
+    var optimization: ?[]const u8 = null;
     var f64_slots: std.ArrayListUnmanaged([]const u8) = .empty;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -83,6 +84,9 @@ pub fn main(init: std.process.Init) !void {
             try f64_slots.append(arena, args[index]);
         } else if (std.mem.eql(u8, arg, "--check")) {
             check_only = true;
+        } else if (std.mem.eql(u8, arg, "--optimization") and index + 1 < args.len) {
+            index += 1;
+            optimization = args[index];
         } else {
             try stderr.print("corewire: unknown argument \"{s}\"\n\n{s}", .{ arg, usage });
             try stderr.flush();
@@ -256,7 +260,12 @@ pub fn main(init: std.process.Init) !void {
             try stderr.flush();
             std.process.exit(2);
         }
-        break :blk emit_profile_mod.emitProfile(arena, parsed, entry, &diags) catch |err| switch (err) {
+        if (optimization != null and !std.mem.eql(u8, optimization.?, "dev") and !std.mem.eql(u8, optimization.?, "release")) {
+            try stderr.print("corewire: --optimization must be dev or release\n", .{});
+            try stderr.flush();
+            std.process.exit(2);
+        }
+        break :blk emit_profile_mod.emitProfile(arena, parsed, entry, optimization, &diags) catch |err| switch (err) {
             error.Refused => {
                 try diags.write(input, stderr);
                 try stderr.flush();
@@ -373,6 +382,7 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
     var inproc_main_out: ?[]const u8 = null;
     var inproc_profile_out: ?[]const u8 = null;
     var saw_service_flag = false;
+    var optimization: ?[]const u8 = null;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
@@ -400,6 +410,10 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
             saw_service_flag = true;
             index += 1;
             inproc_profile_out = args[index];
+        } else if (saw_service_flag and std.mem.eql(u8, arg, "--optimization") and index + 1 < args.len) {
+            saw_service_flag = true;
+            index += 1;
+            optimization = args[index];
         } else if (saw_service_flag) {
             try stderr.print("corewire: unknown service projection argument \"{s}\"\n", .{arg});
             try stderr.flush();
@@ -407,6 +421,11 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
         }
     }
     if (!saw_service_flag) return false;
+    if (optimization != null and !std.mem.eql(u8, optimization.?, "dev") and !std.mem.eql(u8, optimization.?, "release")) {
+        try stderr.print("corewire: --optimization must be dev or release\n", .{});
+        try stderr.flush();
+        std.process.exit(2);
+    }
     const sidecar_path = input orelse {
         try stderr.print("usage: corewire --services-sidecar <services.contract.json> [--service-host-main <service_host_main.ts>] [--service-registry <services.zig>] [--service-client <services.gen.ts>] [--service-inproc-main <service_inproc_main.ts>] [--service-inproc-profile <service_profile.json>]\n", .{});
         try stderr.flush();
@@ -469,7 +488,7 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
         };
     }
     if (inproc_profile_out) |path| {
-        const generated = try emit_service_mod.emitInprocProfile(arena);
+        const generated = try emit_service_mod.emitInprocProfile(arena, optimization);
         std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
             try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
             try stderr.flush();

@@ -74,7 +74,7 @@ fn nodeMissing() Error {
     std.debug.print(
         \\TypeScript app cores need node on PATH (the @native-sdk/core frontend and the
         \\core dev-harness run under it; the binary you ship carries no JS runtime).
-        \\Install Node.js 22.15+ (on the 23 line: 23.5+) - https://nodejs.org or
+        \\Install Node.js 24+ - https://nodejs.org or
         \\`brew install node` - and re-run.
         \\
     , .{});
@@ -480,13 +480,17 @@ pub fn generateSqliteSurface(
     errdefer allocator.free(sdk_out);
     var child = std.process.spawn(io, .{
         .argv = &.{
-            "node",                               runner,                                sqlite_cli,
-            "--src",                              "src",                                 "--sdk-in",
-            sdk_in,                               "--static-in",                         static_in,
-            "--sdk-out",                          sdk_out,                               "--dts-out",
-            ".native/cache/sqlite/core.d.ts",     "--static-out",                        ".native/cache/sqlite/core_static.ts",
-            "--zig-out",                          ".native/cache/sqlite/migrations.zig", "--metadata-out",
-            ".native/cache/sqlite/metadata.json", "--state",                             "src/schema/migrations.lock.json",
+            "node",                            runner,                               sqlite_cli,
+            "--src",                           "src",                                "--sdk-in",
+            sdk_in,                            "--static-in",                        static_in,
+            "--sdk-out",                       sdk_out,                              "--dts-out",
+            ".native/cache/sqlite/core.d.ts",  "--static-out",                       ".native/cache/sqlite/core_static.ts",
+            "--sdk-events-out",                ".native/cache/sqlite/events.ts",     "--sdk-text-out",
+            ".native/cache/sqlite/text.ts",    "--sdk-bytes-text-methods-out",       ".native/cache/sqlite/bytes_text_methods.d.ts",
+            "--sdk-events-dts-out",            ".native/cache/sqlite/events.d.ts",   "--sdk-text-dts-out",
+            ".native/cache/sqlite/text.d.ts",  "--zig-out",                          ".native/cache/sqlite/migrations.zig",
+            "--metadata-out",                  ".native/cache/sqlite/metadata.json", "--state",
+            "src/schema/migrations.lock.json",
         },
         .stdin = .ignore,
         .stdout = .inherit,

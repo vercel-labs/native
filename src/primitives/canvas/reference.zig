@@ -486,6 +486,7 @@ pub const ReferenceRenderSurface = struct {
         } else return error.ReferenceRenderUnsupportedCommand;
 
         const src_rect = referenceImageSourceRect(image, value.src) orelse return;
+        const sample_bounds = referenceImageSampleBounds(image, src_rect);
         const local_dst = referenceImageDestinationRect(value.dst, src_rect, value.fit) orelse return;
         const dst_rect = command.transform.transformRect(local_dst).normalized();
         // The rounded mask applies over the REQUESTED destination (the
@@ -510,7 +511,7 @@ pub const ReferenceRenderSurface = struct {
         // once per (image content, size, phase) and every later repaint
         // — the cover-loading cascade, a re-opened view, a whole-pixel
         // move — blends from the panel.
-        if (self.imageScalePanel(image, value, src_rect, dst_rect, pixel_rect)) |panel| {
+        if (self.imageScalePanel(image, value, src_rect, sample_bounds, dst_rect, pixel_rect)) |panel| {
             const dst_x0: i64 = @intFromFloat(@floor(dst_rect.x));
             const dst_y0: i64 = @intFromFloat(@floor(dst_rect.y));
             var y = pixel_rect.y;
@@ -549,7 +550,7 @@ pub const ReferenceRenderSurface = struct {
                 if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
                 const u = std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
                 const v = std.math.clamp((point.y - dst_rect.y) / dst_rect.height, 0, 1);
-                const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
+                const sample = referenceSampleImage(image, src_rect, sample_bounds, u, v, value.sampling);
                 const index = (y * self.width + x) * 4;
                 const dst = [4]u8{
                     self.pixels[index + 0],
@@ -575,7 +576,7 @@ pub const ReferenceRenderSurface = struct {
         width: usize,
     };
 
-    fn imageScalePanel(self: ReferenceRenderSurface, image: ReferenceImage, value: DrawImage, src_rect: geometry.RectF, dst_rect: geometry.RectF, pixel_rect: ReferencePixelRect) ?ImageScalePanel {
+    fn imageScalePanel(self: ReferenceRenderSurface, image: ReferenceImage, value: DrawImage, src_rect: geometry.RectF, sample_bounds: ReferenceImageSampleBounds, dst_rect: geometry.RectF, pixel_rect: ReferencePixelRect) ?ImageScalePanel {
         const memo = self.render_memo orelse return null;
         // Exact-arithmetic bounds: pixel offsets and phases must stay in
         // f32's exact-integer range for the phase-relative identity
@@ -630,7 +631,7 @@ pub const ReferenceRenderSurface = struct {
             var column: usize = 0;
             while (column < panel_width) : (column += 1) {
                 const u = std.math.clamp(((@as(f32, @floatFromInt(column)) + 0.5) - phase_x) / dst_rect.width, 0, 1);
-                const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
+                const sample = referenceSampleImage(image, src_rect, sample_bounds, u, v, value.sampling);
                 const offset = (row * panel_width + column) * 4;
                 buffer[offset] = sample[0];
                 buffer[offset + 1] = sample[1];
@@ -1372,22 +1373,43 @@ const ReferencePremultipliedLinearColor = struct {
     a: f32 = 0,
 };
 
-fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32, sampling: ImageSampling) [4]u8 {
+fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32, sampling: ImageSampling) [4]u8 {
     return switch (sampling) {
-        .nearest => referenceSampleImageNearest(image, src, u, v),
-        .linear => referenceSampleImageLinear(image, src, u, v),
+        .nearest => referenceSampleImageNearest(image, src, bounds, u, v),
+        .linear => referenceSampleImageLinear(image, src, bounds, u, v),
     };
 }
 
-fn referenceSampleImageNearest(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+const ReferenceImageSampleBounds = struct {
+    min_x: i32,
+    min_y: i32,
+    max_x: i32,
+    max_y: i32,
+};
+
+/// Inclusive texel bounds touched by a clipped source rectangle. Native
+/// image APIs constrain filtering to their source portion; mirror that
+/// here so scaling a texture-atlas tile never samples an adjacent tile.
+fn referenceImageSampleBounds(image: ReferenceImage, src: geometry.RectF) ReferenceImageSampleBounds {
+    const image_max_x: i32 = @intCast(image.width - 1);
+    const image_max_y: i32 = @intCast(image.height - 1);
+    return .{
+        .min_x = clampI32(referenceFloor(src.minX()), 0, image_max_x),
+        .min_y = clampI32(referenceFloor(src.minY()), 0, image_max_y),
+        .max_x = clampI32(referenceCeil(src.maxX()) - 1, 0, image_max_x),
+        .max_y = clampI32(referenceCeil(src.maxY()) - 1, 0, image_max_y),
+    };
+}
+
+fn referenceSampleImageNearest(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32) [4]u8 {
     const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width;
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height;
-    const x = clampI32(referenceFloor(sample_x_f), 0, @intCast(image.width - 1));
-    const y = clampI32(referenceFloor(sample_y_f), 0, @intCast(image.height - 1));
+    const x = clampI32(referenceFloor(sample_x_f), bounds.min_x, bounds.max_x);
+    const y = clampI32(referenceFloor(sample_y_f), bounds.min_y, bounds.max_y);
     return referenceImagePixel(image, x, y);
 }
 
-fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32) [4]u8 {
     // Belt over the renderPass-level fill: direct sampler callers (unit
     // tests, future paths) stay correct. One predictable branch per
     // output pixel — noise next to the twelve pows the table replaces.
@@ -1396,10 +1418,10 @@ fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, u: f32
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height - 0.5;
     const x_floor = referenceFloor(sample_x_f);
     const y_floor = referenceFloor(sample_y_f);
-    const x0 = clampI32(x_floor, 0, @intCast(image.width - 1));
-    const y0 = clampI32(y_floor, 0, @intCast(image.height - 1));
-    const x1 = clampI32(x_floor + 1, 0, @intCast(image.width - 1));
-    const y1 = clampI32(y_floor + 1, 0, @intCast(image.height - 1));
+    const x0 = clampI32(x_floor, bounds.min_x, bounds.max_x);
+    const y0 = clampI32(y_floor, bounds.min_y, bounds.max_y);
+    const x1 = clampI32(x_floor + 1, bounds.min_x, bounds.max_x);
+    const y1 = clampI32(y_floor + 1, bounds.min_y, bounds.max_y);
     const tx = std.math.clamp(sample_x_f - @as(f32, @floatFromInt(x_floor)), 0, 1);
     const ty = std.math.clamp(sample_y_f - @as(f32, @floatFromInt(y_floor)), 0, 1);
 

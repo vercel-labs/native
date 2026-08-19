@@ -1401,6 +1401,57 @@ test "single-line history replay restores exact retained bytes" {
     try std.testing.expect(harness.runtime.views[0].canvasWidgetTextHistoryAvailability(2).can_redo);
 }
 
+test "macOS Command Backspace treats model-provided newlines as single-line presentation bytes" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-input-command-backspace-raw-newline", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 100),
+    });
+
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{canvas.Widget{
+        .id = 2,
+        .kind = .input,
+        .frame = geometry.RectF.init(12, 16, 180, 32),
+        .text = "one\ntwo",
+        .text_selection = canvas.TextSelection.collapsed(7),
+    }} }, geometry.RectF.init(0, 0, 240, 100), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].focused = true;
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .command = true, .shift = true },
+    } });
+
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), retained.nodes[1].widget.text_selection.?);
+    try dispatchTextareaHistoryShortcut(harness, app, false);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("one\ntwo", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(7), retained.nodes[1].widget.text_selection.?);
+}
+
 test "textarea history replays newly completed CRLF atomically" {
     const TestApp = struct {
         fn app(self: *@This()) App {
@@ -1836,6 +1887,79 @@ test "canvas textareas undo and redo keyboard edits" {
     try dispatchTextareaHistoryShortcut(harness, app, true);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("external!", retained.nodes[1].widget.text);
+}
+
+test "macOS Command Backspace deletes to line start in every editable text kind and undoes as one step" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-command-backspace", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 520, 280),
+    });
+
+    const kinds = [_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea };
+    var children: [kinds.len]canvas.Widget = undefined;
+    for (&children, kinds, 0..) |*child, kind, index| {
+        child.* = .{
+            .id = @intCast(index + 2),
+            .kind = kind,
+            .frame = geometry.RectF.init(12, @floatFromInt(12 + index * 46), 260, 36),
+            .text = if (kind == .textarea) "first\nsecond line" else "second line",
+            .text_selection = canvas.TextSelection.collapsed(if (kind == .textarea) 12 else 6),
+            .semantics = .{ .label = "Editor" },
+        };
+    }
+    var nodes: [kinds.len + 1]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .kind = .stack, .children = &children },
+        geometry.RectF.init(0, 0, 520, 280),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    for (kinds, 0..) |kind, index| {
+        const id: canvas.ObjectId = @intCast(index + 2);
+        harness.runtime.views[0].focused = true;
+        harness.runtime.views[0].canvas_widget_focused_id = id;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = "canvas",
+            .kind = .key_down,
+            .key = "backspace",
+            .modifiers = .{ .command = true },
+        } });
+
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const edited = retained.findById(id).?.widget;
+        try std.testing.expectEqualStrings(if (kind == .textarea) "first\n line" else " line", edited.text);
+        try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(if (kind == .textarea) 6 else 0), edited.text_selection.?);
+
+        try dispatchTextareaHistoryShortcut(harness, app, false);
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const undone = retained.findById(id).?.widget;
+        try std.testing.expectEqualStrings(if (kind == .textarea) "first\nsecond line" else "second line", undone.text);
+        try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(if (kind == .textarea) 12 else 6), undone.text_selection.?);
+
+        try dispatchTextareaHistoryShortcut(harness, app, true);
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const redone = retained.findById(id).?.widget;
+        try std.testing.expectEqualStrings(if (kind == .textarea) "first\n line" else " line", redone.text);
+        try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(if (kind == .textarea) 6 else 0), redone.text_selection.?);
+    }
 }
 
 test "compound editor history reroutes every continuation after controlled rebuilds" {

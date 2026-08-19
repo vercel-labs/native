@@ -86,6 +86,20 @@ pub const RuntimeTrayItem = struct {
     label_storage: [platform.max_tray_item_label_bytes]u8 = undefined,
     detail_storage: [platform.max_tray_item_detail_bytes]u8 = undefined,
     key_storage: [platform.max_menu_key_bytes]u8 = undefined,
+    segment_options: [platform.max_tray_segment_options]platform.TraySegmentOption = undefined,
+    segment_option_label_storage: [platform.max_tray_segment_options][platform.max_tray_segment_label_bytes]u8 = undefined,
+    segment_option_command_storage: [platform.max_tray_segment_options][platform.max_tray_item_command_bytes]u8 = undefined,
+    segment_option_count: usize = 0,
+    segmented: ?platform.TraySegmentedRow = null,
+    metric_primary_storage: [platform.max_tray_item_label_bytes]u8 = undefined,
+    metric_secondary_storage: [platform.max_tray_item_detail_bytes]u8 = undefined,
+    metric_accessibility_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    metric: ?platform.TrayMetricRow = null,
+    chart_values: [platform.max_tray_chart_values]f32 = undefined,
+    chart_leading_caption_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    chart_trailing_summary_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    chart_accessibility_label_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    chart: ?platform.TrayChartRow = null,
 };
 
 pub const RuntimeStatusItem = struct {

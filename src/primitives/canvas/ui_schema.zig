@@ -591,6 +591,15 @@ pub const attrs = [_]AttrInfo{
     // minimum unconstrained so a capped element still shrinks with a
     // narrow parent.
     .{ .code = 98, .name = "max-width", .class = .number, .group = .option, .field = "max_width" },
+    // Registered-image source rectangle, in decoded-image pixel
+    // coordinates. The four values are one atomic declaration: the
+    // validator scopes them to avatar/image and requires all four beside
+    // the image binding. They lower together into ElementOptions.image_src,
+    // so no individual attribute names a flat field.
+    .{ .code = 99, .name = "source-x", .class = .number, .group = .element },
+    .{ .code = 100, .name = "source-y", .class = .number, .group = .element },
+    .{ .code = 101, .name = "source-width", .class = .number, .group = .element },
+    .{ .code = 102, .name = "source-height", .class = .number, .group = .element },
 };
 
 // ----------------------------------------------------------------- events

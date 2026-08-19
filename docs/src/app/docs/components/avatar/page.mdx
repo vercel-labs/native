@@ -31,6 +31,13 @@ With a registered image the engine clips it to the avatar circle (`cover` fit); 
 ui.avatar(.{ .image = image_id }, "ZN")
 ```
 
+An avatar can select one region from a registered texture atlas by declaring all four source coordinates in decoded-image pixels. The same crop is `ElementOptions.image_src` in a Zig view:
+
+```html
+<avatar image="{atlas_image}" source-x="64" source-y="0"
+  source-width="32" source-height="32" label="Profile picture">ZN</avatar>
+```
+
 ## Attributes
 
-<AttrTable element="avatar" attrs={["text", "image", "label"]} />
+<AttrTable element="avatar" attrs={["text", "image", "source-x", "source-y", "source-width", "source-height", "label"]} />

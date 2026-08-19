@@ -645,6 +645,7 @@ pub const WidgetClipboardAction = event_model.WidgetClipboardAction;
 pub const widgetKeyboardClipboardAction = event_model.widgetKeyboardClipboardAction;
 pub const widgetKeyboardNewlineTextEditEvent = event_model.widgetKeyboardNewlineTextEditEvent;
 pub const widgetCodeTabTextEditEvent = event_model.widgetCodeTabTextEditEvent;
+pub const widgetKeyboardTextEditEventForWidget = event_model.widgetKeyboardTextEditEventForWidget;
 pub const widgetKindSingleLineTextEntry = event_model.widgetKindSingleLineTextEntry;
 pub const sanitizedSingleLineTextInputEvent = event_model.sanitizedSingleLineTextInputEvent;
 pub const widgetKeyboardControlIntent = event_model.widgetKeyboardControlIntent;

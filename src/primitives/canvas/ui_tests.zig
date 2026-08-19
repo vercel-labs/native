@@ -562,9 +562,9 @@ test "avatar and image sugar carry registered image ids" {
 
     var ui = InboxUi.init(arena_state.allocator());
     const tree = try ui.finalize(ui.column(.{}, .{
-        ui.avatar(.{ .image = 77, .semantics = .{ .label = "Native SDK" } }, "NS"),
+        ui.avatar(.{ .image = 77, .image_src = geometry.RectF.init(32, 0, 32, 32), .semantics = .{ .label = "Native SDK" } }, "NS"),
         ui.avatar(.{}, "NS"),
-        ui.image(.{ .image = 42, .semantics = .{ .label = "Chart" } }),
+        ui.image(.{ .image = 42, .image_src = geometry.RectF.init(4, 8, 24, 16), .semantics = .{ .label = "Chart" } }),
     }));
 
     // With an image id the avatar clips it to the circle (cover fit);
@@ -572,6 +572,7 @@ test "avatar and image sugar carry registered image ids" {
     const with_image = tree.root.children[0];
     try testing.expectEqual(canvas.WidgetKind.avatar, with_image.kind);
     try testing.expectEqual(@as(canvas.ImageId, 77), with_image.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(32, 0, 32, 32)), with_image.image_src);
     try testing.expectEqual(canvas.ImageFit.cover, with_image.image_fit);
     try testing.expectEqualStrings("NS", with_image.text);
 
@@ -582,6 +583,7 @@ test "avatar and image sugar carry registered image ids" {
     const image_leaf = tree.root.children[2];
     try testing.expectEqual(canvas.WidgetKind.image, image_leaf.kind);
     try testing.expectEqual(@as(canvas.ImageId, 42), image_leaf.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(4, 8, 24, 16)), image_leaf.image_src);
 }
 
 test "payload-carrying handlers build messages from edits and values" {

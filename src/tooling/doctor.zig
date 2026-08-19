@@ -165,7 +165,7 @@ pub fn reportForCurrentHostWithProbe(
     } else if (target.os != .macos) {
         try buffers.add("webview-system", .unsupported, "system WebView backend is not wired for this host yet", .{});
     }
-    var manifest_engine = web_engine.readManifestConfig(allocator, io, options.manifest_path orelse "app.zon") catch web_engine.ManifestConfig{};
+    var manifest_engine = web_engine.readManifestConfig(allocator, io, options.manifest_path orelse manifest_tool.defaultPath(io) orelse "app.json") catch web_engine.ManifestConfig{};
     defer manifest_engine.deinit(allocator);
     const resolved_engine = web_engine.resolve(manifest_engine, .{
         .web_engine = options.web_engine_override,

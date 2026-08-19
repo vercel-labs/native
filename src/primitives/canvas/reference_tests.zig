@@ -1731,6 +1731,69 @@ test "reference renderer bilinear-filters scaled images" {
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
 }
 
+test "reference renderer keeps linear atlas crops inside their source rectangle" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .src = geometry.RectF.init(1, 1, 2, 2),
+        .dst = geometry.RectF.init(0, 0, 4, 4),
+    } }};
+
+    // A green 2x2 tile surrounded by red atlas neighbors. Scaling the
+    // crop 2x must stay green through its edge pixels; full-image clamp
+    // would blend red into every side through the bilinear taps.
+    var image_pixels: [4 * 4 * 4]u8 = undefined;
+    for (0..16) |index| {
+        image_pixels[index * 4 + 0] = 255;
+        image_pixels[index * 4 + 1] = 0;
+        image_pixels[index * 4 + 2] = 0;
+        image_pixels[index * 4 + 3] = 255;
+    }
+    for (1..3) |y| {
+        for (1..3) |x| {
+            const index = (y * 4 + x) * 4;
+            image_pixels[index + 0] = 0;
+            image_pixels[index + 1] = 255;
+            image_pixels[index + 2] = 0;
+        }
+    }
+    const images = [_]ReferenceImage{.{
+        .id = 42,
+        .width = 4,
+        .height = 4,
+        .pixels = &image_pixels,
+    }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 4),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(4, 4, &pixels)).withImages(&images);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    for (0..4) |y| {
+        for (0..4) |x| {
+            try expectPixelRgba8(.{ 0, 255, 0, 255 }, surface, x, y);
+        }
+    }
+}
+
 test "reference renderer nearest-filters scaled images" {
     const commands = [_]CanvasCommand{.{ .draw_image = .{
         .id = 1,

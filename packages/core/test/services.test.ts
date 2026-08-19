@@ -61,7 +61,11 @@ test("a generated SQLite SDK surface and typed services share one checked progra
   try {
     fs.cpSync(path.join(packageDir, "sdk"), generatedDir, { recursive: true });
     const result = checkFiles({
-      "core.ts": serviceCore,
+      "core.ts": `
+import type { WindowDescriptor } from "@native-sdk/core/events";
+${serviceCore}
+export function windows(_model: Model): readonly WindowDescriptor[] { return []; }
+`,
       "services/feeds.ts": `export function parse(bytes: Uint8Array): Uint8Array { return bytes; }`,
     }, {
       contractEntry: "src/core.ts",
@@ -88,6 +92,31 @@ test("service source hashes cover transitive shared modules", () => {
   const beforeHash = JSON.parse(before.servicesContract!).operations[0].source_hash;
   const afterHash = JSON.parse(after.servicesContract!).operations[0].source_hash;
   assert.notEqual(beforeHash, afterHash);
+});
+
+test("comment-only service edits preserve core ABI and generated client artifacts", () => {
+  const check = (comment: string) => checkFiles({
+    "core.ts": serviceCore,
+    "shared.ts": `export function helper(bytes: Uint8Array): Uint8Array { return bytes; }`,
+    "services/feeds.ts": `import { helper } from "../shared.ts"; ${comment}\nexport function parse(bytes: Uint8Array): Uint8Array { return helper(bytes); }`,
+  }, { contractEntry: "src/core.ts", servicesContract: true });
+  const before = check("// implementation note one");
+  const after = check("// implementation note two");
+  assert.equal(before.ok, true, JSON.stringify(before.diagnostics));
+  assert.equal(after.ok, true, JSON.stringify(after.diagnostics));
+  assert.equal(before.contract, after.contract, "service implementation comments do not change the core ABI contract");
+  assert.equal(before.servicesClient, after.servicesClient, "service implementation comments do not change the typed client");
+  assert.notEqual(
+    JSON.parse(before.servicesContract!).operations[0].source_hash,
+    JSON.parse(after.servicesContract!).operations[0].source_hash,
+    "the service implementation lane still receives a fresh source identity",
+  );
+  const signatureChange = checkFiles({
+    "core.ts": serviceCore,
+    "services/feeds.ts": `export function parse(): Uint8Array { return new Uint8Array(0); }`,
+  }, { contractEntry: "src/core.ts", servicesContract: true });
+  assert.equal(signatureChange.ok, true, JSON.stringify(signatureChange.diagnostics));
+  assert.notEqual(before.servicesClient, signatureChange.servicesClient, "a service signature change rewrites the typed client and therefore the core compile input");
 });
 
 test("the same ambient module stays refused when it is moved into the core class", () => {
@@ -564,6 +593,34 @@ test("incremental vendoring preserves prior package facts and lets explicit upda
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("app.json vendoring preserves schema metadata and package facts", () => {
+  const source = `{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.example.fixture",
+  "name": "fixture",
+  "version": "1.0.0",
+  "assets": { "images": [{ "id": 9007199254740993, "path": "assets/cover.png" }] },
+  "frontend": { "dev": { "url": "http://127.0.0.1:5173/", "timeout_ms": 1e3 } },
+  "service_packages": [{ "name": "alpha", "version": "1.2.3", "content_hash": "${"a".repeat(64)}" }]
+}\n`;
+  assert.deepEqual(mergePackageSpecs(source, ["beta@2.0.0"], "json"), ["alpha@1.2.3", "beta@2.0.0"]);
+  const replaced = replaceServicePackages(source, [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }], "json");
+  const parsed = JSON.parse(replaced);
+  assert.equal(parsed.$schema, "https://schema.native-sdk.dev/app/v1.json");
+  assert.deepEqual(readServicePackages(replaced, "json"), [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }]);
+  assert.match(replaced, /"id": 9007199254740993/);
+  assert.match(replaced, /"timeout_ms": 1e3/);
+
+  const inserted = replaceServicePackages(`{
+  "id": "dev.example.fixture",
+  "name": "fixture",
+  "version": "1.0.0",
+  "assets": { "images": [{ "id": 9007199254740993, "path": "assets/cover.png" }] }
+}\n`, [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }], "json");
+  assert.match(inserted, /"id": 9007199254740993/);
+  assert.deepEqual(readServicePackages(inserted, "json"), [{ name: "beta", version: "2.0.0", content_hash: "b".repeat(64) }]);
 });
 
 test("service staging lowers tagged throws across the service-host graph", () => {

@@ -829,7 +829,7 @@ test "widget image emits draw image and exposes image semantics" {
         .image_id = 42,
         .image_src = geometry.RectF.init(0, 0, 320, 192),
         .image_fit = .cover,
-        .image_sampling = .nearest,
+        .image_sampling = .linear,
         .image_opacity = 0.75,
         .semantics = .{ .label = "Deployment preview" },
     };
@@ -864,6 +864,8 @@ test "widget image emits draw image and exposes image semantics" {
             try expectRect(geometry.RectF.init(0, 0, 320, 192), draw.src);
             try expectRect(geometry.RectF.init(12, 14, 80, 48), draw.dst);
             try std.testing.expectEqual(ImageFit.cover, draw.fit);
+            // Atlas crops force nearest sampling at the widget seam so
+            // packet hosts cannot filter outside the source rectangle.
             try std.testing.expectEqual(ImageSampling.nearest, draw.sampling);
             try std.testing.expectEqual(@as(f32, 0.75), draw.opacity);
         },

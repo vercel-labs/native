@@ -45,6 +45,10 @@ const max_tray_title_bytes = types.max_tray_title_bytes;
 const max_tray_tooltip_bytes = types.max_tray_tooltip_bytes;
 const max_tray_item_label_bytes = types.max_tray_item_label_bytes;
 const max_tray_item_command_bytes = types.max_tray_item_command_bytes;
+const max_tray_segment_options = types.max_tray_segment_options;
+const max_tray_segment_label_bytes = types.max_tray_segment_label_bytes;
+const max_tray_chart_values = types.max_tray_chart_values;
+const max_tray_chart_text_bytes = types.max_tray_chart_text_bytes;
 const max_drop_paths_bytes = types.max_drop_paths_bytes;
 const max_drop_paths = types.max_drop_paths;
 const max_window_event_name_bytes = types.max_window_event_name_bytes;
@@ -319,6 +323,16 @@ const NullStatusItem = struct {
     open_command_len: usize = 0,
     presentation: TrayPresentation = .{},
     items: [max_tray_items]TrayMenuItem = undefined,
+    segment_options: [max_tray_items * max_tray_segment_options]types.TraySegmentOption = undefined,
+    segment_option_label_storage: [max_tray_items * max_tray_segment_options][max_tray_segment_label_bytes]u8 = undefined,
+    segment_option_command_storage: [max_tray_items * max_tray_segment_options][max_tray_item_command_bytes]u8 = undefined,
+    metric_primary_storage: [max_tray_items][max_tray_item_label_bytes]u8 = undefined,
+    metric_secondary_storage: [max_tray_items][types.max_tray_item_detail_bytes]u8 = undefined,
+    metric_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_values: [max_tray_items * max_tray_chart_values]f32 = undefined,
+    chart_leading_caption_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_trailing_summary_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
     item_count: usize = 0,
 };
 
@@ -1789,7 +1803,42 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const status_item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
         if (items.len > status_item.items.len) return error.InvalidTrayOptions;
-        for (items, 0..) |item, index| status_item.items[index] = item;
+        for (items, 0..) |item, index| {
+            status_item.items[index] = item;
+            if (item.segmented) |segmented| {
+                const start = index * max_tray_segment_options;
+                for (segmented.options, 0..) |option, option_index| {
+                    const flat_index = start + option_index;
+                    status_item.segment_options[flat_index] = .{
+                        .id = option.id,
+                        .label = try copyInto(&status_item.segment_option_label_storage[flat_index], option.label),
+                        .command = try copyInto(&status_item.segment_option_command_storage[flat_index], option.command),
+                        .selected = option.selected,
+                        .enabled = option.enabled,
+                    };
+                }
+                status_item.items[index].segmented = .{ .options = status_item.segment_options[start .. start + segmented.options.len] };
+            }
+            if (item.metric) |metric| {
+                status_item.items[index].metric = .{
+                    .primary_text = try copyInto(&status_item.metric_primary_storage[index], metric.primary_text),
+                    .secondary_text = try copyInto(&status_item.metric_secondary_storage[index], metric.secondary_text),
+                    .accessibility_label = try copyInto(&status_item.metric_accessibility_storage[index], metric.accessibility_label),
+                };
+            }
+            if (item.chart) |chart| {
+                const start = index * max_tray_chart_values;
+                @memcpy(status_item.chart_values[start .. start + chart.values.len], chart.values);
+                status_item.items[index].chart = .{
+                    .values = status_item.chart_values[start .. start + chart.values.len],
+                    .min_value = chart.min_value,
+                    .max_value = chart.max_value,
+                    .leading_caption = try copyInto(&status_item.chart_leading_caption_storage[index], chart.leading_caption),
+                    .trailing_summary = try copyInto(&status_item.chart_trailing_summary_storage[index], chart.trailing_summary),
+                    .accessibility_label = try copyInto(&status_item.chart_accessibility_storage[index], chart.accessibility_label),
+                };
+            }
+        }
         status_item.item_count = items.len;
         self.tray_update_count += 1;
     }

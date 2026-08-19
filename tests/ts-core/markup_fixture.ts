@@ -340,6 +340,8 @@ function applyDraftEdit(draft: Uint8Array, edit: TextInputEvent): Uint8Array {
     case "delete_forward":
     case "delete_word_backward":
     case "delete_word_forward":
+    case "delete_to_start":
+    case "delete_to_line_start":
     case "move_caret":
     case "set_selection":
     case "set_composition":

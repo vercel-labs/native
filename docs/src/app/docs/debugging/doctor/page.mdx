@@ -22,7 +22,7 @@ The `native doctor` command checks your development environment for issues.
     </tr>
     <tr>
       <td>Manifest</td>
-      <td><code>app.zon</code> validation (only when <code>--manifest</code> is passed)</td>
+      <td><code>app.json</code> or <code>app.zon</code> validation when a manifest is discovered or passed explicitly</td>
     </tr>
     <tr>
       <td>Log directory</td>
@@ -30,7 +30,7 @@ The `native doctor` command checks your development environment for issues.
     </tr>
     <tr>
       <td>CEF</td>
-      <td>CEF distribution presence when Chromium is selected by <code>app.zon</code> or <code>--web-engine chromium</code></td>
+      <td>CEF distribution presence when Chromium is selected by the app manifest or <code>--web-engine chromium</code></td>
     </tr>
     <tr>
       <td>Signing tools</td>
@@ -46,10 +46,10 @@ The `native doctor` command checks your development environment for issues.
 native doctor
 
 # Strict mode (exits non-zero on any warning)
-native doctor --manifest app.zon --strict
+native doctor --manifest app.json --strict
 
 # Check CEF setup
-native doctor --manifest app.zon
+native doctor --manifest app.json
 ```
 
 ## Flags
@@ -68,11 +68,11 @@ native doctor --manifest app.zon
     </tr>
     <tr>
       <td><code>--manifest</code></td>
-      <td>Path to <code>app.zon</code></td>
+      <td>Path to <code>app.json</code> or <code>app.zon</code></td>
     </tr>
     <tr>
       <td><code>--web-engine</code></td>
-      <td>Temporarily override the engine from <code>app.zon</code> with <code>system</code> or <code>chromium</code></td>
+      <td>Temporarily override the engine from the app manifest with <code>system</code> or <code>chromium</code></td>
     </tr>
     <tr>
       <td><code>--cef-dir</code></td>

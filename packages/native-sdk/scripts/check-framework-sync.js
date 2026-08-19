@@ -18,6 +18,7 @@ const mirrors = [
   { source: 'LICENSE', target: 'LICENSE' },
   { source: 'skills', target: 'skills' },
   { source: 'skill-data', target: 'skill-data' },
+  { source: 'apps/schema/public/app/v1.json', target: 'schemas/app.schema.json' },
   { source: 'third_party/webview2', target: 'third_party/webview2' },
   { source: 'third_party/sqlite', target: 'third_party/sqlite' },
   // corewire: the mirror/facade/profile generator every TypeScript-core

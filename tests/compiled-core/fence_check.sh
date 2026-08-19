@@ -19,8 +19,8 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 
 if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
   compiler="$NATIVE_SDK_CORE_COMPILER"
-elif [ -f "$repo/packages/core/node_modules/scriptc/dist/main.js" ]; then
-  compiler="node $repo/packages/core/node_modules/scriptc/dist/main.js"
+elif [ -x "$repo/packages/core/node_modules/.bin/scriptc" ]; then
+  compiler="$repo/packages/core/node_modules/.bin/scriptc"
 else
   echo "fence-check: skipped — run \`npm ci --prefix $repo/packages/core\` (or set NATIVE_SDK_CORE_COMPILER) to run the determinism-fence negative control"
   exit 0

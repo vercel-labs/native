@@ -1406,12 +1406,14 @@ test "compiled image leaf binding matches the interpreter and the hand-written v
     try expectSameTree(fixture.ImageLeafMsg, hand, interpreted);
     try expectSameTree(fixture.ImageLeafMsg, hand, compiled);
 
-    // The field binding and the fn binding both resolve to the
-    // widget's image id at comptime-unrolled access.
+    // The field binding, source-coordinate bindings, and id fn all
+    // resolve through comptime-unrolled access.
     const cover = compiled.root.children[0];
     try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
     try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(4, 8, 32, 24)), cover.image_src);
     try testing.expectEqual(@as(canvas.ImageId, 43), compiled.root.children[1].image_id);
+    try testing.expectEqual(@as(?geometry.RectF, null), compiled.root.children[1].image_src);
 
     // 0 draws nothing in both engines — the not-loaded-yet state.
     const empty_model = fixture.ImageLeafModel{};

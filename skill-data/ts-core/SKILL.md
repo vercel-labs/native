@@ -1,13 +1,13 @@
 ---
 name: ts-core
-description: Authoring guide for the primary Native SDK app-logic path: TypeScript app cores - Model, Msg, update, and the pure functions they call, written in the closed app-core subset, checked by the @native-sdk/core frontend, and compiled ahead-of-time to native code by the external core compiler. Use for new apps unless the user explicitly chose Zig, when writing or modifying a src/core.ts app core, fixing subset checker errors (NS1001-NS1069), or deciding how to express state, messages, text (bytes and the byte-text string methods), text input, continuous controls (sliders, scroll), effects (Cmd), subscriptions (Sub), the host-event wiring channels (frameMsg, keyMsg, pinchMsg, dropMsg, appearanceMsg, chromeMsg, envMsgs, app.zon assets), derived values, the view_unbound lint opt-out, local mutation of owned arrays, or how to split a core into modules under src/ (relative imports, namespace imports, @native-sdk/core/text, @native-sdk/core/events). Use ts-services alongside this guide for src/services work.
+description: Authoring guide for the primary Native SDK app-logic path: TypeScript app cores - Model, Msg, update, and the pure functions they call, written in the closed app-core subset, checked by the @native-sdk/core frontend, and compiled ahead-of-time to native code by the external core compiler. Use for new apps unless the user explicitly chose Zig, when writing or modifying a src/core.ts app core, fixing subset checker errors (NS1001-NS1069), or deciding how to express state, messages, text (bytes and the byte-text string methods), text input, continuous controls (sliders, scroll), effects (Cmd), subscriptions (Sub), the host-event wiring channels (frameMsg, keyMsg, pinchMsg, dropMsg, appearanceMsg, chromeMsg, envMsgs, app manifest assets), derived values, the view_unbound lint opt-out, local mutation of owned arrays, or how to split a core into modules under src/ (relative imports, namespace imports, @native-sdk/core/text, @native-sdk/core/events). Use ts-services alongside this guide for src/services work.
 ---
 
 # Author app cores in the TypeScript subset
 
 TypeScript is the primary app-authoring language. An app core is a Native SDK app's deterministic logic: `Model` (the app state), `Msg` (a discriminated union of everything that can happen), `update(model, msg)` (the one pure transition function), and the pure helpers they call. You write it as a TypeScript module rooted at `src/core.ts` - splitting into more modules under `src/` when it grows (see "Splitting a core into modules") - and the build checks the whole import graph with the `@native-sdk/core` frontend and compiles it to native code with the external core compiler. No JS engine ships in the binary — the program either passes the subset checker and compiles to native, or you get a teaching error naming the rule, the fix, and the reason. The same file is executable TypeScript: it typechecks with stock tsc and runs unmodified under node, so you can poke behavior with plain node scripts before the native build.
 
-A whole TS app starts as three files of truth and zero Zig: `src/core.ts` (this guide; plus core-class modules it imports under `src/`), `src/app.native` (the markup view over the core's model), and `app.zon` (windows, identity, permissions). Optional ordinary-TypeScript service modules live under `src/services/` and are never imported by the core; load `native skills get ts-services` for that boundary. `native init` scaffolds the three-file base; the build detects `src/core.ts` in the tree (never a flag or config — a tree with both `src/core.ts` and `src/main.zig` is a teaching error) and generates the wiring outside the app. The loop:
+A whole TS app starts as three files of truth and zero Zig: `src/core.ts` (this guide; plus core-class modules it imports under `src/`), `src/app.native` (the markup view over the core's model), and `app.json` (windows, identity, permissions). Existing `app.zon` manifests remain supported. Optional ordinary-TypeScript service modules live under `src/services/` and are never imported by the core; load `native skills get ts-services` for that boundary. `native init` scaffolds the three-file base; the build detects `src/core.ts` in the tree (never a flag or config — a tree with both `src/core.ts` and `src/main.zig` is a teaching error) and generates the wiring outside the app. The loop:
 
 ```sh
 native dev --core   # the fastest loop: run the core under node's virtual host —
@@ -15,7 +15,7 @@ native dev --core   # the fastest loop: run the core under node's virtual host �
                     # for bytes payloads, {"advance":1000} to run virtual timers),
                     # watch the model + effect transcript. Logic only, no renderer.
 native dev          # build and run the real app (markup hot reload)
-native check        # subset-check core.ts + validate markup + app.zon
+native check        # subset-check core.ts + validate markup + app.json/app.zon
 native build        # ReleaseFast binary; native test runs the app's tests
 ```
 
@@ -197,7 +197,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("app.refresh"),
     alternateActivationCommand: asciiBytes("player.toggle"),
     openCommand: asciiBytes("app.refresh"),
-    presentation: { title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"), width: 62, tone: "normal", iconOpacity: 1, monospaced: true },
+    presentation: { title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"), width: 62, tone: "normal", iconOpacity: 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
     items: [
       { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
       { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
@@ -207,7 +207,7 @@ export function statusItem(model: Model): StatusItemState {
 }
 ```
 
-The canonical records live in `@native-sdk/core/events`. Shell fields are `iconPath`, `tooltip`, `activationCommand`, `alternateActivationCommand`, and `openCommand`; all commands route through `commandMsg(name): Msg | null`. Presentation is exact: `title`, `width` (0 = host default), `tone` (`normal | warning | critical`), `iconOpacity` (0…1), and `monospaced`. Every row has id/label/command/separator/enabled plus byte `detail`, `role` (`command | info | header | hero | agent | context`), byte `key`, and the five explicit modifier booleans. Actionable rows need unique non-zero whole u32 ids and a non-empty label, separators conventionally use id 0, and the runtime cap is 32 rows per item. Row membership and every shell/presentation/menu field may derive from the model. Linux does not implement status items today.
+The canonical records live in `@native-sdk/core/events`. Shell fields are `iconPath`, `tooltip`, `activationCommand`, `alternateActivationCommand`, and `openCommand`; all commands route through `commandMsg(name): Msg | null`. Presentation requires `title`, `width` (0 = host default), `tone`, `iconOpacity`, and `monospaced`; optional `fontSize` (omitted/0 = platform default) and `fontWeight` (omitted = `regular`; otherwise `regular | medium | semibold | bold`) add typography without breaking older cores. Use `statusItems` to compose several persistent menu-bar text/icon items with independent typography; attach the dropdown rows to whichever descriptor should open it. Actionable rows need unique non-zero whole u32 ids, and the runtime cap is 32 rows per item. Linux does not implement status items today.
 
 For multiple items export `statusItems(model): readonly StatusItemDescriptor[]` instead (never both helpers). A descriptor has the singular fields plus stable non-zero `id` identity and live `visible`. Presence creates, absence removes, and changed icon/title/tooltip/visibility/activation/menu fields patch only that id; one menu update never recreates any native item. macOS supports eight simultaneous items. Row ids are scoped to one menu, so different status items may reuse them. This is the Vercel-shaped spend-indicator plus persistent-control-item surface.
 
@@ -231,6 +231,7 @@ export function windows(model: Model): readonly WindowDescriptor[] {
     title: asciiBytes("Settings"),
     width: 420,
     height: 240,
+    restorePolicy: "center_on_primary",
     resizable: false,
     closePolicy: "quit",
     onCloseCommand: asciiBytes("app.settings-closed"),
@@ -239,6 +240,8 @@ export function windows(model: Model): readonly WindowDescriptor[] {
 ```
 
 `closePolicy` is `"quit"` by default. Under `"quit"`, a user close really closes the window and routes `onCloseCommand` through `commandMsg`; map it to the Msg that clears the model's open flag. If the model keeps declaring the label, source wins and the next reconciliation recreates it. Under `"hide"`, the same native window and view stay alive, no close command fires, and `Cmd.showWindow("settings")` reveals it. Stopping the declaration always performs a real reconcile close. The platform safeguards for `hide` are the same as manifest windows. Model-declared secondary windows are desktop-only.
+
+`restorePolicy` accepts `"clamp_to_visible_screen"` (the default) or `"center_on_primary"`. Model-declared windows do not restore persisted frames. On macOS, the latter centers a fresh descriptor with no `x`/`y` directly at native creation time; Windows and Linux currently keep their native default placement.
 
 `titlebar` accepts `"standard"`, `"hidden_inset"`, `"hidden_inset_tall"`, and `"chromeless"`. The last removes all OS chrome and is required when a transparent model-declared window targets Windows; provide working app-drawn close/minimize controls for that fully skinned shape.
 
@@ -355,6 +358,8 @@ export type TextInputEvent =
   | { readonly kind: "delete_forward" }
   | { readonly kind: "delete_word_backward" }
   | { readonly kind: "delete_word_forward" }
+  | { readonly kind: "delete_to_start" }
+  | { readonly kind: "delete_to_line_start" }
   | { readonly kind: "clear" }
   | { readonly kind: "move_caret"; readonly move: TextCaretMove }
   | { readonly kind: "set_selection"; readonly selection: TextSelection }
@@ -391,7 +396,7 @@ export type Msg = /* ... */ | { readonly kind: "library_scrolled"; readonly scro
 The generated wiring detects each channel from an export (export exists → wired; a wrong shape is a taught NS1033). Event records are matched by field name, STRUCTURALLY: import them from `@native-sdk/core/events` (`FrameEvent`, `KeyEvent`, `PinchEvent`, `FileDropEvent`, `ColorScheme`, `ChromeInsets`/`ChromeButtons`) or declare the same shapes in your core — both emit as your module's types and match identically. The `appearanceMsg`/`chromeMsg` arms themselves stay inline union members (`kind` plus the event's fields — the subset has no intersection arms); the SDK's `AppearanceEvent`/`ChromeEvent` records are those arms' canonical payload shapes, importable for helper signatures.
 
 - **`commandMsg(name: string): Msg | null`** — menus, shortcuts, and chrome tabs, by command id (string equality works on `string` values).
-- **`statusItem(model: Model): StatusItemState` / `statusItems(model: Model): readonly StatusItemDescriptor[]`** — one complete menu-bar item, or a stable-id collection: live icon/tooltip/visibility/click hooks, presentation, and dropdown. The generated launcher reconciles after committed updates; import the exact records from `@native-sdk/core/events`.
+- **`statusItem(model: Model): StatusItemState` / `statusItems(model: Model): readonly StatusItemDescriptor[]`** — one complete menu-bar item, or a stable-id collection. Presentation includes generic title typography. Dropdown rows include a typed `metric` block, typed segmented options, and bounded chart data; never encode these as text conventions. The generated launcher reconciles after committed updates.
 - **`themeState(model: Model): ThemeState`** — the stock theme's model-owned pack, color scheme, and accent. Import `ThemeState` from `@native-sdk/core/events`; each field is optional (`pack`, `colorScheme`, `accent`). Omit a field to inherit app.zon, use `colorScheme: "system"` (or omit it) to follow the OS, and spell accents exactly `#rrggbb`. High contrast/reduced motion remain system-owned and high contrast suppresses accents. `themePack(model)` remains the pack-only compatibility helper; export one or the other, never both. Complete `tokens_fn`/`tokens` wiring takes precedence. Forced scheme applies to canvas tokens in v1; native chrome and WebViews remain OS-themed.
 - **`windows(model: Model): readonly WindowDescriptor[]`** — the model-declared secondary-window set. The launcher compiles `src/windows/<label>.native`, reconciles descriptor presence after committed updates, projects `closePolicy`, and routes a `.quit` `onCloseCommand` through `commandMsg`.
 - **`frameMsg(model: Model, frame: FrameEvent): Msg | null`** — presented frames. `FrameEvent` is exactly `{ width, height, timestampMs, intervalMs }` numbers (canvas points; fractional milliseconds). Return null for frames that change nothing — the idle law holds exactly when an idle app dispatches nothing (a frame arm that always returns a Msg would spin the loop at full frame rate). The installing frame is excluded; the first PRESENTED frame corrects any seeded value.

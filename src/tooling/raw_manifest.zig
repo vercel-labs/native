@@ -1,6 +1,10 @@
 const web_engine = @import("web_engine.zig");
 
 pub const RawManifest = struct {
+    /// Editor-only JSON Schema association. The manifest tooling ignores the
+    /// value after parsing; app.json scaffolds point it at the published SDK
+    /// schema so editors can complete and validate the full manifest surface.
+    @"$schema": ?[]const u8 = null,
     id: []const u8,
     name: []const u8,
     display_name: ?[]const u8 = null,

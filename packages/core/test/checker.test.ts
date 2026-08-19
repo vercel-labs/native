@@ -1242,6 +1242,9 @@ export function statusItem(model: Model): StatusItemState {
     openCommand: asciiBytes("refresh"),
     presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
     items: [
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: false, detail: asciiBytes(""), role: "hero", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, metric: { primaryText: asciiBytes("2,494 requests"), secondaryText: asciiBytes("Today"), accessibilityLabel: asciiBytes("2,494 requests today") } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: true, detail: asciiBytes(""), role: "segmented", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, segmented: { options: [{ id: 11, label: asciiBytes("On"), command: asciiBytes("enable"), selected: model.playing, enabled: true }] } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: false, detail: asciiBytes(""), role: "chart", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, chart: { values: [0.25, 0.5, 1], minValue: 0, maxValue: 1, leadingCaption: asciiBytes("Load"), trailingSummary: asciiBytes("50%"), accessibilityLabel: asciiBytes("Load history, 50 percent") } },
       { id: 1, label: asciiBytes(model.playing ? "Pause" : "Play"), command: asciiBytes("toggle"), separator: false, enabled: true, detail: asciiBytes("configured"), role: "agent", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
       { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
     ],
@@ -1341,7 +1344,7 @@ export function initialModel(): Model { return { settingsOpen: false }; }
 export function update(model: Model, msg: Msg): Model { return model; }
 export function windows(model: Model): readonly WindowDescriptor[] {
   if (!model.settingsOpen) return [];
-  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), titlebar: "chromeless", transparent: true, closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
+  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), restorePolicy: "center_on_primary", titlebar: "chromeless", transparent: true, closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
 }
 `;
   const clean = check(cleanSource, { windowViews: ["settings"] });

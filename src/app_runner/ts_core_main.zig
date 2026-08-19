@@ -1,7 +1,8 @@
 //! The generated wiring for a TypeScript app core — staged (never written
 //! into the app) by the framework build when the tree carries src/core.ts:
-//! the build transpiles the core beside this file as core.zig, copies the
-//! app's src/app.native beside it too, and roots the app module here. The
+//! the build transpiles the core beside this file as core.zig, links the
+//! app's src/app.native as an isolated data object, and roots the app module
+//! here. The
 //! app tree stays three files of truth — core.ts (logic), app.native
 //! (view), app.zon (manifest) — and every value below derives from them at
 //! comptime:
@@ -82,11 +83,25 @@ const App = Adapter.App;
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
 const canvas_label = native_sdk.app_manifest.firstGpuSurfaceLabel(shell_scene);
-pub const app_markup = @embedFile("app.native");
+extern const native_sdk_app_markup: u8;
+extern const native_sdk_app_markup_len: usize;
+
+/// Primary markup is linked as a data object so changing it does not dirty
+/// this Zig module's already-compiled SDK/app graph.
+pub fn appMarkup() []const u8 {
+    return @as([*]const u8, @ptrCast(&native_sdk_app_markup))[0..native_sdk_app_markup_len];
+}
+
+// Debug keeps root markup in the separately linked data object above, so an
+// edit is a C-data compile + relink and the runtime interpreter owns imports.
+// Release embeds the same closure and compiles it to direct view code.
 const app_markup_sources = [_]native_sdk.canvas.ui_markup.SourceFile{
-    .{ .path = "app.native", .source = app_markup },
+    .{ .path = "app.native", .source = @embedFile("app.native") },
 } ++ app_sources.sources;
-const CompiledAppView = native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
+const CompiledAppView = if (dev)
+    void
+else
+    native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
@@ -97,8 +112,7 @@ pub fn main(init: std.process.Init) !void {
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .view = CompiledAppView.build,
-        .markup = if (dev) .{ .source = app_markup, .sources = &app_markup_sources, .watch_path = "src/app.native", .io = init.io } else null,
+        .markup = if (dev) .{ .source = appMarkup(), .sources = &app_sources.sources, .watch_path = "src/app.native", .io = init.io } else null,
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no
@@ -108,6 +122,7 @@ pub fn main(init: std.process.Init) !void {
         .theme = comptime runner.manifestThemePack(),
         .theme_accent = comptime runner.manifestThemeAccent(),
     };
+    if (comptime !dev) options.view = CompiledAppView.build;
     if (comptime @hasDecl(core.Model, "windows")) {
         options.window_view = window_views.build;
         options.fragment_watch = .{ .fragments = &window_views.fragments, .io = init.io };

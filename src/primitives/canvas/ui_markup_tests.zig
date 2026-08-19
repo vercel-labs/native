@@ -696,6 +696,7 @@ test "the image attribute validates as one binding on avatar and image" {
     const valid = [_][]const u8{
         "<row>\n  <avatar image=\"{user_image}\">CT</avatar>\n</row>",
         "<row>\n  <image image=\"{cover}\" width=\"120\" height=\"80\" label=\"Cover art\" />\n</row>",
+        "<row>\n  <image image=\"{atlas}\" source-x=\"0\" source-y=\"32\" source-width=\"16\" source-height=\"16\" label=\"Atlas tile\" />\n</row>",
     };
     for (valid) |source| {
         var parser = markup.Parser.init(arena, source);
@@ -711,6 +712,11 @@ test "the image attribute validates as one binding on avatar and image" {
         // attribute would be silently inert.
         .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.image_binding_element_message },
         .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.image_binding_element_message },
+        // Source rectangles are image/avatar-only, require an image, and
+        // are atomic so a missing coordinate never defaults silently.
+        .{ .source = "<row>\n  <badge source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">3</badge>\n</row>", .message = markup.image_source_element_message },
+        .{ .source = "<row>\n  <avatar source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">CT</avatar>\n</row>", .message = markup.image_source_binding_message },
+        .{ .source = "<row>\n  <image image=\"{atlas}\" source-x=\"0\" source-y=\"0\" source-width=\"16\" label=\"Tile\" />\n</row>", .message = markup.image_source_complete_message },
         // ...and required on the leaf: an unbound image is statically
         // dead markup (avatar keeps its initials fallback instead).
         .{ .source = "<row>\n  <image label=\"Art\" />\n</row>", .message = markup.image_missing_image_message },

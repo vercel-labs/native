@@ -2,9 +2,64 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.2
+## 0.9.5
 
 <!-- release:start -->
+
+### New Features
+
+- **JSON manifests by default**: New TypeScript, Zig, web, full, and ejected apps now scaffold with `app.json`, backed by full parsing, discovery, build conversion, validation, vendoring, a published versioned schema, and seamless `app.zon` fallback for existing projects (#385).
+- **Registered-image source cropping**: Canvas image options and Native markup can now select atomic source rectangles from registered images for texture-atlas rendering, with schema, compiler, validation, documentation, and sampling-bleed coverage (#390).
+
+### Bug Fixes
+
+- **Reliable installed TypeScript toolchains**: Core and service builds now resolve ScriptC across nested, hoisted, and global sibling npm layouts, generate the complete SQLite SDK module family, and validate library imports against their actual directories (#389).
+
+### Improvements
+
+- **Focused schema hosting**: `schema.native-sdk.dev` now serves only the versioned app schema and its current-version alias, redirecting every non-schema route to the main Native SDK site (#388).
+
+### Contributors
+
+- @ctate
+
+<!-- release:end -->
+
+## 0.9.4
+
+### New Features
+
+- **Model-driven window restore policies**: TypeScript apps can now declare whether each model-driven window restores saved geometry or opens fresh, including center-on-primary placement, with matching defaults, validation, runtime forwarding, tests, and documentation (#381).
+
+### Improvements
+
+- **Faster, more predictable iterative rebuilds**: Generated core and service ABI artifacts now change only when their contents do, markup and app code compile into independently cached objects, SDK module edits invalidate the right inputs, and rebuild diagnostics expose phase timing, memory use, and cache decisions across platforms (#382).
+- **Updated TypeScript compiler integration**: ScriptC advances to 0.0.33 with published compile-cache bootstrapping, explicit development and release library profiles, synchronized compiler-surface artifacts, and Node 24 throughout the TypeScript build and CI toolchain (#384).
+
+### Contributors
+
+- @ctate
+
+## 0.9.3
+
+### New Features
+
+- **Model-driven TypeScript theme state**: Zero-config TypeScript apps can now derive the built-in pack, color scheme, and accent from committed model state while preserving manifest fallback, live system accessibility settings, deterministic replay, and the existing `themePack` helper (#378).
+- **Platform-correct line deletion**: Command+Backspace on macOS now deletes to the start of a field or logical textarea line across every editable canvas control, with matching TypeScript text helpers, controlled-state behavior, undo, and replay (#377).
+
+### Bug Fixes
+
+- **Precise macOS file-drop routing**: AppKit drops now retain labeled canvas and WebView targets with top-left, view-local coordinates, while unlabeled window regions fall back to content coordinates (#374).
+- **Manifest menus in generated runners**: Zero-config TypeScript and Zig-core apps now load `app.zon` commands, shortcuts, and menus consistently in live and replay runners, including ejected-runner fallbacks (#376).
+- **Large TypeScript message unions compile reliably**: Generated shims now derive comptime scan quotas from message shape and identifier size, allowing wide unions to compile across persistence, channels, environment routing, and the full external-core pipeline (#375).
+- **Correct combobox Enter precedence**: A bound `on-submit` now handles Enter before trigger activation, so query submission no longer opens the picker or dispatches the wrong command (#373).
+
+### Contributors
+
+- @ctate
+- @MohakBajaj
+
+## 0.9.2
 
 ### New Features
 
@@ -27,8 +82,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @sepehr-safari
-
-<!-- release:end -->
 
 ## 0.9.1
 

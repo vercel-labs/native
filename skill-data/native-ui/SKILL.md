@@ -34,7 +34,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("app.refresh"),
     alternateActivationCommand: asciiBytes("player.toggle"),
     openCommand: asciiBytes("app.refresh"),
-    presentation: { title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"), width: 62, tone: "normal", iconOpacity: 1, monospaced: true },
+    presentation: { title: model.playing ? utf8Bytes("MB PLAY") : utf8Bytes("MB"), width: 62, tone: "normal", iconOpacity: 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
     items: [
       { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
       { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
@@ -44,7 +44,7 @@ export function statusItem(model: Model): StatusItemState {
 }
 ```
 
-Presentation fields are `title`, `width`, `tone`, `iconOpacity`, and `monospaced`. Rows add secondary `detail`, a semantic `command | info | header | hero | agent | context` role, a key equivalent, and all five modifier booleans to the ordinary id/label/command/separator/enabled fields. Actionable rows need unique non-zero whole u32 ids; separators conventionally use id 0, and the menu cap is 32 rows. `examples/menu-bar` is the full TypeScript + Native markup hide/Open/Quit lifecycle. The lower-level Zig `Options.status_item` / `status_item_fn` recipe appears below for Zig cores and custom wiring.
+Presentation fields style the persistent menu-bar item. Inside its dropdown, `metric` carries prominent primary/secondary text, `segmented` carries up to eight typed command options, and `chart` carries 1–32 bounded values with captions and accessibility. These are generic composable row payloads, not text conventions.
 
 ## App wiring (Zig cores and extensions only)
 
@@ -215,7 +215,7 @@ Automation drives the native path honestly: snapshots list every widget's declar
 | `skeleton`, `spinner` | loading leaves | size `skeleton` with `width`/`height` |
 | `icon` | vector icon leaf | `name` picks the icon: a bare literal is a curated built-in stroke icon (compile-checked; 49 names: search, plus, x, x-circle, check, check-circle, chevron-up/down/left/right, arrow-up/down/right, menu, panel-left, panel-right, settings, terminal, wrench, trash, edit, copy, external-link, play, pause, skip-back/forward, shuffle, repeat, music, volume, info, alert, download, save, folder, folder-open, file-text, sun, moon, eye, clock, git-pull-request, git-merge, git-branch, circle-dot, archive, refresh-cw, send); `app:<name>` reaches an icon the app registered at boot with `canvas.icons.registerAppIcons` (declare the table as `pub const app_icons` on the app root so `native check` verifies the name against the model contract), and one `{binding}` defers the choice to model data - an unknown resolved name draws the missing-icon fallback (a slashed circle) with a Debug warning naming the value, never a silent gap; tint with `foreground`, size with `width`/`height` |
 | `media-surface` | media surface leaf | composites a texture produced OUTSIDE the widget tree (video decoder, camera, an external renderer like mpv) into the layout like any widget — clipped, z-ordered, rounded. `surface="{binding}"` (required) binds the model-owned u64 surface id a Zig-tier producer targets (`runtime.acquireMediaSurfaceProducer` pushes RGBA8 frames, latest-wins, paced by the presented-frame clock; 0 = unbound, draws nothing; usable ids are nonzero values below the reserved bit 63). No intrinsic size — give it `width`/`height` or `grow`; display-only (presses fall through); `label` it (pictorial content). Texture contents are presentation chrome: goldens, reference screenshots, and session replay show the deterministic id-derived placeholder, never producer frames |
-| `image` | runtime image leaf | draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id `Cmd.imageLoad` (TS) or `fx.loadImage`/`fx.registerImageBytes` (Zig) registered pixels under. `image="{binding}"` (required) binds a model field/fn; ids are model data, never markup literals, and 0 draws nothing (store the id only when the load reports loaded — see the Images section). No intrinsic size — give it `width`/`height` or `grow`; display-only (presses fall through); `label` it (pictorial content) |
+| `image` | runtime image leaf | draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id `Cmd.imageLoad` (TS) or `fx.loadImage`/`fx.registerImageBytes` (Zig) registered pixels under. `image="{binding}"` (required) binds a model field/fn; ids are model data, never markup literals, and 0 draws nothing (store the id only when the load reports loaded — see the Images section). `source-x`/`source-y`/`source-width`/`source-height` select one atlas region in decoded-image pixel coordinates (declare all four). No intrinsic size — give it `width`/`height` or `grow`; display-only (presses fall through); `label` it (pictorial content) |
 | `code` | bare highlighted source/editor | `source="{binding}"` (required) provides source text and `language="tsx"` selects a literal lexer name; the component supplies no background, border, radius, shadow, or padding, so wrap it in a panel/card when chrome is wanted. It is read-only by default; `editable on-input="edit"` opts into multiline editing while retaining highlighting. It wraps by default, `line-numbers` opts into logical line numbers, `added-lines="5"` / `removed-lines="2-4"` add Geist-style diff rows without changing copied source, and `wrap="false"` preserves lines inside one horizontal scroll region. HTML-family highlighting distinguishes HTML/XML/SVG and JSX/TSX tags, attributes, strings, comments, and embedded expressions. Zig builder: `ui.code(CodeOptions, source)` |
 | `markdown` | rendered markdown subtree | leaf; `source` is one `{binding}` — see "Markdown in markup" |
 | `stepper` > `step` | composite stage track | `active="{index}"` (required) derives each step's completed/active/pending state; steps are text leaves (no attributes) joined by connectors; stepper also takes `key`, `global-key`, `label` |
@@ -224,7 +224,7 @@ Automation drives the native path honestly: snapshots list every widget's declar
 | `context-menu` | consumed by its parent | right-click menu on its DIRECT parent (a hit-target kind or an element with `on-press`/`on-double-press`/`on-toggle`/`on-hold`/`on-drag`); metadata, never a flow child. Children: `menu-item`s (`on-press` required, `disabled` optional, no `icon`) and bare `separator`s, with `if`/`else`/`for` around them. Attribute-less; presents natively where the host has a menu presenter, as an anchored surface elsewhere — see "Context menus" |
 | `input-group` > `textarea` + `input-group-actions` | composite grouped input | the composer shape: ONE bordered field wrapping exactly one `textarea` (first — document order is focus order) plus an optional `input-group-actions` row of controls inside the same border. The group wears the focus ring for its focused descendant and the textarea's own chrome dissolves automatically, so the whole group reads as one field; the textarea keeps its full behavior (`text`, `placeholder`, `on-input`, `on-submit`, `autofocus`, and optional `submit-on-enter`). Group takes `label`, `width`, `height`, `min-width`, `grow`, `key`, `global-key`; the actions row takes `gap` and holds ordinary elements (`if`/`else`/`for` work — swap send for stop while streaming) — put a `<spacer grow="1"/>` between leading and trailing controls (`Ui.inputGroup`/`Ui.inputGroupActions` are the Zig-view equivalents) |
 
-Not markup-expressible (deliberately — write these as Zig view functions with `canvas.Ui`): `icon_button` (`<button icon="...">` with empty content is the declarative icon button), `data_grid` (per-column cell templates), `popover`/`menu_surface` (anchored to runtime geometry), `segmented_control` (use `tabs`/`toggle-group`: `<button>` children of `<tabs>` lower to segmented triggers automatically, so the active tab lifts per the house treatment). Charts ARE expressible: `<chart>` with `<series values="{binding}">` children binding model f32 iterables — see the Charts section (`.band` series and dynamic series composition stay with `ui.chart`). Built-in vector icons ARE expressible: `<icon name="search"/>` (closed, compile-checked name set; `Ui.icon` is the Zig-view equivalent). App-authored icons: `canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"))` parses any SVG in the common 24x24 stroke-icon dialect at comptime; register the parsed table once at boot with `canvas.icons.registerAppIcons(&table)` and draw by name via `ui.appIcon(.{...}, "logo")` or `ElementOptions.icon` — registered names render exactly like built-ins on every draw path. Markup `<icon>`/`<button icon>` stay built-in-only (the compiled engine validates names at comptime, where runtime registrations cannot exist — engine parity). Runtime images ARE expressible: `<image image="{cover}" width="120" height="80" label="Cover art"/>` and `<avatar image="{user_image}">CT</avatar>` bind a `u64` ImageId model field/fn (the id is just model data; 0 draws nothing / keeps the initials fallback) — see the Images section; the `image` binding is required on the leaf (an unbound `<image>` is dead markup) and stays avatar+image scoped.
+Not markup-expressible (deliberately — write these as Zig view functions with `canvas.Ui`): `icon_button` (`<button icon="...">` with empty content is the declarative icon button), `data_grid` (per-column cell templates), `popover`/`menu_surface` (anchored to runtime geometry), `segmented_control` (use `tabs`/`toggle-group`: `<button>` children of `<tabs>` lower to segmented triggers automatically, so the active tab lifts per the house treatment). Charts ARE expressible: `<chart>` with `<series values="{binding}">` children binding model f32 iterables — see the Charts section (`.band` series and dynamic series composition stay with `ui.chart`). Built-in vector icons ARE expressible: `<icon name="search"/>` (closed, compile-checked name set; `Ui.icon` is the Zig-view equivalent). App-authored icons: `canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"))` parses any SVG in the common 24x24 stroke-icon dialect at comptime; register the parsed table once at boot with `canvas.icons.registerAppIcons(&table)` and draw by name via `ui.appIcon(.{...}, "logo")` or `ElementOptions.icon` — registered names render exactly like built-ins on every draw path. Markup `<icon>`/`<button icon>` stay built-in-only (the compiled engine validates names at comptime, where runtime registrations cannot exist — engine parity). Runtime images ARE expressible: `<image image="{cover}" width="120" height="80" label="Cover art"/>` and `<avatar image="{user_image}">CT</avatar>` bind a `u64` ImageId model field/fn (the id is just model data; 0 draws nothing / keeps the initials fallback) — see the Images section; the `image` binding is required on the leaf (an unbound `<image>` is dead markup) and stays avatar+image scoped. Add all four `source-x`/`source-y`/`source-width`/`source-height` attributes to draw one decoded-pixel sub-rectangle from a shared atlas.
 
 ## Attributes
 
@@ -565,6 +565,8 @@ The markup binds the FN (`text="{draft}"`), never the buffer: binding a `TextBuf
 
 The runtime owns cmd/ctrl+C/X/V in editable text: copy writes the current selection to the system clipboard, cut copies then delivers the removal to your `on-input` handler as an `insert_text ""` edit, and paste arrives as an ordinary `insert_text` edit — the TEA mirror above stays consistent with zero extra code. Paste is clamped to the view's text capacity: when bytes were dropped, the keyboard event carries `edit_truncated = true` and your `TextBuffer` mirror sets its own `truncated` flag (check it if lost paste bytes matter to your UX; `TextBuffer` clamps oversized insertions at a UTF-8 boundary rather than dropping the edit). Shift+arrows/home/end extend the selection from the keyboard.
 
+Deletion is platform-correct and semantic: Backspace/Delete remove one caret unit, Option+Backspace/Delete on macOS (Ctrl+Backspace/Delete elsewhere) remove one word, and Command+Backspace on macOS (with or without Shift) emits `delete_to_start` for single-line fields or `delete_to_line_start` for a textarea. Either event removes the active selection when non-empty; otherwise the former removes caret-to-offset-0 and the latter removes caret-to-hard-line-start (with CRLF atomic). Soft-wrapped textarea lines intentionally use the hard line start in v1. Apply the event through the same `TextBuffer` / TypeScript `applyTextInputEvent` mirror — it is one edit and therefore one undo step.
+
 Static text is selectable too: click-drag inside one `text` leaf or `paragraph` (markdown bodies included) selects with a highlight, cmd/ctrl+C copies it, and pressing anywhere else clears it. Selection and pressing coexist inside pressable rows — dragging selects (and presses nothing), a plain click collapses the selection and lands on the row's `on-press`. Selection is per-widget by design — there is no document model ordering text across widgets, so a drag cannot span two paragraphs (copy per paragraph). The selection survives rebuilds while that widget's text bytes are unchanged, and shows up in semantics/automation snapshots as `selection=a..b` on the widget line. Clipboard access from `update` is `fx.writeClipboard` / `fx.readClipboard` on the effects channel (see Effects) — never a `pbcopy` spawn; `runtime.readClipboard(&buffer)` / `runtime.writeClipboard(text)` remain for code that holds the runtime.
 
 ## Effects in Zig cores: subprocesses and HTTP from update
@@ -876,7 +878,7 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 
 ## Secondary windows
 
-In the default TypeScript path, export `windows(model): readonly WindowDescriptor[]` and put each possible window's Native markup at `src/windows/<label>.native`. Spell each constructor identity as a literal `label: asciiBytes("<label>")`; `native check` and every build reject dynamic labels and missing roots. Those roots may import shared components nested under `src/windows/`; the generated launcher compiles and hot-reloads the full closure. Use `windowDescriptor` from `@native-sdk/core`; its `closePolicy` field accepts `"quit"` or `"hide"`, and `titlebar` includes `"chromeless"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`; a `"hide"` close preserves the window and view and dispatches no close command. The `ts-core` skill has the complete descriptor and example.
+In the default TypeScript path, export `windows(model): readonly WindowDescriptor[]` and put each possible window's Native markup at `src/windows/<label>.native`. Spell each constructor identity as a literal `label: asciiBytes("<label>")`; `native check` and every build reject dynamic labels and missing roots. Those roots may import shared components nested under `src/windows/`; the generated launcher compiles and hot-reloads the full closure. Use `windowDescriptor` from `@native-sdk/core`; its `restorePolicy` field accepts `"clamp_to_visible_screen"` or `"center_on_primary"` (centering is currently macOS-only), `closePolicy` accepts `"quit"` or `"hide"`, and `titlebar` includes `"chromeless"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`; a `"hide"` close preserves the window and view and dispatches no close command. The `ts-core` skill has the complete descriptor and example.
 
 ### Zig cores: `windows_fn` + `window_view`
 
@@ -903,6 +905,7 @@ fn windowView(ui: *App.Ui, model: *const Model, window_label: []const u8) App.Ui
 Rules that matter:
 - **Every canvas label must be unique across the app** (main + declared windows); input routes back by it, and automation verbs (`widget-click <canvas-label> <id>`, `screenshot`) address any window's canvas the same way.
 - **Close policy**: `WindowDescriptor.close_policy` is `.quit` by default; a user close really closes and dispatches `on_close` (the dismissal precedent), so clear the open flag in `update` — or keep declaring the window and the next rebuild brings it back (source wins). `.hide` keeps the same window, slot, and views alive, dispatches no `on_close`, and `showWindow(label)` reveals it. A close the model itself initiated never echoes a Msg. Existing platform safeguards still apply: unsupported hosts refuse `.hide` rather than strand an unreachable window.
+- **Restore policy**: `WindowDescriptor.restore_policy` is `.clamp_to_visible_screen` by default. On macOS, `.center_on_primary` centers a fresh descriptor with no authored `x`/`y`; Windows and Linux currently keep their native default placement. Model-declared windows deliberately do not restore persisted frames.
 - **Budget**: at most `UiApp.max_ui_windows` (4) declared windows; excess warns and is ignored. Every dispatched Msg rebuilds every open window's view.
 - **Present-before-show**: canvas windows (any `gpu_surface` view — startup, scene, and declared windows alike) are created ordered-out and become visible only after their first canvas frame presents, so opening one never flashes blank. Automatic (`WindowOptions.show = .on_first_present`, derived from the views); webview windows show immediately. The null platform records `window_show`, `window_visible`, and present/shown sequence numbers for ordering assertions; `NATIVE_SDK_WINDOW_TIMING=1` logs create→show latency on macOS.
 - **Markup binds ONE window's content** — there is no `window` element in the closed grammar. A markup-authored secondary window is a `canvas.CompiledMarkupView` whose `build` `window_view` calls for that label.
@@ -976,6 +979,27 @@ The view binds that model-owned id in either tier; `0` is the no-image sentinel 
 <avatar image="{avatar}" label="Octocat">OC</avatar>
 ```
 
+One registered image can be a texture atlas. The source rectangle uses
+decoded-image pixel coordinates; declare all four markup attributes, or set
+the equivalent `ElementOptions.image_src` `geometry.RectF` in a Zig view.
+Cropped widgets use nearest sampling so adjacent atlas regions cannot bleed:
+
+```html
+<image image="{atlas}" source-x="64" source-y="32"
+  source-width="24" source-height="24" width="48" height="48"
+  label="Warning badge" />
+```
+
+```zig
+ui.image(.{
+    .image = model.atlas_image,
+    .image_src = geometry.RectF.init(64, 32, 24, 24),
+    .width = 48,
+    .height = 48,
+    .semantics = .{ .label = "Warning badge" },
+})
+```
+
 ### Zig cores and extensions: direct registration
 
 Image pixels are runtime-registered resources keyed by a caller-chosen `ImageId` (`u64` in the model, effect-key style; 0 = no image). The framework bundles NO codecs — encoded bytes decode through the platform (CGImageSource / gdk-pixbuf / WIC) via `PlatformServices.decode_image_fn`. Registration lives on the effects channel (synchronous calls, not effects — no Msg follows):
@@ -992,7 +1016,7 @@ Image pixels are runtime-registered resources keyed by a caller-chosen `ImageId`
 ```
 
 ```zig
-// Zig views (image and icon content is markup-excluded):
+// Zig views:
 ui.avatar(.{ .image = model.avatar_image, .semantics = .{ .label = "Octocat" } }, "OC"),
 ui.image(.{ .image = model.chart_image, .width = 120, .height = 80, .semantics = .{ .label = "Chart" } }),
 ```

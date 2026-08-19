@@ -266,6 +266,10 @@ pub const max_tray_tooltip_bytes: usize = 256;
 pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
 pub const max_tray_item_detail_bytes: usize = 256;
+pub const max_tray_segment_options: usize = 8;
+pub const max_tray_segment_label_bytes: usize = 64;
+pub const max_tray_chart_values: usize = 32;
+pub const max_tray_chart_text_bytes: usize = 128;
 pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
@@ -1466,6 +1470,13 @@ pub const TrayTone = enum(u8) {
     critical,
 };
 
+pub const TrayFontWeight = enum(u8) {
+    regular,
+    medium,
+    semibold,
+    bold,
+};
+
 /// The model-derived part of a status item. Keeping this separate from
 /// icon/tooltip/activation options lets UiApp patch presentation without
 /// recreating the native item.
@@ -1477,6 +1488,9 @@ pub const TrayPresentation = struct {
     tone: TrayTone = .normal,
     icon_opacity: f32 = 1,
     monospaced: bool = false,
+    /// Explicit title size in points; zero keeps the host's menu-bar default.
+    font_size: f32 = 0,
+    font_weight: TrayFontWeight = .regular,
 };
 
 pub const TrayOptions = struct {
@@ -1531,6 +1545,45 @@ pub const TrayItemRole = enum(u8) {
     hero,
     agent,
     context,
+    segmented,
+    chart,
+};
+
+/// One choice inside a typed segmented tray row. Its stable id and command
+/// participate in the same namespace and dispatch route as an ordinary tray
+/// command row; the containing row itself is display structure, not an
+/// action. At most one option in a row may be selected.
+pub const TraySegmentOption = struct {
+    id: TrayItemId,
+    label: []const u8,
+    command: []const u8,
+    selected: bool = false,
+    enabled: bool = true,
+};
+
+pub const TraySegmentedRow = struct {
+    options: []const TraySegmentOption = &.{},
+};
+
+/// A prominent two-line metric block inside a tray menu. This is semantic
+/// dropdown content, distinct from the persistent menu-bar title.
+pub const TrayMetricRow = struct {
+    primary_text: []const u8,
+    secondary_text: []const u8 = "",
+    accessibility_label: []const u8,
+};
+
+/// A bounded bar-chart/sparkline readout. Values are finite and must fall in
+/// the explicit `min_value...max_value` domain. The text fields remain
+/// semantic data on every host; capable macOS hosts place them around a
+/// native AppKit-drawn bar chart.
+pub const TrayChartRow = struct {
+    values: []const f32 = &.{},
+    min_value: f32 = 0,
+    max_value: f32 = 1,
+    leading_caption: []const u8 = "",
+    trailing_summary: []const u8 = "",
+    accessibility_label: []const u8 = "",
 };
 
 pub const TrayMenuItem = struct {
@@ -1543,6 +1596,11 @@ pub const TrayMenuItem = struct {
     role: TrayItemRole = .command,
     key: []const u8 = "",
     modifiers: ShortcutModifiers = .{},
+    /// Typed rich-row payloads. Exactly one is present for its matching role;
+    /// both stay null for every existing command/readout row.
+    segmented: ?TraySegmentedRow = null,
+    metric: ?TrayMetricRow = null,
+    chart: ?TrayChartRow = null,
 };
 
 pub const NativeCommandEvent = struct {

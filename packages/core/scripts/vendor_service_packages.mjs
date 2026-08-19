@@ -80,7 +80,106 @@ function servicePackagesField(source) {
   throw new Error("app.zon service_packages field is not balanced");
 }
 
-export function readServicePackages(source) {
+function parseJsonManifest(source) {
+  const manifest = JSON.parse(source);
+  if (manifest === null || Array.isArray(manifest) || typeof manifest !== "object") throw new Error("app.json must contain one object");
+  return manifest;
+}
+
+function skipJsonWhitespace(source, start) {
+  let at = start;
+  while (/\s/.test(source[at] ?? "")) at++;
+  return at;
+}
+
+function scanJsonString(source, start) {
+  let escaped = false;
+  for (let at = start + 1; at < source.length; at++) {
+    const char = source[at];
+    if (escaped) escaped = false;
+    else if (char === "\\") escaped = true;
+    else if (char === '"') return at + 1;
+  }
+  throw new Error("app.json contains an unterminated string");
+}
+
+function scanJsonValue(source, start) {
+  const first = source[start];
+  if (first === '"') return scanJsonString(source, start);
+  if (first === "{" || first === "[") {
+    const close = first === "{" ? "}" : "]";
+    let depth = 1;
+    let string = false;
+    let escaped = false;
+    for (let at = start + 1; at < source.length; at++) {
+      const char = source[at];
+      if (string) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') string = false;
+        continue;
+      }
+      if (char === '"') string = true;
+      else if (char === first) depth++;
+      else if (char === close && --depth === 0) return at + 1;
+    }
+    throw new Error("app.json contains an unterminated value");
+  }
+  let at = start;
+  while (at < source.length && !/[\s,}\]]/.test(source[at])) at++;
+  return at;
+}
+
+function jsonObjectField(source, fieldName) {
+  let at = skipJsonWhitespace(source, 0);
+  if (source[at] !== "{") throw new Error("app.json must contain one object");
+  at = skipJsonWhitespace(source, at + 1);
+  let memberCount = 0;
+  let match = null;
+  while (source[at] !== "}") {
+    if (source[at] !== '"') throw new Error("app.json contains an invalid object key");
+    const keyStart = at;
+    const keyEnd = scanJsonString(source, keyStart);
+    const key = JSON.parse(source.slice(keyStart, keyEnd));
+    at = skipJsonWhitespace(source, keyEnd);
+    if (source[at] !== ":") throw new Error("app.json contains an invalid object field");
+    const valueStart = skipJsonWhitespace(source, at + 1);
+    const valueEnd = scanJsonValue(source, valueStart);
+    memberCount++;
+    if (key === fieldName) {
+      if (match !== null) throw new Error(`app.json contains duplicate ${fieldName} fields`);
+      match = { valueStart, valueEnd };
+    }
+    at = skipJsonWhitespace(source, valueEnd);
+    if (source[at] === ",") at = skipJsonWhitespace(source, at + 1);
+    else if (source[at] !== "}") throw new Error("app.json contains an invalid object separator");
+  }
+  return { match, close: at, memberCount };
+}
+
+function jsonTopLevelIndent(source, close) {
+  const firstKey = source.indexOf('"', source.indexOf("{") + 1);
+  const key = firstKey >= 0 && firstKey < close ? firstKey : close;
+  const lineStart = source.lastIndexOf("\n", key - 1) + 1;
+  const indent = source.slice(lineStart, key);
+  return /^[ \t]+$/.test(indent) ? indent : "  ";
+}
+
+function renderJsonValue(value, indent) {
+  return JSON.stringify(value, null, 2).replaceAll("\n", `\n${indent}`);
+}
+
+export function readServicePackages(source, format = "zon") {
+  if (format === "json") {
+    const entries = parseJsonManifest(source).service_packages ?? [];
+    if (!Array.isArray(entries)) throw new Error("app.json service_packages must be an array");
+    return entries.map((entry) => {
+      if (entry === null || typeof entry !== "object" || typeof entry.name !== "string" || typeof entry.version !== "string" || typeof entry.content_hash !== "string") {
+        throw new Error("app.json service_packages contains an invalid package fact");
+      }
+      return { name: entry.name, version: entry.version, content_hash: entry.content_hash };
+    });
+  }
   const field = servicePackagesField(source);
   if (!field) return [];
   const body = source.slice(field.open + 1, field.close);
@@ -104,13 +203,24 @@ function packageNameFromSpec(spec) {
   return spec.slice(0, spec.lastIndexOf("@"));
 }
 
-export function mergePackageSpecs(source, requested) {
-  const specs = new Map(readServicePackages(source).map((entry) => [entry.name, `${entry.name}@${entry.version}`]));
+export function mergePackageSpecs(source, requested, format = "zon") {
+  const specs = new Map(readServicePackages(source, format).map((entry) => [entry.name, `${entry.name}@${entry.version}`]));
   for (const spec of requested) specs.set(packageNameFromSpec(spec), spec);
   return [...specs].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, spec]) => spec);
 }
 
-export function replaceServicePackages(source, entries) {
+export function replaceServicePackages(source, entries, format = "zon") {
+  if (format === "json") {
+    parseJsonManifest(source);
+    const field = jsonObjectField(source, "service_packages");
+    const indent = jsonTopLevelIndent(source, field.close);
+    const rendered = renderJsonValue(entries, indent);
+    if (field.match) {
+      return source.slice(0, field.match.valueStart) + rendered + source.slice(field.match.valueEnd);
+    }
+    const comma = field.memberCount === 0 ? "" : ",";
+    return `${source.slice(0, field.close).trimEnd()}${comma}\n${indent}"service_packages": ${rendered}\n${source.slice(field.close)}`;
+  }
   const rendered = [
     "    .service_packages = .{",
     ...entries.map((entry) => `        .{ .name = ${JSON.stringify(entry.name)}, .version = ${JSON.stringify(entry.version)}, .content_hash = ${JSON.stringify(entry.content_hash)} },`),
@@ -139,10 +249,13 @@ function main(argv) {
     return 2;
   }
 
-  const manifestPath = path.join(appRoot, "app.zon");
+  const jsonPath = path.join(appRoot, "app.json");
+  const zonPath = path.join(appRoot, "app.zon");
+  const manifestPath = fs.existsSync(jsonPath) ? jsonPath : zonPath;
   if (!fs.existsSync(manifestPath)) throw new Error(`${manifestPath} does not exist`);
+  const format = manifestPath.endsWith(".json") ? "json" : "zon";
   const current = fs.readFileSync(manifestPath, "utf8");
-  const installSpecs = mergePackageSpecs(current, requested);
+  const installSpecs = mergePackageSpecs(current, requested, format);
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-vendor-"));
   const servicesRoot = path.join(appRoot, "src", "services");
   const stageRoot = path.join(appRoot, ".native", `.service-vendor-stage-${process.pid}-${Date.now()}`);
@@ -169,8 +282,8 @@ function main(argv) {
     entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     const vendorRoot = path.join(servicesRoot, "vendor");
     replaceVendorTree(vendorRoot, stageRoot);
-    fs.writeFileSync(manifestPath, replaceServicePackages(current, entries));
-    console.log(`vendored ${entries.length} package${entries.length === 1 ? "" : "s"} into src/services/vendor and updated app.zon`);
+    fs.writeFileSync(manifestPath, replaceServicePackages(current, entries, format));
+    console.log(`vendored ${entries.length} package${entries.length === 1 ? "" : "s"} into src/services/vendor and updated ${path.basename(manifestPath)}`);
     for (const entry of entries) console.log(`  ${entry.name}@${entry.version} ${entry.content_hash}`);
     return 0;
   } finally {

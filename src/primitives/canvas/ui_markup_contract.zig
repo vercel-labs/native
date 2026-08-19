@@ -1248,6 +1248,13 @@ const Checker = struct {
                 try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.image_binding_message);
                 continue;
             }
+            if (markup.imageSourceAttrName(attribute.name)) {
+                // Structural validation owns the atomic/scoped rectangle
+                // rules; the model-aware pass verifies every coordinate
+                // binding is numeric and marks it used.
+                try self.checkClassAttr(node, attribute, .number);
+                continue;
+            }
             if (std.mem.eql(u8, attribute.name, "surface")) {
                 // Media-surface ids are model integers (engine parity —
                 // the runtime-image-id shape exactly).

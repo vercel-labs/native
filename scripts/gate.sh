@@ -30,7 +30,7 @@
 #                                                 test-examples-mobile; hello/
 #                                                 webview/browser run their
 #                                                 in-dir `zig build test`)
-#   docs/**                                     -> docs `pnpm check`
+#   docs/**, apps/schema/**                     -> docs `pnpm check`
 #   docs/**, skills/**, skill-data/**,
 #   packages/core/**                            -> service-surface tooling tests:
 #                                                 manifest diff categorization,
@@ -162,6 +162,7 @@ while IFS= read -r file; do
   [ -n "$file" ] || continue
   case "$file" in
     docs/*) docs_changed=true ;;
+    apps/schema/*) docs_changed=true; meta_changed=true ;;
     packages/core/*) meta_changed=true ;;
     src/platform/macos/*) framework_changed=true; macos_platform_changed=true ;;
     src/*|build.zig|build.zig.zon|build/*|tools/*|tests/*|assets/*) framework_changed=true ;;

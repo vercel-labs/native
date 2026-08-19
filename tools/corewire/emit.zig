@@ -55,17 +55,18 @@ fn msgTagConsistencyQuota(arms: []const sidecar_mod.MsgArm) u32 {
     return @intCast(@min(quota, std.math.maxInt(u32)));
 }
 
-/// The eleven text-input event tags the markup engines recognize
+/// The thirteen text-input event tags the markup engines recognize
 /// structurally; a union payload carrying exactly these dispatches
 /// through the ABI's text_input entry.
 const text_input_event_tags = [_][]const u8{
-    "insert_text",         "delete_backward",    "delete_forward",     "delete_word_backward",
-    "delete_word_forward", "clear",              "move_caret",         "set_selection",
-    "set_composition",     "commit_composition", "cancel_composition",
+    "insert_text",         "delete_backward", "delete_forward",       "delete_word_backward",
+    "delete_word_forward", "delete_to_start", "delete_to_line_start", "clear",
+    "move_caret",          "set_selection",   "set_composition",      "commit_composition",
+    "cancel_composition",
 };
 
 /// Whether a union payload declares the text-input event shape the markup
-/// engines route through the dedicated ABI entry: exactly the eleven tags,
+/// engines route through the dedicated ABI entry: exactly the thirteen tags,
 /// with the same structural payload vocabulary. This is public because the
 /// generated facade must make the identical decision when selecting the one
 /// sentinel-saturating decoder; one contract cannot have two recognizers.
@@ -1867,6 +1868,8 @@ test "u64 attestations on selection bounds are accepted (the host supplies unsig
         \\      {"name": "delete_forward", "payload": {"kind": "void"}},
         \\      {"name": "delete_word_backward", "payload": {"kind": "void"}},
         \\      {"name": "delete_word_forward", "payload": {"kind": "void"}},
+        \\      {"name": "delete_to_start", "payload": {"kind": "void"}},
+        \\      {"name": "delete_to_line_start", "payload": {"kind": "void"}},
         \\      {"name": "clear", "payload": {"kind": "void"}},
         \\      {"name": "move_caret", "payload": {"kind": "value", "name": "Move"}},
         \\      {"name": "set_selection", "payload": {"kind": "value", "name": "Sel"}},
@@ -2225,14 +2228,15 @@ test "a text-input-named union without the payload shapes rides the record entry
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // Eleven right names, wrong insert_text payload (void): the markup
+    // Thirteen right names, wrong insert_text payload (void): the markup
     // predicate would not bind this as text input, so dispatch must
     // not route it to the text_input entry either.
     var arms: std.ArrayListUnmanaged(u8) = .empty;
     const tags = [_][]const u8{
-        "insert_text",         "delete_backward",    "delete_forward",     "delete_word_backward",
-        "delete_word_forward", "clear",              "move_caret",         "set_selection",
-        "set_composition",     "commit_composition", "cancel_composition",
+        "insert_text",         "delete_backward", "delete_forward",       "delete_word_backward",
+        "delete_word_forward", "delete_to_start", "delete_to_line_start", "clear",
+        "move_caret",          "set_selection",   "set_composition",      "commit_composition",
+        "cancel_composition",
     };
     for (tags, 0..) |tag, index| {
         if (index > 0) try arms.appendSlice(arena, ", ");

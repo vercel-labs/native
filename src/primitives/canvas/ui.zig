@@ -579,6 +579,14 @@ pub fn Ui(comptime Msg: type) type {
             /// shape, one bit of the id space apart (see
             /// `canvas.media_surface_image_id_bit`).
             image: canvas.ImageId = 0,
+            /// Optional source rectangle in image pixel coordinates for
+            /// image-bearing widgets. Null draws the whole registered
+            /// image; a rectangle draws only that sub-region, clipped to
+            /// the registered image bounds — the texture-atlas path.
+            /// Crops use nearest sampling so filtering cannot bleed an
+            /// adjacent atlas region. The destination remains the
+            /// widget's resolved frame.
+            image_src: ?geometry.RectF = null,
             /// Vector icon name drawn inside icon-bearing controls
             /// (`button`, `toggle_button`, `icon_button`, `list_item`,
             /// `menu_item`): a built-in registry name
@@ -1044,6 +1052,8 @@ pub fn Ui(comptime Msg: type) type {
                         .delete_forward => @unionInit(Payload, "delete_forward", {}),
                         .delete_word_backward => @unionInit(Payload, "delete_word_backward", {}),
                         .delete_word_forward => @unionInit(Payload, "delete_word_forward", {}),
+                        .delete_to_start => @unionInit(Payload, "delete_to_start", {}),
+                        .delete_to_line_start => @unionInit(Payload, "delete_to_line_start", {}),
                         .clear => @unionInit(Payload, "clear", {}),
                         .move_caret => |move| blk: {
                             const Move = @FieldType(Payload, "move_caret");
@@ -1511,7 +1521,7 @@ pub fn Ui(comptime Msg: type) type {
                     } else {
                         const locally_derived = canvas.widgetCodeTabTextEditEvent(widget, keyboard) orelse
                             canvas.widgetKeyboardNewlineTextEditEvent(widget, keyboard) orelse
-                            keyboard.textEditEvent();
+                            canvas.widgetKeyboardTextEditEventForWidget(widget, keyboard);
                         if (locally_derived) |text_edit| {
                             // Direct Tree consumers still sanitize locally:
                             // these bytes have not crossed the runtime seam.
@@ -3757,6 +3767,7 @@ pub fn Ui(comptime Msg: type) type {
                 .autofocus = options.autofocus,
                 .submit_on_enter = options.submit_on_enter,
                 .image_id = options.image,
+                .image_src = options.image_src,
                 .value = options.value,
                 .value_x = options.value_x,
                 .tree_level = options.tree_level,

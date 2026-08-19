@@ -4,7 +4,7 @@ import { CodeToggle } from "@/components/code-toggle";
 
 An app core is a Native SDK app's deterministic logic: `Model` (the app state), `Msg` (a discriminated union of everything that can happen), `update(model, msg)` (the one pure transition function), and the pure helpers they call. By default you write it as one TypeScript module — `src/core.ts` — the `@native-sdk/core` frontend checks it, and the external core compiler builds it to native code at build time. No JS engine ships in the binary: the program either passes the subset checker and compiles to native, or you get a teaching error naming the rule, the fix, and the reason.
 
-This is the two-tier shape of the toolkit: Zig is how everything works — the engine, the runtime, every widget — and TypeScript plus [Native markup](/docs/native-ui) are how applications are authored. A whole app starts as three files and zero Zig: `src/core.ts`, `src/app.native`, and `app.zon`. When ordinary TypeScript work needs filesystem access, JSON, regexes, `Map`, `Date`, classes, or child processes, add modules under `src/services/`; they compile to native code too and answer the core through the same effect→Msg boundary as every other external action. Writing the core in Zig instead ([App Model](/docs/app-model)) is first-class by choice — same loop, same runtime — and extending the toolkit itself (custom widgets and render passes) is always Zig.
+This is the two-tier shape of the toolkit: Zig is how everything works — the engine, the runtime, every widget — and TypeScript plus [Native markup](/docs/native-ui) are how applications are authored. A whole app starts as three files and zero Zig: `src/core.ts`, `src/app.native`, and `app.json`. Existing `app.zon` manifests remain supported. When ordinary TypeScript work needs filesystem access, JSON, regexes, `Map`, `Date`, classes, or child processes, add modules under `src/services/`; they compile to native code too and answer the core through the same effect→Msg boundary as every other external action. Writing the core in Zig instead ([App Model](/docs/app-model)) is first-class by choice — same loop, same runtime — and extending the toolkit itself (custom widgets and render passes) is always Zig.
 
 The same `core.ts` is executable TypeScript: it typechecks with stock tsc and runs unmodified under node, which is what makes the fastest dev loop possible:
 
@@ -12,7 +12,7 @@ The same `core.ts` is executable TypeScript: it typechecks with stock tsc and ru
 native dev --core   # run the core under node's virtual host: dispatch Msgs as
                     # JSON lines, watch the model + effect transcript
 native dev          # build and run the real app (markup hot reload)
-native check        # subset-check core.ts + validate markup + app.zon
+native check        # subset-check core.ts + validate markup + app.json
 native build        # ReleaseFast binary; native test runs the app's tests
 ```
 
@@ -433,7 +433,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 ```
 
-Audio input uses the same bounded, wake-driven stream transport without requiring native posting code. `Cmd.audioCaptureStart(key, { source, sampleRate?, channels? }, { event })` captures the microphone or the desktop output mix. The supported canonical rates are 16, 24, and 48 kHz; channels are mono or stereo; the default is 48 kHz mono. Each `data` event carries at most 20 ms of interleaved signed 16-bit little-endian PCM in `pcm`, plus `timestampMs`, `frames`, the delivered format, and drop counters. Microphone and system capture can run concurrently, but only one stream per source is live; starting that source again stops the prior key. `Cmd.audioCaptureStop(key)` quiesces the native callback, drains accepted chunks, then emits one `stopped` terminal. A key remains occupied until that terminal is delivered, so wait for `stopped` before reusing it. Add `"microphone"` and/or `"system_audio"` to `app.zon` permissions so packaged macOS apps receive the required usage descriptions and consent prompts.
+Audio input uses the same bounded, wake-driven stream transport without requiring native posting code. `Cmd.audioCaptureStart(key, { source, sampleRate?, channels? }, { event })` captures the microphone or the desktop output mix. The supported canonical rates are 16, 24, and 48 kHz; channels are mono or stereo; the default is 48 kHz mono. Each `data` event carries at most 20 ms of interleaved signed 16-bit little-endian PCM in `pcm`, plus `timestampMs`, `frames`, the delivered format, and drop counters. Microphone and system capture can run concurrently, but only one stream per source is live; starting that source again stops the prior key. `Cmd.audioCaptureStop(key)` quiesces the native callback, drains accepted chunks, then emits one `stopped` terminal. A key remains occupied until that terminal is delivered, so wait for `stopped` before reusing it. Add `"microphone"` and/or `"system_audio"` to the `app.json` permissions array so packaged macOS apps receive the required usage descriptions and consent prompts.
 
 ```ts:src/core.ts
 import { Cmd, type AudioCaptureState, type AudioCaptureSource } from "@native-sdk/core";
@@ -463,7 +463,7 @@ export function statusItem(model: Model): StatusItemState {
     activationCommand: asciiBytes("app.sync"),
     alternateActivationCommand: asciiBytes(""),
     openCommand: asciiBytes("app.sync"),
-    presentation: { title: model.syncing ? utf8Bytes("SYNC…") : utf8Bytes("READY"), width: 62, tone: model.failed ? "critical" : "normal", iconOpacity: model.stale ? 0.5 : 1, monospaced: true },
+    presentation: { title: model.syncing ? utf8Bytes("SYNC…") : utf8Bytes("READY"), width: 62, tone: model.failed ? "critical" : "normal", iconOpacity: model.stale ? 0.5 : 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
     items: [
       { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
       { id: 2, label: utf8Bytes("Sync now…"), command: asciiBytes("app.sync"), separator: false, enabled: !model.syncing, detail: asciiBytes(""), role: "command", key: asciiBytes("r"), modifiers: { primary: true, command: false, control: false, option: false, shift: false } },
@@ -472,7 +472,7 @@ export function statusItem(model: Model): StatusItemState {
 }
 ```
 
-Import the canonical records and unions from `@native-sdk/core/events`. Presentation includes byte `title`, numeric `width`, `normal | warning | critical` tone, `iconOpacity` in 0…1, and `monospaced`. Rows include id/label/command/separator/enabled plus secondary `detail`, semantic `role`, key equivalent, and all five modifier booleans. Actionable ids are unique and non-zero, and there are at most 32 rows. `commandMsg(name): Msg | null` maps row selection, status-button activation, Option-activation, and menu-open refresh into the ordinary update loop. See [System Tray](/docs/tray) and the zero-Zig `examples/menu-bar` app for the full hide/Open/Quit lifecycle.
+Import the canonical records and unions from `@native-sdk/core/events`. Presentation includes byte `title`, numeric `width`, tone, `iconOpacity`, `monospaced`, `fontSize`, and `fontWeight`; `statusItems` composes several independently styled persistent menu-bar items. Rows include id/label/command/separator/enabled plus secondary `detail`, semantic `role`, key equivalent, and all five modifier booleans. Actionable ids are unique and non-zero, and there are at most 32 rows. `commandMsg(name): Msg | null` maps row selection, status-button activation, Option-activation, and menu-open refresh into the ordinary update loop. See [System Tray](/docs/tray).
 
 Export `statusItems(model): readonly StatusItemDescriptor[]` when the app needs several independent items. Each descriptor adds stable non-zero `id` identity and a live `visible` flag to the same shell/presentation/menu record. Adding/removing descriptors creates/removes only those ids; icon, title, tooltip, visibility, activation/open commands, and menu changes patch in place. Export either the singular or collection helper, not both. macOS supports up to eight simultaneous items; every item keeps its own 32-row menu.
 
@@ -483,6 +483,8 @@ Export `windows(model): readonly WindowDescriptor[]` to derive the live secondar
 The main `src/app.native` view can import component files anywhere under `src/`, with `src/components/` as the convention. The generated launcher embeds every other `.native` source and watches the imported closure, so the same imports work in development, release builds, and mobile builds. Secondary-window roots remain narrower: they import within `src/windows/`.
 
 `closePolicy` accepts `"quit"` (the default) or `"hide"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`, where the app maps it to the Msg that clears its open flag. A `"hide"` close retains the same native window and view and dispatches no close command; `Cmd.showWindow(label)` reveals it. Model-declared secondary windows are desktop-only. See `examples/system-monitor-ts`.
+
+`restorePolicy` accepts `"clamp_to_visible_screen"` (the default) or `"center_on_primary"`. Model-declared windows do not restore persisted frames. On macOS, `"center_on_primary"` centers a fresh descriptor with no authored `x`/`y`; Windows and Linux currently keep their native default placement.
 
 `titlebar` accepts `"standard"`, `"hidden_inset"`, `"hidden_inset_tall"`, or `"chromeless"`. Transparent Windows windows require `"chromeless"`; because that removes the system buttons, fully skinned windows must draw working close/minimize controls.
 
@@ -591,7 +593,7 @@ The core never receives a synchronous handle. Its update returns a command, the 
 
 `native dev` keeps markup instant — `.native` edits hot-reload into the running window — but a `src/core.ts` edit rebuilds the core through the external core compiler and restarts the app: seconds per rebuild (roughly 3-6s warm), not sub-second. The core loop in the real window is restart-shaped; keep logic iteration under `native dev --core` and rebuild when you want to see it live.
 
-`native check` runs the subset checker (real tsc semantics plus the app-core rules) over the core class, emits and validates the service contract, runs the pinned compiler's coverage verdict over each independent service root, then validates markup and `app.zon`. Every diagnostic names the rule, the idiomatic rewrite, and the reason — write to them up front and the loop stays fast.
+`native check` runs the subset checker (real tsc semantics plus the app-core rules) over the core class, emits and validates the service contract, runs the pinned compiler's coverage verdict over each independent service root, then validates markup and the app manifest. Every diagnostic names the rule, the idiomatic rewrite, and the reason — write to them up front and the loop stays fast.
 
 ## Build targets
 

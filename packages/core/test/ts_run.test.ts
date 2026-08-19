@@ -1,12 +1,12 @@
 // The layout-neutral runner (build/ts_run.mjs) under both node capability
-// tiers. Where module.registerHooks exists (22.15+; on the 23 line 23.5+)
+// tiers. Node 24 is the common floor because scriptc 0.0.33's published
+// bootstrap uses Node 24's compile cache; module.registerHooks then strips
 // the runner strips EVERY .ts target with the transpiler's own toolchain
 // — node's native stripping is never relied on (it refuses node_modules
-// by design and is only DEFAULT outside node_modules from 22.18, above
-// this tier's floor). On a hooks-less node ANY .ts target must fail fast
+// by design). On a hooks-less Node 24 build ANY .ts target must fail fast
 // with the one-line branch-aware teaching instead of node's raw
 // extension/stripping error — checkout-resident targets included, because
-// 22.15-22.17 has no default stripping for them either.
+// the shared runner requires its load hook.
 //
 // The hooks-less tier is simulated by deleting module.registerHooks in a
 // --import preload before the runner loads — the spawned node then presents
@@ -25,11 +25,9 @@ const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const runner = path.join(path.dirname(path.dirname(pkg)), "build", "ts_run.mjs");
 
 // Pins the teaching verbatim: the string the runner prints on a node
-// without registerHooks. Layout-neutral on purpose — with the hook
-// required for every .ts target, checkouts hit this teaching exactly like
-// npm installs do — and branch-aware: the hook landed in 22.15 and 23.5,
-// so a bare ">=22.15" would wrongly admit 23.0-23.4.
-const teaching = "TypeScript apps need Node.js 22.15+ (on the 23 line: 23.5+)";
+// without registerHooks. Layout-neutral on purpose: checkouts hit this
+// teaching exactly like npm installs do.
+const teaching = "TypeScript apps need Node.js 24+";
 
 // A module whose types only stripping (the runner's hook) can remove.
 const typedModule = 'const answer: number = 42;\nconsole.log("RAN", answer);\n';
@@ -57,7 +55,7 @@ function runRunner(target: string, { withoutHooks = false } = {}) {
   return spawnSync(process.execPath, args, { encoding: "utf8" });
 }
 
-test("without registerHooks, a node_modules-resident target is taught 22.15+ before import", () => {
+test("without registerHooks, a node_modules-resident target is taught Node 24 before import", () => {
   withFixture(path.join(os.tmpdir(), "tsrun-npm-"), path.join("node_modules", "app", "core.ts"), (target) => {
     const result = runRunner(target, { withoutHooks: true });
     assert.notEqual(result.status, 0);
@@ -67,13 +65,9 @@ test("without registerHooks, a node_modules-resident target is taught 22.15+ bef
   });
 });
 
-test("without registerHooks, a repo-checkout target is taught 22.15+ too (default stripping is 22.18+, not 22.15)", () => {
-  // The old premise — "checkouts keep running natively" — was false:
-  // node's default type stripping only landed in 22.18, so a
-  // hooks-absent node (< 22.15) cannot run a checkout .ts target either
-  // — letting the import proceed would die with
-  // ERR_UNKNOWN_FILE_EXTENSION. Hooks-absent therefore teaches for ANY
-  // .ts target, keeping the 22.15 floor honest for both layouts.
+test("without registerHooks, a repo-checkout target is taught Node 24 too", () => {
+  // Hooks-absent teaches for every .ts target, keeping the Node 24 floor
+  // honest for both layouts.
   withFixture(path.join(os.tmpdir(), "tsrun-checkout-"), path.join("app", "core.ts"), (target) => {
     const result = runRunner(target, { withoutHooks: true });
     assert.notEqual(result.status, 0);
@@ -97,8 +91,7 @@ test("with registerHooks, a node_modules-resident target is stripped and runs", 
 
 test("with registerHooks, a repo-checkout target is stripped by the hook and runs", () => {
   // Checkout-resident modules go through the SAME hook (one code path):
-  // on 22.15-22.17 there is nothing to fall through to, and on 22.18+ the
-  // hook short-circuits before native stripping would apply.
+  // the hook short-circuits before native stripping would apply.
   withFixture(path.join(pkg, ".tsrun-fixture-"), path.join("app", "core.ts"), (target) => {
     const result = runRunner(target);
     assert.equal(result.status, 0, result.stderr);

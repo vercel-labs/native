@@ -62,6 +62,34 @@ test("text reducer snaps editable endpoints out of CRLF", () => {
   assert.deepEqual(inserted.selection, { anchor: 4, focus: 4 });
 });
 
+test("text reducer deletes to hard line start", () => {
+  const midLine = apply(state("first\nsecond line", 12), { kind: "delete_to_line_start" });
+  assert.equal(decoder.decode(midLine.text), "first\n line");
+  assert.deepEqual(midLine.selection, { anchor: 6, focus: 6 });
+
+  const atStart = apply(state("first\nsecond", 6), { kind: "delete_to_line_start" });
+  assert.equal(decoder.decode(atStart.text), "first\nsecond");
+  assert.deepEqual(atStart.selection, { anchor: 6, focus: 6 });
+
+  const selection = apply(state("first\nsecond", 7, 10), { kind: "delete_to_line_start" });
+  assert.equal(decoder.decode(selection.text), "first\nsnd");
+  assert.deepEqual(selection.selection, { anchor: 7, focus: 7 });
+
+  const crlf = apply(state("one\r\ntwo", 8), { kind: "delete_to_line_start" });
+  assert.equal(decoder.decode(crlf.text), "one\r\n");
+  assert.deepEqual(crlf.selection, { anchor: 5, focus: 5 });
+});
+
+test("text reducer deletes to field start across raw line breaks", () => {
+  const collapsed = apply(state("first\nsecond line", 12), { kind: "delete_to_start" });
+  assert.equal(decoder.decode(collapsed.text), " line");
+  assert.deepEqual(collapsed.selection, { anchor: 0, focus: 0 });
+
+  const selection = apply(state("first\nsecond", 7, 10), { kind: "delete_to_start" });
+  assert.equal(decoder.decode(selection.text), "first\nsnd");
+  assert.deepEqual(selection.selection, { anchor: 7, focus: 7 });
+});
+
 test("text reducer retains exact composition ownership across CRLF", () => {
   const initial = state("a\nb", 1);
   const preview = apply(initial, {
