@@ -1170,6 +1170,11 @@ pub fn build(b: *std.Build) void {
         // one paced emission per display interval.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)scheduleFrameEventEmission" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)emitScheduledFrameEvent" },
+        // Opt-in frame trace separates scheduler queue lateness from the
+        // synchronous engine dispatch and names whether its event was
+        // requested, completion-driven, or coalesced.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "deadline_ns=%llu block_start_ns=%llu queue_late_us=%llu producer=%s dispatch_us=%llu" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkFrameEventProducerCoalesced" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-quit-stop-queued", "Verify the quit verb's stop is queued to the next loop turn on every synchronous-emit host (a synchronous emitShutdown nests the shutdown dispatch inside the requesting command's dispatch, seals the session journal before the command commits, and replay diverges)", &.{
         // macOS (AppKit and CEF hosts): the main-queue hop, with the

@@ -214,6 +214,21 @@ static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen) {
  * heartbeat completion still marks the glass flush pending. */
 static const uint64_t NativeSdkOccludedFrameHeartbeatNs = 1000000000ull;
 
+typedef NS_ENUM(NSInteger, NativeSdkFrameEventProducer) {
+    NativeSdkFrameEventProducerRequest = 0,
+    NativeSdkFrameEventProducerCompletion = 1,
+    NativeSdkFrameEventProducerCoalesced = 2,
+};
+
+static const char *NativeSdkFrameEventProducerName(NativeSdkFrameEventProducer producer) {
+    switch (producer) {
+        case NativeSdkFrameEventProducerCompletion: return "completion";
+        case NativeSdkFrameEventProducerCoalesced: return "coalesced";
+        case NativeSdkFrameEventProducerRequest: return "request";
+    }
+    return "request";
+}
+
 static uint32_t NativeSdkModifierFlagsForEvent(NSEvent *event) {
     NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
     uint32_t modifiers = 0;
@@ -561,6 +576,12 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * to a second out) is replaced by an immediate full-cadence one — the
  * dispatch source itself cannot be cancelled. */
 @property(nonatomic, assign) NSUInteger frameEventEmissionGeneration;
+/* Trace-only scheduler facts. They are populated only while
+ * NATIVE_SDK_GPU_FRAME_TRACE is enabled and copied to locals before the
+ * synchronous engine dispatch, which may schedule the following frame. */
+@property(nonatomic, assign) uint64_t frameEventTraceDeadlineNs;
+@property(nonatomic, assign) uint64_t frameEventTraceBlockStartNs;
+@property(nonatomic, assign) NativeSdkFrameEventProducer frameEventTraceProducer;
 /* One-shot: an input was dispatched to this surface and its responding
  * frame must not wait out the occluded heartbeat. Input is external
  * truth on its own cadence — automation drives covered windows
@@ -6104,7 +6125,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
  * hostage for a second. */
 - (void)scheduleFrameEventEmissionForPresentCompletion:(BOOL)presentCompletion {
     if (![self isAvailable] || self.hidden || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
+    const BOOL tracing = NativeSdkGpuFrameTraceEnabled();
+    const BOOL coalesced = self.frameEventEmissionScheduled;
     if (self.frameEventEmissionScheduled) {
+        if (tracing) self.frameEventTraceProducer = NativeSdkFrameEventProducerCoalesced;
         if (!presentCompletion) return;
         self.frameEventEmissionGeneration += 1;
         self.frameEventEmissionScheduled = NO;
@@ -6134,6 +6158,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (self.retainedFrameLastEmitNs > 0 && now < self.retainedFrameLastEmitNs + paceNs) {
         delayNs = self.retainedFrameLastEmitNs + paceNs - now;
     }
+    if (tracing) {
+        self.frameEventTraceProducer = coalesced
+            ? NativeSdkFrameEventProducerCoalesced
+            : (presentCompletion ? NativeSdkFrameEventProducerCompletion : NativeSdkFrameEventProducerRequest);
+        self.frameEventTraceDeadlineNs = now + delayNs;
+    }
     const NSUInteger generation = self.frameEventEmissionGeneration;
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
@@ -6143,6 +6173,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         // this block sat in the queue): the replacement owns the flag
         // and the activity — touch nothing.
         if (strongSelf.frameEventEmissionGeneration != generation) return;
+        if (tracing) strongSelf.frameEventTraceBlockStartNs = NativeSdkTimestampNanoseconds();
         strongSelf.frameEventEmissionScheduled = NO;
         [strongSelf emitScheduledFrameEvent];
         // The emission's engine dispatch re-arms the channel when more
@@ -6171,7 +6202,23 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.frameIndex += 1;
     const BOOL nonblank = self.verifiedNonblankFrame || self.hasCanvasTexture;
     const uint32_t sampleColor = self.verifiedNonblankFrame ? self.lastSampleColor : 0;
+    const BOOL tracing = NativeSdkGpuFrameTraceEnabled();
+    const uint64_t deadlineNs = tracing ? self.frameEventTraceDeadlineNs : 0;
+    const uint64_t blockStartNs = tracing ? self.frameEventTraceBlockStartNs : 0;
+    const NativeSdkFrameEventProducer producer = self.frameEventTraceProducer;
+    const uint64_t dispatchBeginNs = tracing ? NativeSdkTimestampNanoseconds() : 0;
     [self emitFrameEventWithFrameIndex:requestedFrameIndex sampleColor:sampleColor nonblank:nonblank occluded:[self occludedFramePacingActive]];
+    if (tracing) {
+        const uint64_t dispatchNs = NativeSdkTimestampNanoseconds() - dispatchBeginNs;
+        const uint64_t queueLateNs = blockStartNs > deadlineNs ? blockStartNs - deadlineNs : 0;
+        fprintf(stderr, "native-sdk: gpu scheduler-trace frame=%lu deadline_ns=%llu block_start_ns=%llu queue_late_us=%llu producer=%s dispatch_us=%llu\n",
+                (unsigned long)requestedFrameIndex,
+                (unsigned long long)deadlineNs,
+                (unsigned long long)blockStartNs,
+                (unsigned long long)(queueLateNs / 1000),
+                NativeSdkFrameEventProducerName(producer),
+                (unsigned long long)(dispatchNs / 1000));
+    }
 }
 
 - (void)renderFrame {

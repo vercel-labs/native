@@ -4,7 +4,7 @@
 //! frame planner, and the wire encoders all run exactly as they do under
 //! a live host. Measures end-to-end latency per interaction (input
 //! dispatch through present) and per-stage attribution via the runtime's
-//! frame profile (`rebuild`/`layout`/`reconcile`/`emit`/`plan`/`patch`/
+//! frame profile (`effects`/`rebuild`/`layout`/`reconcile`/`emit`/`plan`/`patch`/
 //! `encode`/`present`).
 //!
 //! What it deliberately does NOT measure: the macOS host's CoreText
