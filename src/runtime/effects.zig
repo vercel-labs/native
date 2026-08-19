@@ -16441,23 +16441,25 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn writeThroughOpenedParent(dir: std.Io.Dir, io: std.Io, basename: []const u8, bytes: []const u8) !void {
-            const kind = if (dir.statFile(io, basename, .{ .follow_symlinks = false })) |stat|
-                stat.kind
-            else |err| switch (err) {
-                error.FileNotFound => null,
+            const existing = dir.openFile(io, basename, .{
+                .mode = .write_only,
+                .allow_directory = false,
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound, error.SymLinkLoop => null,
                 else => return err,
             };
-            // Preserve writes to FIFOs and other special files, but open the
-            // retained final entry without following a substituted symlink.
-            if (kind != null and kind.? != .file and kind.? != .sym_link) {
-                var file = try dir.openFile(io, basename, .{
-                    .mode = .write_only,
-                    .allow_directory = false,
-                    .follow_symlinks = false,
-                });
-                defer file.close(io);
-                try file.writeStreamingAll(io, bytes);
-                return;
+            if (existing) |file| {
+                const stat = file.stat(io) catch |err| {
+                    file.close(io);
+                    return err;
+                };
+                if (stat.kind != .file and stat.kind != .sym_link) {
+                    defer file.close(io);
+                    try file.writeStreamingAll(io, bytes);
+                    return;
+                }
+                file.close(io);
             }
 
             var atomic = try dir.createFileAtomic(io, basename, .{ .replace = true });

@@ -1177,6 +1177,64 @@ fn makeFifo(path: []const u8) !void {
     try std.testing.expect(result.term == .exited and result.term.exited == 0);
 }
 
+const FifoRead = struct {
+    path: []const u8,
+    bytes: [64]u8 = undefined,
+    len: usize = 0,
+    err: ?anyerror = null,
+
+    fn run(self: *FifoRead) void {
+        const io = std.testing.io;
+        var file = std.Io.Dir.cwd().openFile(io, self.path, .{}) catch |err| {
+            self.err = err;
+            return;
+        };
+        defer file.close(io);
+        while (self.len < self.bytes.len) {
+            var slices: [1][]u8 = .{self.bytes[self.len..]};
+            const len = file.readStreaming(io, &slices) catch |err| switch (err) {
+                error.EndOfStream => return,
+                else => {
+                    self.err = err;
+                    return;
+                },
+            };
+            if (len == 0) return;
+            self.len += len;
+        }
+    }
+};
+
+test "real executor streams to the exact no-follow-opened FIFO handle" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fifo_path_buffer: [256]u8 = undefined;
+    const fifo_path = try std.fmt.bufPrint(&fifo_path_buffer, ".zig-cache/tmp/{s}/delivery.fifo", .{tmp.sub_path[0..]});
+    try makeFifo(fifo_path);
+
+    var read: FifoRead = .{ .path = fifo_path };
+    const reader = try std.Thread.spawn(.{}, FifoRead.run, .{&read});
+    var reader_joined = false;
+    defer if (!reader_joined) reader.join();
+
+    var h = try Harness.create();
+    defer h.destroy();
+    test_path = fifo_path;
+    test_bytes = "fifo payload";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try waitForRealResult(&h, 1);
+    reader.join();
+    reader_joined = true;
+
+    try std.testing.expect(read.err == null);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    try std.testing.expectEqualStrings("fifo payload", read.bytes[0..read.len]);
+    const stat = try tmp.dir.statFile(io, "delivery.fifo", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.named_pipe, stat.kind);
+}
+
 test "teardown abandons a file worker stuck on a reader-less FIFO and leaks its world loudly" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
