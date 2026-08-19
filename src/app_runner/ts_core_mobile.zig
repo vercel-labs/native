@@ -40,6 +40,7 @@ pub const core = @import("core.zig");
 const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
 const app_sources = @import("app_sources.zig");
+const app_markup_root = @import("app_markup_root");
 
 /// Shared with the embed host: its UiApp type must use the same feature set
 /// as this module's TypeScript adapter or their Options types are distinct.
@@ -51,9 +52,8 @@ const Adapter = native_sdk.TsUiAppWithFeatures(core, features);
 pub const Model = core.Model;
 pub const Msg = core.Msg;
 
-pub const app_markup = @embedFile("app.native");
 const app_markup_sources = [_]native_sdk.canvas.ui_markup.SourceFile{
-    .{ .path = "app.native", .source = app_markup },
+    .{ .path = "app.native", .source = app_markup_root.source },
 } ++ app_sources.sources;
 const CompiledAppView = native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
 

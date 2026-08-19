@@ -36,7 +36,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return error.MarkupCommandFailed;
     }
 
-    const outcome = try checkFiles(allocator, io, files.items);
+    const outcome = try checkFiles(allocator, io, files.items, .{});
     // Exit directly: the diagnostics above are the whole story, and a
     // returned error would bury them under the CLI's own return trace.
     if (outcome.failures > 0) std.process.exit(1);
@@ -55,13 +55,21 @@ pub const CheckOutcome = struct {
     contract_checked: bool = false,
 };
 
+pub const CheckOptions = struct {
+    /// Shared import boundary for every checked file. `native check` sets
+    /// this to `src`, matching the generated app resolver; the standalone
+    /// markup command leaves it null so each explicitly named file remains
+    /// rooted at its own directory.
+    import_root: ?[]const u8 = null,
+};
+
 /// The `check` body shared by `native markup check` and `native check`:
 /// structural validation of every file, plus — when the working directory
 /// is an app with a FRESH model-contract artifact — the model-aware
 /// contract pass and the dead-state lint. A missing, stale, or unreadable
 /// artifact degrades to structural checking with a note, never a false
 /// pass.
-pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []const u8) !CheckOutcome {
+pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []const u8, options: CheckOptions) !CheckOutcome {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -104,6 +112,7 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
             .contract = if (contract_value) |*parsed| parsed else null,
             .usage = if (usage_state) |*live_usage| live_usage else null,
             .arena = arena,
+            .import_root = options.import_root,
         }) catch {
             outcome.failures += 1;
             printOrphanHint(arena, io, file_path, &embedded_basenames);
@@ -192,6 +201,41 @@ test "orphanNote: Zig track hints only for unembedded files" {
     try std.testing.expectEqual(@as(?[]const u8, null), orphanNote(false, &embedded, "app.native"));
     const note = orphanNote(false, &embedded, "leftover.native") orelse return error.TestExpectedNote;
     try std.testing.expect(std.mem.indexOf(u8, note, "@embedFile") != null);
+}
+
+test "app-wide checking preserves src as the component import root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "src/components");
+    try tmp.dir.createDirPath(io, "src/shared");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/components/card.native",
+        .data =
+        \\<import src="../shared/base.native"/>
+        \\<template name="card"><column><use template="base" /></column></template>
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/shared/base.native",
+        .data = "<template name=\"base\"><text>shared</text></template>\n",
+    });
+
+    var root_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}/src", .{tmp.sub_path[0..]});
+    var path_buffer: [320]u8 = undefined;
+    const component_path = try std.fmt.bufPrint(&path_buffer, "{s}/components/card.native", .{root});
+    const checked = try checkFile(std.testing.allocator, io, component_path, .{
+        .arena = std.testing.allocator,
+        .import_root = root,
+    });
+    try std.testing.expect(!checked.had_view);
+
+    // An explicitly named standalone component keeps its own directory as
+    // the root; reaching a sibling remains an escape in that narrower mode.
+    try std.testing.expectError(error.MarkupImport, checkFile(std.testing.allocator, io, component_path, .{
+        .arena = std.testing.allocator,
+    }));
 }
 
 /// The basename of every `@embedFile("...")` argument across the .zig
@@ -339,6 +383,7 @@ const FileCheckContext = struct {
     /// Session arena for contract-check messages, which outlive the
     /// per-file arena (the dead-state summary prints after all files).
     arena: std.mem.Allocator,
+    import_root: ?[]const u8 = null,
 };
 
 const FileCheckResult = struct {
@@ -356,14 +401,16 @@ fn checkFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, co
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
 
-    // Resolve the import closure from disk, rooted at the checked file's
-    // directory (the markup root): checking a view checks its imports, and
-    // a broken import reports at the importing file's position. A file
-    // that is all templates (no view root) is a valid component file —
-    // it checks standalone and as an import target.
+    // Resolve the import closure from disk. Standalone checks root at the
+    // checked file's directory; app-wide `native check` supplies the app's
+    // shared `src/` root so independently checked component files preserve
+    // the same sibling-import boundary as src/app.native.
     var disk_loader = DiskLoader{ .io = io };
     var diagnostic: ui_markup.MarkupErrorInfo = .{};
-    const document = ui_markup.resolveImports(arena_state.allocator(), file_path, source, disk_loader.loader(), &diagnostic) catch |err| {
+    const document = (if (context.import_root) |root|
+        ui_markup.resolveImportsFromRoot(arena_state.allocator(), root, file_path, source, disk_loader.loader(), &diagnostic)
+    else
+        ui_markup.resolveImports(arena_state.allocator(), file_path, source, disk_loader.loader(), &diagnostic)) catch |err| {
         const path = if (diagnostic.path.len > 0) diagnostic.path else file_path;
         std.debug.print("{s}:{d}:{d}: error: {s}\n", .{ path, diagnostic.line, diagnostic.column, diagnostic.message });
         printStaleBinaryHint(diagnostic.message);

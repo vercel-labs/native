@@ -483,6 +483,10 @@ const TsCoreStage = struct {
     /// mirror/registry files): the embed static library's `app`
     /// module roots here on iOS/Android targets.
     mobile_root: std.Build.LazyPath,
+    /// Release/mobile-only module embedding src/app.native. It lives in a
+    /// separate generated directory so a Debug app-code module never gains
+    /// the root markup as a transitive file input; Debug links markup_c.
+    app_markup_root: std.Build.LazyPath,
     /// The compiled-core archive: the app module links it (with libc,
     /// for the toolchain's runtime) beside the staged mirror.
     archive: std.Build.LazyPath,
@@ -1310,12 +1314,12 @@ fn tsCoreStage(
         \\
     , .{ service_carrier, service_pool_workers }));
     _ = staged.addCopyFile(migrations_zig, "migrations.zig");
-    // Release desktop and mobile compile the complete root markup closure at
-    // comptime, so stage the root and every non-window import beside the
-    // generated runner. Debug desktop still reads the root through the small
-    // linked C data object below, preserving link-only rebuilds for ordinary
-    // edits while using these staged imports for the runtime resolver.
-    _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
+    // Every imported file is an input to Debug's embedded source resolver and
+    // the release/mobile compiled view, so stage those beside the runner.
+    // Keep the ROOT out of this directory: changing any file in one WriteFiles
+    // output changes its directory identity, and the runner lives here. Root
+    // markup gets a separate release-only module below; Debug keeps the small
+    // linked C data object, preserving its link-only edit path.
     for (app_markup_sources.files) |source| {
         _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
     }
@@ -1338,9 +1342,17 @@ fn tsCoreStage(
     // registry, same carrier constant — only the shell differs (the embed
     // host's AppDef contract instead of a process `main`).
     const mobile_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_mobile.zig"), "mobile.zig");
+    const release_markup = b.addWriteFiles();
+    _ = release_markup.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
+    const app_markup_root = release_markup.add("app_markup_root.zig",
+        \\//! Generated release/mobile embedding for the TypeScript root view.
+        \\pub const source = @embedFile("app.native");
+        \\
+    );
     return .{
         .main_root = main_root,
         .mobile_root = mobile_root,
+        .app_markup_root = app_markup_root,
         .archive = archive,
         .service_exe = service_exe,
         .service_archive = service_archive,
@@ -1579,6 +1591,8 @@ pub const MobileLibOptions = struct {
 pub const MobileTsCore = struct {
     /// The staged mobile wiring (mobile.zig beside the generated mirror).
     main_root: std.Build.LazyPath,
+    /// Separate root-markup module consumed by the compiled mobile view.
+    app_markup_root: std.Build.LazyPath,
     /// The compiled-core archive; merged into the embed library.
     archive: std.Build.LazyPath,
     /// The in-process service archive, when src/services exists.
@@ -1647,6 +1661,11 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
                 .optimize = optimize,
             });
             mod.addImport("app_manifest_zon", ts.manifest_mod);
+            mod.addImport("app_markup_root", b.createModule(.{
+                .root_source_file = ts.app_markup_root,
+                .target = target,
+                .optimize = optimize,
+            }));
             break :ts_app mod;
         } else localModule(b, target, optimize, options.main);
         app_mod.addImport("native_sdk", native_sdk_mod);
@@ -1836,6 +1855,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .max_image_pixel_bytes = app_config.max_image_pixel_bytes,
             .ts_core = if (ts_stage) |stage| .{
                 .main_root = stage.mobile_root,
+                .app_markup_root = stage.app_markup_root,
                 .archive = stage.archive,
                 .service_archive = stage.service_archive,
                 .manifest_mod = appManifestModule(b, app_options.app_root, manifest_name),
@@ -2184,6 +2204,17 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         // toolchain's runtime needs libc.
         app_mod.link_libc = true;
         app_mod.addObjectFile(stage.archive);
+        // Debug reads src/app.native only through the separately linked C
+        // data object. Supplying this generated module in Debug would put
+        // the authored root back into the app-code dependency graph even
+        // though the runner's comptime branch never imports it.
+        if (optimize != .Debug) {
+            app_mod.addImport("app_markup_root", b.createModule(.{
+                .root_source_file = stage.app_markup_root,
+                .target = target,
+                .optimize = optimize,
+            }));
+        }
         // The in-process service archive links beside it (distinct symbol
         // prefix; its runtime internals are localized).
         if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);

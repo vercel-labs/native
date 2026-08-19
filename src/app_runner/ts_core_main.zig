@@ -95,8 +95,9 @@ pub fn appMarkup() []const u8 {
 // Debug keeps root markup in the separately linked data object above, so an
 // edit is a C-data compile + relink and the runtime interpreter owns imports.
 // Release embeds the same closure and compiles it to direct view code.
-const app_markup_sources = [_]native_sdk.canvas.ui_markup.SourceFile{
-    .{ .path = "app.native", .source = @embedFile("app.native") },
+const app_markup_root = if (dev) void else @import("app_markup_root");
+const app_markup_sources = if (dev) void else [_]native_sdk.canvas.ui_markup.SourceFile{
+    .{ .path = "app.native", .source = app_markup_root.source },
 } ++ app_sources.sources;
 const CompiledAppView = if (dev)
     void
