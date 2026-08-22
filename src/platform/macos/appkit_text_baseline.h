@@ -15,15 +15,18 @@ static inline CGFloat NativeSdkAppKitLineFragmentOriginY(NSFont *font, CGFloat b
     return baseline - round(font.ascender);
 }
 
-/* The legacy host-wrapping fallback can impose an explicit line height.
- * TextKit may then distribute extra leading around the first line, so its
- * baseline offset is not necessarily round(font.ascender). Ask the same
- * layout machinery drawWithRect: uses and translate its container so the
- * first baseline still lands on the engine's coordinate. */
-static inline CGFloat NativeSdkAppKitFirstBaselineOffset(
+/* The legacy host-wrapping fallback can impose an explicit line height or
+ * resolve fallback faces whose metrics enlarge the line fragment. TextKit may
+ * then place the first baseline somewhere other than round(font.ascender).
+ * Build the layout once, translate that exact glyph range to the engine's
+ * baseline, and draw through the same manager: measuring with NSLayoutManager
+ * but drawing with NSString lets the two APIs choose different baselines for
+ * fallback glyphs (for example a Geist run containing an emoji). */
+static inline CGFloat NativeSdkAppKitDrawTextOnFirstBaseline(
     NSString *value,
     NSDictionary *attributes,
     NSFont *font,
+    NSPoint engineBaseline,
     NSSize containerSize
 ) {
     const CGFloat fallback = round(font.ascender);
@@ -42,12 +45,15 @@ static inline CGFloat NativeSdkAppKitFirstBaselineOffset(
     const NSUInteger firstGlyph = glyphRange.location;
     const NSRect lineFragment = [layoutManager lineFragmentRectForGlyphAtIndex:firstGlyph effectiveRange:NULL];
     const NSPoint glyphLocation = [layoutManager locationForGlyphAtIndex:firstGlyph];
-    const CGFloat offset = NSMinY(lineFragment) + glyphLocation.y;
+    const CGFloat measuredOffset = NSMinY(lineFragment) + glyphLocation.y;
     /* A line height smaller than the font box legitimately moves TextKit's
      * first baseline above the container origin, producing a negative
      * offset. Preserve that answer: rejecting it would put compact runs back
      * on face-dependent ascenders and split their shared engine baseline. */
-    return isfinite(offset) ? offset : fallback;
+    const CGFloat offset = isfinite(measuredOffset) ? measuredOffset : fallback;
+    const NSPoint containerOrigin = NSMakePoint(engineBaseline.x, engineBaseline.y - offset);
+    [layoutManager drawGlyphsForGlyphRange:glyphRange atPoint:containerOrigin];
+    return offset;
 }
 
 #endif

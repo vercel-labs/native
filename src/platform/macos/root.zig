@@ -183,6 +183,7 @@ extern fn native_sdk_test_appkit_text_baselines(
     out_wrapped_mono_first: *c_int,
     out_compact_regular_first: *c_int,
     out_compact_mono_first: *c_int,
+    out_fallback_first: *c_int,
 ) c_int;
 
 const shortcut_modifier_primary: u32 = 1 << 0;
@@ -1300,6 +1301,7 @@ test "mac packet text keeps mixed-face runs on the engine baseline" {
     var wrapped_mono_first: c_int = -1;
     var compact_regular_first: c_int = -1;
     var compact_mono_first: c_int = -1;
+    var fallback_first: c_int = -1;
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_appkit_text_baselines(
         canvas.font_ttf.geist_regular_bytes.ptr,
         canvas.font_ttf.geist_regular_bytes.len,
@@ -1319,6 +1321,7 @@ test "mac packet text keeps mixed-face runs on the engine baseline" {
         &wrapped_mono_first,
         &compact_regular_first,
         &compact_mono_first,
+        &fallback_first,
     ));
 
     // The fixtures genuinely exercise different line-fragment metrics,
@@ -1340,6 +1343,7 @@ test "mac packet text keeps mixed-face runs on the engine baseline" {
     try std.testing.expectEqual(fixed_regular_first, wrapped_mono_first);
     try std.testing.expectEqual(fixed_regular_first, compact_regular_first);
     try std.testing.expectEqual(fixed_regular_first, compact_mono_first);
+    try std.testing.expectEqual(fixed_regular_first, fallback_first);
 }
 
 test "mac image decoder keeps ImageIO thumbnail rounding inside the pixel cap" {

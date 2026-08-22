@@ -26,7 +26,9 @@ static NativeSdkTestInkRows NativeSdkTestDrawText(
     CGFloat size,
     CGFloat baseline,
     BOOL corrected,
-    CGFloat lineHeight
+    CGFloat lineHeight,
+    NSString *value,
+    size_t scanColumnLimit
 ) {
     const size_t width = 96;
     const size_t height = 72;
@@ -69,26 +71,34 @@ static NativeSdkTestInkRows NativeSdkTestDrawText(
         paragraph.maximumLineHeight = lineHeight;
         attributes[NSParagraphStyleAttributeName] = paragraph;
         const NSSize extent = NSMakeSize(80, 30);
-        baselineOffset = corrected
-            ? NativeSdkAppKitFirstBaselineOffset(@"H", attributes, font, extent)
-            : size;
-        [@"H" drawWithRect:NSMakeRect(8, baseline - baselineOffset, extent.width, extent.height)
-                    options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                 attributes:attributes];
+        if (corrected) {
+            baselineOffset = NativeSdkAppKitDrawTextOnFirstBaseline(
+                value,
+                attributes,
+                font,
+                NSMakePoint(8, baseline),
+                extent
+            );
+        } else {
+            [value drawWithRect:NSMakeRect(8, baseline - baselineOffset, extent.width, extent.height)
+                        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                     attributes:attributes];
+        }
     } else {
         const CGFloat y = corrected
             ? NativeSdkAppKitLineFragmentOriginY(font, baseline)
             : baseline - size;
-        [@"H" drawAtPoint:NSMakePoint(8, y) withAttributes:attributes];
+        [value drawAtPoint:NSMakePoint(8, y) withAttributes:attributes];
     }
 
     [NSGraphicsContext restoreGraphicsState];
     CGContextRelease(context);
 
     NativeSdkTestInkRows rows = { .first = -1, .last = -1, .baselineOffset = baselineOffset };
+    const size_t scanColumns = MIN(width, scanColumnLimit);
     for (size_t row = 0; row < height; row++) {
         BOOL hasInk = NO;
-        for (size_t column = 0; column < width; column++) {
+        for (size_t column = 0; column < scanColumns; column++) {
             if (pixels[row * bytesPerRow + column * 4 + 3] != 0) {
                 hasInk = YES;
                 break;
@@ -123,23 +133,28 @@ int native_sdk_test_appkit_text_baselines(
     int *outWrappedRegularFirst,
     int *outWrappedMonoFirst,
     int *outCompactRegularFirst,
-    int *outCompactMonoFirst
+    int *outCompactMonoFirst,
+    int *outFallbackFirst
 ) {
     @autoreleasepool {
         NSFont *regular = NativeSdkTestFont(regularBytes, regularLength, size);
         NSFont *mono = NativeSdkTestFont(monoBytes, monoLength, size);
         if (!regular || !mono) return 0;
 
-        const NativeSdkTestInkRows oldRegular = NativeSdkTestDrawText(regular, size, baseline, NO, 0);
-        const NativeSdkTestInkRows oldMono = NativeSdkTestDrawText(mono, size, baseline, NO, 0);
-        const NativeSdkTestInkRows fixedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 0);
-        const NativeSdkTestInkRows fixedMono = NativeSdkTestDrawText(mono, size, baseline, YES, 0);
-        const NativeSdkTestInkRows wrappedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 20);
-        const NativeSdkTestInkRows wrappedMono = NativeSdkTestDrawText(mono, size, baseline, YES, 20);
+        const NativeSdkTestInkRows oldRegular = NativeSdkTestDrawText(regular, size, baseline, NO, 0, @"H", 96);
+        const NativeSdkTestInkRows oldMono = NativeSdkTestDrawText(mono, size, baseline, NO, 0, @"H", 96);
+        const NativeSdkTestInkRows fixedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 0, @"H", 96);
+        const NativeSdkTestInkRows fixedMono = NativeSdkTestDrawText(mono, size, baseline, YES, 0, @"H", 96);
+        const NativeSdkTestInkRows wrappedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 20, @"H", 96);
+        const NativeSdkTestInkRows wrappedMono = NativeSdkTestDrawText(mono, size, baseline, YES, 20, @"H", 96);
         /* Smaller than either face's font box: TextKit's valid first-baseline
          * offsets are negative, exercising the compact-line regression. */
-        const NativeSdkTestInkRows compactRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 1);
-        const NativeSdkTestInkRows compactMono = NativeSdkTestDrawText(mono, size, baseline, YES, 1);
+        const NativeSdkTestInkRows compactRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 1, @"H", 96);
+        const NativeSdkTestInkRows compactMono = NativeSdkTestDrawText(mono, size, baseline, YES, 1, @"H", 96);
+        /* The emoji resolves to a fallback face with taller metrics. Scan only
+         * the leading Geist H: measuring with NSLayoutManager and then drawing
+         * through NSString used to move this H five rows above its baseline. */
+        const NativeSdkTestInkRows fallback = NativeSdkTestDrawText(regular, size, baseline, YES, 20, @"H\U0001F600", 19);
 
         if (outRegularOffset) *outRegularOffset = round(regular.ascender);
         if (outMonoOffset) *outMonoOffset = round(mono.ascender);
@@ -153,6 +168,7 @@ int native_sdk_test_appkit_text_baselines(
         if (outWrappedMonoFirst) *outWrappedMonoFirst = wrappedMono.first;
         if (outCompactRegularFirst) *outCompactRegularFirst = compactRegular.first;
         if (outCompactMonoFirst) *outCompactMonoFirst = compactMono.first;
+        if (outFallbackFirst) *outFallbackFirst = fallback.first;
 
         return oldRegular.first >= 0 && oldMono.first >= 0 && oldRegular.first != oldMono.first &&
             fixedRegular.first == fixedMono.first && fixedRegular.last == fixedMono.last &&
@@ -160,6 +176,7 @@ int native_sdk_test_appkit_text_baselines(
             fixedRegular.first == wrappedRegular.first && fixedRegular.last == wrappedRegular.last &&
             compactRegular.baselineOffset < 0 && compactMono.baselineOffset < 0 &&
             compactRegular.first == compactMono.first && compactRegular.last == compactMono.last &&
-            fixedRegular.first == compactRegular.first && fixedRegular.last == compactRegular.last;
+            fixedRegular.first == compactRegular.first && fixedRegular.last == compactRegular.last &&
+            fixedRegular.first == fallback.first && fixedRegular.last == fallback.last;
     }
 }
