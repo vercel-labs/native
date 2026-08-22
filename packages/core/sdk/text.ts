@@ -74,8 +74,9 @@ export interface TextEditState {
 }
 
 function rangeNormalized(r: TextRange, textLen: number): TextRange {
-  const start = Math.min(r.start, textLen);
-  const end = Math.min(r.end, textLen);
+  const wholeLen = textLen >= 0 && textLen <= 9007199254740991 ? Math.trunc(textLen) : 0;
+  const start = r.start > wholeLen ? wholeLen : r.start;
+  const end = r.end > wholeLen ? wholeLen : r.end;
   return start <= end ? { start: start, end: end } : { start: end, end: start };
 }
 
@@ -238,13 +239,11 @@ function snapTextCaretSelection(text: Uint8Array, selection: TextSelection): Tex
 
 function snapTextRange(text: Uint8Array, range: TextRange): TextRange {
   const normalized = rangeNormalized(range, text.length);
-  return rangeNormalized(
-    {
-      start: snapTextOffset(text, normalized.start),
-      end: snapTextOffset(text, normalized.end),
-    },
-    text.length,
-  );
+  const rawStart = snapTextOffset(text, normalized.start);
+  const rawEnd = snapTextOffset(text, normalized.end);
+  const start = rawStart >= 0 && rawStart <= 9007199254740991 ? Math.trunc(rawStart) : 0;
+  const end = rawEnd >= 0 && rawEnd <= 9007199254740991 ? Math.trunc(rawEnd) : 0;
+  return rangeNormalized({ start: start, end: end }, text.length);
 }
 
 interface TextReplaceResult {
@@ -322,7 +321,10 @@ function setTextComposition(
   return {
     text: result.text,
     selection: caretSelectionAt(absoluteCursor, absoluteCursor),
-    composition: { start: result.insertedStart, end: result.insertedEnd },
+    composition: {
+      start: result.insertedStart >= 0 && result.insertedStart <= 9007199254740991 ? Math.trunc(result.insertedStart) : 0,
+      end: result.insertedEnd >= 0 && result.insertedEnd <= 9007199254740991 ? Math.trunc(result.insertedEnd) : 0,
+    },
   };
 }
 
@@ -350,9 +352,13 @@ function deleteBackwardTextEdit(state: TextEditState, capacity: number): TextEdi
   if (caret === 0) {
     return { text: state.text, selection: { anchor: 0, focus: 0 }, composition: null };
   }
+  const rawStart = previousTextCaretOffset(state.text, caret);
   return replaceTextEditRange(
     state,
-    { start: previousTextCaretOffset(state.text, caret), end: caret },
+    {
+      start: rawStart >= 0 && rawStart <= 9007199254740991 ? Math.trunc(rawStart) : 0,
+      end: caret >= 0 && caret <= 9007199254740991 ? Math.trunc(caret) : 0,
+    },
     new Uint8Array(0),
     capacity,
     null,
@@ -370,9 +376,13 @@ function deleteForwardTextEdit(state: TextEditState, capacity: number): TextEdit
     const len = state.text.length;
     return { text: state.text, selection: caretSelectionAt(len, len), composition: null };
   }
+  const rawEnd = nextTextCaretOffset(state.text, caret);
   return replaceTextEditRange(
     state,
-    { start: caret, end: nextTextCaretOffset(state.text, caret) },
+    {
+      start: caret >= 0 && caret <= 9007199254740991 ? Math.trunc(caret) : 0,
+      end: rawEnd >= 0 && rawEnd <= 9007199254740991 ? Math.trunc(rawEnd) : 0,
+    },
     new Uint8Array(0),
     capacity,
     null,
@@ -389,9 +399,13 @@ function deleteWordBackwardTextEdit(state: TextEditState, capacity: number): Tex
   if (caret === 0) {
     return { text: state.text, selection: { anchor: 0, focus: 0 }, composition: null };
   }
+  const rawStart = previousTextWordOffset(state.text, caret);
   return replaceTextEditRange(
     state,
-    { start: previousTextWordOffset(state.text, caret), end: caret },
+    {
+      start: rawStart >= 0 && rawStart <= 9007199254740991 ? Math.trunc(rawStart) : 0,
+      end: caret >= 0 && caret <= 9007199254740991 ? Math.trunc(caret) : 0,
+    },
     new Uint8Array(0),
     capacity,
     null,
@@ -409,9 +423,13 @@ function deleteWordForwardTextEdit(state: TextEditState, capacity: number): Text
     const len = state.text.length;
     return { text: state.text, selection: caretSelectionAt(len, len), composition: null };
   }
+  const rawEnd = nextTextWordOffset(state.text, caret);
   return replaceTextEditRange(
     state,
-    { start: caret, end: nextTextWordOffset(state.text, caret) },
+    {
+      start: caret >= 0 && caret <= 9007199254740991 ? Math.trunc(caret) : 0,
+      end: rawEnd >= 0 && rawEnd <= 9007199254740991 ? Math.trunc(rawEnd) : 0,
+    },
     new Uint8Array(0),
     capacity,
     null,
@@ -436,7 +454,7 @@ function deleteToStartTextEdit(state: TextEditState, capacity: number): TextEdit
   }
   return replaceTextEditRange(
     state,
-    { start: 0, end: caret },
+    { start: 0, end: caret >= 0 && caret <= 9007199254740991 ? Math.trunc(caret) : 0 },
     new Uint8Array(0),
     capacity,
     null,
@@ -456,7 +474,10 @@ function deleteToLineStartTextEdit(state: TextEditState, capacity: number): Text
   }
   return replaceTextEditRange(
     state,
-    { start: lineStart, end: caret },
+    {
+      start: lineStart >= 0 && lineStart <= 9007199254740991 ? Math.trunc(lineStart) : 0,
+      end: caret >= 0 && caret <= 9007199254740991 ? Math.trunc(caret) : 0,
+    },
     new Uint8Array(0),
     capacity,
     null,
