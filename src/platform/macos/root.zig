@@ -2879,6 +2879,16 @@ test "mac platform module exports type" {
     _ = MacPlatform;
 }
 
+test "mac AppKit packet text anchors use the resolved font ascent" {
+    const host_source = @embedFile("appkit_host.m");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "static CGFloat NativeSdkPacketTextOriginYForBaseline(CGFloat baseline, NSFont *font)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "return baseline - round(font.ascender);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(origin.y, font)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(baseline, font)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "origin.y - size") == null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "baseline - size") == null);
+}
+
 test "mac status agent rows recognize decorated states and stay actionable" {
     const host_source = @embedFile("appkit_host.m");
     try std.testing.expect(std.mem.indexOf(u8, host_source, "[state hasPrefix:@\"configured \"]") != null);

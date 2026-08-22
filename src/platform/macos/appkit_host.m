@@ -2045,6 +2045,10 @@ static NSTextAlignment NativeSdkPacketTextAlignment(NSString *align) {
     return NSTextAlignmentNatural;
 }
 
+static CGFloat NativeSdkPacketTextOriginYForBaseline(CGFloat baseline, NSFont *font) {
+    return baseline - round(font.ascender);
+}
+
 // Italicizes a resolved sans face for the reserved italic span font ids
 // (5 and 6). Prefers a real italic face from the same family via
 // NSFontManager (SF has one; Geist does not ship a sans italic), and falls
@@ -2704,7 +2708,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     };
     NSDictionary *layout = NativeSdkPacketDictionary(text[@"layout"]);
     if (!layout) {
-        [value drawAtPoint:NSMakePoint(origin.x, origin.y - size) withAttributes:baseAttributes];
+        [value drawAtPoint:NSMakePoint(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, font)) withAttributes:baseAttributes];
         return YES;
     }
 
@@ -2724,7 +2728,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
             if (lineText.length == 0) continue;
             CGFloat lineX = NativeSdkPacketNumber(line[@"x"], origin.x);
             CGFloat baseline = NativeSdkPacketNumber(line[@"baseline"], origin.y);
-            [lineText drawAtPoint:NSMakePoint(lineX, baseline - size) withAttributes:baseAttributes];
+            [lineText drawAtPoint:NSMakePoint(lineX, NativeSdkPacketTextOriginYForBaseline(baseline, font)) withAttributes:baseAttributes];
         }
         return YES;
     }
@@ -2750,7 +2754,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
                                              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                           attributes:attributes];
     textHeight = MAX(textHeight, ceil(measuredRect.size.height + 1));
-    [value drawWithRect:NSMakeRect(origin.x, origin.y - size, textWidth, textHeight)
+    [value drawWithRect:NSMakeRect(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, font), textWidth, textHeight)
                 options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
              attributes:attributes];
     return YES;

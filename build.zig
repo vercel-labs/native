@@ -1347,8 +1347,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSMutableParagraphStyle" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextLineBreakMode" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextAlignment" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static CGFloat NativeSdkPacketTextOriginYForBaseline(CGFloat baseline, NSFont *font)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return baseline - round(font.ascender);" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextOriginYForBaseline(origin.y, font)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextOriginYForBaseline(baseline, font)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketNumber(layout[@\"maxWidth\"], 0)" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[value drawWithRect:NSMakeRect(origin.x, origin.y - size, textWidth, textHeight)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[value drawWithRect:NSMakeRect(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, font), textWidth, textHeight)" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-font-assets", "Verify AppKit GPU packet text registers bundled font assets", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "#import <CoreText/CoreText.h>" },
