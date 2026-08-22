@@ -1,6 +1,6 @@
 # Native SDK Kanban (TypeScript)
 
-This three-column board is authored entirely in TypeScript + Native markup. `src/core.ts` is the model/update tier, `src/app.native` is the view, and `app.zon` is the desktop shell; no JavaScript runtime or app-owned Zig ships in the binary.
+This three-column board is authored entirely in TypeScript + Native markup. `src/core.ts` is the model/update tier, `src/app.native` is the root view, `src/components/board-column.native` holds its reusable column and card-list templates, and `app.zon` is the desktop shell; no JavaScript runtime or app-owned Zig ships in the binary.
 
 Drop one or more files anywhere on the board to add their basenames as Todo cards. The desktop host sends the native file-drop event through the runtime, and the core's `dropMsg` maps the full path list into one deterministic `files_dropped` message before `update` changes the board.
 

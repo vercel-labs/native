@@ -201,7 +201,7 @@ const TsWindowView = struct {
     staged_path: []const u8,
 };
 
-const TsWindowSource = struct {
+const TsMarkupSource = struct {
     set_path: []const u8,
     source_path: []const u8,
     staged_path: []const u8,
@@ -209,8 +209,51 @@ const TsWindowSource = struct {
 
 const TsWindowViews = struct {
     views: []const TsWindowView,
-    sources: []const TsWindowSource,
+    sources: []const TsMarkupSource,
 };
+
+const TsAppMarkupSources = struct {
+    /// Non-root, non-window files discovered under src/. Window files are
+    /// staged by the existing secondary-window registry and must not be
+    /// copied a second time.
+    files: []const TsMarkupSource,
+    /// The root view's embedded resolver set. Its path keys are relative to
+    /// src/, matching the root disk watcher; existing window sources are
+    /// projected under their staged `windows/...` names.
+    sources: []const TsMarkupSource,
+};
+
+const max_markup_source_path_len = 200;
+const max_markup_source_path_segments = 24;
+const root_markup_source_prefix = "src/";
+
+/// Whether a path relative to `src/` fits the markup resolver once the
+/// generated desktop watch and `native check` address it as `src/<path>`.
+/// The compiled source set drops that prefix, but accepting a path only the
+/// compiled resolver can represent would make development and release
+/// disagree at the boundary.
+pub fn markupSourcePathWithinBudget(path: []const u8) bool {
+    var segments: usize = 1; // the disk resolver's leading `src` segment
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next() != null) segments += 1;
+    return root_markup_source_prefix.len + path.len <= max_markup_source_path_len and
+        segments <= max_markup_source_path_segments;
+}
+
+fn validateMarkupSourcePath(path: []const u8) void {
+    if (!markupSourcePathWithinBudget(path)) {
+        std.debug.panic(
+            "\nTypeScript markup source path `src/{s}` exceeds the import resolver budget: the full app-relative path, including `src/`, must be at most {d} bytes and {d} segments\n",
+            .{ path, max_markup_source_path_len, max_markup_source_path_segments },
+        );
+    }
+}
+
+pub fn isRootMarkupSourcePath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".native") and
+        !std.mem.eql(u8, path, "app.native") and
+        !std.mem.startsWith(u8, path, "windows/");
+}
 
 /// Default TypeScript secondary-window views are statically discovered under
 /// `src/windows/`: `settings.native` serves descriptor label `settings`.
@@ -224,7 +267,7 @@ fn collectTsWindowViews(b: *std.Build, app_root: []const u8) TsWindowViews {
     var walker = dir.walk(b.allocator) catch return .{ .views = &.{}, .sources = &.{} };
     defer walker.deinit();
     var views: std.ArrayList(TsWindowView) = .empty;
-    var sources: std.ArrayList(TsWindowSource) = .empty;
+    var sources: std.ArrayList(TsMarkupSource) = .empty;
     while (walker.next(b.graph.io) catch null) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".native")) continue;
         const normalized_path = b.dupe(entry.path);
@@ -261,12 +304,83 @@ fn collectTsWindowViews(b: *std.Build, app_root: []const u8) TsWindowViews {
     }.than;
     std.mem.sort(TsWindowView, views.items, {}, less);
     const source_less = struct {
-        fn than(_: void, a: TsWindowSource, z: TsWindowSource) bool {
+        fn than(_: void, a: TsMarkupSource, z: TsMarkupSource) bool {
             return std.mem.order(u8, a.set_path, z.set_path) == .lt;
         }
     }.than;
-    std.mem.sort(TsWindowSource, sources.items, {}, source_less);
+    std.mem.sort(TsMarkupSource, sources.items, {}, source_less);
     return .{ .views = views.items, .sources = sources.items };
+}
+
+/// The root TypeScript view resolves imports from every `.native` file under
+/// `src/` except itself. Window files already come from collectTsWindowViews;
+/// append those under `windows/...` keys so this set matches the root disk
+/// resolver without changing the separate window resolver root.
+fn collectAppMarkupSources(b: *std.Build, app_root: []const u8, window_views: TsWindowViews) TsAppMarkupSources {
+    const src_path = appPath(b, app_root, "src");
+    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch
+        return .{ .files = &.{}, .sources = &.{} };
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return .{ .files = &.{}, .sources = &.{} };
+    defer walker.deinit();
+
+    var files: std.ArrayList(TsMarkupSource) = .empty;
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".native")) continue;
+        const normalized_path = b.dupe(entry.path);
+        for (normalized_path) |*char| {
+            if (char.* == '\\') char.* = '/';
+        }
+        if (!isRootMarkupSourcePath(normalized_path)) continue;
+        validateMarkupSourcePath(normalized_path);
+        files.append(b.allocator, .{
+            .set_path = normalized_path,
+            .source_path = b.fmt("src/{s}", .{normalized_path}),
+            .staged_path = normalized_path,
+        }) catch @panic("OOM");
+    }
+
+    const less = struct {
+        fn than(_: void, a: TsMarkupSource, z: TsMarkupSource) bool {
+            return std.mem.order(u8, a.set_path, z.set_path) == .lt;
+        }
+    }.than;
+    std.mem.sort(TsMarkupSource, files.items, {}, less);
+
+    var sources: std.ArrayList(TsMarkupSource) = .empty;
+    sources.ensureTotalCapacity(b.allocator, files.items.len + window_views.sources.len) catch @panic("OOM");
+    sources.appendSliceAssumeCapacity(files.items);
+    for (window_views.sources) |source| {
+        validateMarkupSourcePath(source.staged_path);
+        sources.appendAssumeCapacity(.{
+            .set_path = source.staged_path,
+            .source_path = source.source_path,
+            .staged_path = source.staged_path,
+        });
+    }
+    std.mem.sort(TsMarkupSource, sources.items, {}, less);
+    return .{ .files = files.items, .sources = sources.items };
+}
+
+fn tsAppMarkupSourcesSource(b: *std.Build, registry: TsAppMarkupSources) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(b.allocator,
+        \\//! Generated by build/app.zig from src/**/*.native.
+        \\const native_sdk = @import("native_sdk");
+        \\const canvas = native_sdk.canvas;
+        \\pub const sources = [_]canvas.ui_markup.SourceFile{
+        \\
+    ) catch @panic("OOM");
+    for (registry.sources) |source| {
+        const line = std.fmt.allocPrint(
+            b.allocator,
+            "    .{{ .path = \"{f}\", .source = @embedFile(\"{f}\") }},\n",
+            .{ std.zig.fmtString(source.set_path), std.zig.fmtString(source.staged_path) },
+        ) catch @panic("OOM");
+        out.appendSlice(b.allocator, line) catch @panic("OOM");
+    }
+    out.appendSlice(b.allocator, "};\n") catch @panic("OOM");
+    return out.items;
 }
 
 fn tsWindowRegistrySource(b: *std.Build, registry: TsWindowViews) []const u8 {
@@ -369,6 +483,10 @@ const TsCoreStage = struct {
     /// mirror/registry files): the embed static library's `app`
     /// module roots here on iOS/Android targets.
     mobile_root: std.Build.LazyPath,
+    /// Release/mobile-only module embedding src/app.native. It lives in a
+    /// separate generated directory so a Debug app-code module never gains
+    /// the root markup as a transitive file input; Debug links markup_c.
+    app_markup_root: std.Build.LazyPath,
     /// The compiled-core archive: the app module links it (with libc,
     /// for the toolchain's runtime) beside the staged mirror.
     archive: std.Build.LazyPath,
@@ -860,6 +978,7 @@ fn tsCoreStage(
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const window_views = collectTsWindowViews(b, app_root);
+    const app_markup_sources = collectAppMarkupSources(b, app_root, window_views);
     const has_services = appHasServiceFiles(b, app_root);
     if (!scriptcCompileSupported(b.graph.host.result, target)) {
         panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
@@ -1195,9 +1314,19 @@ fn tsCoreStage(
         \\
     , .{ service_carrier, service_pool_workers }));
     _ = staged.addCopyFile(migrations_zig, "migrations.zig");
+    // Every imported file is an input to Debug's embedded source resolver and
+    // the release/mobile compiled view, so stage those beside the runner.
+    // Keep the ROOT out of this directory: changing any file in one WriteFiles
+    // output changes its directory identity, and the runner lives here. Root
+    // markup gets a separate release-only module below; Debug keeps the small
+    // linked C data object, preserving its link-only edit path.
+    for (app_markup_sources.files) |source| {
+        _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
+    }
     // Primary markup bytes live in their own tiny C translation unit. They
-    // no longer participate in Zig source analysis, so a markup edit reuses
-    // the compiled app/SDK graph and performs only C data compile + relink.
+    // drive Debug desktop without participating in Zig source analysis, so a
+    // root markup edit there reuses the compiled app/SDK graph and performs
+    // only C data compile + relink.
     const markup_embed = b.addSystemCommand(&.{node});
     markup_embed.setName("native embed primary markup data");
     markup_embed.addFileArg(dep.path("packages/core/scripts/embed_markup_c.mjs"));
@@ -1206,15 +1335,24 @@ fn tsCoreStage(
     for (window_views.sources) |source| {
         _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
     }
+    _ = staged.add("app_sources.zig", tsAppMarkupSourcesSource(b, app_markup_sources));
     _ = staged.add("window_views.zig", tsWindowRegistrySource(b, window_views));
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
     // The mobile wiring stages beside the desktop entry: same mirror, same
     // registry, same carrier constant — only the shell differs (the embed
     // host's AppDef contract instead of a process `main`).
     const mobile_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_mobile.zig"), "mobile.zig");
+    const release_markup = b.addWriteFiles();
+    _ = release_markup.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
+    const app_markup_root = release_markup.add("app_markup_root.zig",
+        \\//! Generated release/mobile embedding for the TypeScript root view.
+        \\pub const source = @embedFile("app.native");
+        \\
+    );
     return .{
         .main_root = main_root,
         .mobile_root = mobile_root,
+        .app_markup_root = app_markup_root,
         .archive = archive,
         .service_exe = service_exe,
         .service_archive = service_archive,
@@ -1453,11 +1591,12 @@ pub const MobileLibOptions = struct {
 pub const MobileTsCore = struct {
     /// The staged mobile wiring (mobile.zig beside the generated mirror).
     main_root: std.Build.LazyPath,
+    /// Separate root-markup module consumed by the compiled mobile view.
+    app_markup_root: std.Build.LazyPath,
     /// The compiled-core archive; merged into the embed library.
     archive: std.Build.LazyPath,
     /// The in-process service archive, when src/services exists.
     service_archive: ?std.Build.LazyPath,
-    markup_c: std.Build.LazyPath,
     /// The app.zon module the mobile wiring reads scene chrome, identity,
     /// and theme from (`app_manifest_zon`).
     manifest_mod: *std.Build.Module,
@@ -1522,6 +1661,11 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
                 .optimize = optimize,
             });
             mod.addImport("app_manifest_zon", ts.manifest_mod);
+            mod.addImport("app_markup_root", b.createModule(.{
+                .root_source_file = ts.app_markup_root,
+                .target = target,
+                .optimize = optimize,
+            }));
             break :ts_app mod;
         } else localModule(b, target, optimize, options.main);
         app_mod.addImport("native_sdk", native_sdk_mod);
@@ -1536,7 +1680,6 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         // host link already passes).
         exports_mod.link_libc = true;
         exports_mod.addObjectFile(ts.archive);
-        exports_mod.addObjectFile(markupDataObject(b, target, optimize, ts.markup_c).getEmittedBin());
         if (ts.service_archive) |service_archive| exports_mod.addObjectFile(service_archive);
     }
     if (options.store_capability or options.relational_capability) {
@@ -1712,9 +1855,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .max_image_pixel_bytes = app_config.max_image_pixel_bytes,
             .ts_core = if (ts_stage) |stage| .{
                 .main_root = stage.mobile_root,
+                .app_markup_root = stage.app_markup_root,
                 .archive = stage.archive,
                 .service_archive = stage.service_archive,
-                .markup_c = stage.markup_c,
                 .manifest_mod = appManifestModule(b, app_options.app_root, manifest_name),
             } else null,
         });
@@ -1779,7 +1922,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         });
         const link_mod = b.createModule(.{ .target = target, .optimize = app_optimize });
         link_mod.addObject(app_code);
-        link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
+        if (app_optimize == .Debug) link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
         // Object dependencies propagate framework/system-library NAMES, but
         // Zig does not propagate the search paths or rpaths recorded on the
         // module that produced an object. Restate those path-only facts on
@@ -1849,7 +1992,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         appModule(b, dep, target, optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config)
     else
         app_mod;
-    if (ts_stage) |stage| test_app_mod.addObject(markupDataObject(b, target, optimize, stage.markup_c));
+    if (ts_stage) |stage| {
+        if (optimize == .Debug) test_app_mod.addObject(markupDataObject(b, target, optimize, stage.markup_c));
+    }
     const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -2059,6 +2204,17 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         // toolchain's runtime needs libc.
         app_mod.link_libc = true;
         app_mod.addObjectFile(stage.archive);
+        // Debug reads src/app.native only through the separately linked C
+        // data object. Supplying this generated module in Debug would put
+        // the authored root back into the app-code dependency graph even
+        // though the runner's comptime branch never imports it.
+        if (optimize != .Debug) {
+            app_mod.addImport("app_markup_root", b.createModule(.{
+                .root_source_file = stage.app_markup_root,
+                .target = target,
+                .optimize = optimize,
+            }));
+        }
         // The in-process service archive links beside it (distinct symbol
         // prefix; its runtime internals are localized).
         if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);

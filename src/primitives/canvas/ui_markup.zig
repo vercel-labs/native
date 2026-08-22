@@ -3900,9 +3900,26 @@ pub fn resolveImports(
     loader: ImportLoader,
     diagnostic: *MarkupErrorInfo,
 ) ResolveError!MarkupDocument {
+    return resolveImportsFromRoot(arena, dirnamePath(root_name), root_name, root_source, loader, diagnostic);
+}
+
+/// Resolve an import closure against an explicit markup root. App-wide
+/// tooling uses this form while checking component files independently:
+/// every file under `src/` keeps the app root, so a component may import a
+/// sibling directory exactly as it does when reached from `src/app.native`.
+/// Direct `native markup check <file>` continues through `resolveImports`
+/// above, where the checked file's own directory is the root.
+pub fn resolveImportsFromRoot(
+    arena: std.mem.Allocator,
+    root_dir: []const u8,
+    root_name: []const u8,
+    root_source: []const u8,
+    loader: ImportLoader,
+    diagnostic: *MarkupErrorInfo,
+) ResolveError!MarkupDocument {
     var resolver = ImportResolver{
         .arena = arena,
-        .root_dir = dirnamePath(root_name),
+        .root_dir = root_dir,
         .loader = loader,
         .diagnostic = diagnostic,
     };
