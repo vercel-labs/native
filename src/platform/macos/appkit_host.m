@@ -2045,11 +2045,11 @@ static NSTextAlignment NativeSdkPacketTextAlignment(NSString *align) {
     return NSTextAlignmentNatural;
 }
 
-static CGFloat NativeSdkPacketTextOriginYForBaseline(CGFloat baseline, NSFont *font) {
+static CGFloat NativeSdkPacketTextOriginYForFontBaseline(CGFloat baseline, NSFont *font) {
     return baseline - round(font.ascender);
 }
 
-static CGFloat NativeSdkPacketTextOriginYForRectBaseline(
+static CGFloat NativeSdkPacketTextOriginYForBaseline(
     CGFloat baseline,
     NSString *value,
     NSDictionary *attributes,
@@ -2057,7 +2057,7 @@ static CGFloat NativeSdkPacketTextOriginYForRectBaseline(
     NSFont *font
 ) {
     if (value.length == 0 || width <= 0) {
-        return NativeSdkPacketTextOriginYForBaseline(baseline, font);
+        return NativeSdkPacketTextOriginYForFontBaseline(baseline, font);
     }
 
     NSTextStorage *storage = [[NSTextStorage alloc] initWithString:value attributes:attributes];
@@ -2068,7 +2068,7 @@ static CGFloat NativeSdkPacketTextOriginYForRectBaseline(
     [storage addLayoutManager:layoutManager];
     [layoutManager ensureLayoutForTextContainer:container];
     if (layoutManager.numberOfGlyphs == 0) {
-        return NativeSdkPacketTextOriginYForBaseline(baseline, font);
+        return NativeSdkPacketTextOriginYForFontBaseline(baseline, font);
     }
 
     return baseline - [layoutManager locationForGlyphAtIndex:0].y;
@@ -2733,7 +2733,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     };
     NSDictionary *layout = NativeSdkPacketDictionary(text[@"layout"]);
     if (!layout) {
-        [value drawAtPoint:NSMakePoint(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, font)) withAttributes:baseAttributes];
+        [value drawAtPoint:NSMakePoint(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, value, baseAttributes, CGFLOAT_MAX, font)) withAttributes:baseAttributes];
         return YES;
     }
 
@@ -2753,7 +2753,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
             if (lineText.length == 0) continue;
             CGFloat lineX = NativeSdkPacketNumber(line[@"x"], origin.x);
             CGFloat baseline = NativeSdkPacketNumber(line[@"baseline"], origin.y);
-            [lineText drawAtPoint:NSMakePoint(lineX, NativeSdkPacketTextOriginYForBaseline(baseline, font)) withAttributes:baseAttributes];
+            [lineText drawAtPoint:NSMakePoint(lineX, NativeSdkPacketTextOriginYForBaseline(baseline, lineText, baseAttributes, CGFLOAT_MAX, font)) withAttributes:baseAttributes];
         }
         return YES;
     }
@@ -2779,7 +2779,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
                                              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                           attributes:attributes];
     textHeight = MAX(textHeight, ceil(measuredRect.size.height + 1));
-    [value drawWithRect:NSMakeRect(origin.x, NativeSdkPacketTextOriginYForRectBaseline(origin.y, value, attributes, textWidth, font), textWidth, textHeight)
+    [value drawWithRect:NSMakeRect(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, value, attributes, textWidth, font), textWidth, textHeight)
                 options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
              attributes:attributes];
     return YES;

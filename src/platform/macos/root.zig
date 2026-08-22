@@ -2881,13 +2881,13 @@ test "mac platform module exports type" {
 
 test "mac AppKit packet text anchors use the resolved font ascent" {
     const host_source = @embedFile("appkit_host.m");
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "static CGFloat NativeSdkPacketTextOriginYForBaseline(CGFloat baseline, NSFont *font)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "static CGFloat NativeSdkPacketTextOriginYForRectBaseline(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "static CGFloat NativeSdkPacketTextOriginYForBaseline(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "static CGFloat NativeSdkPacketTextOriginYForFontBaseline(CGFloat baseline, NSFont *font)") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "[layoutManager locationForGlyphAtIndex:0].y") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "return baseline - round(font.ascender);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(origin.y, font)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(baseline, font)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForRectBaseline(origin.y, value, attributes, textWidth, font)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(origin.y, value, baseAttributes, CGFLOAT_MAX, font)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(baseline, lineText, baseAttributes, CGFLOAT_MAX, font)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(origin.y, value, attributes, textWidth, font)") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "origin.y - size") == null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "baseline - size") == null);
 }
