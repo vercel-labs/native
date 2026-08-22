@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#import "appkit_text_baseline.h"
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>

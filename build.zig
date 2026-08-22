@@ -241,6 +241,10 @@ pub fn build(b: *std.Build) void {
         else
             &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
         desktop_mod.addCSourceFile(.{ .file = b.path("src/platform/macos/image_fit_test.m"), .flags = flags });
+        desktop_mod.addCSourceFile(.{ .file = b.path("src/platform/macos/text_baseline_test.m"), .flags = flags });
+        desktop_mod.linkFramework("AppKit", .{});
+        desktop_mod.linkFramework("CoreGraphics", .{});
+        desktop_mod.linkFramework("CoreText", .{});
         desktop_mod.linkFramework("Foundation", .{});
         desktop_mod.linkFramework("ImageIO", .{});
         desktop_mod.linkSystemLibrary("objc", .{});
