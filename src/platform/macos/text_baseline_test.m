@@ -9,6 +9,7 @@
 typedef struct {
     int first;
     int last;
+    CGFloat baselineOffset;
 } NativeSdkTestInkRows;
 
 static NSFont *NativeSdkTestFont(const uint8_t *bytes, size_t length, CGFloat size) {
@@ -25,13 +26,13 @@ static NativeSdkTestInkRows NativeSdkTestDrawText(
     CGFloat size,
     CGFloat baseline,
     BOOL corrected,
-    BOOL wrapped
+    CGFloat lineHeight
 ) {
     const size_t width = 96;
     const size_t height = 72;
     const size_t bytesPerRow = width * 4;
     uint8_t *pixels = calloc(height, bytesPerRow);
-    if (!pixels) return (NativeSdkTestInkRows){ .first = -1, .last = -1 };
+    if (!pixels) return (NativeSdkTestInkRows){ .first = -1, .last = -1, .baselineOffset = NAN };
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     CGContextRef context = CGBitmapContextCreate(
         pixels,
@@ -45,7 +46,7 @@ static NativeSdkTestInkRows NativeSdkTestDrawText(
     CGColorSpaceRelease(colorSpace);
     if (!context) {
         free(pixels);
-        return (NativeSdkTestInkRows){ .first = -1, .last = -1 };
+        return (NativeSdkTestInkRows){ .first = -1, .last = -1, .baselineOffset = NAN };
     }
 
     /* Match appkit_host.m's packet bitmap and flipped NSGraphicsContext. */
@@ -61,16 +62,17 @@ static NativeSdkTestInkRows NativeSdkTestDrawText(
         NSFontAttributeName: font,
         NSForegroundColorAttributeName: NSColor.whiteColor,
     } mutableCopy];
-    if (wrapped) {
+    CGFloat baselineOffset = corrected ? round(font.ascender) : size;
+    if (lineHeight > 0) {
         NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
-        paragraph.minimumLineHeight = 20;
-        paragraph.maximumLineHeight = 20;
+        paragraph.minimumLineHeight = lineHeight;
+        paragraph.maximumLineHeight = lineHeight;
         attributes[NSParagraphStyleAttributeName] = paragraph;
         const NSSize extent = NSMakeSize(80, 30);
-        const CGFloat offset = corrected
+        baselineOffset = corrected
             ? NativeSdkAppKitFirstBaselineOffset(@"H", attributes, font, extent)
             : size;
-        [@"H" drawWithRect:NSMakeRect(8, baseline - offset, extent.width, extent.height)
+        [@"H" drawWithRect:NSMakeRect(8, baseline - baselineOffset, extent.width, extent.height)
                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                  attributes:attributes];
     } else {
@@ -83,7 +85,7 @@ static NativeSdkTestInkRows NativeSdkTestDrawText(
     [NSGraphicsContext restoreGraphicsState];
     CGContextRelease(context);
 
-    NativeSdkTestInkRows rows = { .first = -1, .last = -1 };
+    NativeSdkTestInkRows rows = { .first = -1, .last = -1, .baselineOffset = baselineOffset };
     for (size_t row = 0; row < height; row++) {
         BOOL hasInk = NO;
         for (size_t column = 0; column < width; column++) {
@@ -112,37 +114,52 @@ int native_sdk_test_appkit_text_baselines(
     double baseline,
     double *outRegularOffset,
     double *outMonoOffset,
+    double *outCompactRegularOffset,
+    double *outCompactMonoOffset,
     int *outOldRegularFirst,
     int *outOldMonoFirst,
     int *outFixedRegularFirst,
     int *outFixedMonoFirst,
     int *outWrappedRegularFirst,
-    int *outWrappedMonoFirst
+    int *outWrappedMonoFirst,
+    int *outCompactRegularFirst,
+    int *outCompactMonoFirst
 ) {
     @autoreleasepool {
         NSFont *regular = NativeSdkTestFont(regularBytes, regularLength, size);
         NSFont *mono = NativeSdkTestFont(monoBytes, monoLength, size);
         if (!regular || !mono) return 0;
 
-        const NativeSdkTestInkRows oldRegular = NativeSdkTestDrawText(regular, size, baseline, NO, NO);
-        const NativeSdkTestInkRows oldMono = NativeSdkTestDrawText(mono, size, baseline, NO, NO);
-        const NativeSdkTestInkRows fixedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, NO);
-        const NativeSdkTestInkRows fixedMono = NativeSdkTestDrawText(mono, size, baseline, YES, NO);
-        const NativeSdkTestInkRows wrappedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, YES);
-        const NativeSdkTestInkRows wrappedMono = NativeSdkTestDrawText(mono, size, baseline, YES, YES);
+        const NativeSdkTestInkRows oldRegular = NativeSdkTestDrawText(regular, size, baseline, NO, 0);
+        const NativeSdkTestInkRows oldMono = NativeSdkTestDrawText(mono, size, baseline, NO, 0);
+        const NativeSdkTestInkRows fixedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 0);
+        const NativeSdkTestInkRows fixedMono = NativeSdkTestDrawText(mono, size, baseline, YES, 0);
+        const NativeSdkTestInkRows wrappedRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 20);
+        const NativeSdkTestInkRows wrappedMono = NativeSdkTestDrawText(mono, size, baseline, YES, 20);
+        /* Smaller than either face's font box: TextKit's valid first-baseline
+         * offsets are negative, exercising the compact-line regression. */
+        const NativeSdkTestInkRows compactRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 1);
+        const NativeSdkTestInkRows compactMono = NativeSdkTestDrawText(mono, size, baseline, YES, 1);
 
         if (outRegularOffset) *outRegularOffset = round(regular.ascender);
         if (outMonoOffset) *outMonoOffset = round(mono.ascender);
+        if (outCompactRegularOffset) *outCompactRegularOffset = compactRegular.baselineOffset;
+        if (outCompactMonoOffset) *outCompactMonoOffset = compactMono.baselineOffset;
         if (outOldRegularFirst) *outOldRegularFirst = oldRegular.first;
         if (outOldMonoFirst) *outOldMonoFirst = oldMono.first;
         if (outFixedRegularFirst) *outFixedRegularFirst = fixedRegular.first;
         if (outFixedMonoFirst) *outFixedMonoFirst = fixedMono.first;
         if (outWrappedRegularFirst) *outWrappedRegularFirst = wrappedRegular.first;
         if (outWrappedMonoFirst) *outWrappedMonoFirst = wrappedMono.first;
+        if (outCompactRegularFirst) *outCompactRegularFirst = compactRegular.first;
+        if (outCompactMonoFirst) *outCompactMonoFirst = compactMono.first;
 
         return oldRegular.first >= 0 && oldMono.first >= 0 && oldRegular.first != oldMono.first &&
             fixedRegular.first == fixedMono.first && fixedRegular.last == fixedMono.last &&
             wrappedRegular.first == wrappedMono.first && wrappedRegular.last == wrappedMono.last &&
-            fixedRegular.first == wrappedRegular.first && fixedRegular.last == wrappedRegular.last;
+            fixedRegular.first == wrappedRegular.first && fixedRegular.last == wrappedRegular.last &&
+            compactRegular.baselineOffset < 0 && compactMono.baselineOffset < 0 &&
+            compactRegular.first == compactMono.first && compactRegular.last == compactMono.last &&
+            fixedRegular.first == compactRegular.first && fixedRegular.last == compactRegular.last;
     }
 }

@@ -173,12 +173,16 @@ extern fn native_sdk_test_appkit_text_baselines(
     baseline: f64,
     out_regular_offset: *f64,
     out_mono_offset: *f64,
+    out_compact_regular_offset: *f64,
+    out_compact_mono_offset: *f64,
     out_old_regular_first: *c_int,
     out_old_mono_first: *c_int,
     out_fixed_regular_first: *c_int,
     out_fixed_mono_first: *c_int,
     out_wrapped_regular_first: *c_int,
     out_wrapped_mono_first: *c_int,
+    out_compact_regular_first: *c_int,
+    out_compact_mono_first: *c_int,
 ) c_int;
 
 const shortcut_modifier_primary: u32 = 1 << 0;
@@ -1286,12 +1290,16 @@ test "mac packet text keeps mixed-face runs on the engine baseline" {
 
     var regular_offset: f64 = 0;
     var mono_offset: f64 = 0;
+    var compact_regular_offset: f64 = 0;
+    var compact_mono_offset: f64 = 0;
     var old_regular_first: c_int = -1;
     var old_mono_first: c_int = -1;
     var fixed_regular_first: c_int = -1;
     var fixed_mono_first: c_int = -1;
     var wrapped_regular_first: c_int = -1;
     var wrapped_mono_first: c_int = -1;
+    var compact_regular_first: c_int = -1;
+    var compact_mono_first: c_int = -1;
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_appkit_text_baselines(
         canvas.font_ttf.geist_regular_bytes.ptr,
         canvas.font_ttf.geist_regular_bytes.len,
@@ -1301,12 +1309,16 @@ test "mac packet text keeps mixed-face runs on the engine baseline" {
         40,
         &regular_offset,
         &mono_offset,
+        &compact_regular_offset,
+        &compact_mono_offset,
         &old_regular_first,
         &old_mono_first,
         &fixed_regular_first,
         &fixed_mono_first,
         &wrapped_regular_first,
         &wrapped_mono_first,
+        &compact_regular_first,
+        &compact_mono_first,
     ));
 
     // The fixtures genuinely exercise different line-fragment metrics,
@@ -1315,11 +1327,19 @@ test "mac packet text keeps mixed-face runs on the engine baseline" {
     try std.testing.expectEqual(@as(f64, 15), mono_offset);
     try std.testing.expect(old_regular_first != old_mono_first);
 
+    // Explicit line heights smaller than the font box validly place the
+    // first baseline above TextKit's container origin. Those negative
+    // offsets must not be replaced by the face-dependent ascent fallback.
+    try std.testing.expect(compact_regular_offset < 0);
+    try std.testing.expect(compact_mono_offset < 0);
+
     // Both the engine-measured-line path and the rare host-wrapping fallback
     // now place the identical cap outline on one shared engine baseline.
     try std.testing.expectEqual(fixed_regular_first, fixed_mono_first);
     try std.testing.expectEqual(fixed_regular_first, wrapped_regular_first);
     try std.testing.expectEqual(fixed_regular_first, wrapped_mono_first);
+    try std.testing.expectEqual(fixed_regular_first, compact_regular_first);
+    try std.testing.expectEqual(fixed_regular_first, compact_mono_first);
 }
 
 test "mac image decoder keeps ImageIO thumbnail rounding inside the pixel cap" {

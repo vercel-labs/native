@@ -43,7 +43,11 @@ static inline CGFloat NativeSdkAppKitFirstBaselineOffset(
     const NSRect lineFragment = [layoutManager lineFragmentRectForGlyphAtIndex:firstGlyph effectiveRange:NULL];
     const NSPoint glyphLocation = [layoutManager locationForGlyphAtIndex:firstGlyph];
     const CGFloat offset = NSMinY(lineFragment) + glyphLocation.y;
-    return isfinite(offset) && offset >= 0 ? offset : fallback;
+    /* A line height smaller than the font box legitimately moves TextKit's
+     * first baseline above the container origin, producing a negative
+     * offset. Preserve that answer: rejecting it would put compact runs back
+     * on face-dependent ascenders and split their shared engine baseline. */
+    return isfinite(offset) ? offset : fallback;
 }
 
 #endif
