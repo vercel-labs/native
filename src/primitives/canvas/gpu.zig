@@ -2,6 +2,7 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
+const text_metrics = @import("text_metrics.zig");
 const render_model = @import("render.zig");
 
 const Error = canvas.Error;
@@ -170,6 +171,9 @@ pub const CanvasGpuText = struct {
     color: Color = .{},
     text: []const u8 = "",
     glyphs: []const Glyph = &.{},
+    /// Process-local measurement context used while deriving packet lines.
+    /// It never crosses the wire.
+    measure: ?*const text_metrics.TextMeasureProvider = null,
     text_layout: ?TextLayoutOptions = null,
 };
 
@@ -568,6 +572,7 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
                 .color = value.color,
                 .text = value.text,
                 .glyphs = value.glyphs,
+                .measure = value.measure,
                 .text_layout = value.text_layout,
             };
             packet_command.uses_resource = true;

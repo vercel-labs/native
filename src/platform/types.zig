@@ -3044,6 +3044,9 @@ pub const PlatformServices = struct {
     /// engine-side registered-face provider — both batch engine-side
     /// without any platform seam.
     measure_text_advances_fn: ?*const fn (context: ?*anyopaque, font_id: u64, size: f32, text: []const u8, advances: []f32) bool = null,
+    /// Shaped glyph-path bounds for one single-line run, relative to its
+    /// baseline. Null on platforms without host-side text metrics.
+    measure_text_ink_fn: ?*const fn (context: ?*anyopaque, font_id: u64, size: f32, text: []const u8, metrics: *canvas.TextInkMetrics) bool = null,
     /// Decode encoded image bytes (PNG, JPEG, ... — whatever the platform
     /// codec supports) into tightly packed, row-major, straight-alpha
     /// (non-premultiplied) RGBA8 written into `buffer`, returning the

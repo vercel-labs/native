@@ -36,14 +36,17 @@ pub const estimateTextWidthForFace = text_metrics.estimateTextWidthForFace;
 pub const estimateTextAdvanceForBytes = text_metrics.estimateTextAdvanceForBytes;
 pub const estimatedGlyphAdvance = text_metrics.estimatedGlyphAdvance;
 pub const TextMeasureProvider = text_metrics.TextMeasureProvider;
+pub const TextInkMetrics = text_metrics.TextInkMetrics;
 pub const measureTextWidthForFont = text_metrics.measureTextWidthForFont;
 pub const measureTextAdvance = text_metrics.measureTextAdvance;
 
 /// The measurement provider a DrawText carries via its layout options, if
 /// any. Runs without layout options always measure with the estimator.
 fn drawTextMeasure(text: DrawText) ?*const text_metrics.TextMeasureProvider {
-    const options = text.text_layout orelse return null;
-    return options.measure;
+    if (text.text_layout) |options| {
+        if (options.measure) |measure| return measure;
+    }
+    return text.measure;
 }
 
 const textLayoutOptionsForDrawText = text_layout_hash.textLayoutOptionsForDrawText;
@@ -284,7 +287,7 @@ pub const TextLayoutPlanner = struct {
 
     fn consumeText(self: *TextLayoutPlanner, text: DrawText, options: TextLayoutOptions) Error!void {
         if (self.plan_len >= self.plans.len) return error.TextLayoutPlanListFull;
-        const plan = try layoutTextRunPlan(text, textLayoutOptionsForDrawText(options, text), self.lines[self.line_len..]);
+        const plan = try layoutTextRunPlan(text, options, self.lines[self.line_len..]);
         self.plans[self.plan_len] = plan;
         self.plan_len += 1;
         self.line_len += plan.lineCount();
@@ -318,9 +321,10 @@ pub fn layoutTextRun(text: DrawText, options: TextLayoutOptions, output: []TextL
 }
 
 pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []TextLine) Error!TextLayoutPlan {
+    const effective_options = textLayoutOptionsForDrawText(options, text);
     var len: usize = 0;
     var bounds: ?geometry.RectF = null;
-    var lines = TextLineIterator.init(text, options);
+    var lines = TextLineIterator.init(text, effective_options);
     while (lines.next()) |line| {
         if (len >= output.len) return error.TextLayoutLineListFull;
         output[len] = line;
@@ -328,7 +332,7 @@ pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []T
         bounds = unionOptionalBounds(bounds, line.bounds);
     }
     return .{
-        .key = textLayoutKey(text, options),
+        .key = textLayoutKey(text, effective_options),
         .layout = .{ .lines = output[0..len], .bounds = bounds },
     };
 }
@@ -426,18 +430,82 @@ fn textInkInsets(size: f32) geometry.InsetsF {
 }
 
 pub fn textBounds(value: DrawText) ?geometry.RectF {
+    if (value.text_layout) |options| {
+        var lines: [max_text_bounds_layout_lines]TextLine = undefined;
+        if (layoutTextRun(value, options, &lines)) |layout| {
+            return textBoundsForLines(value, layout.lines);
+        } else |_| {}
+
+        // Bounds must remain truthful even when the fixed layout scratch
+        // cannot materialize every line. Stream the same iterator used by
+        // caret and selection queries; this keeps long wrapped paragraphs
+        // from falling back to a metric box that can clip host-shaped ink.
+        const effective_options = textLayoutOptionsForDrawText(options, value);
+        var iterator = TextLineIterator.init(value, effective_options);
+        var bounds: ?geometry.RectF = null;
+        while (iterator.next()) |line| {
+            bounds = unionOptionalBounds(bounds, textLineInkBounds(value, line));
+        }
+        if (bounds) |value_bounds| return value_bounds.inflate(textInkInsets(value.size));
+    }
+
     const metric = metricTextBounds(value) orelse return null;
-    return metric.inflate(textInkInsets(value.size));
+    var bounds = metric.inflate(textInkInsets(value.size));
+    if (value.text_layout == null and value.glyphs.len == 0) {
+        if (drawTextMeasure(value)) |provider| {
+            if (provider.measureInk(value.font_id, value.size, value.text)) |metrics| {
+                bounds = bounds.unionWith(geometry.RectF.init(
+                    value.origin.x + metrics.min_x,
+                    value.origin.y - metrics.max_y,
+                    metrics.max_x - metrics.min_x,
+                    metrics.max_y - metrics.min_y,
+                ));
+            }
+        }
+    }
+    return bounds;
+}
+
+fn textBoundsForLines(value: DrawText, lines: []const TextLine) ?geometry.RectF {
+    var bounds: ?geometry.RectF = null;
+    for (lines) |line| {
+        bounds = unionOptionalBounds(bounds, textLineInkBounds(value, line));
+    }
+    return if (bounds) |value_bounds| value_bounds.inflate(textInkInsets(value.size)) else null;
+}
+
+fn textLineInkBounds(value: DrawText, line: TextLine) geometry.RectF {
+    var bounds = line.bounds;
+    if (value.glyphs.len > 0) return bounds;
+    if (drawTextMeasure(value)) |provider| {
+        const start = @min(line.text_start, value.text.len);
+        const end = @min(value.text.len, start + line.paintedTextLen());
+        if (end > start) {
+            if (provider.measureInk(value.font_id, value.size, value.text[start..end])) |line_metrics| {
+                bounds = bounds.unionWith(geometry.RectF.init(
+                    line.bounds.x + line_metrics.min_x,
+                    line.baseline - line_metrics.max_y,
+                    line_metrics.max_x - line_metrics.min_x,
+                    line_metrics.max_y - line_metrics.min_y,
+                ));
+            }
+        }
+        if (line.hasEllipsis()) {
+            if (provider.measureInk(value.font_id, value.size, text_ellipsis)) |ellipsis_metrics| {
+                bounds = bounds.unionWith(geometry.RectF.init(
+                    line.bounds.maxX() - line.ellipsis_advance + ellipsis_metrics.min_x,
+                    line.baseline - ellipsis_metrics.max_y,
+                    ellipsis_metrics.max_x - ellipsis_metrics.min_x,
+                    ellipsis_metrics.max_y - ellipsis_metrics.min_y,
+                ));
+            }
+        }
+    }
+    return bounds;
 }
 
 fn metricTextBounds(value: DrawText) ?geometry.RectF {
     if (value.glyphs.len == 0 and value.text.len == 0) return null;
-    if (value.text_layout) |options| {
-        var lines: [max_text_bounds_layout_lines]TextLine = undefined;
-        if (layoutTextRun(value, options, &lines)) |layout| {
-            if (layout.bounds) |bounds| return bounds;
-        } else |_| {}
-    }
 
     var min_x = value.origin.x;
     var min_y = value.origin.y - value.size;

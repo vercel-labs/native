@@ -336,6 +336,7 @@ pub const defaultFocusable = event_model.defaultFocusable;
 pub const textLineBounds = text_model.textLineBounds;
 pub const textBounds = text_model.textBounds;
 pub const TextMeasureProvider = text_model.TextMeasureProvider;
+pub const TextInkMetrics = text_model.TextInkMetrics;
 pub const measureTextWidthForFont = text_model.measureTextWidthForFont;
 pub const measureTextAdvance = text_model.measureTextAdvance;
 pub const estimateTextWidth = text_model.estimateTextWidth;

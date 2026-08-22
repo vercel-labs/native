@@ -1347,14 +1347,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSMutableParagraphStyle" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextLineBreakMode" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextAlignment" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static CGFloat NativeSdkPacketTextOriginYForBaseline(" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static CGFloat NativeSdkPacketTextOriginYForFontBaseline(CGFloat baseline, NSFont *font)" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[layoutManager locationForGlyphAtIndex:0].y" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return baseline - round(font.ascender);" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextOriginYForBaseline(origin.y, value, baseAttributes, CGFLOAT_MAX, font)" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextOriginYForBaseline(baseline, lineText, baseAttributes, CGFLOAT_MAX, font)" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextOriginYForBaseline(origin.y, value, attributes, textWidth, font)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static BOOL NativeSdkPacketDrawAttributedText(" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "drawGlyphsForGlyphRange:glyphRange atPoint:" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "glyphRangeForTextContainer:container" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketNumber(layout[@\"maxWidth\"], 0)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "native_sdk_appkit_measure_text_ink(" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-font-assets", "Verify AppKit GPU packet text registers bundled font assets", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "#import <CoreText/CoreText.h>" },

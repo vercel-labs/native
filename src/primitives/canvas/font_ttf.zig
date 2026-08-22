@@ -260,6 +260,30 @@ pub const Face = struct {
         return @floatFromInt(value);
     }
 
+    /// The glyph's TrueType bounding box in font units, or null for an
+    /// intentionally empty glyph such as space. The bbox is stored in the
+    /// `glyf` header for both simple and composite glyphs, so this answers
+    /// without replaying the outline into a path builder.
+    pub fn glyphBounds(self: *const Face, glyph: u16) Error!?geometry.RectF {
+        if (glyph >= self.num_glyphs) return error.FontParseFailed;
+        const range = try self.glyphRange(glyph);
+        if (range.len == 0) return null;
+        if (range.len < 10) return error.FontParseFailed;
+        const offset = self.glyf_offset + range.offset;
+        const min_x = try readI16(self.bytes, offset + 2);
+        const min_y = try readI16(self.bytes, offset + 4);
+        const max_x = try readI16(self.bytes, offset + 6);
+        const max_y = try readI16(self.bytes, offset + 8);
+        if (max_x < min_x or max_y < min_y) return error.FontParseFailed;
+        if (max_x == min_x or max_y == min_y) return null;
+        return geometry.RectF.init(
+            @floatFromInt(min_x),
+            @floatFromInt(min_y),
+            @as(f32, @floatFromInt(max_x - min_x)),
+            @as(f32, @floatFromInt(max_y - min_y)),
+        );
+    }
+
     /// Emit the glyph outline through `transform` into `sink`
     /// (`moveTo`/`lineTo`/`quadTo`/`close`). Coordinates handed to the
     /// transform are raw font units (y-up); bake the y-flip and em

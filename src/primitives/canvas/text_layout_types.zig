@@ -17,6 +17,9 @@ pub const DrawText = struct {
     color: Color,
     text: []const u8 = "",
     glyphs: []const Glyph = &.{},
+    /// Process-local measurement context used for host-aware ink bounds.
+    /// Excluded from equality, hashing, and serialization.
+    measure: ?*const text_metrics.TextMeasureProvider = null,
     text_layout: ?TextLayoutOptions = null,
 };
 

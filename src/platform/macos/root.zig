@@ -252,6 +252,7 @@ extern fn native_sdk_appkit_close_webview(host: *AppKitHost, window_id: u64, lab
 extern fn native_sdk_appkit_clipboard_read(host: *AppKitHost, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_measure_text(font_id: u64, size: f64, text: [*]const u8, text_len: usize) f64;
 extern fn native_sdk_appkit_measure_text_advances(font_id: u64, size: f64, text: [*]const u8, text_len: usize, advances: [*]f32) c_int;
+extern fn native_sdk_appkit_measure_text_ink(font_id: u64, size: f64, text: [*]const u8, text_len: usize, min_x: *f64, max_x: *f64, min_y: *f64, max_y: *f64) c_int;
 extern fn native_sdk_appkit_register_font(font_id: u64, bytes: [*]const u8, bytes_len: usize, out_token: *u64) c_int;
 extern fn native_sdk_appkit_unregister_font(font_id: u64, token: u64) c_int;
 extern fn native_sdk_appkit_register_bundled_fonts() void;
@@ -847,6 +848,7 @@ pub const MacPlatform = struct {
                 .update_widget_accessibility_fn = updateWidgetAccessibility,
                 .measure_text_fn = measureText,
                 .measure_text_advances_fn = measureTextAdvances,
+                .measure_text_ink_fn = measureTextInk,
                 .decode_image_fn = decodeImage,
             },
             .app_info = self.app_info,
@@ -1202,6 +1204,7 @@ pub fn installHeadlessTextServices(services: *platform_mod.PlatformServices) voi
     native_sdk_appkit_register_bundled_fonts();
     services.measure_text_fn = measureText;
     services.measure_text_advances_fn = measureTextAdvances;
+    services.measure_text_ink_fn = measureTextInk;
     services.register_gpu_surface_font_fn = registerGpuSurfaceFont;
     services.unregister_gpu_surface_font_fn = unregisterGpuSurfaceFont;
 }
@@ -1229,6 +1232,23 @@ fn measureTextAdvances(context: ?*anyopaque, font_id: u64, size: f32, text: []co
     if (text.len == 0) return true;
     if (advances.len < text.len) return false;
     return native_sdk_appkit_measure_text_advances(font_id, size, text.ptr, text.len, advances.ptr) == 1;
+}
+
+fn measureTextInk(context: ?*anyopaque, font_id: u64, size: f32, text: []const u8, metrics: *canvas.TextInkMetrics) bool {
+    _ = context;
+    if (text.len == 0) return false;
+    var min_x: f64 = 0;
+    var max_x: f64 = 0;
+    var min_y: f64 = 0;
+    var max_y: f64 = 0;
+    if (native_sdk_appkit_measure_text_ink(font_id, size, text.ptr, text.len, &min_x, &max_x, &min_y, &max_y) != 1) return false;
+    metrics.* = .{
+        .min_x = @floatCast(min_x),
+        .max_x = @floatCast(max_x),
+        .min_y = @floatCast(min_y),
+        .max_y = @floatCast(max_y),
+    };
+    return true;
 }
 
 /// System image decoding (ImageIO raster codecs plus NSImage's SVG
@@ -2881,15 +2901,10 @@ test "mac platform module exports type" {
 
 test "mac AppKit packet text anchors use the resolved font ascent" {
     const host_source = @embedFile("appkit_host.m");
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "static CGFloat NativeSdkPacketTextOriginYForBaseline(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "static CGFloat NativeSdkPacketTextOriginYForFontBaseline(CGFloat baseline, NSFont *font)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "[layoutManager locationForGlyphAtIndex:0].y") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "return baseline - round(font.ascender);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(origin.y, value, baseAttributes, CGFLOAT_MAX, font)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(baseline, lineText, baseAttributes, CGFLOAT_MAX, font)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkPacketTextOriginYForBaseline(origin.y, value, attributes, textWidth, font)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "origin.y - size") == null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "baseline - size") == null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "static BOOL NativeSdkPacketDrawAttributedText(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "drawGlyphsForGlyphRange:glyphRange atPoint:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "glyphRangeForTextContainer:container") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_measure_text_ink(") != null);
 }
 
 test "mac status agent rows recognize decorated states and stay actionable" {

@@ -2045,33 +2045,32 @@ static NSTextAlignment NativeSdkPacketTextAlignment(NSString *align) {
     return NSTextAlignmentNatural;
 }
 
-static CGFloat NativeSdkPacketTextOriginYForFontBaseline(CGFloat baseline, NSFont *font) {
-    return baseline - round(font.ascender);
-}
-
-static CGFloat NativeSdkPacketTextOriginYForBaseline(
-    CGFloat baseline,
+static BOOL NativeSdkPacketDrawAttributedText(
     NSString *value,
     NSDictionary *attributes,
+    CGFloat x,
+    CGFloat baseline,
     CGFloat width,
-    NSFont *font
+    CGFloat height
 ) {
-    if (value.length == 0 || width <= 0) {
-        return NativeSdkPacketTextOriginYForFontBaseline(baseline, font);
-    }
+    if (value.length == 0) return YES;
 
     NSTextStorage *storage = [[NSTextStorage alloc] initWithString:value attributes:attributes];
     NSLayoutManager *layoutManager = [[NSLayoutManager alloc] init];
-    NSTextContainer *container = [[NSTextContainer alloc] initWithContainerSize:NSMakeSize(width, CGFLOAT_MAX)];
+    NSTextContainer *container = [[NSTextContainer alloc] initWithContainerSize:NSMakeSize(
+        width > 0 ? width : CGFLOAT_MAX,
+        height > 0 ? height : CGFLOAT_MAX
+    )];
     container.lineFragmentPadding = 0;
     [layoutManager addTextContainer:container];
     [storage addLayoutManager:layoutManager];
     [layoutManager ensureLayoutForTextContainer:container];
-    if (layoutManager.numberOfGlyphs == 0) {
-        return NativeSdkPacketTextOriginYForFontBaseline(baseline, font);
-    }
 
-    return baseline - [layoutManager locationForGlyphAtIndex:0].y;
+    NSRange glyphRange = [layoutManager glyphRangeForTextContainer:container];
+    if (glyphRange.length == 0) return YES;
+    CGFloat firstLineOffset = [layoutManager locationForGlyphAtIndex:glyphRange.location].y;
+    [layoutManager drawGlyphsForGlyphRange:glyphRange atPoint:NSMakePoint(x, baseline - firstLineOffset)];
+    return YES;
 }
 
 // Italicizes a resolved sans face for the reserved italic span font ids
@@ -2214,6 +2213,16 @@ static NSCache<NSString *, NSNumber *> *NativeSdkMeasuredWidthCache(void) {
     return cache;
 }
 
+static NSCache<NSString *, NSValue *> *NativeSdkMeasuredInkCache(void) {
+    static NSCache<NSString *, NSValue *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 16384;
+    });
+    return cache;
+}
+
 // The id's current registration token AND the registered face that
 // token resolves to, snapshotted under ONE acquisition of the
 // descriptor table's @synchronized guard. The pair must be atomic
@@ -2298,6 +2307,7 @@ int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size
             for (NSString *cachedKey in cachedKeys) {
                 if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];
             }
+            [NativeSdkMeasuredInkCache() removeAllObjects];
             // The measured-width cache holds the same stale state but
             // cannot be enumerated for eviction, so stamp the id with a
             // fresh process-global token instead: width-cache keys
@@ -2375,6 +2385,7 @@ int native_sdk_appkit_unregister_font(uint64_t font_id, uint64_t token) {
             // id's token under this same guard before caching, and this
             // removal already retired the token it snapshotted.
             [NativeSdkMeasuredWidthCache() removeAllObjects];
+            [NativeSdkMeasuredInkCache() removeAllObjects];
         }
         return 1;
     }
@@ -2518,6 +2529,47 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
             }
         }
         return width;
+    }
+}
+
+int native_sdk_appkit_measure_text_ink(uint64_t font_id, double size, const char *text, size_t text_len, double *min_x, double *max_x, double *min_y, double *max_y) {
+    if (!text || text_len == 0 || !min_x || !max_x || !min_y || !max_y) return 0;
+    CGFloat clamped = MAX(1, size);
+    @autoreleasepool {
+        NSString *value = [[NSString alloc] initWithBytes:text length:text_len encoding:NSUTF8StringEncoding];
+        if (!value) return 0;
+
+        unsigned long long token = 0;
+        NSFont *registered = NativeSdkRegisteredFontSnapshot((unsigned long long)font_id, clamped, &token);
+        NSFont *font = registered ?: NativeSdkBuiltInFontForFontId(font_id, clamped);
+        if (!font) return 0;
+
+        NSString *key = [NSString stringWithFormat:@"%llu/%llu/%.3f/%@", (unsigned long long)font_id, token, (double)clamped, value];
+        NSValue *cached = [NativeSdkMeasuredInkCache() objectForKey:key];
+        if (cached) {
+            CGRect bounds = cached.rectValue;
+            *min_x = CGRectGetMinX(bounds);
+            *max_x = CGRectGetMaxX(bounds);
+            *min_y = CGRectGetMinY(bounds);
+            *max_y = CGRectGetMaxY(bounds);
+            return 1;
+        }
+
+        NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:value
+                                                                             attributes:@{ NSFontAttributeName : font }];
+        CTLineRef line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)attributed);
+        if (!line) return 0;
+        CGRect bounds = CTLineGetBoundsWithOptions(line, kCTLineBoundsUseGlyphPathBounds);
+        CFRelease(line);
+        if (!isfinite(CGRectGetMinX(bounds)) || !isfinite(CGRectGetMaxX(bounds)) ||
+            !isfinite(CGRectGetMinY(bounds)) || !isfinite(CGRectGetMaxY(bounds))) return 0;
+
+        [NativeSdkMeasuredInkCache() setObject:[NSValue valueWithRect:bounds] forKey:key];
+        *min_x = CGRectGetMinX(bounds);
+        *max_x = CGRectGetMaxX(bounds);
+        *min_y = CGRectGetMinY(bounds);
+        *max_y = CGRectGetMaxY(bounds);
+        return 1;
     }
 }
 
@@ -2733,8 +2785,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     };
     NSDictionary *layout = NativeSdkPacketDictionary(text[@"layout"]);
     if (!layout) {
-        [value drawAtPoint:NSMakePoint(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, value, baseAttributes, CGFLOAT_MAX, font)) withAttributes:baseAttributes];
-        return YES;
+        return NativeSdkPacketDrawAttributedText(value, baseAttributes, origin.x, origin.y, CGFLOAT_MAX, CGFLOAT_MAX);
     }
 
     // Engine-measured line breaks: the packet carries the exact lines the
@@ -2753,7 +2804,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
             if (lineText.length == 0) continue;
             CGFloat lineX = NativeSdkPacketNumber(line[@"x"], origin.x);
             CGFloat baseline = NativeSdkPacketNumber(line[@"baseline"], origin.y);
-            [lineText drawAtPoint:NSMakePoint(lineX, NativeSdkPacketTextOriginYForBaseline(baseline, lineText, baseAttributes, CGFLOAT_MAX, font)) withAttributes:baseAttributes];
+            if (!NativeSdkPacketDrawAttributedText(lineText, baseAttributes, lineX, baseline, CGFLOAT_MAX, CGFLOAT_MAX)) return NO;
         }
         return YES;
     }
@@ -2772,17 +2823,8 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     NSMutableDictionary *attributes = [baseAttributes mutableCopy];
     attributes[NSParagraphStyleAttributeName] = paragraph;
     CGFloat maxWidth = NativeSdkPacketNumber(layout[@"maxWidth"], 0);
-    CGFloat measuredWidth = ceil([value sizeWithAttributes:attributes].width + size);
-    CGFloat textWidth = maxWidth > 0 ? maxWidth : MAX(size, measuredWidth);
-    CGFloat textHeight = MAX(lineHeight > 0 ? lineHeight : size * 1.25, size * 1.25);
-    NSRect measuredRect = [value boundingRectWithSize:NSMakeSize(textWidth, CGFLOAT_MAX)
-                                             options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                          attributes:attributes];
-    textHeight = MAX(textHeight, ceil(measuredRect.size.height + 1));
-    [value drawWithRect:NSMakeRect(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, value, attributes, textWidth, font), textWidth, textHeight)
-                options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-             attributes:attributes];
-    return YES;
+    CGFloat textWidth = maxWidth > 0 ? maxWidth : CGFLOAT_MAX;
+    return NativeSdkPacketDrawAttributedText(value, attributes, origin.x, origin.y, textWidth, CGFLOAT_MAX);
 }
 
 static BOOL NativeSdkPacketDrawEffect(NSDictionary *effect, CGFloat opacity, CGContextRef context, CGFloat scale, id transformValue, BOOL hasClip, NSRect clipRect) {

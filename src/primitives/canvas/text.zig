@@ -59,6 +59,7 @@ pub const textLineRange = text_layout.textLineRange;
 pub const textLineCaretX = text_layout.textLineCaretX;
 pub const textLineBounds = text_layout.textLineBounds;
 pub const TextMeasureProvider = text_layout.TextMeasureProvider;
+pub const TextInkMetrics = text_layout.TextInkMetrics;
 pub const measureTextWidthForFont = text_layout.measureTextWidthForFont;
 pub const measureTextAdvance = text_layout.measureTextAdvance;
 pub const estimateTextWidth = text_layout.estimateTextWidth;

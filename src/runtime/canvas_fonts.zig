@@ -222,6 +222,7 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
                     .context = self,
                     .measure_fn = canvasFontMeasure,
                     .measure_advances_fn = canvasFontMeasureAdvances,
+                    .measure_ink_fn = canvasFontMeasureInk,
                 };
             }
             noteCanvasFontsChanged(self);
@@ -287,6 +288,92 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
                 @memset(advances[index + 1 .. next], 0);
                 index = next;
             }
+            return true;
+        }
+
+        fn canvasFontMeasureInk(context: ?*anyopaque, font_id: canvas.FontId, size: f32, text: []const u8, metrics: *canvas.TextInkMetrics) bool {
+            const runtime: *Runtime = @ptrCast(@alignCast(context));
+            const index = findCanvasFontIndex(runtime, font_id) orelse return false;
+            const face = &runtime.canvas_font_faces[index];
+            const scale = size / face.units_per_em;
+            var pen_x: f32 = 0;
+            var has_ink = false;
+            var min_x: f32 = 0;
+            var max_x: f32 = 0;
+            var min_y: f32 = 0;
+            var max_y: f32 = 0;
+            var offset: usize = 0;
+            while (offset < text.len) {
+                const next = @min(text.len, offset + canvas.utf8SequenceLength(text[offset]));
+                const cluster = text[offset..next];
+                const cell_advance = canvas.estimateTextWidthForFace(face, cluster, size);
+                const is_break = text[offset] == ' ' or text[offset] == '\t' or
+                    text[offset] == '\n' or text[offset] == '\r';
+
+                if (!is_break) {
+                    var glyph: u16 = 0;
+                    if (cluster.len == canvas.utf8SequenceLength(cluster[0]) and cluster.len > 1) {
+                        if (std.unicode.utf8Decode(cluster)) |codepoint| {
+                            glyph = face.glyphIndex(codepoint);
+                        } else |_| {}
+                    } else if (cluster.len == 1 and cluster[0] >= 0x20 and cluster[0] < 0x7F) {
+                        glyph = face.glyphIndex(cluster[0]);
+                    }
+
+                    if (glyph != 0) {
+                        const natural_advance = face.advance(glyph) * scale;
+                        const inset = @max(0, (cell_advance - natural_advance) * 0.5);
+                        const outline = face.glyphBounds(glyph) catch return false;
+                        if (outline) |glyph_bounds| {
+                            const outline_min_x = pen_x + inset + glyph_bounds.x * scale;
+                            const outline_max_x = pen_x + inset + (glyph_bounds.x + glyph_bounds.width) * scale;
+                            const outline_min_y = -((glyph_bounds.y + glyph_bounds.height) * scale);
+                            const outline_max_y = -(glyph_bounds.y * scale);
+                            if (!has_ink) {
+                                has_ink = true;
+                                min_x = outline_min_x;
+                                max_x = outline_max_x;
+                                min_y = outline_min_y;
+                                max_y = outline_max_y;
+                            } else {
+                                min_x = @min(min_x, outline_min_x);
+                                max_x = @max(max_x, outline_max_x);
+                                min_y = @min(min_y, outline_min_y);
+                                max_y = @max(max_y, outline_max_y);
+                            }
+                        }
+                    } else {
+                        // The reference renderer paints a solid fallback
+                        // cell for an uncovered cluster. Keep this provider
+                        // in lockstep with that block's actual cell bounds.
+                        const block_min_x = pen_x;
+                        const block_max_x = pen_x + cell_advance;
+                        const block_min_y = -size;
+                        const block_max_y = 0;
+                        if (!has_ink) {
+                            has_ink = true;
+                            min_x = block_min_x;
+                            max_x = block_max_x;
+                            min_y = block_min_y;
+                            max_y = block_max_y;
+                        } else {
+                            min_x = @min(min_x, block_min_x);
+                            max_x = @max(max_x, block_max_x);
+                            min_y = @min(min_y, block_min_y);
+                            max_y = @max(max_y, block_max_y);
+                        }
+                    }
+                }
+                pen_x += cell_advance;
+                offset = next;
+            }
+
+            metrics.* = if (has_ink) .{
+                .min_x = min_x,
+                .max_x = max_x,
+                .min_y = min_y,
+                .max_y = max_y,
+            } else .{};
             return true;
         }
 

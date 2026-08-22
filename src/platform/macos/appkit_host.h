@@ -616,6 +616,8 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
  * not valid UTF-8 or the font id cannot resolve (the engine then keeps
  * its per-prefix path for that run). */
 int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const char *text, size_t text_len, float *advances);
+/* Shaped glyph-path bounds for one line, relative to its baseline. */
+int native_sdk_appkit_measure_text_ink(uint64_t font_id, double size, const char *text, size_t text_len, double *min_x, double *max_x, double *min_y, double *max_y);
 
 // Register engine-validated TrueType bytes under a canvas font id so
 // measurement and packet text drawing resolve the id to this exact face.

@@ -529,6 +529,7 @@ pub const Runtime = struct {
                 .context = options.platform.services.context,
                 .measure_fn = measure_fn,
                 .measure_advances_fn = options.platform.services.measure_text_advances_fn,
+                .measure_ink_fn = options.platform.services.measure_text_ink_fn,
             }
         else
             null;

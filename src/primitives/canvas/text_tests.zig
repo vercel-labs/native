@@ -874,6 +874,47 @@ test "text bounds reserve top ink headroom for fallback glyphs" {
     try std.testing.expectEqual(@as(f32, 5.6), text.origin.y - text.size - bounds.y);
 }
 
+fn providerInkMetricsForTests(
+    context: ?*anyopaque,
+    font_id: FontId,
+    size: f32,
+    text: []const u8,
+    metrics: *support.TextInkMetrics,
+) bool {
+    _ = context;
+    _ = font_id;
+    _ = size;
+    _ = text;
+    metrics.* = .{
+        .min_x = -2,
+        .max_x = 12,
+        .min_y = -4,
+        .max_y = 18,
+    };
+    return true;
+}
+
+const provider_ink_measure = support.TextMeasureProvider{
+    .measure_fn = coretextLikeMeasureForTests,
+    .measure_ink_fn = providerInkMetricsForTests,
+};
+
+test "text bounds include provider ink metrics for standalone runs" {
+    const text = DrawText{
+        .font_id = 1,
+        .size = 10,
+        .origin = geometry.PointF.init(4, 20),
+        .color = Color.rgb8(255, 255, 255),
+        .text = "A",
+        .measure = &provider_ink_measure,
+    };
+    const bounds = textBounds(text).?;
+    try std.testing.expect(bounds.x <= 2);
+    try std.testing.expect(bounds.y <= 2);
+    try std.testing.expect(bounds.maxX() >= 16);
+    try std.testing.expect(bounds.maxY() >= 24);
+}
+
 test "text bounds and reference renderer honor per-run wrapping" {
     const text = DrawText{
         .font_id = 1,

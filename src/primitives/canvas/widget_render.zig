@@ -2673,6 +2673,7 @@ fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size, tokens)),
         .color = widgetForegroundColor(widget, tokens, tokens.colors.text),
         .text = widget.text,
+        .measure = tokens.text_measure,
     });
 }
 
@@ -3662,6 +3663,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
                 .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(plot.x - chart_axis_label_gap - width, top + size)),
                 .color = tokens.colors.text_muted,
                 .text = text,
+                .measure = tokens.text_measure,
             });
         }
     }
@@ -3693,6 +3695,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
                 .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(x, baseline)),
                 .color = tokens.colors.text_muted,
                 .text = label,
+                .measure = tokens.text_measure,
             });
         }
     }
@@ -4164,6 +4167,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
         .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(card.x + chart_detail_pad_h, row_y + size)),
         .color = tokens.colors.text,
         .text = title_text,
+        .measure = tokens.text_measure,
     });
     row_y += line_height;
     for (data.series, 0..) |series, series_index| {
@@ -4183,6 +4187,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(card.x + chart_detail_pad_h + chart_detail_swatch + chart_detail_swatch_gap, row_y + size)),
             .color = tokens.colors.text_muted,
             .text = chartDetailRowName(series),
+            .measure = tokens.text_measure,
         });
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
         const value_text = try builder.allocChartLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
@@ -4194,6 +4199,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(card.maxX() - chart_detail_pad_h - value_width, row_y + size)),
             .color = tokens.colors.text,
             .text = value_text,
+            .measure = tokens.text_measure,
         });
         row_y += line_height;
     }

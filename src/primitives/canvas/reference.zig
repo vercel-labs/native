@@ -782,7 +782,10 @@ pub const ReferenceRenderSurface = struct {
         // one tail glyph per multibyte codepoint: the flat 0.65em
         // multibyte estimate overshot the provider's real advances and
         // pushed the tail past the measured clip bounds.
-        const measure = if (value.text_layout) |options| options.measure else null;
+        const measure = if (value.text_layout) |options|
+            options.measure orelse value.measure
+        else
+            value.measure;
         const end = @min(value.text.len, line.text_start + line.paintedTextLen());
         var text_offset: usize = line.text_start;
         var x = line.bounds.x;
