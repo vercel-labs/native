@@ -2049,6 +2049,31 @@ static CGFloat NativeSdkPacketTextOriginYForBaseline(CGFloat baseline, NSFont *f
     return baseline - round(font.ascender);
 }
 
+static CGFloat NativeSdkPacketTextOriginYForRectBaseline(
+    CGFloat baseline,
+    NSString *value,
+    NSDictionary *attributes,
+    CGFloat width,
+    NSFont *font
+) {
+    if (value.length == 0 || width <= 0) {
+        return NativeSdkPacketTextOriginYForBaseline(baseline, font);
+    }
+
+    NSTextStorage *storage = [[NSTextStorage alloc] initWithString:value attributes:attributes];
+    NSLayoutManager *layoutManager = [[NSLayoutManager alloc] init];
+    NSTextContainer *container = [[NSTextContainer alloc] initWithContainerSize:NSMakeSize(width, CGFLOAT_MAX)];
+    container.lineFragmentPadding = 0;
+    [layoutManager addTextContainer:container];
+    [storage addLayoutManager:layoutManager];
+    [layoutManager ensureLayoutForTextContainer:container];
+    if (layoutManager.numberOfGlyphs == 0) {
+        return NativeSdkPacketTextOriginYForBaseline(baseline, font);
+    }
+
+    return baseline - [layoutManager locationForGlyphAtIndex:0].y;
+}
+
 // Italicizes a resolved sans face for the reserved italic span font ids
 // (5 and 6). Prefers a real italic face from the same family via
 // NSFontManager (SF has one; Geist does not ship a sans italic), and falls
@@ -2754,7 +2779,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
                                              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                           attributes:attributes];
     textHeight = MAX(textHeight, ceil(measuredRect.size.height + 1));
-    [value drawWithRect:NSMakeRect(origin.x, NativeSdkPacketTextOriginYForBaseline(origin.y, font), textWidth, textHeight)
+    [value drawWithRect:NSMakeRect(origin.x, NativeSdkPacketTextOriginYForRectBaseline(origin.y, value, attributes, textWidth, font), textWidth, textHeight)
                 options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
              attributes:attributes];
     return YES;
