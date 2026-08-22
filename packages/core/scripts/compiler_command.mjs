@@ -49,7 +49,7 @@ export function compilerArgv(command, options = {}) {
 }
 
 /// Resolve scriptc through its published package `bin` declaration. This is
-/// intentionally not `scriptc/dist/main.js`: 0.0.33's bin points at the Node
+/// intentionally not `scriptc/dist/main.js`: 0.0.35's bin points at the Node
 /// 24 compile-cache bootstrap, and future package entrypoint changes should
 /// reach every Native check/build invocation automatically.
 export function publishedScriptcArgv(origin, options = {}) {

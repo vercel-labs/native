@@ -13,7 +13,7 @@
 // relied on: it refuses node_modules-resident .ts by design
 // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), and outside node_modules
 // it only became DEFAULT in node 22.18. Hooking everything keeps both layouts
-// identical. scriptc 0.0.33 requires Node 24 for its published compile-cache
+// identical. scriptc 0.0.35 requires Node 24 for its published compile-cache
 // bootstrap, so this shared runner enforces the same floor before importing
 // any frontend module. Then it imports the requested module with argv
 // respliced so the target sees its usual shape (its own path at argv[1],
