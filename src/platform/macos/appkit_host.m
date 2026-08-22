@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#import "appkit_text_baseline.h"
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -2704,7 +2705,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     };
     NSDictionary *layout = NativeSdkPacketDictionary(text[@"layout"]);
     if (!layout) {
-        [value drawAtPoint:NSMakePoint(origin.x, origin.y - size) withAttributes:baseAttributes];
+        [value drawAtPoint:NSMakePoint(origin.x, NativeSdkAppKitLineFragmentOriginY(font, origin.y)) withAttributes:baseAttributes];
         return YES;
     }
 
@@ -2724,7 +2725,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
             if (lineText.length == 0) continue;
             CGFloat lineX = NativeSdkPacketNumber(line[@"x"], origin.x);
             CGFloat baseline = NativeSdkPacketNumber(line[@"baseline"], origin.y);
-            [lineText drawAtPoint:NSMakePoint(lineX, baseline - size) withAttributes:baseAttributes];
+            [lineText drawAtPoint:NSMakePoint(lineX, NativeSdkAppKitLineFragmentOriginY(font, baseline)) withAttributes:baseAttributes];
         }
         return YES;
     }
@@ -2750,7 +2751,13 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
                                              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                           attributes:attributes];
     textHeight = MAX(textHeight, ceil(measuredRect.size.height + 1));
-    [value drawWithRect:NSMakeRect(origin.x, origin.y - size, textWidth, textHeight)
+    CGFloat firstBaselineOffset = NativeSdkAppKitFirstBaselineOffset(
+        value,
+        attributes,
+        font,
+        NSMakeSize(textWidth, textHeight)
+    );
+    [value drawWithRect:NSMakeRect(origin.x, origin.y - firstBaselineOffset, textWidth, textHeight)
                 options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
              attributes:attributes];
     return YES;
