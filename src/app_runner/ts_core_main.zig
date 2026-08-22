@@ -10,7 +10,8 @@
 //!   scene / canvas   app.zon's `.shell` through `shellConfigFrom`; the
 //!                    canvas is the scene's first gpu_surface view.
 //!   identity         app.zon's `.id`/`.name`/`.display_name`.
-//!   security         app.zon's `.permissions` and navigation origins.
+//!   security         app.zon's `.permissions`, navigation origins, and
+//!                    `external_links` (Cmd.openExternalUrl allowlist).
 //!   theme            app.zon's `.theme` pack; the stock tokens compose
 //!                    it with the live system appearance. `.theme_accent`
 //!                    layers the manifest's one-accent brand override
@@ -91,6 +92,7 @@ pub fn appMarkup() []const u8 {
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
+const external_links = manifestExternalLinks();
 const app_data_dir_env = "NATIVE_SDK_APP_DATA_DIR";
 
 pub fn main(init: std.process.Init) !void {
@@ -320,7 +322,10 @@ pub fn main(init: std.process.Init) !void {
         .js_window_api = false,
         .security = .{
             .permissions = app_permissions,
-            .navigation = .{ .allowed_origins = allowed_origins },
+            .navigation = .{
+                .allowed_origins = allowed_origins,
+                .external_links = external_links,
+            },
         },
         .relational_migrations = &relational_migrations.migrations,
     }, init);
@@ -513,4 +518,27 @@ fn manifestAllowedOrigins() []const []const u8 {
         if (!@hasField(@TypeOf(manifest.security), "navigation")) return &.{};
         return manifestStringList(manifest.security.navigation, "allowed_origins");
     }
+}
+
+fn manifestExternalLinks() native_sdk.security.ExternalLinkPolicy {
+    comptime {
+        if (!@hasField(@TypeOf(manifest), "security")) return .{};
+        if (!@hasField(@TypeOf(manifest.security), "navigation")) return .{};
+        if (!@hasField(@TypeOf(manifest.security.navigation), "external_links")) return .{};
+        const links = manifest.security.navigation.external_links;
+        return .{
+            .action = manifestExternalLinkAction(links),
+            .allowed_urls = if (@hasField(@TypeOf(links), "allowed_urls"))
+                manifestStringList(links, "allowed_urls")
+            else
+                &.{},
+        };
+    }
+}
+
+fn manifestExternalLinkAction(comptime links: anytype) native_sdk.security.ExternalLinkAction {
+    if (!@hasField(@TypeOf(links), "action")) return .deny;
+    const action: []const u8 = links.action;
+    if (std.mem.eql(u8, action, "open_system_browser")) return .open_system_browser;
+    return .deny;
 }
