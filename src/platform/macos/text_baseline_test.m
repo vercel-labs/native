@@ -64,31 +64,39 @@ static NativeSdkTestInkRows NativeSdkTestDrawText(
         NSFontAttributeName: font,
         NSForegroundColorAttributeName: NSColor.whiteColor,
     } mutableCopy];
-    CGFloat baselineOffset = corrected ? round(font.ascender) : size;
+    CGFloat baselineOffset = size;
     if (lineHeight > 0) {
         NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
         paragraph.minimumLineHeight = lineHeight;
         paragraph.maximumLineHeight = lineHeight;
         attributes[NSParagraphStyleAttributeName] = paragraph;
-        const NSSize extent = NSMakeSize(80, 30);
         if (corrected) {
-            baselineOffset = NativeSdkAppKitDrawTextOnFirstBaseline(
+            NativeSdkAppKitDrawAttributedText(
                 value,
                 attributes,
-                font,
-                NSMakePoint(8, baseline),
-                extent
+                8,
+                baseline,
+                80,
+                CGFLOAT_MAX,
+                &baselineOffset
             );
         } else {
-            [value drawWithRect:NSMakeRect(8, baseline - baselineOffset, extent.width, extent.height)
+            [value drawWithRect:NSMakeRect(8, baseline - baselineOffset, 80, 30)
                         options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                      attributes:attributes];
         }
+    } else if (corrected) {
+        NativeSdkAppKitDrawAttributedText(
+            value,
+            attributes,
+            8,
+            baseline,
+            CGFLOAT_MAX,
+            CGFLOAT_MAX,
+            &baselineOffset
+        );
     } else {
-        const CGFloat y = corrected
-            ? NativeSdkAppKitLineFragmentOriginY(font, baseline)
-            : baseline - size;
-        [value drawAtPoint:NSMakePoint(8, y) withAttributes:attributes];
+        [value drawAtPoint:NSMakePoint(8, baseline - size) withAttributes:attributes];
     }
 
     [NSGraphicsContext restoreGraphicsState];
@@ -152,8 +160,8 @@ int native_sdk_test_appkit_text_baselines(
         const NativeSdkTestInkRows compactRegular = NativeSdkTestDrawText(regular, size, baseline, YES, 1, @"H", 96);
         const NativeSdkTestInkRows compactMono = NativeSdkTestDrawText(mono, size, baseline, YES, 1, @"H", 96);
         /* The emoji resolves to a fallback face with taller metrics. Scan only
-         * the leading Geist H: measuring with NSLayoutManager and then drawing
-         * through NSString used to move this H five rows above its baseline. */
+         * the leading Geist H to prove the shared TextKit draw keeps it on the
+         * same baseline as the no-fallback direct path. */
         const NativeSdkTestInkRows fallback = NativeSdkTestDrawText(regular, size, baseline, YES, 20, @"H\U0001F600", 19);
 
         if (outRegularOffset) *outRegularOffset = round(regular.ascender);

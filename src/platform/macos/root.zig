@@ -2983,9 +2983,11 @@ test "mac platform module exports type" {
 
 test "mac AppKit packet text anchors use the resolved font ascent" {
     const host_source = @embedFile("appkit_host.m");
+    const baseline_source = @embedFile("appkit_text_baseline.h");
     try std.testing.expect(std.mem.indexOf(u8, host_source, "static BOOL NativeSdkPacketDrawAttributedText(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "drawGlyphsForGlyphRange:glyphRange atPoint:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "glyphRangeForTextContainer:container") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "return NativeSdkAppKitDrawAttributedText(value, attributes, x, baseline, width, height, NULL)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, baseline_source, "drawGlyphsForGlyphRange:glyphRange atPoint:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, baseline_source, "glyphRangeForTextContainer:container") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_measure_text_ink(") != null);
 }
 

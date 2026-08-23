@@ -2054,24 +2054,7 @@ static BOOL NativeSdkPacketDrawAttributedText(
     CGFloat width,
     CGFloat height
 ) {
-    if (value.length == 0) return YES;
-
-    NSTextStorage *storage = [[NSTextStorage alloc] initWithString:value attributes:attributes];
-    NSLayoutManager *layoutManager = [[NSLayoutManager alloc] init];
-    NSTextContainer *container = [[NSTextContainer alloc] initWithContainerSize:NSMakeSize(
-        width > 0 ? width : CGFLOAT_MAX,
-        height > 0 ? height : CGFLOAT_MAX
-    )];
-    container.lineFragmentPadding = 0;
-    [layoutManager addTextContainer:container];
-    [storage addLayoutManager:layoutManager];
-    [layoutManager ensureLayoutForTextContainer:container];
-
-    NSRange glyphRange = [layoutManager glyphRangeForTextContainer:container];
-    if (glyphRange.length == 0) return YES;
-    CGFloat firstLineOffset = [layoutManager locationForGlyphAtIndex:glyphRange.location].y;
-    [layoutManager drawGlyphsForGlyphRange:glyphRange atPoint:NSMakePoint(x, baseline - firstLineOffset)];
-    return YES;
+    return NativeSdkAppKitDrawAttributedText(value, attributes, x, baseline, width, height, NULL);
 }
 
 // Italicizes a resolved sans face for the reserved italic span font ids
