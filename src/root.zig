@@ -21,6 +21,8 @@ pub const js = @import("js/root.zig");
 pub const bridge = @import("bridge/root.zig");
 pub const frontend = @import("frontend/root.zig");
 pub const security = @import("security/root.zig");
+pub const updater = @import("updater/root.zig");
+pub const update_check_command = platform.update_check_command;
 
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.Options;

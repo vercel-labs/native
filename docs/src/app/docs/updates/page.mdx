@@ -1,38 +1,125 @@
 # Updates
 
-The Native SDK reserves an explicit update configuration in `app.zon` so packaged apps can declare how they discover signed updates.
+Native SDK includes its own signed updater for packaged macOS apps. It does not use Sparkle or another updater framework.
+
+An enabled app gets:
+
+- **Check for Updates…** in the macOS application menu.
+- Optional background checks after launch.
+- A standard update-available prompt with release notes.
+- Download progress, signed metadata verification, archive size and SHA-256 verification.
+- In-place app replacement, rollback when replacement or the relaunch request fails, and relaunch into the new version.
+
+The first backend supports macOS apps using the system host (`web_engine: "system"`). Windows, Linux, and the macOS Chromium host do not install updates yet.
+
+## Configure the app
+
+Generate an Ed25519 key pair once:
+
+```bash
+native update keygen --private-key ~/Documents/my-app-update.key
+```
+
+The command writes the 32-byte private seed with mode `0600` and prints the base64 public key. Back up the private key securely and keep it out of the app repository, build artifacts, and update server.
+
+Put only the public key and feed URL in `app.json`:
+
+```json
+{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "com.example.my-app",
+  "name": "my-app",
+  "version": "1.0.0",
+  "updates": {
+    "feed_url": "https://example.com/releases/native-update.json",
+    "public_key": "base64-ed25519-public-key",
+    "check_on_start": true
+  }
+}
+```
+
+Legacy `app.zon` uses the same fields:
 
 ```zig
 .updates = .{
-    .feed_url = "https://example.com/releases/native-sdk-feed.json",
+    .feed_url = "https://example.com/releases/native-update.json",
     .public_key = "base64-ed25519-public-key",
     .check_on_start = true,
 },
 ```
 
-The runtime does not silently install updates. Apps should surface update checks through their own UI, verify signatures before applying artifacts, and keep platform-specific installation behavior explicit.
+Both URLs in the release path—the feed URL and archive URL—must use HTTPS. The Ed25519 signature remains the authority if the server or TLS endpoint is compromised.
 
-## Fields
+## Build the update archive
 
-<table>
-  <thead>
-    <tr>
-      <th>Field</th>
-      <th>Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>feed_url</code></td>
-      <td>HTTPS endpoint that describes available releases.</td>
-    </tr>
-    <tr>
-      <td><code>public_key</code></td>
-      <td>Public key used to verify update metadata and artifacts.</td>
-    </tr>
-    <tr>
-      <td><code>check_on_start</code></td>
-      <td>Whether the app should check for updates during startup.</td>
-    </tr>
-  </tbody>
-</table>
+Package the app with the same signing identity as the installed release and request the updater ZIP:
+
+```bash
+native build
+native package \
+  --target macos \
+  --signing identity \
+  --identity "Developer ID Application: Your Name (TEAMID)" \
+  --update-archive
+```
+
+The command emits the `.app` and a ZIP named like:
+
+```text
+zig-out/package/my-app-1.1.0-macos-ReleaseFast-update.zip
+```
+
+That ZIP contains exactly the packaged `.app`. Do not use the user-facing DMG as the update archive. When the manifest enables updates, `zig build package` also requests this updater ZIP automatically; use the direct `native package` command when you need Developer ID signing flags.
+
+## Sign the release feed
+
+Upload the ZIP to its final HTTPS URL, then sign its immutable URL, size, digest, app identity, version, target, and release notes:
+
+```bash
+native update sign \
+  --manifest app.json \
+  --private-key ~/Documents/my-app-update.key \
+  --archive zig-out/package/my-app-1.1.0-macos-ReleaseFast-update.zip \
+  --url https://example.com/releases/my-app-1.1.0-macos-aarch64.zip \
+  --target macos-aarch64 \
+  --notes "Faster launch and improved export reliability." \
+  --output native-update.json
+```
+
+Use `macos-aarch64` for Apple silicon and `macos-x86_64` for Intel. Publish the resulting `native-update.json` at the manifest's `feed_url`. Sign and publish one target-specific feed per app build.
+
+`native update sign` refuses a private key that does not match the public key embedded in the manifest.
+
+## Trigger a check
+
+The stock application-menu item requires no app code. `check_on_start` performs a quiet startup check: no-update results stay silent and failures go to the app log.
+
+To place the action in another menu, tray item, shortcut, or native control, dispatch the reserved command:
+
+```text
+app.check-for-updates
+```
+
+The runtime consumes this command as a host action. Do not map it through a TypeScript core's `commandMsg` or a Zig app's `on_command`.
+
+## Verification model
+
+The updater verifies every release in this order:
+
+1. Decode the bounded feed envelope.
+2. Verify its exact payload bytes with the embedded Ed25519 public key.
+3. Match bundle ID, target architecture, and a newer semantic version.
+4. Download through HTTPS and reject redirects away from HTTPS.
+5. Match the signed archive byte size and SHA-256 digest before extraction.
+6. Require exactly one top-level `.app` with the expected bundle ID and version.
+7. For Developer ID apps, require the update to retain the installed app's bundle identifier and Apple signing team.
+8. Exit the app, replace it in the containing directory, retain the old bundle as rollback, and relaunch.
+
+Unsigned and ad-hoc apps can use the Ed25519 trust path for development. Public releases should still be Developer ID signed and notarized so Gatekeeper can identify the developer and validate the downloaded app independently.
+
+## Current limits
+
+- The containing directory must be writable by the current user. The updater does not request administrator privileges or install into an administrator-owned location.
+- The macOS system host is supported; Chromium, Windows, and Linux backends are pending.
+- Full ZIP releases are supported. Delta updates, channels, phased rollout, skipped-version preferences, and automatic background installation are not implemented yet.
+- An app renamed in Finder is supported; the update ZIP may keep its original bundle filename.

@@ -159,6 +159,8 @@ macOS app bundles declare `LSMinimumSystemVersion` as `11.0`. File associations 
 
 See [Code Signing](/docs/packaging/signing) for signing, notarization, and DMG creation.
 
+Apps using [native updates](/docs/updates) add `--update-archive` to emit the ZIP consumed by the updater. The updater ZIP contains exactly the packaged `.app`; it is separate from the user-facing DMG.
+
 ### DMG archives
 
 Add <code>--archive</code> to turn the packaged app into the disk image users download:

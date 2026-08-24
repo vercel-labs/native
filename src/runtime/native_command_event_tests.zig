@@ -253,6 +253,29 @@ test "runtime dispatches menu command events" {
     try std.testing.expectEqual(@as(platform.WindowId, 1), app_state.last_window_id);
 }
 
+test "runtime reserves the native update command for the platform host" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "update-command", .source = platform.WebViewSource.html("<p>Update</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event_value == .command) self.command_count += 1;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    try harness.runtime.dispatchCommand(app_state.app(), .{ .name = platform.update_check_command, .source = .menu });
+    try std.testing.expectEqual(@as(u32, 0), app_state.command_count);
+}
+
 test "automation snapshot exposes configured app menus" {
     const items = [_]platform.MenuItem{
         .{ .label = "Refresh", .command = "app.refresh" },

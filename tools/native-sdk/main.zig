@@ -103,6 +103,19 @@ pub fn main(init: std.process.Init) !void {
             error.ResetNeedsConfirmation => fail("native db reset deletes this app's engine-owned app.db; rerun as `native db reset --yes`"),
             else => return err,
         };
+    } else if (std.mem.eql(u8, command, "update")) {
+        tooling.update.run(allocator, init.io, args[2..]) catch |err| switch (err) {
+            error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json]"),
+            error.KeyAlreadyExists => fail("the private update key already exists; choose another --private-key path or move the existing key explicitly"),
+            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS"),
+            error.InvalidTarget => fail("update target must be macos-aarch64 or macos-x86_64"),
+            error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
+            error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),
+            error.InvalidUpdatePublicKey => fail("the app manifest update public_key is not a valid base64 Ed25519 public key"),
+            error.UpdateKeyMismatch => fail("the private update key does not match the public_key embedded in the app manifest"),
+            error.GeneratedFeedInvalid => fail("the generated update feed failed its own verification; no feed was written"),
+            else => return err,
+        };
     } else if (std.mem.eql(u8, command, "vendor")) {
         if (args.len < 3) fail("usage: native vendor [dir] <package@exact-version> [more packages...]");
         const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, init.io, init.environ_map) orelse
@@ -189,9 +202,9 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
+            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]",
             .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
-            .bool_flags = &.{ "--cef-auto-install", "--archive" },
+            .bool_flags = &.{ "--cef-auto-install", "--archive", "--update-archive" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json";
         const metadata = tooling.manifest.readMetadata(allocator, init.io, manifest_path) catch |err| switch (err) {
@@ -266,6 +279,7 @@ pub fn main(init: std.process.Init) !void {
             .cef_dir = web_engine.cef_dir,
             .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
             .archive = archive,
+            .update_archive = flagBool(args, "--update-archive"),
             .env_map = init.environ_map,
         });
         tooling.package.printDiagnostic(stats);
@@ -460,6 +474,7 @@ fn usage() void {
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
         \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.json/app.zon
         \\  db new-migration <name> | status | reset --yes manage the relational schema and development database
+        \\  update keygen|sign                              generate Ed25519 keys and signed native update feeds
         \\  vendor [dir] <package@exact-version> [...]     check npm sources into src/services/vendor and pin their hashes in the app manifest
         \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  eject component <name> [dir]                   write an owned copy of a library composite into src/components/
@@ -467,7 +482,7 @@ fn usage() void {
         \\  doctor [--strict] [--manifest app.json] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.json|app.zon]
         \\  bundle-assets [app.json|app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]
         \\  dev [--manifest app.json] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
         \\  package-windows [--output path] [--binary path] [--service-binary path]
         \\  package-linux [--output path] [--binary path] [--service-binary path]

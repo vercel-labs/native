@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "../ios/apple_image_fit.h"
 
@@ -1005,6 +1006,17 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSImage *appIcon;
 @property(nonatomic, strong) NSString *bundleIdentifier;
 @property(nonatomic, strong) NSString *iconPath;
+@property(nonatomic, strong) NSString *updateFeedURL;
+@property(nonatomic, strong) NSString *updatePublicKey;
+@property(nonatomic, strong) NSString *updateTarget;
+@property(nonatomic, assign) BOOL updateCheckOnStart;
+@property(nonatomic, assign) BOOL updateCheckRunning;
+@property(nonatomic, strong) NSURLSessionDownloadTask *updateFeedTask;
+@property(nonatomic, strong) NSURLSessionDownloadTask *updateDownloadTask;
+@property(nonatomic, strong) NSTimer *updateFeedLimitTimer;
+@property(nonatomic, strong) NSTimer *updateDownloadLimitTimer;
+@property(nonatomic, assign) uint64_t updateExpectedArchiveBytes;
+@property(nonatomic, strong) NSAlert *updateDownloadAlert;
 @property(nonatomic, strong) NSString *windowLabel;
 @property(nonatomic, assign) native_sdk_appkit_event_callback_t callback;
 @property(nonatomic, assign) native_sdk_appkit_bridge_callback_t bridgeCallback;
@@ -1093,6 +1105,13 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)configureApplication;
 - (void)buildMenuBar;
 - (void)addApplicationMenuToMenu:(NSMenu *)mainMenu;
+- (void)checkForUpdatesMenuItem:(id)sender;
+- (void)checkForUpdatesUserInitiated:(BOOL)userInitiated;
+- (void)downloadUpdateVersion:(NSString *)version archiveURL:(NSString *)archiveURL archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256 releaseNotes:(NSString *)releaseNotes;
+- (void)installDownloadedUpdate:(NSURL *)downloadURL version:(NSString *)version archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256;
+- (void)showUpdateError:(NSString *)message userInitiated:(BOOL)userInitiated;
+- (void)updateFeedLimitTimerFired:(NSTimer *)timer;
+- (void)updateDownloadLimitTimerFired:(NSTimer *)timer;
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
 - (NSMenuItem *)commandMenuItem:(NSString *)title command:(NSString *)command key:(NSString *)key modifiers:(uint32_t)modifiers enabled:(BOOL)enabled checked:(BOOL)checked;
 - (void)menuCommandItemClicked:(NSMenuItem *)menuItem;
@@ -7914,6 +7933,11 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.bundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : @"dev.native_sdk.app";
     self.iconPath = iconPath ?: @"";
     self.windowLabel = windowLabel.length > 0 ? windowLabel : @"main";
+    self.updateFeedURL = @"";
+    self.updatePublicKey = @"";
+    self.updateTarget = @"";
+    self.updateCheckOnStart = NO;
+    self.updateCheckRunning = NO;
     self.windows = [[NSMutableDictionary alloc] init];
     self.webViews = [[NSMutableDictionary alloc] init];
     self.delegates = [[NSMutableDictionary alloc] init];
@@ -8202,6 +8226,10 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     NSUserNotificationCenter *notificationCenter = [NSUserNotificationCenter defaultUserNotificationCenter];
     if (notificationCenter.delegate == self) notificationCenter.delegate = nil;
     [self invalidateAppTimers];
+    [self.updateFeedLimitTimer invalidate];
+    [self.updateDownloadLimitTimer invalidate];
+    [self.updateFeedTask cancel];
+    [self.updateDownloadTask cancel];
     [self audioCaptureStopSource:0];
     [self audioCaptureStopSource:1];
     [self audioStop];
@@ -9869,12 +9897,331 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:self.displayName];
     [appMenuItem setSubmenu:appMenu];
     [appMenu addItem:[self menuItem:[NSString stringWithFormat:@"About %@", self.displayName] action:@selector(showAboutPanel:) key:@"" modifiers:0]];
+    if (self.updateFeedURL.length > 0 && self.updatePublicKey.length > 0) {
+        [appMenu addItem:[self menuItem:@"Check for Updates…" action:@selector(checkForUpdatesMenuItem:) key:@"" modifiers:0]];
+    }
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItem:[self menuItem:[NSString stringWithFormat:@"Hide %@", self.displayName] action:@selector(hide:) key:@"h" modifiers:NSEventModifierFlagCommand]];
     [appMenu addItem:[self menuItem:@"Hide Others" action:@selector(hideOtherApplications:) key:@"h" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagOption)]];
     [appMenu addItem:[self menuItem:@"Show All" action:@selector(unhideAllApplications:) key:@"" modifiers:0]];
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItem:[self menuItem:[NSString stringWithFormat:@"Quit %@", self.displayName] action:@selector(terminate:) key:@"q" modifiers:NSEventModifierFlagCommand]];
+}
+
+- (void)checkForUpdatesMenuItem:(id)sender {
+    (void)sender;
+    [self checkForUpdatesUserInitiated:YES];
+}
+
+- (void)showUpdateError:(NSString *)message userInitiated:(BOOL)userInitiated {
+    self.updateCheckRunning = NO;
+    if (!userInitiated) {
+        NSLog(@"Native SDK update check failed: %@", message ?: @"unknown error");
+        return;
+    }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.messageText = @"Unable to Check for Updates";
+    alert.informativeText = message ?: @"The update could not be checked.";
+    [alert addButtonWithTitle:@"OK"];
+    [alert beginSheetModalForWindow:self.window completionHandler:nil];
+}
+
+- (void)checkForUpdatesUserInitiated:(BOOL)userInitiated {
+    if (self.updateFeedURL.length == 0 || self.updatePublicKey.length == 0 || self.updateCheckRunning) return;
+    NSString *bundlePath = NSBundle.mainBundle.bundlePath;
+    if (![[bundlePath pathExtension].lowercaseString isEqualToString:@"app"]) {
+        [self showUpdateError:@"Update checks run only from a packaged .app bundle." userInitiated:userInitiated];
+        return;
+    }
+    NSURL *feedURL = [NSURL URLWithString:self.updateFeedURL];
+    if (!feedURL || ![feedURL.scheme.lowercaseString isEqualToString:@"https"]) {
+        [self showUpdateError:@"The update feed URL is invalid." userInitiated:userInitiated];
+        return;
+    }
+    self.updateCheckRunning = YES;
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    NSMutableURLRequest *feedRequest = [NSMutableURLRequest requestWithURL:feedURL];
+    [feedRequest setValue:@"bytes=0-65536" forHTTPHeaderField:@"Range"];
+    self.updateFeedTask = [[NSURLSession sharedSession] downloadTaskWithRequest:feedRequest completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        NSDictionary *attributes = location ? [[NSFileManager defaultManager] attributesOfItemAtPath:location.path error:nil] : nil;
+        unsigned long long feedBytes = attributes.fileSize;
+        NSData *data = feedBytes > 0 && feedBytes <= 64 * 1024 ? [NSData dataWithContentsOfURL:location options:NSDataReadingMappedIfSafe error:nil] : nil;
+        if (error || data.length == 0 || ![response.URL.scheme.lowercaseString isEqualToString:@"https"] || ![response isKindOfClass:[NSHTTPURLResponse class]] || ((NSHTTPURLResponse *)response).statusCode < 200 || ((NSHTTPURLResponse *)response).statusCode >= 300) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf.updateFeedLimitTimer invalidate];
+                strongSelf.updateFeedLimitTimer = nil;
+                strongSelf.updateCheckRunning = NO;
+                strongSelf.updateFeedTask = nil;
+                [strongSelf showUpdateError:error.localizedDescription ?: @"The update feed could not be downloaded." userInitiated:userInitiated];
+            });
+            return;
+        }
+        NSMutableData *versionData = [NSMutableData dataWithLength:64];
+        NSMutableData *archiveURLData = [NSMutableData dataWithLength:4096];
+        NSMutableData *releaseNotesData = [NSMutableData dataWithLength:16 * 1024];
+        native_sdk_update_verify_result_t verified = native_sdk_update_verify_feed(
+            data.bytes, data.length,
+            strongSelf.updatePublicKey.UTF8String, [strongSelf.updatePublicKey lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+            strongSelf.bundleIdentifier.UTF8String, [strongSelf.bundleIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+            strongSelf.appVersion.UTF8String, [strongSelf.appVersion lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+            strongSelf.updateTarget.UTF8String, [strongSelf.updateTarget lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+            versionData.mutableBytes, versionData.length,
+            archiveURLData.mutableBytes, archiveURLData.length,
+            releaseNotesData.mutableBytes, releaseNotesData.length);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [strongSelf.updateFeedLimitTimer invalidate];
+            strongSelf.updateFeedLimitTimer = nil;
+            strongSelf.updateFeedTask = nil;
+            if (verified.ok == 2) {
+                strongSelf.updateCheckRunning = NO;
+                if (userInitiated) {
+                    NSAlert *alert = [[NSAlert alloc] init];
+                    alert.messageText = [NSString stringWithFormat:@"%@ is up to date", strongSelf.displayName];
+                    alert.informativeText = [NSString stringWithFormat:@"You’re running version %@.", strongSelf.appVersion];
+                    [alert addButtonWithTitle:@"OK"];
+                    [alert beginSheetModalForWindow:strongSelf.window completionHandler:nil];
+                }
+                return;
+            }
+            if (verified.ok != 1) {
+                NSString *message = verified.error_code == 3 ? @"The update feed signature is invalid."
+                    : verified.error_code == 5 ? @"The update feed belongs to another app."
+                    : verified.error_code == 6 ? @"The update feed does not contain a release for this Mac."
+                    : @"The update feed is malformed or cannot be verified.";
+                [strongSelf showUpdateError:message userInitiated:userInitiated];
+                return;
+            }
+            NSString *version = [[NSString alloc] initWithBytes:versionData.bytes length:verified.version_len encoding:NSUTF8StringEncoding];
+            NSString *archiveURL = [[NSString alloc] initWithBytes:archiveURLData.bytes length:verified.archive_url_len encoding:NSUTF8StringEncoding];
+            NSString *releaseNotes = [[NSString alloc] initWithBytes:releaseNotesData.bytes length:verified.release_notes_len encoding:NSUTF8StringEncoding] ?: @"";
+            NSString *sha256 = [[NSString alloc] initWithBytes:verified.sha256 length:sizeof(verified.sha256) encoding:NSASCIIStringEncoding];
+            if (!version || !archiveURL || !sha256) {
+                [strongSelf showUpdateError:@"The verified update metadata could not be decoded." userInitiated:userInitiated];
+                return;
+            }
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = [NSString stringWithFormat:@"A new version of %@ is available", strongSelf.displayName];
+            alert.informativeText = releaseNotes.length > 0
+                ? [NSString stringWithFormat:@"Version %@\n\n%@", version, releaseNotes]
+                : [NSString stringWithFormat:@"Version %@ is ready to install.", version];
+            [alert addButtonWithTitle:@"Install Update"];
+            [alert addButtonWithTitle:@"Later"];
+            [alert beginSheetModalForWindow:strongSelf.window completionHandler:^(NSModalResponse responseCode) {
+                if (responseCode == NSAlertFirstButtonReturn) {
+                    [strongSelf downloadUpdateVersion:version archiveURL:archiveURL archiveBytes:verified.archive_bytes sha256:sha256 releaseNotes:releaseNotes];
+                } else {
+                    strongSelf.updateCheckRunning = NO;
+                }
+            }];
+        });
+    }];
+    [self.updateFeedTask resume];
+    self.updateFeedLimitTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 target:self selector:@selector(updateFeedLimitTimerFired:) userInfo:nil repeats:YES];
+}
+
+- (void)updateFeedLimitTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if (!self.updateFeedTask) {
+        [self.updateFeedLimitTimer invalidate];
+        self.updateFeedLimitTimer = nil;
+        return;
+    }
+    if (self.updateFeedTask.countOfBytesReceived > 64 * 1024) [self.updateFeedTask cancel];
+}
+
+- (void)downloadUpdateVersion:(NSString *)version archiveURL:(NSString *)archiveURL archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256 releaseNotes:(NSString *)releaseNotes {
+    (void)releaseNotes;
+    NSURL *url = [NSURL URLWithString:archiveURL];
+    if (!url || ![url.scheme.lowercaseString isEqualToString:@"https"]) {
+        [self showUpdateError:@"The update archive URL is invalid." userInitiated:YES];
+        return;
+    }
+    NSAlert *progress = [[NSAlert alloc] init];
+    progress.messageText = [NSString stringWithFormat:@"Downloading %@ %@…", self.displayName, version];
+    progress.informativeText = @"The update will be verified before it is installed.";
+    NSProgressIndicator *indicator = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, 320, 20)];
+    indicator.indeterminate = YES;
+    indicator.style = NSProgressIndicatorStyleBar;
+    [indicator startAnimation:nil];
+    progress.accessoryView = indicator;
+    [progress addButtonWithTitle:@"Cancel"];
+    self.updateDownloadAlert = progress;
+    self.updateExpectedArchiveBytes = archiveBytes;
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    self.updateDownloadTask = [[NSURLSession sharedSession] downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        NSURL *copied = nil;
+        NSError *copyError = error;
+        if (!copyError && location && [response.URL.scheme.lowercaseString isEqualToString:@"https"] && [response isKindOfClass:[NSHTTPURLResponse class]] && ((NSHTTPURLResponse *)response).statusCode >= 200 && ((NSHTTPURLResponse *)response).statusCode < 300) {
+            NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"native-update-%@.zip", NSUUID.UUID.UUIDString]];
+            copied = [NSURL fileURLWithPath:path];
+            if (![[NSFileManager defaultManager] copyItemAtURL:location toURL:copied error:&copyError]) copied = nil;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [strongSelf.updateDownloadLimitTimer invalidate];
+            strongSelf.updateDownloadLimitTimer = nil;
+            strongSelf.updateDownloadTask = nil;
+            if (strongSelf.updateDownloadAlert.window.sheetParent) {
+                [strongSelf.updateDownloadAlert.window.sheetParent endSheet:strongSelf.updateDownloadAlert.window returnCode:NSModalResponseOK];
+            }
+            strongSelf.updateDownloadAlert = nil;
+            if (!copied || copyError) {
+                [strongSelf showUpdateError:copyError.localizedDescription ?: @"The update archive could not be downloaded." userInitiated:YES];
+                return;
+            }
+            [strongSelf installDownloadedUpdate:copied version:version archiveBytes:archiveBytes sha256:sha256];
+        });
+    }];
+    [progress beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse responseCode) {
+        if (responseCode == NSAlertFirstButtonReturn && weakSelf.updateDownloadTask) {
+            [weakSelf.updateDownloadTask cancel];
+        }
+    }];
+    [self.updateDownloadTask resume];
+    self.updateDownloadLimitTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 target:self selector:@selector(updateDownloadLimitTimerFired:) userInfo:nil repeats:YES];
+}
+
+- (void)updateDownloadLimitTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if (!self.updateDownloadTask) {
+        [self.updateDownloadLimitTimer invalidate];
+        self.updateDownloadLimitTimer = nil;
+        return;
+    }
+    if ((uint64_t)self.updateDownloadTask.countOfBytesReceived > self.updateExpectedArchiveBytes) [self.updateDownloadTask cancel];
+}
+
+static BOOL NativeSdkRunTask(NSString *launchPath, NSArray<NSString *> *arguments, NSString **output) {
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:launchPath];
+    task.arguments = arguments;
+    NSPipe *pipe = [NSPipe pipe];
+    task.standardOutput = pipe;
+    task.standardError = pipe;
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) {
+        if (output) *output = error.localizedDescription;
+        return NO;
+    }
+    NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+    [task waitUntilExit];
+    if (output) *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+    return task.terminationStatus == 0;
+}
+
+static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
+    SecStaticCodeRef code = NULL;
+    CFDictionaryRef information = NULL;
+    OSStatus status = SecStaticCodeCreateWithPath((__bridge CFURLRef)[NSURL fileURLWithPath:bundlePath], kSecCSDefaultFlags, &code);
+    if (status == errSecSuccess) status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &information);
+    NSString *result = nil;
+    if (status == errSecSuccess && information) {
+        CFTypeRef value = CFDictionaryGetValue(information, kSecCodeInfoTeamIdentifier);
+        if (value && CFGetTypeID(value) == CFStringGetTypeID()) result = [(__bridge NSString *)value copy];
+    }
+    if (information) CFRelease(information);
+    if (code) CFRelease(code);
+    return result;
+}
+
+- (void)installDownloadedUpdate:(NSURL *)downloadURL version:(NSString *)version archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256 {
+    NSString *bundlePath = NSBundle.mainBundle.bundlePath.stringByStandardizingPath;
+    NSString *parentPath = bundlePath.stringByDeletingLastPathComponent;
+    if (![[NSFileManager defaultManager] isWritableFileAtPath:parentPath]) {
+        [[NSFileManager defaultManager] removeItemAtURL:downloadURL error:nil];
+        [self showUpdateError:@"The app’s containing folder is not writable. Move the app to a user-writable Applications folder or install the update manually." userInitiated:YES];
+        return;
+    }
+    if (!native_sdk_update_verify_archive(downloadURL.path.UTF8String, [downloadURL.path lengthOfBytesUsingEncoding:NSUTF8StringEncoding], archiveBytes, sha256.UTF8String, [sha256 lengthOfBytesUsingEncoding:NSUTF8StringEncoding])) {
+        [[NSFileManager defaultManager] removeItemAtURL:downloadURL error:nil];
+        [self showUpdateError:@"The downloaded update did not match its signed size and SHA-256 digest." userInitiated:YES];
+        return;
+    }
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        NSFileManager *manager = [NSFileManager defaultManager];
+        NSString *stagePath = [parentPath stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.native-update-%@", bundlePath.lastPathComponent, NSUUID.UUID.UUIDString]];
+        NSString *extractPath = [stagePath stringByAppendingPathComponent:@"extracted"];
+        NSError *stageError = nil;
+        if (![manager createDirectoryAtPath:extractPath withIntermediateDirectories:YES attributes:nil error:&stageError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:stageError.localizedDescription userInitiated:YES]; });
+            return;
+        }
+        NSString *taskOutput = nil;
+        if (!NativeSdkRunTask(@"/usr/bin/ditto", @[ @"-x", @"-k", downloadURL.path, extractPath ], &taskOutput)) {
+            [manager removeItemAtPath:stagePath error:nil];
+            [manager removeItemAtURL:downloadURL error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:taskOutput.length > 0 ? taskOutput : @"The update archive could not be extracted." userInitiated:YES]; });
+            return;
+        }
+        [manager removeItemAtURL:downloadURL error:nil];
+        NSError *listingError = nil;
+        NSArray<NSString *> *entries = [manager contentsOfDirectoryAtPath:extractPath error:&listingError];
+        NSMutableArray<NSString *> *appEntries = [NSMutableArray array];
+        for (NSString *entry in entries ?: @[]) {
+            if ([[entry pathExtension].lowercaseString isEqualToString:@"app"]) [appEntries addObject:entry];
+        }
+        if (listingError || entries.count != 1 || appEntries.count != 1) {
+            [manager removeItemAtPath:stagePath error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:@"The update archive must contain exactly one top-level .app bundle." userInitiated:YES]; });
+            return;
+        }
+        NSString *candidatePath = [extractPath stringByAppendingPathComponent:appEntries.firstObject];
+        NSNumber *candidateIsDirectory = nil;
+        NSNumber *candidateIsSymlink = nil;
+        [[NSURL fileURLWithPath:candidatePath] getResourceValue:&candidateIsDirectory forKey:NSURLIsDirectoryKey error:nil];
+        [[NSURL fileURLWithPath:candidatePath] getResourceValue:&candidateIsSymlink forKey:NSURLIsSymbolicLinkKey error:nil];
+        NSBundle *candidateBundle = [NSBundle bundleWithPath:candidatePath];
+        if (!candidateIsDirectory.boolValue || candidateIsSymlink.boolValue || !candidateBundle || ![candidateBundle.bundleIdentifier isEqualToString:strongSelf.bundleIdentifier] || ![[candidateBundle objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:version]) {
+            [manager removeItemAtPath:stagePath error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:@"The update archive does not contain the expected app bundle and version." userInitiated:YES]; });
+            return;
+        }
+        NSString *teamIdentifier = NativeSdkSigningTeamIdentifier(bundlePath);
+        if (teamIdentifier.length > 0) {
+            if ([teamIdentifier rangeOfCharacterFromSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]].location != NSNotFound ||
+                [strongSelf.bundleIdentifier rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\\\""]].location != NSNotFound) {
+                [manager removeItemAtPath:stagePath error:nil];
+                dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:@"The installed app’s signing identity cannot be represented safely." userInitiated:YES]; });
+                return;
+            }
+            NSString *requirement = [NSString stringWithFormat:@"anchor apple generic and certificate leaf[subject.OU] = \"%@\" and identifier \"%@\"", teamIdentifier, strongSelf.bundleIdentifier];
+            NSMutableArray<NSString *> *codesignArguments = [NSMutableArray arrayWithArray:@[ @"--verify", @"--deep", @"--strict" ]];
+            if (requirement.length > 0) [codesignArguments addObject:[@"-R=" stringByAppendingString:requirement]];
+            [codesignArguments addObject:candidatePath];
+            if (!NativeSdkRunTask(@"/usr/bin/codesign", codesignArguments, &taskOutput)) {
+                [manager removeItemAtPath:stagePath error:nil];
+                dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:taskOutput.length > 0 ? taskOutput : @"The update’s Apple code signature does not match the installed app." userInitiated:YES]; });
+                return;
+            }
+        }
+        NSString *scriptPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"native-update-install-%@.sh", NSUUID.UUID.UUIDString]];
+        NSString *backupPath = [parentPath stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.native-update-backup-%@", bundlePath.lastPathComponent, NSUUID.UUID.UUIDString]];
+        NSString *script = @"#!/bin/sh\nset -u\npid=\"$1\"\ncurrent=\"$2\"\ncandidate=\"$3\"\nbackup=\"$4\"\nstage=\"$5\"\ncount=0\nwhile /bin/kill -0 \"$pid\" 2>/dev/null; do\n  count=$((count + 1))\n  if [ \"$count\" -ge 600 ]; then /bin/rm -rf \"$stage\"; /bin/rm -f \"$0\"; exit 1; fi\n  /bin/sleep 0.1\ndone\nif /bin/mv \"$current\" \"$backup\" && /bin/mv \"$candidate\" \"$current\"; then\n  if /usr/bin/open \"$current\"; then\n    /bin/rm -rf \"$backup\" \"$stage\"\n    /bin/rm -f \"$0\"\n    exit 0\n  fi\n  /bin/rm -rf \"$current\"\n  /bin/mv \"$backup\" \"$current\"\nfi\nif [ -e \"$backup\" ] && [ ! -e \"$current\" ]; then /bin/mv \"$backup\" \"$current\"; fi\n/usr/bin/open \"$current\" >/dev/null 2>&1 || true\n/bin/rm -rf \"$stage\"\n/bin/rm -f \"$0\"\nexit 1\n";
+        NSError *scriptError = nil;
+        if (![script writeToFile:scriptPath atomically:YES encoding:NSUTF8StringEncoding error:&scriptError] || ![manager setAttributes:@{ NSFilePosixPermissions: @0700 } ofItemAtPath:scriptPath error:&scriptError]) {
+            [manager removeItemAtPath:stagePath error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:scriptError.localizedDescription userInitiated:YES]; });
+            return;
+        }
+        NSTask *installer = [[NSTask alloc] init];
+        installer.executableURL = [NSURL fileURLWithPath:@"/bin/sh"];
+        installer.arguments = @[ scriptPath, [NSString stringWithFormat:@"%d", getpid()], bundlePath, candidatePath, backupPath, stagePath ];
+        NSError *launchError = nil;
+        if (![installer launchAndReturnError:&launchError]) {
+            [manager removeItemAtPath:stagePath error:nil];
+            [manager removeItemAtPath:scriptPath error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:launchError.localizedDescription userInitiated:YES]; });
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+    });
 }
 
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers {
@@ -10079,6 +10426,13 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     });
     dispatch_activate(sigterm_source);
     self.sigtermSource = sigterm_source;
+
+    if (self.updateCheckOnStart && self.updateFeedURL.length > 0 && self.updatePublicKey.length > 0) {
+        __weak NativeSdkAppKitHost *weakUpdateSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakUpdateSelf checkForUpdatesUserInitiated:NO];
+        });
+    }
 
     [self scheduleFrame];
     [NSApp run];
@@ -12591,6 +12945,26 @@ void native_sdk_appkit_set_dock_icon_file(native_sdk_appkit_host_t *host, const 
         if (pathString.length == 0) return;
         [object loadDockIconFromFile:pathString];
     }
+}
+
+void native_sdk_appkit_configure_updates(native_sdk_appkit_host_t *host, const char *feed_url, size_t feed_url_len, const char *public_key, size_t public_key_len, int check_on_start, const char *target, size_t target_len) {
+    if (!host) return;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        object.updateFeedURL = feed_url && feed_url_len > 0 ? ([[NSString alloc] initWithBytes:feed_url length:feed_url_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        object.updatePublicKey = public_key && public_key_len > 0 ? ([[NSString alloc] initWithBytes:public_key length:public_key_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        object.updateTarget = target && target_len > 0 ? ([[NSString alloc] initWithBytes:target length:target_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+        object.updateCheckOnStart = check_on_start != 0;
+        [object buildMenuBar];
+    }
+}
+
+int native_sdk_appkit_check_for_updates(native_sdk_appkit_host_t *host, int user_initiated) {
+    if (!host) return 0;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (object.updateFeedURL.length == 0 || object.updatePublicKey.length == 0) return 0;
+    [object checkForUpdatesUserInitiated:(user_initiated != 0)];
+    return 1;
 }
 
 void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_event_callback_t callback, void *context) {

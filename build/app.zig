@@ -1742,6 +1742,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         @panic("-Dplatform=windows requires a Windows target");
     }
     const web_engine = web_engine_override orelse app_config.web_engine;
+    if (app_config.updates_enabled and selected_platform == .macos and web_engine == .chromium) {
+        @panic("\nnative updates currently require the system macOS host; use web_engine = \"system\" or remove the updates block\n");
+    }
     const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_config.cef_dir);
     const cef_auto_install = cef_auto_install_override orelse app_config.cef_auto_install;
     if (web_engine == .chromium and selected_platform != .macos) {
@@ -1973,6 +1976,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // runtime (the generated build graph already forwards them).
         package_run.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
         if (cef_auto_install) package_run.addArg("--cef-auto-install");
+        if (app_config.updates_enabled and host_os == .macos) package_run.addArg("--update-archive");
         package_run.has_side_effects = true;
         const package_step = b.step("package", "Create a distributable package via the native CLI");
         package_step.dependOn(&package_run.step);
@@ -2747,6 +2751,7 @@ const AppManifestBuildConfig = struct {
     credentials_permission: bool = false,
     filesystem_permission: bool = false,
     max_image_pixel_bytes: usize = 1024 * 1024,
+    updates_enabled: bool = false,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
@@ -2786,6 +2791,7 @@ const InferenceManifest = struct {
     service_packages: []const ServicePackageConfig = &.{},
     service_carrier: []const u8 = "auto",
     service_pool_size: u8 = 0,
+    updates: ?struct {} = null,
     shell: struct {
         windows: []const struct {
             views: []const struct {
@@ -2851,6 +2857,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8, manifest_name: []
         .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
         .filesystem_permission = hasManifestPermission(raw.permissions, "filesystem"),
         .max_image_pixel_bytes = raw.images.max_image_pixel_bytes,
+        .updates_enabled = raw.updates != null,
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };

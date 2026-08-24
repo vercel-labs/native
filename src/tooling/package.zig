@@ -83,6 +83,9 @@ pub const PackageOptions = struct {
     cef_dir: []const u8 = web_engine_tool.default_cef_dir,
     signing: SigningConfig = .{},
     archive: bool = false,
+    /// Emit the ZIP consumed by the native updater. macOS only; unlike the
+    /// user-facing DMG, this archive contains exactly the packaged .app.
+    update_archive: bool = false,
     /// The process environment, when the caller has one (the CLI). The
     /// Android artifact probes it for the SDK/NDK toolchain to assemble
     /// the debug APK; without it the generated project is still complete
@@ -153,6 +156,7 @@ pub const PackageStats = struct {
     web_engine: WebEngine = .system,
     web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
+    update_archive_path: ?[]const u8 = null,
     /// The Windows subsystem verdict: `console` when the package
     /// wrapped a CONSOLE-subsystem exe (the app will flash a terminal
     /// window behind itself on every launch), `gui` for a GUI-subsystem
@@ -217,6 +221,10 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         return err;
     };
     try validateWebEngineTarget(options.target, options.web_engine);
+    if (options.metadata.updates.enabled() and options.target == .macos and options.web_engine == .chromium) {
+        std.debug.print("error: native updates currently require the system macOS host; package with --web-engine system or remove the updates block\n", .{});
+        return error.UnsupportedUpdateHost;
+    }
     if (options.target == .macos and options.archive) {
         manifest_tool.validateDmgPackageSettings(options.metadata) catch |err| {
             std.debug.print("error: app.zon dmg settings are invalid ({s})\n", .{@errorName(err)});
@@ -238,6 +246,11 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         if (archive_path) |path| {
             stats.archive_path = path;
         }
+    }
+    if (options.update_archive) {
+        if (options.target != .macos) return error.UnsupportedUpdateTarget;
+        if (!options.metadata.updates.enabled()) return error.UpdatesNotConfigured;
+        stats.update_archive_path = try createUpdateArchive(allocator, io, options);
     }
     return stats;
 }
@@ -283,6 +296,26 @@ pub fn printDiagnostic(stats: PackageStats) void {
     if (stats.archive_path) |archive| {
         std.debug.print("  archive: {s}\n", .{archive});
     }
+    if (stats.update_archive_path) |archive| {
+        std.debug.print("  update archive: {s}\n", .{archive});
+    }
+}
+
+fn createUpdateArchive(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) ![]const u8 {
+    const parent = std.fs.path.dirname(options.output_path) orelse ".";
+    const archive_name = try std.fmt.allocPrint(allocator, "{s}-{s}-macos-{s}-update.zip", .{ options.metadata.name, options.metadata.version, options.optimize });
+    defer allocator.free(archive_name);
+    const archive_path = try std.fs.path.join(allocator, &.{ parent, archive_name });
+    errdefer allocator.free(archive_path);
+    const app_path = try absolutePathAlloc(allocator, io, options.output_path);
+    defer allocator.free(app_path);
+    const archive_command_path = try absolutePathAlloc(allocator, io, archive_path);
+    defer allocator.free(archive_command_path);
+    if (!runArchiveCommand(io, &.{ "/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app_path, archive_command_path }, null)) {
+        std.debug.print("error: update archive creation failed for {s}\n", .{archive_path});
+        return error.UpdateArchiveFailed;
+    }
+    return archive_path;
 }
 
 pub fn createLocalPackage(io: std.Io, output_path: []const u8) !PackageStats {

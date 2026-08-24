@@ -654,8 +654,20 @@ pub fn validateSecurity(security: SecurityConfig) ValidationError!void {
 }
 
 pub fn validateUpdates(updates: UpdateConfig) ValidationError!void {
-    if (updates.feed_url) |url| try validateExternalUrlPattern(url);
-    if (updates.public_key) |key| if (key.len == 0) return error.MissingRequiredField;
+    if ((updates.feed_url == null) != (updates.public_key == null)) return error.MissingRequiredField;
+    if (updates.check_on_start and updates.feed_url == null) return error.MissingRequiredField;
+    if (updates.feed_url) |url| {
+        if (url.len > 4096) return error.InvalidUrl;
+        if (!std.mem.startsWith(u8, url, "https://")) return error.InvalidUrl;
+        try validateUrl(url);
+    }
+    if (updates.public_key) |key| {
+        var decoded: [std.crypto.sign.Ed25519.PublicKey.encoded_length]u8 = undefined;
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(key) catch return error.MissingRequiredField;
+        if (decoded_len != decoded.len) return error.MissingRequiredField;
+        std.base64.standard.Decoder.decode(&decoded, key) catch return error.MissingRequiredField;
+        _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(decoded) catch return error.MissingRequiredField;
+    }
 }
 
 fn validateExternalUrlPattern(url: []const u8) ValidationError!void {

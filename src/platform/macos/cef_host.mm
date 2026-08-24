@@ -2477,6 +2477,23 @@ void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host) {
     CFBridgingRelease(host);
 }
 
+void native_sdk_appkit_configure_updates(native_sdk_appkit_host_t *host, const char *feed_url, size_t feed_url_len, const char *public_key, size_t public_key_len, int check_on_start, const char *target, size_t target_len) {
+    (void)host;
+    (void)feed_url;
+    (void)feed_url_len;
+    (void)public_key;
+    (void)public_key_len;
+    (void)check_on_start;
+    (void)target;
+    (void)target_len;
+}
+
+int native_sdk_appkit_check_for_updates(native_sdk_appkit_host_t *host, int user_initiated) {
+    (void)host;
+    (void)user_initiated;
+    return 0;
+}
+
 void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_event_callback_t callback, void *context) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     [object runWithCallback:callback context:context];

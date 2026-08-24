@@ -95,6 +95,9 @@ pub const RunOptions = struct {
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
+            .update_feed_url = manifestUpdateString("feed_url"),
+            .update_public_key = manifestUpdateString("public_key"),
+            .update_check_on_start = manifestUpdateCheckOnStart(),
             .main_window = .{
                 .id = 1,
                 .label = "main",
@@ -154,6 +157,23 @@ pub const RunOptions = struct {
         return self.menus orelse storage.fromManifest();
     }
 };
+
+fn manifestUpdateString(comptime field: []const u8) []const u8 {
+    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return "";
+    const updates = app_manifest.updates;
+    if (comptime !@hasField(@TypeOf(updates), field)) return "";
+    const value = @field(updates, field);
+    return switch (@typeInfo(@TypeOf(value))) {
+        .optional => value orelse "",
+        else => value,
+    };
+}
+
+fn manifestUpdateCheckOnStart() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return false;
+    if (comptime !@hasField(@TypeOf(app_manifest.updates), "check_on_start")) return false;
+    return app_manifest.updates.check_on_start;
+}
 
 const CommandStorage = struct {
     commands: [native_sdk.app_manifest.max_commands]native_sdk.Command = undefined,
@@ -1256,6 +1276,11 @@ test "RunOptions resolves manifest commands menus and shortcuts" {
         .app_name = "runner-fixture",
         .bundle_id = "dev.native_sdk.runner_fixture",
     };
+    var info_buffers: StateBuffers = .{};
+    const app_info = options.appInfo(&info_buffers);
+    try std.testing.expectEqualStrings("https://example.com/native-update.json", app_info.update_feed_url);
+    try std.testing.expectEqualStrings("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=", app_info.update_public_key);
+    try std.testing.expect(app_info.update_check_on_start);
 
     var command_storage: CommandStorage = .{};
     const commands = options.resolvedCommands(&command_storage);

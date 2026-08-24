@@ -367,6 +367,27 @@ typedef struct {
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
 typedef void (*native_sdk_appkit_bridge_callback_t)(void *context, uint64_t window_id, const char *webview_label, size_t webview_label_len, const char *message, size_t message_len, const char *origin, size_t origin_len);
 
+typedef struct native_sdk_update_verify_result {
+    int ok;
+    int error_code;
+    size_t version_len;
+    size_t archive_url_len;
+    size_t release_notes_len;
+    uint64_t archive_bytes;
+    char sha256[64];
+} native_sdk_update_verify_result_t;
+
+native_sdk_update_verify_result_t native_sdk_update_verify_feed(
+    const char *envelope, size_t envelope_len,
+    const char *public_key, size_t public_key_len,
+    const char *bundle_id, size_t bundle_id_len,
+    const char *current_version, size_t current_version_len,
+    const char *target, size_t target_len,
+    char *version_out, size_t version_capacity,
+    char *archive_url_out, size_t archive_url_capacity,
+    char *release_notes_out, size_t release_notes_capacity);
+int native_sdk_update_verify_archive(const char *path, size_t path_len, uint64_t expected_bytes, const char *sha256, size_t sha256_len);
+
 // show_policy 0 = immediate (ordered front at create), 1 = deferred to
 // the first canvas present (present-before-show: the window is created
 // ordered-out and `makeKeyAndOrderFront` runs after the first
@@ -396,6 +417,8 @@ void native_sdk_appkit_set_dock_icon_rgba(native_sdk_appkit_host_t *host, const 
 // Debug dev-run path falls back to this when its masked render fails,
 // keeping the pre-masking behavior (icon shown unshaped) as the floor.
 void native_sdk_appkit_set_dock_icon_file(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
+void native_sdk_appkit_configure_updates(native_sdk_appkit_host_t *host, const char *feed_url, size_t feed_url_len, const char *public_key, size_t public_key_len, int check_on_start, const char *target, size_t target_len);
+int native_sdk_appkit_check_for_updates(native_sdk_appkit_host_t *host, int user_initiated);
 void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_event_callback_t callback, void *context);
 // The host-side shutdown request: a failed event emit asks the host to
 // deliver SHUTDOWN and stop. While the run loop is live the delivery is

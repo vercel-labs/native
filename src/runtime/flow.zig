@@ -573,6 +573,13 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
 
         pub fn dispatchCommand(self: *Runtime, app: App, command: CommandEvent) anyerror!void {
             try validateCommandName(command.name);
+            if (std.mem.eql(u8, command.name, platform.update_check_command)) {
+                self.options.platform.services.checkForUpdates(true) catch |err| switch (err) {
+                    error.UnsupportedService => {},
+                    else => return err,
+                };
+                return;
+            }
             try dispatchEvent(self, app, .{ .command = command });
         }
 

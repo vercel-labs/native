@@ -320,6 +320,7 @@ pub fn build(b: *std.Build) void {
     const ios_host_mod = module(b, target, optimize, "src/platform/ios/files.zig");
     const android_host_mod = module(b, target, optimize, "src/platform/android/files.zig");
     const tooling_mod = module(b, target, optimize, "src/tooling/root.zig");
+    const update_feed_mod = module(b, target, optimize, "src/updater/feed.zig");
     tooling_mod.addImport("assets", assets_mod);
     tooling_mod.addImport("app_dirs", app_dirs_mod);
     tooling_mod.addImport("app_manifest", app_manifest_mod);
@@ -331,6 +332,7 @@ pub fn build(b: *std.Build) void {
     tooling_mod.addImport("ios_host", ios_host_mod);
     tooling_mod.addImport("android_host", android_host_mod);
     tooling_mod.addImport("sqlite_engine", module(b, target, optimize, "src/runtime/sqlite_engine.zig"));
+    tooling_mod.addImport("update_feed", update_feed_mod);
     tooling_mod.addIncludePath(b.path("third_party/sqlite"));
     tooling_mod.addCSourceFile(.{
         .file = b.path("third_party/sqlite/sqlite3.c"),
@@ -440,6 +442,7 @@ pub fn build(b: *std.Build) void {
     const host_ios_host_mod = module(b, host_target, optimize, "src/platform/ios/files.zig");
     const host_android_host_mod = module(b, host_target, optimize, "src/platform/android/files.zig");
     const host_tooling_mod = module(b, host_target, optimize, "src/tooling/root.zig");
+    const host_update_feed_mod = module(b, host_target, optimize, "src/updater/feed.zig");
     host_tooling_mod.addImport("assets", host_assets_mod);
     host_tooling_mod.addImport("app_dirs", host_app_dirs_mod);
     host_tooling_mod.addImport("app_manifest", host_app_manifest_mod);
@@ -451,6 +454,7 @@ pub fn build(b: *std.Build) void {
     host_tooling_mod.addImport("ios_host", host_ios_host_mod);
     host_tooling_mod.addImport("android_host", host_android_host_mod);
     host_tooling_mod.addImport("sqlite_engine", module(b, host_target, optimize, "src/runtime/sqlite_engine.zig"));
+    host_tooling_mod.addImport("update_feed", host_update_feed_mod);
     host_tooling_mod.addIncludePath(b.path("third_party/sqlite"));
     host_tooling_mod.addCSourceFile(.{
         .file = b.path("third_party/sqlite/sqlite3.c"),

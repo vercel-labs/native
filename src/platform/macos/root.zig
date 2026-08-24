@@ -8,6 +8,12 @@ const canvas = @import("canvas");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
 // macOS mask/inset render so the Dock tile matches `native package`.
 const app_icon = canvas.app_icon;
+const updater_c_api = @import("../../updater/c_api.zig");
+
+comptime {
+    _ = updater_c_api.native_sdk_update_verify_feed;
+    _ = updater_c_api.native_sdk_update_verify_archive;
+}
 
 pub const Error = error{
     CallbackFailed,
@@ -174,6 +180,8 @@ extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, d
 extern fn native_sdk_appkit_destroy(host: *AppKitHost) void;
 extern fn native_sdk_appkit_set_dock_icon_rgba(host: *AppKitHost, pixels: [*]const u8, width: usize, height: usize) void;
 extern fn native_sdk_appkit_set_dock_icon_file(host: *AppKitHost, path: [*]const u8, path_len: usize) void;
+extern fn native_sdk_appkit_configure_updates(host: *AppKitHost, feed_url: [*]const u8, feed_url_len: usize, public_key: [*]const u8, public_key_len: usize, check_on_start: c_int, target: [*]const u8, target_len: usize) void;
+extern fn native_sdk_appkit_check_for_updates(host: *AppKitHost, user_initiated: c_int) c_int;
 extern fn native_sdk_appkit_run(host: *AppKitHost, callback: AppKitCallback, context: ?*anyopaque) void;
 extern fn native_sdk_appkit_stop(host: *AppKitHost) void;
 extern fn native_sdk_appkit_request_stop(host: *AppKitHost) void;
@@ -677,6 +685,12 @@ pub const MacPlatform = struct {
         const dock_icon = planDockIcon(app_info.icon_path);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
         const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        const update_target = comptime switch (builtin.cpu.arch) {
+            .aarch64 => "macos-aarch64",
+            .x86_64 => "macos-x86_64",
+            else => "macos-unsupported",
+        };
+        native_sdk_appkit_configure_updates(host, app_info.update_feed_url.ptr, app_info.update_feed_url.len, app_info.update_public_key.ptr, app_info.update_public_key.len, if (app_info.update_check_on_start) 1 else 0, update_target.ptr, update_target.len);
         switch (dock_icon) {
             .host_file => {},
             .masked_render => spawnDevDockIconRender(host, app_info.icon_path),
@@ -801,6 +815,7 @@ pub const MacPlatform = struct {
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
+                .check_for_updates_fn = checkForUpdates,
                 .create_tray_fn = createTray,
                 .update_tray_shell_fn = updateTrayShell,
                 .update_tray_menu_fn = updateTrayMenu,
@@ -2367,6 +2382,11 @@ fn addRecentDocument(context: ?*anyopaque, path: []const u8) anyerror!void {
 fn clearRecentDocuments(context: ?*anyopaque) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_clear_recent_documents(self.host) == 0) return error.UnsupportedService;
+}
+
+fn checkForUpdates(context: ?*anyopaque, user_initiated: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_check_for_updates(self.host, if (user_initiated) 1 else 0) == 0) return error.UnsupportedService;
 }
 
 fn configureSecurityPolicy(context: ?*anyopaque, policy: security.Policy) anyerror!void {

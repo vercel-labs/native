@@ -1,12 +1,17 @@
 .{
     .id = "dev.native_sdk.runner_fixture",
     .name = "runner-fixture",
+    .updates = .{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        .check_on_start = true,
+    },
     .commands = .{
         .{ .id = "app.refresh", .title = "Refresh", .enabled = false, .checked = true },
         .{ .id = "app.defaults" },
     },
     .shortcuts = .{
-        .{ .id = "app.refresh", .key = "r", .modifiers = .{ "primary" } },
+        .{ .id = "app.refresh", .key = "r", .modifiers = .{"primary"} },
     },
     .menus = .{
         .{
