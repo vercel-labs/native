@@ -8,14 +8,18 @@ const native_sdk = @import("native_sdk");
 
 pub fn build(b: *std.Build) void {
     const dep = b.dependency("native_sdk", .{});
+    const macos_minimum: native_sdk.MacOSDeploymentTarget = .{ .major = 12 };
     const artifacts = native_sdk.addAppArtifacts(b, dep, .{
         .name = "swift-toolchain-proof",
         // The one app-level floor must reach both Zig final links and Swift.
-        .macos_minimum = .{ .major = 12 },
+        .macos_minimum = macos_minimum,
     });
     native_sdk.addSwiftAppSources(b, artifacts, .{
         .sources = &.{b.path("src/NativeView.swift")},
         .module_name = "NativeViewHost",
+        // A Swift standard-library module (not an Apple framework) proves
+        // that its autolink dylib reaches Zig's final link.
+        .modules = &.{"RegexBuilder"},
         // AVFoundation exercises a Swift overlay outside the original
         // SwiftUI/AppKit closure; its async property API requires macOS 12.
         .frameworks = &.{ "SwiftUI", "AppKit", "Foundation", "AVFoundation" },
@@ -47,6 +51,8 @@ pub fn build(b: *std.Build) void {
     package.addArgs(&.{
         "--optimize",
         "ReleaseFast",
+        "--macos-minimum",
+        b.fmt("{d}.{d}", .{ macos_minimum.major, macos_minimum.minor }),
         "--web-layer",
         "exclude",
         "--web-engine",

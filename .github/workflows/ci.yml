@@ -89,9 +89,13 @@ jobs:
           cd tests/swift-toolchain-proof
           xcrun vtool -show-build zig-out/bin/swift-toolchain-proof | grep -q "minos 12.0"
           otool -L zig-out/bin/swift-toolchain-proof | grep -q "libswiftAVFoundation"
+          otool -L zig-out/bin/swift-toolchain-proof | grep -q "libswiftRegexBuilder"
           ! otool -L zig-out/bin/swift-toolchain-proof | grep -q "/SwiftUICore.framework/"
           ./zig-out/bin/swift-toolchain-proof --swift-proof-smoke
+          zig build package -Dplatform=macos
+          test "$(plutil -extract LSMinimumSystemVersion raw zig-out/package/swift-toolchain-proof.app/Contents/Info.plist)" = "12.0"
           zig build signed-package -Dplatform=macos
+          test "$(plutil -extract LSMinimumSystemVersion raw zig-out/package/swift-toolchain-proof.app/Contents/Info.plist)" = "12.0"
           codesign --verify --deep --strict zig-out/package/swift-toolchain-proof.app
       # Shared macos-14 runners are far noisier than a dev box (the second
       # CI run measured a 576 ms automation-ready against the 500 ms local

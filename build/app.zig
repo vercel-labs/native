@@ -1626,6 +1626,10 @@ pub const AppArtifacts = struct {
 pub const SwiftAppSourcesOptions = struct {
     sources: []const std.Build.LazyPath,
     module_name: []const u8,
+    /// Swift modules imported by the app that are not Apple frameworks.
+    /// Their compiler-emitted autolink libraries are forwarded to Zig's
+    /// linker, but they do not become framework load commands.
+    modules: []const []const u8 = &.{},
     frameworks: []const []const u8 = &.{},
 };
 
@@ -1661,11 +1665,11 @@ pub fn addSwiftAppSources(b: *std.Build, artifacts: AppArtifacts, options: Swift
     else
         compileSwiftObject(b, swiftc, sdk, target, test_optimize, options);
     const toolchain_identity = swiftToolchainCacheIdentity(b, swiftc, sdk, target);
-    const exe_autolink = swiftAutolinkOptions(b, swiftc, sdk, target, exe_optimize, options.frameworks, toolchain_identity);
+    const exe_autolink = swiftAutolinkOptions(b, swiftc, sdk, target, exe_optimize, options.modules, options.frameworks, toolchain_identity);
     const test_autolink = if (test_optimize == exe_optimize)
         exe_autolink
     else
-        swiftAutolinkOptions(b, swiftc, sdk, target, test_optimize, options.frameworks, toolchain_identity);
+        swiftAutolinkOptions(b, swiftc, sdk, target, test_optimize, options.modules, options.frameworks, toolchain_identity);
 
     // TypeScript apps use a link-only executable module over their cached app
     // object. Zig-core apps point exe.root_module directly at the app module.
@@ -1754,6 +1758,13 @@ fn macosDeploymentFlag(b: *std.Build, target: std.Build.ResolvedTarget) []const 
         b.fmt("-mmacosx-version-min={d}.{d}.{d}", .{ minimum.major, minimum.minor, minimum.patch });
 }
 
+fn macosDeploymentVersion(b: *std.Build, minimum: MacOSDeploymentTarget) []const u8 {
+    return if (minimum.patch == 0)
+        b.fmt("{d}.{d}", .{ minimum.major, minimum.minor })
+    else
+        b.fmt("{d}.{d}.{d}", .{ minimum.major, minimum.minor, minimum.patch });
+}
+
 const SwiftAutolinkOptions = struct {
     libraries: []const []const u8,
     frameworks: []const []const u8,
@@ -1819,29 +1830,29 @@ fn swiftAutolinkCacheDigest(
 
 /// Swift records link directives in Mach-O objects, but Zig's Mach-O linker
 /// does not consume LC_LINKER_OPTION. Compile one import-only object for the
-/// requested framework modules and ask Xcode's otool for that toolchain's
-/// exact runtime-library and framework closure. Framework directives are used
-/// to preserve deployment-aware SDK re-exports; only app-declared modules
-/// become strong direct framework dependencies. The probe is content-addressed under
-/// the app's build cache, including compiler target-info and SDK settings, so
-/// replacing Xcode in place cannot reuse stale directives.
+/// declared Swift modules and framework modules, then ask Xcode's otool for
+/// that toolchain's exact runtime-library and framework closure. Framework
+/// directives preserve deployment-aware SDK re-exports; only app-declared
+/// frameworks become strong direct framework dependencies. The probe is
+/// content-addressed under the app's build cache, including compiler target-info
+/// and SDK settings, so replacing Xcode in place cannot reuse stale directives.
 fn swiftAutolinkOptions(
     b: *std.Build,
     swiftc: []const u8,
     sdk: []const u8,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    modules: []const []const u8,
     frameworks: []const []const u8,
     identity: SwiftToolchainCacheIdentity,
 ) SwiftAutolinkOptions {
     var source: std.ArrayList(u8) = .empty;
     source.appendSlice(b.allocator, "// Generated import probe for Swift LC_LINKER_OPTION discovery.\n") catch @panic("OOM");
+    for (modules) |module_name| {
+        appendSwiftProbeImport(b, &source, module_name, "module");
+    }
     for (frameworks) |framework| {
-        if (!swiftModuleNameValid(framework)) {
-            std.debug.panic("\naddSwiftAppSources framework {s} is not a Swift module identifier; pass importable Apple framework module names such as AppKit or AVFoundation\n", .{framework});
-        }
-        const import = std.fmt.allocPrint(b.allocator, "import {s}\n", .{framework}) catch @panic("OOM");
-        source.appendSlice(b.allocator, import) catch @panic("OOM");
+        appendSwiftProbeImport(b, &source, framework, "framework");
     }
     source.appendSlice(b.allocator, "@_cdecl(\"native_swift_autolink_probe\") public func nativeSwiftAutolinkProbe() {}\n") catch @panic("OOM");
 
@@ -1889,7 +1900,7 @@ fn swiftAutolinkOptions(
         defer b.allocator.free(compile.stdout);
         defer b.allocator.free(compile.stderr);
         if (compile.term != .exited or compile.term.exited != 0) {
-            std.debug.panic("\naddSwiftAppSources could not import its declared Swift frameworks for autolink discovery:\n{s}\n", .{compile.stderr});
+            std.debug.panic("\naddSwiftAppSources could not import its declared Swift modules and frameworks for autolink discovery:\n{s}\n", .{compile.stderr});
         }
     }
 
@@ -1907,6 +1918,16 @@ fn swiftAutolinkOptions(
         std.debug.panic("\naddSwiftAppSources could not inspect Swift autolink metadata:\n{s}\n", .{inspect.stderr});
     }
     return parseSwiftAutolinkOptions(b.allocator, inspect.stdout);
+}
+
+fn appendSwiftProbeImport(b: *std.Build, source: *std.ArrayList(u8), module_name: []const u8, kind: []const u8) void {
+    if (!swiftModuleNameValid(module_name)) {
+        std.debug.panic("\naddSwiftAppSources {s} {s} is not a Swift module identifier; pass importable module names such as RegexBuilder or Apple framework names such as AppKit\n", .{ kind, module_name });
+    }
+    const import = std.fmt.allocPrint(b.allocator, "import {s}\n", .{module_name}) catch @panic("OOM");
+    if (std.mem.indexOf(u8, source.items, import) == null) {
+        source.appendSlice(b.allocator, import) catch @panic("OOM");
+    }
 }
 
 fn swiftModuleNameValid(name: []const u8) bool {
@@ -2643,6 +2664,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // build graph knows the packaged binary's REAL mode, so forward
         // it instead of letting the CLI assume one.
         package_run.addArgs(&.{ "--optimize", @tagName(app_optimize) });
+        if (host_os == .macos) {
+            package_run.addArgs(&.{ "--macos-minimum", macosDeploymentVersion(b, app_options.macos_minimum) });
+        }
         // Forward the RESOLVED web-layer decision, never the raw inputs:
         // this graph already decided web vs native-only for the exe it is
         // packaging (app.zon declarations plus -Dweb-layer/-Dweb-engine),

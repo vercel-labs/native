@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import RegexBuilder
 import SwiftUI
 
 private struct NativeToolchainProofView: View {
@@ -13,6 +14,13 @@ private struct NativeToolchainProofView: View {
 /// creation returns a retained app-owned NSView and the caller releases it.
 @_cdecl("native_swift_proof_create_view")
 public func nativeSwiftProofCreateView() -> UnsafeMutableRawPointer {
+    // RegexBuilder is a Swift library module rather than a framework. Keep
+    // the deployment floor at 12 while proving its autolink input under an
+    // ordinary availability guard.
+    if #available(macOS 13.0, *) {
+        let digits = Regex { OneOrMore(.digit) }
+        _ = "123".wholeMatch(of: digits)
+    }
     // Exercise AVFoundation's Swift overlay rather than merely the ObjC
     // framework. This API contributes swiftAVFoundation/CoreMedia overlays.
     let asset = AVURLAsset(url: URL(fileURLWithPath: "/tmp/native-swift-toolchain-proof"))
