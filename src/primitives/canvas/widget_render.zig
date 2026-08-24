@@ -1123,11 +1123,18 @@ fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
         // image child, a full-bleed row) shears along the chrome's
         // corners instead of the generic surface radius.
         .bubble => widget_render_surfaces.bubbleWidgetRadius(widget, tokens),
-        .alert, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
+        // Keep a surface's child clip exactly in step with its chrome.
+        // In particular, an explicit `radius="none"` must not round a
+        // full-bleed child after the surface itself has become square.
+        .alert => controlRadius(widget, alertControlVisualTokens(tokens), tokens.radius.lg),
+        .card => controlRadius(widget, cardControlVisualTokens(tokens), tokens.radius.lg),
+        .resizable, .panel, .menu_surface, .dropdown_menu => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .accordion => .{},
-        .dialog, .popover => Radius.all(tokens.radius.xl),
-        .drawer, .sheet => Radius.all(tokens.radius.lg),
-        .tooltip => Radius.all(tokens.radius.md),
+        .dialog => controlRadius(widget, dialogControlVisualTokens(tokens), tokens.radius.xl),
+        .drawer => controlRadius(widget, drawerControlVisualTokens(tokens), tokens.radius.xl),
+        .sheet => controlRadius(widget, sheetControlVisualTokens(tokens), tokens.radius.lg),
+        .popover => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .tooltip => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
         else => .{},
     };
 }

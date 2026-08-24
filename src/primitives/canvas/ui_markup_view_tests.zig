@@ -449,6 +449,57 @@ test "markup radius none resolves to square button corners" {
     }
 }
 
+test "markup radius none keeps a surface content clip square" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<panel radius=\"none\"><row background=\"accent\" /></panel>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    // Give the child the entire panel frame: this is the full-bleed case
+    // where the content clip, rather than layout padding, owns the corners.
+    var panel = tree.root;
+    panel.frame = geometry.RectF.init(0, 0, 120, 72);
+    panel.layout.clip_content = true;
+    var children = [_]canvas.Widget{panel.children[0]};
+    children[0].frame = panel.frame;
+    panel.children = &children;
+
+    var commands: [8]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, panel, .{});
+
+    var saw_panel_chrome = false;
+    var saw_content_clip = false;
+    var saw_full_bleed_child = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == canvas.widgetPartId(panel.id, 2)) {
+                    try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius);
+                    saw_panel_chrome = true;
+                }
+                if (fill.id == canvas.widgetPartId(children[0].id, 1)) {
+                    try testing.expectEqualDeep(panel.frame, fill.rect);
+                    saw_full_bleed_child = true;
+                }
+            },
+            .push_clip => |clip| if (clip.id == canvas.widgetPartId(panel.id, 9)) {
+                try testing.expectEqualDeep(canvas.Radius.all(0), clip.radius);
+                saw_content_clip = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_panel_chrome);
+    try testing.expect(saw_content_clip);
+    try testing.expect(saw_full_bleed_child);
+}
+
 test "explicit style values win over token references" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
