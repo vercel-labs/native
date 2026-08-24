@@ -112,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
             error.UpdateArchitectureMismatch => fail("the update archive executable does not contain the architecture named by --target"),
             error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
             error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),
+            error.InvalidManifestVersion => fail("the app manifest version must use canonical X.Y.Z numeric components without leading zeroes"),
             error.InvalidUpdatePublicKey => fail("the app manifest update public_key is not a valid base64 Ed25519 public key"),
             error.UpdateKeyMismatch => fail("the private update key does not match the public_key embedded in the app manifest"),
             error.GeneratedFeedInvalid => fail("the generated update feed failed its own verification; no feed was written"),

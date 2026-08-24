@@ -94,12 +94,12 @@ pub fn archiveUrlIsValid(value: []const u8) bool {
 pub fn releaseApplies(release: Release, bundle_id: []const u8, current_version: []const u8, target: []const u8) !bool {
     if (!std.mem.eql(u8, release.bundle_id, bundle_id)) return error.UpdateBundleMismatch;
     if (!std.mem.eql(u8, release.target, target)) return error.UpdateTargetMismatch;
-    return versionOrder(current_version, release.version) == .lt;
+    return try versionOrder(current_version, release.version) == .lt;
 }
 
-pub fn versionOrder(left: []const u8, right: []const u8) std.math.Order {
-    const left_version = parseVersion(left) catch return std.mem.order(u8, left, right);
-    const right_version = parseVersion(right) catch return std.mem.order(u8, left, right);
+pub fn versionOrder(left: []const u8, right: []const u8) !std.math.Order {
+    const left_version = try parseVersion(left);
+    const right_version = try parseVersion(right);
     const major = std.math.order(left_version.major, right_version.major);
     if (major != .eq) return major;
     const minor = std.math.order(left_version.minor, right_version.minor);
@@ -169,9 +169,19 @@ test "tampered payload is rejected" {
 }
 
 test "semantic versions compare numerically" {
-    try std.testing.expectEqual(std.math.Order.lt, versionOrder("1.9.9", "1.10.0"));
-    try std.testing.expectEqual(std.math.Order.eq, versionOrder("2.0.0", "2.0.0"));
-    try std.testing.expectEqual(std.math.Order.gt, versionOrder("3.0.0", "2.99.99"));
+    try std.testing.expectEqual(std.math.Order.lt, try versionOrder("1.9.9", "1.10.0"));
+    try std.testing.expectEqual(std.math.Order.eq, try versionOrder("2.0.0", "2.0.0"));
+    try std.testing.expectEqual(std.math.Order.gt, try versionOrder("3.0.0", "2.99.99"));
+    try std.testing.expectError(error.InvalidVersion, versionOrder("1.010.0", "1.9.0"));
+    try std.testing.expectError(error.InvalidVersion, versionOrder("1.9.0", "1.010.0"));
+    try std.testing.expectError(error.InvalidVersion, releaseApplies(.{
+        .bundle_id = "com.example.demo",
+        .version = "1.9.0",
+        .target = "macos-aarch64",
+        .archive_url = "https://example.com/demo.zip",
+        .archive_bytes = 42,
+        .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }, "com.example.demo", "1.010.0", "macos-aarch64"));
 }
 
 test "archive URLs fit the runtime output buffer" {

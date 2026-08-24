@@ -3102,6 +3102,14 @@ test "mac updater hashes archives off the main thread and treats user cancellati
     try std.testing.expect(std.mem.indexOf(u8, download_body, "strongSelf.updateCheckRunning = NO;") != null);
 }
 
+test "mac updater binds packaged releases to the installed bundle identity" {
+    const host_source = @embedFile("appkit_host.m");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "static NSString *NativeSdkPackagedBundleIdentifier(void)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "self.bundleIdentifier = NativeSdkPackagedBundleIdentifier() ?: configuredBundleIdentifier;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "strongSelf.bundleIdentifier.UTF8String") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "[candidateBundle.bundleIdentifier isEqualToString:strongSelf.bundleIdentifier]") != null);
+}
+
 test "mac updater presents without relying on the startup window and cleans failed staging" {
     const host_source = @embedFile("appkit_host.m");
     const helper_at = std.mem.lastIndexOf(u8, host_source, "- (void)presentUpdateAlert:(NSAlert *)alert completionHandler:") orelse return error.TestExpectedEqual;

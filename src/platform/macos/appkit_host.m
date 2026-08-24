@@ -159,6 +159,17 @@ static NSString *NativeSdkStringFromTextInput(id value) {
     return [value description] ?: @"";
 }
 
+/* The authored runner identity is the right fallback for unbundled dev
+ * executables. Once the process is inside a packaged .app, Info.plist is the
+ * installed identity and must win: Finder/package tooling can legitimately
+ * produce a bundle whose identifier differs from stale generated runner
+ * source, and update feeds are bound to the bundle actually being replaced. */
+static NSString *NativeSdkPackagedBundleIdentifier(void) {
+    NSBundle *bundle = NSBundle.mainBundle;
+    if (![[bundle.bundlePath pathExtension].lowercaseString isEqualToString:@"app"]) return nil;
+    return bundle.bundleIdentifier.length > 0 ? bundle.bundleIdentifier : nil;
+}
+
 static int NativeSdkAppKitColorSchemeForAppearance(NSAppearance *appearance) {
     NSAppearance *effective = appearance ?: NSApp.effectiveAppearance;
     NSString *bestMatch = [effective bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
@@ -7934,7 +7945,8 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.appVersion = version ?: @"";
     self.aboutDescription = aboutDescription ?: @"";
     self.hasWebContent = hasWebContent;
-    self.bundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : @"dev.native_sdk.app";
+    NSString *configuredBundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : @"dev.native_sdk.app";
+    self.bundleIdentifier = NativeSdkPackagedBundleIdentifier() ?: configuredBundleIdentifier;
     self.iconPath = iconPath ?: @"";
     self.windowLabel = windowLabel.length > 0 ? windowLabel : @"main";
     self.updateFeedURL = @"";

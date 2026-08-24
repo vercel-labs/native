@@ -67,6 +67,7 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path orelse manifest_tool.defaultPath(io) orelse "app.json");
     defer metadata.deinit(allocator);
     if (!metadata.updates.enabled()) return error.UpdatesNotConfigured;
+    _ = manifest_tool.parseVersion(metadata.version) catch return error.InvalidManifestVersion;
     if (release_notes.len > 16 * 1024) return error.ReleaseNotesTooLarge;
     validateUpdateArchive(allocator, io, archive, metadata.id, metadata.version, metadata.name, release_target) catch |err| switch (err) {
         error.UpdateArchitectureMismatch => return error.UpdateArchitectureMismatch,

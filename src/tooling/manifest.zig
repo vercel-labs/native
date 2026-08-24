@@ -2472,8 +2472,28 @@ fn validatePathSegment(segment: []const u8) !void {
 }
 
 fn parseVersionNumber(value: []const u8) !u32 {
-    if (value.len == 0) return error.InvalidVersion;
-    return std.fmt.parseUnsigned(u32, value, 10);
+    if (value.len == 0 or (value.len > 1 and value[0] == '0')) return error.InvalidVersion;
+    return std.fmt.parseUnsigned(u32, value, 10) catch error.InvalidVersion;
+}
+
+test "manifest versions use canonical numeric components" {
+    try std.testing.expectEqual(@as(u32, 10), (try parseVersion("1.10.0")).minor);
+    try std.testing.expectError(error.InvalidVersion, parseVersion("1.010.0"));
+    try std.testing.expectError(error.InvalidVersion, parseVersion("01.0.0"));
+    try std.testing.expectError(error.InvalidVersion, parseVersion("1.0.00"));
+}
+
+test "manifest validation rejects leading-zero versions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.json", .data =
+        \\{ "id": "com.example.version", "name": "version", "version": "1.010.0" }
+    });
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/app.json", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    const result = try validateFile(std.testing.allocator, std.testing.io, path);
+    try std.testing.expect(!result.ok);
+    try std.testing.expectEqualStrings("app manifest version is invalid", result.message);
 }
 
 test "JSON manifest parser accepts schema metadata and rejects unknown fields" {

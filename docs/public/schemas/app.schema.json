@@ -12,7 +12,7 @@
     "name": { "type": "string", "minLength": 1, "description": "Short machine-readable app name." },
     "display_name": { "type": "string", "minLength": 1, "description": "Human-readable app name." },
     "description": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
     "icons": { "$ref": "#/$defs/stringArray" },
     "platforms": {
       "type": "array",

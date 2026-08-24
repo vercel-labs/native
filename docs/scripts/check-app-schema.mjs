@@ -14,6 +14,7 @@ const schema = JSON.parse(publishedBytes.toString("utf8"));
 const deployment = JSON.parse(fs.readFileSync(deploymentPath, "utf8"));
 
 assert.equal(schema.$id, "https://schema.native-sdk.dev/app/v1.json");
+assert.equal(schema.properties.version.pattern, "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$");
 assert.equal(schema.$defs.persist.properties.debounce_ms.minimum, 0);
 assert.equal(schema.$defs.persist.properties.debounce_ms.maximum, 60_000);
 assert.equal(schema.$defs.frontend.properties.dev.properties.timeout_ms.minimum, 1);
