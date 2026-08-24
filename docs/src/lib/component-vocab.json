@@ -506,7 +506,7 @@
     },
     {
       "name": "radius",
-      "doc": "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl)."
+      "doc": "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl, none)."
     }
   ],
   "events": [
@@ -1572,7 +1572,8 @@
     "sm",
     "md",
     "lg",
-    "xl"
+    "xl",
+    "none"
   ],
   "ejectable": [
     {

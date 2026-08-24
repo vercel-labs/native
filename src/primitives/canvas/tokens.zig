@@ -444,11 +444,14 @@ pub const SpacingTokens = struct {
 /// Derived from a 10px base radius, the derivation the house scale uses:
 /// `--radius`: lg is the base, md steps down 2, sm steps down 4, and xl
 /// steps up 4. Buttons and inputs sit on md; cards and surfaces on lg.
+/// `none` is the fixed square-corner constant, deliberately outside that
+/// derived scale.
 pub const RadiusTokens = struct {
     sm: f32 = 6,
     md: f32 = 8,
     lg: f32 = 10,
     xl: f32 = 14,
+    none: f32 = 0,
 };
 
 pub const StrokeTokens = struct {
@@ -1349,6 +1352,7 @@ pub const SpacingTokenOverrides = struct {
 };
 
 pub const RadiusTokenOverrides = struct {
+    // `none` is intentionally not overridable: it always means square corners.
     sm: ?f32 = null,
     md: ?f32 = null,
     lg: ?f32 = null,

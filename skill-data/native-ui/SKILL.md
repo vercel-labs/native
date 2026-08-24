@@ -389,7 +389,7 @@ The `examples/feed` app is the reference: a 100,000-post deterministic MIXED-HEI
 Color and radius come from the design tokens, referenced by token NAME — literals only, no bindings, no raw colors (dynamic styling stays in Zig via `ElementOptions.style`):
 
 - Color attributes: `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, `focus-ring`. Values are `canvas.ColorTokens` field names — the complete list: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `syntax_plain`, `syntax_comment`, `syntax_keyword`, `syntax_literal`, `syntax_function`, `syntax_property`, `syntax_constant`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `success`, `success_text`, `warning`, `warning_text`, `info`, `info_text`, `focus_ring`, `shadow`, `scrim`, `disabled`. The `syntax_*` roles are the Geist Code Block palette used automatically by `ui.code` and Markdown fences in both built-in packs. `info` is the violet identity hue beside the status trio (merged PR badges, "new" chips). (`border-color`, not bare `border` — that name is reserved for a future width shorthand.)
-- `radius` — `canvas.RadiusTokens` field names: `sm`, `md`, `lg`, `xl`.
+- `radius` — `canvas.RadiusTokens` field names: `sm`, `md`, `lg`, `xl`, `none`; `none` renders square corners.
 
 ```html
 <row background="surface" radius="md" padding="8">

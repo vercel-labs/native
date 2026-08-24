@@ -421,6 +421,33 @@ test "style token references resolve against tokens at finalize time" {
     try testing.expectEqual(light_badge.id, dark_badge.id);
 }
 
+test "markup radius none resolves to square button corners" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<button radius=\"none\" on-press=\"add\">Square</button>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    var button = tree.root;
+    button.frame = geometry.RectF.init(0, 0, 120, 36);
+    button.state.focused = true;
+    var commands: [4]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, button, .{});
+    switch (builder.displayList().commands[0]) {
+        .fill_rounded_rect => |fill| try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (builder.displayList().commands[2]) {
+        .stroke_rect => |ring| try testing.expectEqualDeep(canvas.Radius.all(2), ring.radius),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "explicit style values win over token references" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

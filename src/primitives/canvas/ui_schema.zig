@@ -662,7 +662,7 @@ pub const color_token_names = [_][]const u8{
     "focus_ring",      "shadow",           "scrim",           "disabled",
 };
 
-pub const radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl" };
+pub const radius_token_names = [_][]const u8{ "sm", "md", "lg", "xl", "none" };
 
 /// The `size` attribute's CONTROL-scale values, accepted on every sized
 /// element: the control register of `canvas.WidgetSize`, mirrored as data

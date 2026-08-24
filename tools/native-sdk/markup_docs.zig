@@ -149,7 +149,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "accent-foreground", .doc = "Accent foreground color token (literal ColorTokens field name, e.g. accent_text)." },
     .{ .name = "border-color", .doc = "Border color token (literal ColorTokens field name, e.g. border)." },
     .{ .name = "focus-ring", .doc = "Focus ring color token (literal ColorTokens field name, e.g. focus_ring)." },
-    .{ .name = "radius", .doc = "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl)." },
+    .{ .name = "radius", .doc = "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl, none)." },
 };
 
 pub const template_attr_docs = [_]Doc{
