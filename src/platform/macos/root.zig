@@ -3083,6 +3083,25 @@ test "both mac hosts apply launch dock presence before configuring the app" {
     }
 }
 
+test "mac updater hashes archives off the main thread and treats user cancellation silently" {
+    const host_source = @embedFile("appkit_host.m");
+    const install_at = std.mem.indexOf(u8, host_source, "- (void)installDownloadedUpdate:(NSURL *)downloadURL version:(NSString *)version archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256 {") orelse return error.TestExpectedEqual;
+    const install_tail = host_source[install_at..];
+    const install_end = std.mem.indexOf(u8, install_tail, "- (NSMenuItem *)menuItem:") orelse return error.TestExpectedEqual;
+    const install_body = install_tail[0..install_end];
+    const background_at = std.mem.indexOf(u8, install_body, "dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)") orelse return error.TestExpectedEqual;
+    const verify_at = std.mem.indexOf(u8, install_body, "native_sdk_update_verify_archive(") orelse return error.TestExpectedEqual;
+    try std.testing.expect(background_at < verify_at);
+
+    const download_at = std.mem.indexOf(u8, host_source, "- (void)downloadUpdateVersion:(NSString *)version archiveURL:(NSString *)archiveURL archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256 releaseNotes:(NSString *)releaseNotes {") orelse return error.TestExpectedEqual;
+    const download_tail = host_source[download_at..];
+    const download_end = std.mem.indexOf(u8, download_tail, "- (void)updateDownloadLimitTimerFired:") orelse return error.TestExpectedEqual;
+    const download_body = download_tail[0..download_end];
+    try std.testing.expect(std.mem.indexOf(u8, download_body, "strongSelf.updateDownloadCancelledByUser = YES;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, download_body, "if (cancelledByUser)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, download_body, "strongSelf.updateCheckRunning = NO;") != null);
+}
+
 test "mac transparent raw frames are premultiplied exactly once before Metal upload" {
     const host_source = @embedFile("appkit_host.m");
     const helper_at = std.mem.indexOf(

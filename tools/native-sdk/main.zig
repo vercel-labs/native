@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
         tooling.update.run(allocator, init.io, args[2..]) catch |err| switch (err) {
             error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json]"),
             error.KeyAlreadyExists => fail("the private update key already exists; choose another --private-key path or move the existing key explicitly"),
-            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS"),
+            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes"),
             error.InvalidTarget => fail("update target must be macos-aarch64 or macos-x86_64"),
             error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
             error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),

@@ -5,6 +5,7 @@ const Ed25519 = std.crypto.sign.Ed25519;
 pub const max_envelope_bytes: usize = 64 * 1024;
 pub const max_payload_bytes: usize = 32 * 1024;
 pub const max_release_notes_bytes: usize = 16 * 1024;
+pub const max_archive_url_bytes: usize = 4096;
 pub const max_archive_bytes: u64 = 8 * 1024 * 1024 * 1024;
 
 pub const Envelope = struct {
@@ -76,11 +77,15 @@ pub fn validateRelease(release: Release) !void {
     if (release.bundle_id.len == 0 or release.bundle_id.len > 128) return error.InvalidUpdatePayload;
     _ = try parseVersion(release.version);
     if (!std.mem.eql(u8, release.target, "macos-aarch64") and !std.mem.eql(u8, release.target, "macos-x86_64")) return error.InvalidUpdatePayload;
-    if (!std.mem.startsWith(u8, release.archive_url, "https://")) return error.InvalidUpdatePayload;
+    if (!archiveUrlIsValid(release.archive_url)) return error.InvalidUpdatePayload;
     if (release.archive_bytes == 0 or release.archive_bytes > max_archive_bytes) return error.InvalidUpdatePayload;
     if (release.sha256.len != 64) return error.InvalidUpdatePayload;
     for (release.sha256) |byte| if (!(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'))) return error.InvalidUpdatePayload;
     if (release.release_notes.len > max_release_notes_bytes) return error.InvalidUpdatePayload;
+}
+
+pub fn archiveUrlIsValid(value: []const u8) bool {
+    return value.len <= max_archive_url_bytes and std.mem.startsWith(u8, value, "https://");
 }
 
 pub fn releaseApplies(release: Release, bundle_id: []const u8, current_version: []const u8, target: []const u8) !bool {
@@ -164,4 +169,28 @@ test "semantic versions compare numerically" {
     try std.testing.expectEqual(std.math.Order.lt, versionOrder("1.9.9", "1.10.0"));
     try std.testing.expectEqual(std.math.Order.eq, versionOrder("2.0.0", "2.0.0"));
     try std.testing.expectEqual(std.math.Order.gt, versionOrder("3.0.0", "2.99.99"));
+}
+
+test "archive URLs fit the runtime output buffer" {
+    var maximum: [max_archive_url_bytes]u8 = [_]u8{'a'} ** max_archive_url_bytes;
+    @memcpy(maximum[0.."https://".len], "https://");
+    try validateRelease(.{
+        .bundle_id = "com.example.demo",
+        .version = "1.2.3",
+        .target = "macos-aarch64",
+        .archive_url = &maximum,
+        .archive_bytes = 42,
+        .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    });
+
+    var oversized: [max_archive_url_bytes + 1]u8 = [_]u8{'a'} ** (max_archive_url_bytes + 1);
+    @memcpy(oversized[0.."https://".len], "https://");
+    try std.testing.expectError(error.InvalidUpdatePayload, validateRelease(.{
+        .bundle_id = "com.example.demo",
+        .version = "1.2.3",
+        .target = "macos-aarch64",
+        .archive_url = &oversized,
+        .archive_bytes = 42,
+        .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }));
 }

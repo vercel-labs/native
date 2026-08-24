@@ -1016,6 +1016,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSTimer *updateFeedLimitTimer;
 @property(nonatomic, strong) NSTimer *updateDownloadLimitTimer;
 @property(nonatomic, assign) uint64_t updateExpectedArchiveBytes;
+@property(nonatomic, assign) BOOL updateDownloadCancelledByUser;
 @property(nonatomic, strong) NSAlert *updateDownloadAlert;
 @property(nonatomic, strong) NSString *windowLabel;
 @property(nonatomic, assign) native_sdk_appkit_event_callback_t callback;
@@ -7938,6 +7939,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.updateTarget = @"";
     self.updateCheckOnStart = NO;
     self.updateCheckRunning = NO;
+    self.updateDownloadCancelledByUser = NO;
     self.windows = [[NSMutableDictionary alloc] init];
     self.webViews = [[NSMutableDictionary alloc] init];
     self.delegates = [[NSMutableDictionary alloc] init];
@@ -10050,6 +10052,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [progress addButtonWithTitle:@"Cancel"];
     self.updateDownloadAlert = progress;
     self.updateExpectedArchiveBytes = archiveBytes;
+    self.updateDownloadCancelledByUser = NO;
     __weak NativeSdkAppKitHost *weakSelf = self;
     self.updateDownloadTask = [[NSURLSession sharedSession] downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
         NativeSdkAppKitHost *strongSelf = weakSelf;
@@ -10062,6 +10065,8 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
             if (![[NSFileManager defaultManager] copyItemAtURL:location toURL:copied error:&copyError]) copied = nil;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
+            const BOOL cancelledByUser = strongSelf.updateDownloadCancelledByUser;
+            strongSelf.updateDownloadCancelledByUser = NO;
             [strongSelf.updateDownloadLimitTimer invalidate];
             strongSelf.updateDownloadLimitTimer = nil;
             strongSelf.updateDownloadTask = nil;
@@ -10069,6 +10074,11 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
                 [strongSelf.updateDownloadAlert.window.sheetParent endSheet:strongSelf.updateDownloadAlert.window returnCode:NSModalResponseOK];
             }
             strongSelf.updateDownloadAlert = nil;
+            if (cancelledByUser) {
+                if (copied) [[NSFileManager defaultManager] removeItemAtURL:copied error:nil];
+                strongSelf.updateCheckRunning = NO;
+                return;
+            }
             if (!copied || copyError) {
                 [strongSelf showUpdateError:copyError.localizedDescription ?: @"The update archive could not be downloaded." userInitiated:YES];
                 return;
@@ -10077,8 +10087,10 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         });
     }];
     [progress beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse responseCode) {
-        if (responseCode == NSAlertFirstButtonReturn && weakSelf.updateDownloadTask) {
-            [weakSelf.updateDownloadTask cancel];
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (responseCode == NSAlertFirstButtonReturn && strongSelf.updateDownloadTask) {
+            strongSelf.updateDownloadCancelledByUser = YES;
+            [strongSelf.updateDownloadTask cancel];
         }
     }];
     [self.updateDownloadTask resume];
@@ -10131,21 +10143,25 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
 - (void)installDownloadedUpdate:(NSURL *)downloadURL version:(NSString *)version archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256 {
     NSString *bundlePath = NSBundle.mainBundle.bundlePath.stringByStandardizingPath;
     NSString *parentPath = bundlePath.stringByDeletingLastPathComponent;
-    if (![[NSFileManager defaultManager] isWritableFileAtPath:parentPath]) {
-        [[NSFileManager defaultManager] removeItemAtURL:downloadURL error:nil];
-        [self showUpdateError:@"The app’s containing folder is not writable. Move the app to a user-writable Applications folder or install the update manually." userInitiated:YES];
-        return;
-    }
-    if (!native_sdk_update_verify_archive(downloadURL.path.UTF8String, [downloadURL.path lengthOfBytesUsingEncoding:NSUTF8StringEncoding], archiveBytes, sha256.UTF8String, [sha256 lengthOfBytesUsingEncoding:NSUTF8StringEncoding])) {
-        [[NSFileManager defaultManager] removeItemAtURL:downloadURL error:nil];
-        [self showUpdateError:@"The downloaded update did not match its signed size and SHA-256 digest." userInitiated:YES];
-        return;
-    }
     __weak NativeSdkAppKitHost *weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NativeSdkAppKitHost *strongSelf = weakSelf;
         if (!strongSelf) return;
         NSFileManager *manager = [NSFileManager defaultManager];
+        if (![manager isWritableFileAtPath:parentPath]) {
+            [manager removeItemAtURL:downloadURL error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf showUpdateError:@"The app’s containing folder is not writable. Move the app to a user-writable Applications folder or install the update manually." userInitiated:YES];
+            });
+            return;
+        }
+        if (!native_sdk_update_verify_archive(downloadURL.path.UTF8String, [downloadURL.path lengthOfBytesUsingEncoding:NSUTF8StringEncoding], archiveBytes, sha256.UTF8String, [sha256 lengthOfBytesUsingEncoding:NSUTF8StringEncoding])) {
+            [manager removeItemAtURL:downloadURL error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf showUpdateError:@"The downloaded update did not match its signed size and SHA-256 digest." userInitiated:YES];
+            });
+            return;
+        }
         NSString *stagePath = [parentPath stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.native-update-%@", bundlePath.lastPathComponent, NSUUID.UUID.UUIDString]];
         NSString *extractPath = [stagePath stringByAppendingPathComponent:@"extracted"];
         NSError *stageError = nil;

@@ -61,7 +61,7 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     const archive = archive_path orelse return error.InvalidArguments;
     const url = archive_url orelse return error.InvalidArguments;
     const release_target = target orelse return error.InvalidArguments;
-    if (!std.mem.startsWith(u8, url, "https://")) return error.InvalidArchiveUrl;
+    if (!update_feed.archiveUrlIsValid(url)) return error.InvalidArchiveUrl;
     if (!std.mem.eql(u8, release_target, "macos-aarch64") and !std.mem.eql(u8, release_target, "macos-x86_64")) return error.InvalidTarget;
     if (!std.mem.endsWith(u8, archive, ".zip")) return error.InvalidArchive;
     const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path orelse manifest_tool.defaultPath(io) orelse "app.json");
