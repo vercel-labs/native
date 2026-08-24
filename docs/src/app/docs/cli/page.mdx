@@ -134,6 +134,8 @@ Package the app for distribution. The manifest is picked up at `app.json` (falli
   <dd>Path to frontend assets directory.</dd>
   <dt><code>--optimize</code></dt>
   <dd>Optimization level.</dd>
+  <dt><code>--macos-minimum</code></dt>
+  <dd>macOS deployment floor written to <code>LSMinimumSystemVersion</code>. Standard <code>zig build package</code> graphs pass the executable's configured floor automatically.</dd>
   <dt><code>--web-engine</code></dt>
   <dd>Temporarily override the app manifest with <code>system</code> or macOS-only <code>chromium</code>.</dd>
   <dt><code>--web-layer</code></dt>

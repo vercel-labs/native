@@ -46,6 +46,9 @@ pub const AppOptions = @import("build/app.zig").AppOptions;
 pub const addApp = @import("build/app.zig").addApp;
 pub const AppArtifacts = @import("build/app.zig").AppArtifacts;
 pub const addAppArtifacts = @import("build/app.zig").addAppArtifacts;
+pub const MacOSDeploymentTarget = @import("build/app.zig").MacOSDeploymentTarget;
+pub const SwiftAppSourcesOptions = @import("build/app.zig").SwiftAppSourcesOptions;
+pub const addSwiftAppSources = @import("build/app.zig").addSwiftAppSources;
 pub const MobileLibOptions = @import("build/app.zig").MobileLibOptions;
 pub const addMobileLib = @import("build/app.zig").addMobileLib;
 const mobile_export_symbol_names = @import("build/app.zig").mobile_export_symbol_names;
@@ -102,6 +105,10 @@ test "service archive support matches ScriptC localized object formats" {
     try std.testing.expect(!app_build.scriptcTargetIsCross(windows_host, native_windows_msvc));
     try std.testing.expect(app_build.scriptcCompileSupported(windows_host, native_windows_msvc));
     try std.testing.expect(app_build.serviceArchiveSupported(windows_host, native_windows_msvc));
+}
+
+test "Swift build helpers preserve deployment compatibility and cache identity" {
+    try @import("build/app.zig").testSwiftBuildHelpers();
 }
 
 pub fn build(b: *std.Build) void {
@@ -625,6 +632,17 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    const swift_toolchain_proof_step = b.step("test-swift-toolchain-proof", "Build and run the macOS Swift/AppKit toolchain proof fixture");
+    if (host_target.result.os.tag == .macos) {
+        const swift_toolchain_proof = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "-Dplatform=macos" });
+        swift_toolchain_proof.setCwd(b.path("tests/swift-toolchain-proof"));
+        swift_toolchain_proof.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".zig-cache/global");
+        // The child graph owns its own input cache. Always enter it so edits
+        // to the fixture and helper cannot be hidden by this outer Run step.
+        swift_toolchain_proof.has_side_effects = true;
+        swift_toolchain_proof_step.dependOn(&swift_toolchain_proof.step);
+        test_step.dependOn(&swift_toolchain_proof.step);
+    }
     test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(assets_tests).step);

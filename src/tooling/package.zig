@@ -61,6 +61,9 @@ pub const PackageOptions = struct {
     metadata: manifest_tool.Metadata,
     target: PackageTarget = .macos,
     optimize: []const u8 = "Debug",
+    /// Deployment floor written to a macOS bundle's Info.plist. Standard app
+    /// build graphs forward the same value used for the executable link.
+    macos_minimum: []const u8 = "11.0",
     output_path: []const u8,
     /// Project root used to resolve app.zon-relative packaging inputs such
     /// as a custom DMG background. The CLI derives it from --manifest.
@@ -201,6 +204,10 @@ pub fn artifactName(buffer: []u8, metadata: manifest_tool.Metadata, target: Pack
 }
 
 pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
+    if (options.target == .macos and !validMacosMinimumVersion(options.macos_minimum)) {
+        std.debug.print("error: --macos-minimum must be one to three dot-separated numeric components with a non-zero major version (for example 12.0)\n", .{});
+        return error.InvalidMacOSMinimumVersion;
+    }
     // Keep the manifest's accessory-app safety invariant at the artifact
     // boundary too. CLI package verbs and direct callers receive Metadata,
     // not the typed manifest that `native validate` checks, so without this
@@ -355,7 +362,7 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
         try makeExecutable(package_dir, io, service_subpath);
     }
 
-    const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name);
+    const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name, options.macos_minimum);
     defer allocator.free(info_plist);
     try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
     try writeFile(package_dir, io, "Contents/PkgInfo", "APPL????");
@@ -769,7 +776,8 @@ fn appRelativeAssetSubpath(assets_dir: []const u8) ?[]const u8 {
     return assets_dir;
 }
 
-fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, executable_name: []const u8) ![]const u8 {
+fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, executable_name: []const u8, minimum_system_version: []const u8) ![]const u8 {
+    if (!validMacosMinimumVersion(minimum_system_version)) return error.InvalidMacOSMinimumVersion;
     const icon_name = macosIconFile(metadata);
     const bundle_id = try xmlEscapeAlloc(allocator, metadata.id);
     defer allocator.free(bundle_id);
@@ -781,6 +789,8 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
     defer allocator.free(icon);
     const version = try xmlEscapeAlloc(allocator, metadata.version);
     defer allocator.free(version);
+    const minimum = try xmlEscapeAlloc(allocator, minimum_system_version);
+    defer allocator.free(minimum);
     const document_types = try macosDocumentTypes(allocator, metadata);
     defer allocator.free(document_types);
     const url_types = try macosUrlTypes(allocator, metadata);
@@ -822,7 +832,7 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\  <key>CFBundlePackageType</key>
         \\  <string>APPL</string>
         \\  <key>LSMinimumSystemVersion</key>
-        \\  <string>11.0</string>
+        \\  <string>{s}</string>
         \\  <key>CFBundleShortVersionString</key>
         \\  <string>{s}</string>
         \\  <key>CFBundleVersion</key>
@@ -831,7 +841,19 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\</dict>
         \\</plist>
         \\
-    , .{ bundle_id, display_name, display_name, executable, icon, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
+    , .{ bundle_id, display_name, display_name, executable, icon, minimum, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
+}
+
+fn validMacosMinimumVersion(value: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, value, '.');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        count += 1;
+        if (count > 3 or part.len == 0) return false;
+        const component = std.fmt.parseInt(u16, part, 10) catch return false;
+        if (count == 1 and component == 0) return false;
+    }
+    return count >= 1;
 }
 
 fn metadataHasPermission(metadata: manifest_tool.Metadata, name: []const u8) bool {
@@ -3199,7 +3221,7 @@ test "artifact names include metadata target and optimize mode" {
 
 test "plist template includes identity executable and version" {
     const metadata: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .display_name = "Demo App", .description = "A demo of the packaging pipeline.", .version = "1.2.3", .icons = &.{"assets/icon.icns"} };
-    const plist = try macosInfoPlist(std.testing.allocator, metadata, "demo");
+    const plist = try macosInfoPlist(std.testing.allocator, metadata, "demo", "12.3");
     defer std.testing.allocator.free(plist);
     try std.testing.expect(std.mem.indexOf(u8, plist, "CFBundleIdentifier") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "CFBundleDisplayName") != null);
@@ -3212,16 +3234,26 @@ test "plist template includes identity executable and version" {
     try std.testing.expect(std.mem.indexOf(u8, plist, "<key>CFBundleExecutable</key>\n  <string>demo</string>") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "icon.icns") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "LSMinimumSystemVersion") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plist, "11.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>LSMinimumSystemVersion</key>\n  <string>12.3</string>") != null);
     // The manifest description reaches the About panel's footer key.
     try std.testing.expect(std.mem.indexOf(u8, plist, "NSHumanReadableCopyright") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "A demo of the packaging pipeline.") != null);
 
     // Without a description the key is absent, not emitted empty.
     const bare: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.2.3" };
-    const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo");
+    const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo", "11.0");
     defer std.testing.allocator.free(bare_plist);
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSHumanReadableCopyright") == null);
+}
+
+test "macos deployment minimum accepts semantic components and rejects malformed values" {
+    try std.testing.expect(validMacosMinimumVersion("12"));
+    try std.testing.expect(validMacosMinimumVersion("12.3"));
+    try std.testing.expect(validMacosMinimumVersion("12.3.1"));
+    try std.testing.expect(!validMacosMinimumVersion("0.0"));
+    try std.testing.expect(!validMacosMinimumVersion("12."));
+    try std.testing.expect(!validMacosMinimumVersion("12.beta"));
+    try std.testing.expect(!validMacosMinimumVersion("12.3.1.4"));
 }
 
 test "plist capture usage descriptions follow manifest permissions" {
@@ -3233,7 +3265,7 @@ test "plist capture usage descriptions follow manifest permissions" {
         .version = "1.0.0",
         .permissions = &capture_permissions,
     };
-    const plist = try macosInfoPlist(std.testing.allocator, capture, "recorder");
+    const plist = try macosInfoPlist(std.testing.allocator, capture, "recorder", "11.0");
     defer std.testing.allocator.free(plist);
     try std.testing.expect(std.mem.indexOf(u8, plist, "NSMicrophoneUsageDescription") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "NSAudioCaptureUsageDescription") != null);
@@ -3241,7 +3273,7 @@ test "plist capture usage descriptions follow manifest permissions" {
     try std.testing.expect(std.mem.indexOf(u8, plist, "Audio &amp; Voice captures microphone audio") != null);
 
     const bare: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" };
-    const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo");
+    const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo", "11.0");
     defer std.testing.allocator.free(bare_plist);
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSMicrophoneUsageDescription") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSAudioCaptureUsageDescription") == null);
@@ -3255,12 +3287,12 @@ test "plist launch policy follows dock visibility" {
         .version = "1.0.0",
         .dock_visible = false,
     };
-    const accessory_plist = try macosInfoPlist(std.testing.allocator, accessory, "menu");
+    const accessory_plist = try macosInfoPlist(std.testing.allocator, accessory, "menu", "11.0");
     defer std.testing.allocator.free(accessory_plist);
     try std.testing.expect(std.mem.indexOf(u8, accessory_plist, "<key>LSUIElement</key>\n  <true/>") != null);
 
     const regular: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" };
-    const regular_plist = try macosInfoPlist(std.testing.allocator, regular, "demo");
+    const regular_plist = try macosInfoPlist(std.testing.allocator, regular, "demo", "11.0");
     defer std.testing.allocator.free(regular_plist);
     try std.testing.expect(std.mem.indexOf(u8, regular_plist, "LSUIElement") == null);
 }
@@ -3303,7 +3335,7 @@ test "plist template includes document and URL registrations" {
         .file_associations = &associations,
         .url_schemes = &schemes,
     };
-    const plist = try macosInfoPlist(std.testing.allocator, metadata, "demo");
+    const plist = try macosInfoPlist(std.testing.allocator, metadata, "demo", "11.0");
     defer std.testing.allocator.free(plist);
     try std.testing.expect(std.mem.indexOf(u8, plist, "CFBundleDocumentTypes") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "CFBundleTypeRole") != null);

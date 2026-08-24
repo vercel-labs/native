@@ -204,8 +204,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]",
-            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
+            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--macos-minimum version] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]",
+            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--macos-minimum", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
             .bool_flags = &.{ "--cef-auto-install", "--archive", "--update-archive" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json";
@@ -270,6 +270,7 @@ pub fn main(init: std.process.Init) !void {
             .metadata = metadata,
             .target = target,
             .optimize = optimize_value,
+            .macos_minimum = try flagValue(args, "--macos-minimum") orelse "11.0",
             .output_path = output_dir,
             .project_dir = project_dir,
             .binary_path = binary_path,
@@ -484,7 +485,7 @@ fn usage() void {
         \\  doctor [--strict] [--manifest app.json] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.json|app.zon]
         \\  bundle-assets [app.json|app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--macos-minimum version] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]
         \\  dev [--manifest app.json] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
         \\  package-windows [--output path] [--binary path] [--service-binary path]
         \\  package-linux [--output path] [--binary path] [--service-binary path]
@@ -968,6 +969,7 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
                 std.mem.eql(u8, arg, "--binary") or
                 std.mem.eql(u8, arg, "--service-binary") or
                 std.mem.eql(u8, arg, "--assets") or
+                std.mem.eql(u8, arg, "--macos-minimum") or
                 std.mem.eql(u8, arg, "--web-engine") or
                 std.mem.eql(u8, arg, "--web-layer") or
                 std.mem.eql(u8, arg, "--cef-dir") or
