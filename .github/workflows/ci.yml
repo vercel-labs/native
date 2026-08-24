@@ -81,6 +81,17 @@ jobs:
       # codesign --verify --strict (macOS runners are the only tier with
       # codesign; the step skips loudly anywhere else).
       - run: zig build test-package-signing
+      # App-owned Swift must link through Zig for both app/test modes, retain
+      # one macOS deployment floor, execute its C ABI, and survive packaging.
+      - name: Swift toolchain integration
+        run: |
+          zig build test-swift-toolchain-proof
+          cd tests/swift-toolchain-proof
+          xcrun vtool -show-build zig-out/bin/swift-toolchain-proof | grep -q "minos 12.0"
+          otool -L zig-out/bin/swift-toolchain-proof | grep -q "libswiftAVFoundation"
+          ./zig-out/bin/swift-toolchain-proof --swift-proof-smoke
+          zig build signed-package -Dplatform=macos
+          codesign --verify --deep --strict zig-out/package/swift-toolchain-proof.app
       # Shared macos-14 runners are far noisier than a dev box (the second
       # CI run measured a 576 ms automation-ready against the 500 ms local
       # ceiling), so widen the smoke budgets here instead of weakening the

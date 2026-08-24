@@ -8,20 +8,24 @@ const native_sdk = @import("native_sdk");
 
 pub fn build(b: *std.Build) void {
     const dep = b.dependency("native_sdk", .{});
-    const artifacts = native_sdk.addAppArtifacts(b, dep, .{ .name = "swift-toolchain-proof" });
+    const artifacts = native_sdk.addAppArtifacts(b, dep, .{
+        .name = "swift-toolchain-proof",
+        // The one app-level floor must reach both Zig final links and Swift.
+        .macos_minimum = .{ .major = 12 },
+    });
     native_sdk.addSwiftAppSources(b, artifacts, .{
         .sources = &.{b.path("src/NativeView.swift")},
         .module_name = "NativeViewHost",
-        .frameworks = &.{ "SwiftUI", "AppKit", "Foundation" },
-        // Match Native SDK's current macOS deployment floor. Raising this is
-        // an explicit fixture edit, never an ambient Xcode default.
-        .macos_minimum = .{ .major = 11 },
+        // AVFoundation exercises a Swift overlay outside the original
+        // SwiftUI/AppKit closure; its async property API requires macOS 12.
+        .frameworks = &.{ "SwiftUI", "AppKit", "Foundation", "AVFoundation" },
     });
     // `addAppArtifacts`' test step normally need not build the app binary.
     // This proof's whole purpose is to link both independently optimized
-    // artifacts, so make the ReleaseFast executable part of its test gate.
+    // artifacts, so make the installed ReleaseFast executable part of its test
+    // gate as well; CI smoke-runs that exact zig-out/bin artifact next.
     if (b.top_level_steps.get("test")) |test_step| {
-        test_step.step.dependOn(&artifacts.exe.step);
+        test_step.step.dependOn(&artifacts.install.step);
     }
 
     // Reproducible ReleaseFast package/sign gate for Phase 1. The standard

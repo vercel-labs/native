@@ -630,7 +630,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run package and framework tests");
     const swift_toolchain_proof_step = b.step("test-swift-toolchain-proof", "Build and run the macOS Swift/AppKit toolchain proof fixture");
     if (host_target.result.os.tag == .macos) {
-        const swift_toolchain_proof = b.addSystemCommand(&.{ "zig", "build", "test", "-Dplatform=macos" });
+        const swift_toolchain_proof = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "-Dplatform=macos" });
         swift_toolchain_proof.setCwd(b.path("tests/swift-toolchain-proof"));
         swift_toolchain_proof.setEnvironmentVariable("ZIG_GLOBAL_CACHE_DIR", ".zig-cache/global");
         // The child graph owns its own input cache. Always enter it so edits

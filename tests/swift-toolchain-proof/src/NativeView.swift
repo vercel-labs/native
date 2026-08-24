@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 
 private struct NativeToolchainProofView: View {
@@ -12,7 +13,11 @@ private struct NativeToolchainProofView: View {
 /// creation returns a retained app-owned NSView and the caller releases it.
 @_cdecl("native_swift_proof_create_view")
 public func nativeSwiftProofCreateView() -> UnsafeMutableRawPointer {
-    Unmanaged.passRetained(NSHostingView(rootView: NativeToolchainProofView())).toOpaque()
+    // Exercise AVFoundation's Swift overlay rather than merely the ObjC
+    // framework. This API contributes swiftAVFoundation/CoreMedia overlays.
+    let asset = AVURLAsset(url: URL(fileURLWithPath: "/tmp/native-swift-toolchain-proof"))
+    Task { _ = try? await asset.load(.duration) }
+    return Unmanaged.passRetained(NSHostingView(rootView: NativeToolchainProofView())).toOpaque()
 }
 
 @_cdecl("native_swift_proof_release_view")

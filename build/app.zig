@@ -120,6 +120,15 @@ const WebEngineOption = web_layer_contract.WebEngine;
 
 const WebLayerOption = web_layer_contract.WebViewLayer;
 
+/// Explicit deployment floor for a macOS app and every native language it
+/// contains. Keeping one target on `AppOptions` prevents the final Zig link
+/// from advertising an older OS than app-owned Swift objects can run on.
+pub const MacOSDeploymentTarget = struct {
+    major: u16,
+    minor: u16 = 0,
+    patch: u16 = 0,
+};
+
 pub const AppOptions = struct {
     name: []const u8,
     /// Explicit manifest path. Null auto-detects app.json first, then app.zon,
@@ -144,6 +153,9 @@ pub const AppOptions = struct {
     /// step walks wuffs/translate_c and whose full build pulls harfbuzz)
     /// — the load-bearing property for scaffolded apps.
     terminal_sessions: bool = false,
+    /// One deployment floor for the complete macOS artifact. Swift sources,
+    /// Zig modules, tests, and the final executable all inherit this target.
+    macos_minimum: MacOSDeploymentTarget = .{ .major = 11 },
 };
 
 /// Which core the app tree carries. No flag and no config anywhere: the
@@ -1468,7 +1480,7 @@ pub const MobileTsCore = struct {
 /// a standalone build.zig (it registers the standard `target`/`optimize`
 /// options itself).
 pub fn addMobileLib(b: *std.Build, dep: *std.Build.Dependency, options: MobileLibOptions) void {
-    const target = nativeSdkTarget(b);
+    const target = nativeSdkTarget(b, .{ .major = 11 });
     const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
     const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
     addMobileLibWithTarget(b, dep, target, optimize, options);
@@ -1608,16 +1620,6 @@ pub const AppArtifacts = struct {
     run: *std.Build.Step.Run,
 };
 
-/// Explicit deployment floor for Swift sources compiled into a macOS app.
-/// Keep this independent from the SDK's own floor: an app may deliberately
-/// use a newer Swift/AppKit API surface, and that choice must stay visible at
-/// its build boundary.
-pub const MacOSDeploymentTarget = struct {
-    major: u16,
-    minor: u16 = 0,
-    patch: u16 = 0,
-};
-
 /// Phase-1 Swift toolchain integration. Swift sources compile to a plain
 /// object for each optimization mode used by the app artifacts; no Xcode
 /// project, helper executable, dylib, or post-link rewrite is involved.
@@ -1625,7 +1627,6 @@ pub const SwiftAppSourcesOptions = struct {
     sources: []const std.Build.LazyPath,
     module_name: []const u8,
     frameworks: []const []const u8 = &.{},
-    macos_minimum: MacOSDeploymentTarget,
 };
 
 /// Compile and link app-owned Swift sources into both halves of
@@ -1634,7 +1635,6 @@ pub const SwiftAppSourcesOptions = struct {
 pub fn addSwiftAppSources(b: *std.Build, artifacts: AppArtifacts, options: SwiftAppSourcesOptions) void {
     if (options.sources.len == 0) @panic("\naddSwiftAppSources needs at least one .swift source\n");
     if (options.module_name.len == 0) @panic("\naddSwiftAppSources needs a non-empty module_name\n");
-    if (options.macos_minimum.major == 0) @panic("\naddSwiftAppSources needs a valid non-zero macOS deployment target\n");
 
     const target = artifacts.exe.root_module.resolved_target orelse
         @panic("\naddSwiftAppSources requires a resolved app target\n");
@@ -1660,14 +1660,19 @@ pub fn addSwiftAppSources(b: *std.Build, artifacts: AppArtifacts, options: Swift
         exe_object
     else
         compileSwiftObject(b, swiftc, sdk, target, test_optimize, options);
+    const exe_autolink = swiftAutolinkOptions(b, swiftc, sdk, target, exe_optimize, options.frameworks);
+    const test_autolink = if (test_optimize == exe_optimize)
+        exe_autolink
+    else
+        swiftAutolinkOptions(b, swiftc, sdk, target, test_optimize, options.frameworks);
 
     // TypeScript apps use a link-only executable module over their cached app
     // object. Zig-core apps point exe.root_module directly at the app module.
     // Tests always own their test app module. Attach Swift to those final-link
     // roots so it is added exactly once in either graph shape.
-    addSwiftLinkInputs(b, artifacts.exe.root_module, exe_object, swift_macos_lib, options.frameworks, exe_optimize);
+    addSwiftLinkInputs(b, artifacts.exe.root_module, exe_object, sdk, swift_macos_lib, exe_autolink, exe_optimize);
     if (artifacts.tests.root_module != artifacts.exe.root_module) {
-        addSwiftLinkInputs(b, artifacts.tests.root_module, test_object, swift_macos_lib, options.frameworks, test_optimize);
+        addSwiftLinkInputs(b, artifacts.tests.root_module, test_object, sdk, swift_macos_lib, test_autolink, test_optimize);
     }
 }
 
@@ -1693,7 +1698,7 @@ fn compileSwiftObject(
     optimize: std.builtin.OptimizeMode,
     options: SwiftAppSourcesOptions,
 ) std.Build.LazyPath {
-    const triple = swiftMacosTargetTriple(b, target.result.cpu.arch, options.macos_minimum);
+    const triple = swiftMacosTargetTriple(b, target);
     const compile = b.addSystemCommand(&.{swiftc});
     compile.addArgs(&.{
         "-parse-as-library",
@@ -1719,11 +1724,16 @@ fn compileSwiftObject(
     return object;
 }
 
-fn swiftMacosTargetTriple(b: *std.Build, arch: std.Target.Cpu.Arch, minimum: MacOSDeploymentTarget) []const u8 {
-    const arch_name = switch (arch) {
+fn swiftMacosTargetTriple(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    const arch_name = switch (target.result.cpu.arch) {
         .aarch64 => "arm64",
         .x86_64 => "x86_64",
         else => @panic("\naddSwiftAppSources supports Apple Silicon (aarch64) and Intel (x86_64) macOS targets only\n"),
+    };
+    const minimum = switch (target.query.os_version_min orelse
+        @panic("\naddSwiftAppSources requires the app target to carry an explicit macOS deployment floor\n")) {
+        .semver => |value| value,
+        else => @panic("\naddSwiftAppSources found a non-semantic macOS deployment floor\n"),
     };
     return if (minimum.patch == 0)
         b.fmt("{s}-apple-macosx{d}.{d}", .{ arch_name, minimum.major, minimum.minor })
@@ -1731,18 +1741,188 @@ fn swiftMacosTargetTriple(b: *std.Build, arch: std.Target.Cpu.Arch, minimum: Mac
         b.fmt("{s}-apple-macosx{d}.{d}.{d}", .{ arch_name, minimum.major, minimum.minor, minimum.patch });
 }
 
+fn macosDeploymentFlag(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    const minimum = switch (target.query.os_version_min orelse
+        @panic("macOS app target needs an explicit deployment floor")) {
+        .semver => |value| value,
+        else => @panic("macOS app target needs a semantic deployment floor"),
+    };
+    return if (minimum.patch == 0)
+        b.fmt("-mmacosx-version-min={d}.{d}", .{ minimum.major, minimum.minor })
+    else
+        b.fmt("-mmacosx-version-min={d}.{d}.{d}", .{ minimum.major, minimum.minor, minimum.patch });
+}
+
+const SwiftAutolinkOptions = struct {
+    libraries: []const []const u8,
+    frameworks: []const []const u8,
+};
+
+/// Swift records link directives in Mach-O objects, but Zig's Mach-O linker
+/// does not consume LC_LINKER_OPTION. Compile one import-only object for the
+/// requested framework modules and ask Xcode's otool for that toolchain's
+/// exact closure. The probe is content-addressed under the app's build cache,
+/// so unchanged Xcode/SDK/framework inputs configure without recompiling it.
+fn swiftAutolinkOptions(
+    b: *std.Build,
+    swiftc: []const u8,
+    sdk: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    frameworks: []const []const u8,
+) SwiftAutolinkOptions {
+    var source: std.ArrayList(u8) = .empty;
+    source.appendSlice(b.allocator, "// Generated import probe for Swift LC_LINKER_OPTION discovery.\n") catch @panic("OOM");
+    for (frameworks) |framework| {
+        if (!swiftModuleNameValid(framework)) {
+            std.debug.panic("\naddSwiftAppSources framework {s} is not a Swift module identifier; pass importable Apple framework module names such as AppKit or AVFoundation\n", .{framework});
+        }
+        const import = std.fmt.allocPrint(b.allocator, "import {s}\n", .{framework}) catch @panic("OOM");
+        source.appendSlice(b.allocator, import) catch @panic("OOM");
+    }
+    source.appendSlice(b.allocator, "@_cdecl(\"native_swift_autolink_probe\") public func nativeSwiftAutolinkProbe() {}\n") catch @panic("OOM");
+
+    const triple = swiftMacosTargetTriple(b, target);
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update(swiftc);
+    digest.update(sdk);
+    digest.update(triple);
+    digest.update(@tagName(optimize));
+    digest.update(source.items);
+    var digest_bytes: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    digest.final(&digest_bytes);
+    const digest_hex = std.fmt.bytesToHex(digest_bytes, .lower);
+    const cache_dir = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "native-swift-autolink" });
+    const stem = b.fmt("{s}", .{&digest_hex});
+    const source_path = b.pathJoin(&.{ cache_dir, b.fmt("{s}.swift", .{stem}) });
+    const object_path = b.pathJoin(&.{ cache_dir, b.fmt("{s}.o", .{stem}) });
+    std.Io.Dir.cwd().createDirPath(b.graph.io, cache_dir) catch |err|
+        std.debug.panic("\naddSwiftAppSources could not create its autolink cache at {s}: {t}\n", .{ cache_dir, err });
+
+    if (!absoluteBuildFileExists(b, object_path)) {
+        std.Io.Dir.cwd().writeFile(b.graph.io, .{ .sub_path = source_path, .data = source.items }) catch |err|
+            std.debug.panic("\naddSwiftAppSources could not write its autolink probe at {s}: {t}\n", .{ source_path, err });
+        const module_cache = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "native-swift-module-cache" });
+        var argv: std.ArrayList([]const u8) = .empty;
+        argv.appendSlice(b.allocator, &.{
+            swiftc,
+            "-parse-as-library",
+            "-emit-object",
+            "-whole-module-optimization",
+            "-module-name",
+            "NativeSwiftAutolinkProbe",
+            "-target",
+            triple,
+            "-sdk",
+            sdk,
+            "-module-cache-path",
+            module_cache,
+        }) catch @panic("OOM");
+        switch (optimize) {
+            .Debug => argv.appendSlice(b.allocator, &.{ "-Onone", "-g" }) catch @panic("OOM"),
+            .ReleaseSafe, .ReleaseFast => argv.append(b.allocator, "-O") catch @panic("OOM"),
+            .ReleaseSmall => argv.append(b.allocator, "-Osize") catch @panic("OOM"),
+        }
+        argv.appendSlice(b.allocator, &.{ "-o", object_path, source_path }) catch @panic("OOM");
+        const compile = std.process.run(b.allocator, b.graph.io, .{
+            .argv = argv.items,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(1024 * 1024),
+        }) catch |err|
+            std.debug.panic("\naddSwiftAppSources could not run swiftc for autolink discovery: {t}\n", .{err});
+        defer b.allocator.free(compile.stdout);
+        defer b.allocator.free(compile.stderr);
+        if (compile.term != .exited or compile.term.exited != 0) {
+            std.debug.panic("\naddSwiftAppSources could not import its declared Swift frameworks for autolink discovery:\n{s}\n", .{compile.stderr});
+        }
+    }
+
+    const otool = findXcrunTool(b, "otool") orelse
+        @panic("\naddSwiftAppSources could not find otool. Install Xcode and verify `xcrun --find otool`.\n");
+    const inspect = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ otool, "-l", object_path },
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch |err|
+        std.debug.panic("\naddSwiftAppSources could not inspect Swift autolink metadata: {t}\n", .{err});
+    defer b.allocator.free(inspect.stdout);
+    defer b.allocator.free(inspect.stderr);
+    if (inspect.term != .exited or inspect.term.exited != 0) {
+        std.debug.panic("\naddSwiftAppSources could not inspect Swift autolink metadata:\n{s}\n", .{inspect.stderr});
+    }
+    return parseSwiftAutolinkOptions(b, inspect.stdout);
+}
+
+fn swiftModuleNameValid(name: []const u8) bool {
+    if (name.len == 0 or !std.ascii.isAlphabetic(name[0]) and name[0] != '_') return false;
+    for (name[1..]) |char| if (!std.ascii.isAlphanumeric(char) and char != '_') return false;
+    return true;
+}
+
+fn parseSwiftAutolinkOptions(b: *std.Build, output: []u8) SwiftAutolinkOptions {
+    var libraries: std.ArrayList([]const u8) = .empty;
+    var frameworks: std.ArrayList([]const u8) = .empty;
+    var expect_framework = false;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (!std.mem.startsWith(u8, line, "string #")) continue;
+        const first_space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const rest = std.mem.trimStart(u8, line[first_space + 1 ..], " \t");
+        const second_space = std.mem.indexOfScalar(u8, rest, ' ') orelse continue;
+        const value = std.mem.trim(u8, rest[second_space + 1 ..], " \t\r");
+        if (expect_framework) {
+            appendUniqueString(b, &frameworks, value);
+            expect_framework = false;
+        } else if (std.mem.eql(u8, value, "-framework")) {
+            expect_framework = true;
+        } else if (std.mem.startsWith(u8, value, "-l") and value.len > 2) {
+            appendUniqueString(b, &libraries, value[2..]);
+        }
+    }
+    return .{ .libraries = libraries.items, .frameworks = frameworks.items };
+}
+
+fn appendUniqueString(b: *std.Build, list: *std.ArrayList([]const u8), value: []const u8) void {
+    for (list.items) |existing| if (std.mem.eql(u8, existing, value)) return;
+    list.append(b.allocator, b.dupe(value)) catch @panic("OOM");
+}
+
+fn absoluteBuildFileExists(b: *std.Build, path: []const u8) bool {
+    std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return false;
+    return true;
+}
+
+fn swiftCompatibilityArchives(b: *std.Build, swift_macos_lib: []const u8) []const []const u8 {
+    var archives: std.ArrayList([]const u8) = .empty;
+    var dir = std.Io.Dir.cwd().openDir(b.graph.io, swift_macos_lib, .{ .iterate = true }) catch |err|
+        std.debug.panic("\naddSwiftAppSources could not inspect the Swift runtime directory {s}: {t}\n", .{ swift_macos_lib, err });
+    defer dir.close(b.graph.io);
+    var iterator = dir.iterate();
+    while (iterator.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.mem.startsWith(u8, entry.name, "libswiftCompatibility") or !std.mem.endsWith(u8, entry.name, ".a")) continue;
+        archives.append(b.allocator, b.dupe(entry.name)) catch @panic("OOM");
+    }
+    std.sort.pdq([]const u8, archives.items, {}, stringLessThan);
+    return archives.items;
+}
+
+fn stringLessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.lessThan(u8, lhs, rhs);
+}
+
 fn addSwiftLinkInputs(
     b: *std.Build,
     mod: *std.Build.Module,
     object: std.Build.LazyPath,
+    sdk: []const u8,
     swift_macos_lib: []const u8,
-    frameworks: []const []const u8,
+    autolink: SwiftAutolinkOptions,
     optimize: std.builtin.OptimizeMode,
 ) void {
     mod.addObjectFile(object);
-    if (b.sysroot) |sysroot| {
-        mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
-    }
+    mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
     // System Swift dylibs have lived at this stable OS path since macOS 10.14.
     // The rpath is what Apple's Swift driver itself emits for a macOS link.
     mod.addLibraryPath(.{ .cwd_relative = "/usr/lib/swift" });
@@ -1752,70 +1932,40 @@ fn addSwiftLinkInputs(
     mod.addRPath(.{ .cwd_relative = "/usr/lib/swift" });
 
     // Swift's Mach-O objects carry LC_LINKER_OPTION records for imported
-    // overlays. Zig's Mach-O link does not consume those records, so spell
-    // out the system overlays exercised by SwiftUI/AppKit/Foundation. They
-    // are TBDs in the macOS SDK and resolve to /usr/lib/swift at runtime;
-    // none are copied into the app bundle.
-    const swift_system_libraries = [_][]const u8{
-        "swiftCore",
-        "swiftSwiftOnoneSupport",
-        "swiftos",
-        "swiftObjectiveC",
-        "swift_StringProcessing",
-        "swift_Concurrency",
-        "swift_DarwinFoundation1",
-        "swift_DarwinFoundation2",
-        "swift_DarwinFoundation3",
-        "swiftDarwin",
-        "swift_Builtin_float",
-        "swiftXPC",
-        "swiftDispatch",
-        "swiftUniformTypeIdentifiers",
-        "swiftFoundation",
-        "swiftSystem",
-        "swiftObservation",
-        "swiftCoreFoundation",
-        "swiftIOKit",
-        "swiftsimd",
-        "swiftQuartzCore",
-        "swiftMetal",
-        "swiftOSLog",
-        "swiftCoreImage",
-        "swiftSpatial",
-    };
-    for (swift_system_libraries) |library| {
+    // overlays. Zig's Mach-O link does not consume those records, so discover
+    // the selected SDK's complete Swift overlay set instead of pinning one
+    // framework closure to one Xcode release. Unreferenced dylibs are omitted;
+    // referenced overlays stay weak for back-deployment exactly as before.
+    for (autolink.libraries) |library| {
+        if (std.mem.startsWith(u8, library, "swiftCompatibility")) continue;
         if (optimize != .Debug and std.mem.eql(u8, library, "swiftSwiftOnoneSupport")) continue;
-        const tbd = b.pathJoin(&.{ b.sysroot.?, "usr", "lib", "swift", b.fmt("lib{s}.tbd", .{library}) });
-        std.Io.Dir.cwd().access(b.graph.io, tbd, .{}) catch {
-            // Swift's imported-module graph varies with Xcode. A library that
-            // does not exist in this SDK cannot have been selected by this
-            // toolchain; skip it so the Phase-1 superset spans Xcode releases.
-            continue;
-        };
         // Apple's linker records imported-module overlays as weak dylibs;
         // that is what lets an object compiled by a newer Xcode run on an
         // older deployment target where a newly split overlay does not yet
         // exist. The core runtime and Debug support library are the only
         // direct, non-overlay dependencies here.
-        const weak = !std.mem.eql(u8, library, "swiftCore") and
+        const weak = std.mem.startsWith(u8, library, "swift") and
+            !std.mem.eql(u8, library, "swiftCore") and
             !std.mem.eql(u8, library, "swiftSwiftOnoneSupport");
         mod.linkSystemLibrary(library, .{ .use_pkg_config = .no, .weak = weak });
     }
-    for (frameworks) |framework| mod.linkFramework(framework, .{});
+    for (autolink.frameworks) |framework| {
+        const framework_dir = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks", b.fmt("{s}.framework", .{framework}) });
+        const top_level_tbd = b.pathJoin(&.{ framework_dir, b.fmt("{s}.tbd", .{framework}) });
+        const versioned_tbd = b.pathJoin(&.{ framework_dir, "Versions", "A", b.fmt("{s}.tbd", .{framework}) });
+        // LC_LINKER_OPTION also names subframeworks/re-exports that Apple's
+        // linker resolves transitively but Zig rejects as top-level
+        // `-framework` inputs. Add only concrete SDK framework bundles; the
+        // owning public framework remains in this same discovered closure.
+        if (!absoluteBuildFileExists(b, top_level_tbd) and !absoluteBuildFileExists(b, versioned_tbd)) continue;
+        mod.linkFramework(framework, .{});
+    }
 
-    // A macOS 11 deployment still needs these back-deployment shims from the
-    // active Xcode toolchain. They are static archive inputs, not bundled
-    // runtime dylibs. libswiftCompatibility56 contains C++ runtime code.
-    const compatibility_archives = [_][]const u8{
-        "libswiftCompatibilityConcurrency.a",
-        "libswiftCompatibility56.a",
-        "libswiftCompatibilityPacks.a",
-    };
-    for (compatibility_archives) |archive| {
+    // Back-deployment shims vary by Swift/Xcode release. Add exactly the set
+    // present in this toolchain; older Xcodes are not required to carry newer
+    // archive names, and archive extraction omits unused members.
+    for (swiftCompatibilityArchives(b, swift_macos_lib)) |archive| {
         const path = b.pathJoin(&.{ swift_macos_lib, archive });
-        std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch {
-            std.debug.panic("\naddSwiftAppSources could not find {s}. The selected Xcode Swift toolchain is incomplete or incompatible with this deployment target.\n", .{path});
-        };
         mod.addObjectFile(.{ .cwd_relative = path });
     }
     mod.link_libcpp = true;
@@ -1827,7 +1977,7 @@ pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions
 }
 
 pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) AppArtifacts {
-    const target = nativeSdkTarget(b);
+    const target = nativeSdkTarget(b, app_options.macos_minimum);
     const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
     const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
     const app_optimize = exampleOptimizeMode(b, optimize_request, .ReleaseFast);
@@ -2338,9 +2488,10 @@ fn addMacosInfoPlist(b: *std.Build, app_mod: *std.Build.Module, target: std.Buil
     app_mod.addCSourceFile(.{ .file = generated, .flags = &.{} });
 }
 
-fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
+fn nativeSdkTarget(b: *std.Build, macos_minimum: MacOSDeploymentTarget) std.Build.ResolvedTarget {
     const target = b.standardTargetOptions(.{});
     if (target.result.os.tag != .macos) return target;
+    if (macos_minimum.major == 0) @panic("macos_minimum needs a valid non-zero macOS deployment target");
 
     if (b.sysroot == null) {
         b.sysroot = macosSdkPath(b) orelse b.sysroot;
@@ -2348,7 +2499,11 @@ fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
 
     var query = target.query;
     query.os_tag = .macos;
-    query.os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } };
+    query.os_version_min = .{ .semver = .{
+        .major = macos_minimum.major,
+        .minor = macos_minimum.minor,
+        .patch = macos_minimum.patch,
+    } };
     return b.resolveTargetQuery(query);
 }
 
@@ -2665,10 +2820,11 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
 fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, cef_dir: []const u8, cef_auto_install: bool) void {
     addPlatformLinkSearchPaths(b, platform, web_engine, cef_dir, app_mod);
     if (platform == .macos) {
+        const deployment_flag = macosDeploymentFlag(b, target);
         switch (web_engine) {
             .system => {
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", deployment_flag, "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", deployment_flag };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
@@ -2685,7 +2841,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // bundled libc++/libc headers). A plain -I shadows libc++'s <string.h>/<math.h>
                 // wrappers in ObjC++ and surfaces SDK nullability gaps as a diagnostic flood.
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-isystem{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", include_arg, define_arg };
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", deployment_flag, "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC++", "-std=c++17", "-stdlib=libc++", deployment_flag, include_arg, define_arg };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/cef_host.mm"), .flags = flags });
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));
                 app_mod.linkFramework("Chromium Embedded Framework", .{});
