@@ -1,0 +1,8 @@
+.{
+    .name = .swift_toolchain_proof,
+    .fingerprint = 0xf7a4ffb2f05ece1c,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{ .native_sdk = .{ .path = "../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "app.zon", "README.md" },
+}

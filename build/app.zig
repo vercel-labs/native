@@ -1608,6 +1608,220 @@ pub const AppArtifacts = struct {
     run: *std.Build.Step.Run,
 };
 
+/// Explicit deployment floor for Swift sources compiled into a macOS app.
+/// Keep this independent from the SDK's own floor: an app may deliberately
+/// use a newer Swift/AppKit API surface, and that choice must stay visible at
+/// its build boundary.
+pub const MacOSDeploymentTarget = struct {
+    major: u16,
+    minor: u16 = 0,
+    patch: u16 = 0,
+};
+
+/// Phase-1 Swift toolchain integration. Swift sources compile to a plain
+/// object for each optimization mode used by the app artifacts; no Xcode
+/// project, helper executable, dylib, or post-link rewrite is involved.
+pub const SwiftAppSourcesOptions = struct {
+    sources: []const std.Build.LazyPath,
+    module_name: []const u8,
+    frameworks: []const []const u8 = &.{},
+    macos_minimum: MacOSDeploymentTarget,
+};
+
+/// Compile and link app-owned Swift sources into both halves of
+/// `AppArtifacts`. This is intentionally the smallest successful Phase-1
+/// seam; Phase 2 owns broader API hardening and diagnostics tests.
+pub fn addSwiftAppSources(b: *std.Build, artifacts: AppArtifacts, options: SwiftAppSourcesOptions) void {
+    if (options.sources.len == 0) @panic("\naddSwiftAppSources needs at least one .swift source\n");
+    if (options.module_name.len == 0) @panic("\naddSwiftAppSources needs a non-empty module_name\n");
+    if (options.macos_minimum.major == 0) @panic("\naddSwiftAppSources needs a valid non-zero macOS deployment target\n");
+
+    const target = artifacts.exe.root_module.resolved_target orelse
+        @panic("\naddSwiftAppSources requires a resolved app target\n");
+    if (target.result.os.tag != .macos) {
+        @panic("\naddSwiftAppSources supports macOS app targets only; remove the Swift sources or select a macOS target\n");
+    }
+    if (b.graph.host.result.os.tag != .macos) {
+        @panic("\naddSwiftAppSources needs a macOS build host with Xcode; Swift/AppKit sources cannot be compiled from this host\n");
+    }
+
+    const sdk = b.sysroot orelse macosSdkPath(b) orelse
+        @panic("\naddSwiftAppSources could not find the macOS SDK. Install Xcode, select it with `sudo xcode-select -s /Applications/Xcode.app`, and verify `xcrun --sdk macosx --show-sdk-path`.\n");
+    const swiftc = findXcrunTool(b, "swiftc") orelse
+        @panic("\naddSwiftAppSources could not find swiftc. Install Xcode, select it with `sudo xcode-select -s /Applications/Xcode.app`, and verify `xcrun --find swiftc`.\n");
+    const swift_usr = std.fs.path.dirname(std.fs.path.dirname(swiftc) orelse "") orelse
+        @panic("\naddSwiftAppSources found swiftc at an unexpected path; `xcrun --find swiftc` must resolve an Xcode toolchain executable\n");
+    const swift_macos_lib = b.pathJoin(&.{ swift_usr, "lib", "swift", "macosx" });
+
+    const exe_optimize = artifacts.exe.root_module.optimize orelse .Debug;
+    const test_optimize = artifacts.tests.root_module.optimize orelse .Debug;
+    const exe_object = compileSwiftObject(b, swiftc, sdk, target, exe_optimize, options);
+    const test_object = if (test_optimize == exe_optimize)
+        exe_object
+    else
+        compileSwiftObject(b, swiftc, sdk, target, test_optimize, options);
+
+    // TypeScript apps use a link-only executable module over their cached app
+    // object. Zig-core apps point exe.root_module directly at the app module.
+    // Tests always own their test app module. Attach Swift to those final-link
+    // roots so it is added exactly once in either graph shape.
+    addSwiftLinkInputs(b, artifacts.exe.root_module, exe_object, swift_macos_lib, options.frameworks, exe_optimize);
+    if (artifacts.tests.root_module != artifacts.exe.root_module) {
+        addSwiftLinkInputs(b, artifacts.tests.root_module, test_object, swift_macos_lib, options.frameworks, test_optimize);
+    }
+}
+
+fn findXcrunTool(b: *std.Build, tool: []const u8) ?[]const u8 {
+    const result = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ "xcrun", "--find", tool },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return null;
+    defer b.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        b.allocator.free(result.stdout);
+        return null;
+    }
+    return std.mem.trimEnd(u8, result.stdout, "\r\n");
+}
+
+fn compileSwiftObject(
+    b: *std.Build,
+    swiftc: []const u8,
+    sdk: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    options: SwiftAppSourcesOptions,
+) std.Build.LazyPath {
+    const triple = swiftMacosTargetTriple(b, target.result.cpu.arch, options.macos_minimum);
+    const compile = b.addSystemCommand(&.{swiftc});
+    compile.addArgs(&.{
+        "-parse-as-library",
+        "-emit-object",
+        "-whole-module-optimization",
+        "-module-name",
+        options.module_name,
+        "-target",
+        triple,
+        "-sdk",
+        sdk,
+        "-module-cache-path",
+        b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "native-swift-module-cache" }),
+    });
+    switch (optimize) {
+        .Debug => compile.addArgs(&.{ "-Onone", "-g" }),
+        .ReleaseSafe, .ReleaseFast => compile.addArg("-O"),
+        .ReleaseSmall => compile.addArg("-Osize"),
+    }
+    compile.addArg("-o");
+    const object = compile.addOutputFileArg(b.fmt("{s}-{s}.o", .{ options.module_name, @tagName(optimize) }));
+    for (options.sources) |source| compile.addFileArg(source);
+    return object;
+}
+
+fn swiftMacosTargetTriple(b: *std.Build, arch: std.Target.Cpu.Arch, minimum: MacOSDeploymentTarget) []const u8 {
+    const arch_name = switch (arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "x86_64",
+        else => @panic("\naddSwiftAppSources supports Apple Silicon (aarch64) and Intel (x86_64) macOS targets only\n"),
+    };
+    return if (minimum.patch == 0)
+        b.fmt("{s}-apple-macosx{d}.{d}", .{ arch_name, minimum.major, minimum.minor })
+    else
+        b.fmt("{s}-apple-macosx{d}.{d}.{d}", .{ arch_name, minimum.major, minimum.minor, minimum.patch });
+}
+
+fn addSwiftLinkInputs(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    object: std.Build.LazyPath,
+    swift_macos_lib: []const u8,
+    frameworks: []const []const u8,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    mod.addObjectFile(object);
+    if (b.sysroot) |sysroot| {
+        mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+    }
+    // System Swift dylibs have lived at this stable OS path since macOS 10.14.
+    // The rpath is what Apple's Swift driver itself emits for a macOS link.
+    mod.addLibraryPath(.{ .cwd_relative = "/usr/lib/swift" });
+    // With --sysroot Zig prefixes absolute -L paths into the SDK. The Swift
+    // object also autolinks libobjc, whose TBD sits at <sdk>/usr/lib.
+    mod.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+    mod.addRPath(.{ .cwd_relative = "/usr/lib/swift" });
+
+    // Swift's Mach-O objects carry LC_LINKER_OPTION records for imported
+    // overlays. Zig's Mach-O link does not consume those records, so spell
+    // out the system overlays exercised by SwiftUI/AppKit/Foundation. They
+    // are TBDs in the macOS SDK and resolve to /usr/lib/swift at runtime;
+    // none are copied into the app bundle.
+    const swift_system_libraries = [_][]const u8{
+        "swiftCore",
+        "swiftSwiftOnoneSupport",
+        "swiftos",
+        "swiftObjectiveC",
+        "swift_StringProcessing",
+        "swift_Concurrency",
+        "swift_DarwinFoundation1",
+        "swift_DarwinFoundation2",
+        "swift_DarwinFoundation3",
+        "swiftDarwin",
+        "swift_Builtin_float",
+        "swiftXPC",
+        "swiftDispatch",
+        "swiftUniformTypeIdentifiers",
+        "swiftFoundation",
+        "swiftSystem",
+        "swiftObservation",
+        "swiftCoreFoundation",
+        "swiftIOKit",
+        "swiftsimd",
+        "swiftQuartzCore",
+        "swiftMetal",
+        "swiftOSLog",
+        "swiftCoreImage",
+        "swiftSpatial",
+    };
+    for (swift_system_libraries) |library| {
+        if (optimize != .Debug and std.mem.eql(u8, library, "swiftSwiftOnoneSupport")) continue;
+        const tbd = b.pathJoin(&.{ b.sysroot.?, "usr", "lib", "swift", b.fmt("lib{s}.tbd", .{library}) });
+        std.Io.Dir.cwd().access(b.graph.io, tbd, .{}) catch {
+            // Swift's imported-module graph varies with Xcode. A library that
+            // does not exist in this SDK cannot have been selected by this
+            // toolchain; skip it so the Phase-1 superset spans Xcode releases.
+            continue;
+        };
+        // Apple's linker records imported-module overlays as weak dylibs;
+        // that is what lets an object compiled by a newer Xcode run on an
+        // older deployment target where a newly split overlay does not yet
+        // exist. The core runtime and Debug support library are the only
+        // direct, non-overlay dependencies here.
+        const weak = !std.mem.eql(u8, library, "swiftCore") and
+            !std.mem.eql(u8, library, "swiftSwiftOnoneSupport");
+        mod.linkSystemLibrary(library, .{ .use_pkg_config = .no, .weak = weak });
+    }
+    for (frameworks) |framework| mod.linkFramework(framework, .{});
+
+    // A macOS 11 deployment still needs these back-deployment shims from the
+    // active Xcode toolchain. They are static archive inputs, not bundled
+    // runtime dylibs. libswiftCompatibility56 contains C++ runtime code.
+    const compatibility_archives = [_][]const u8{
+        "libswiftCompatibilityConcurrency.a",
+        "libswiftCompatibility56.a",
+        "libswiftCompatibilityPacks.a",
+    };
+    for (compatibility_archives) |archive| {
+        const path = b.pathJoin(&.{ swift_macos_lib, archive });
+        std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch {
+            std.debug.panic("\naddSwiftAppSources could not find {s}. The selected Xcode Swift toolchain is incomplete or incompatible with this deployment target.\n", .{path});
+        };
+        mod.addObjectFile(.{ .cwd_relative = path });
+    }
+    mod.link_libcpp = true;
+    mod.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
+}
+
 pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) void {
     _ = addAppArtifacts(b, dep, app_options);
 }
