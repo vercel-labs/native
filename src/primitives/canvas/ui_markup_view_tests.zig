@@ -429,7 +429,8 @@ test "markup radius none resolves to square button corners" {
 
     var view = try InboxMarkup.init(arena, "<button radius=\"none\" on-press=\"add\">Square</button>");
     var ui = InboxUi.init(arena);
-    const tree = try ui.finalize(try view.build(&ui, &model));
+    const custom_tokens = canvas.DesignTokens{ .radius = .{ .none = 8 } };
+    const tree = try ui.finalizeWithTokens(try view.build(&ui, &model), custom_tokens);
     try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
 
     var button = tree.root;

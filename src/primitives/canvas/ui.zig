@@ -393,6 +393,7 @@ fn colorTokenValue(colors: canvas.ColorTokens, ref: ColorTokenName) canvas.Color
 
 fn radiusTokenValue(radius: canvas.RadiusTokens, ref: RadiusTokenName) f32 {
     return switch (ref) {
+        .none => 0,
         inline else => |tag| @field(radius, @tagName(tag)),
     };
 }
