@@ -5,9 +5,10 @@ ABI into an ordinary Native SDK app without an Xcode project, helper process,
 or bundled dynamic library.
 
 `src/NativeView.swift` exports retained `NSHostingView` construction and
-release functions with `@_cdecl`, exercises AVFoundation's Swift overlay, and
-uses the non-framework `RegexBuilder` module to prove its autolink library is
-forwarded to Zig.
+release functions with `@_cdecl`, exercises AVFoundation's Swift overlay, uses
+the non-framework `RegexBuilder` module to prove its autolink library is
+forwarded to Zig, and calls a macOS 26 SwiftUI API behind an availability guard
+to prove newer split-framework symbols remain linkable at the macOS 12 floor.
 `src/main.zig` calls only those C symbols; the pointer remains opaque to Zig
 and ownership stays with the app.
 

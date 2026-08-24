@@ -1704,6 +1704,7 @@ fn compileSwiftObject(
     options: SwiftAppSourcesOptions,
 ) std.Build.LazyPath {
     const triple = swiftMacosTargetTriple(b, target);
+    const module_cache = swiftModuleCachePath(b, swiftc, sdk, triple);
     const compile = b.addSystemCommand(&.{swiftc});
     compile.addArgs(&.{
         "-parse-as-library",
@@ -1716,7 +1717,7 @@ fn compileSwiftObject(
         "-sdk",
         sdk,
         "-module-cache-path",
-        b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "native-swift-module-cache" }),
+        module_cache,
     });
     switch (optimize) {
         .Debug => compile.addArgs(&.{ "-Onone", "-g" }),
@@ -1727,6 +1728,40 @@ fn compileSwiftObject(
     const object = compile.addOutputFileArg(b.fmt("{s}-{s}.o", .{ options.module_name, @tagName(optimize) }));
     for (options.sources) |source| compile.addFileArg(source);
     return object;
+}
+
+fn swiftModuleCacheDigest(
+    build_root: []const u8,
+    cache_root: []const u8,
+    swiftc: []const u8,
+    sdk: []const u8,
+    triple: []const u8,
+) [std.crypto.hash.sha2.Sha256.digest_length]u8 {
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update("native-swift-module-cache-v1\x00");
+    for ([_][]const u8{ build_root, cache_root, swiftc, sdk, triple }) |value| {
+        digest.update(value);
+        digest.update("\x00");
+    }
+    var result: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    digest.final(&result);
+    return result;
+}
+
+/// Clang PCMs record their module-cache path. Include both resolved roots in
+/// the directory identity so copying an app together with `.zig-cache` cannot
+/// make Swift reopen a PCM that embeds the old app's absolute path.
+fn swiftModuleCachePath(
+    b: *std.Build,
+    swiftc: []const u8,
+    sdk: []const u8,
+    triple: []const u8,
+) []const u8 {
+    const build_root = b.pathFromRoot(".");
+    const cache_root = b.pathResolve(&.{b.cache_root.path orelse ".zig-cache"});
+    const digest_bytes = swiftModuleCacheDigest(build_root, cache_root, swiftc, sdk, triple);
+    const digest_hex = std.fmt.bytesToHex(digest_bytes, .lower);
+    return b.pathJoin(&.{ cache_root, b.fmt("native-swift-module-cache-{s}", .{digest_hex[0..16]}) });
 }
 
 fn swiftMacosTargetTriple(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
@@ -1869,7 +1904,7 @@ fn swiftAutolinkOptions(
     if (!absoluteBuildFileExists(b, object_path)) {
         std.Io.Dir.cwd().writeFile(b.graph.io, .{ .sub_path = source_path, .data = source.items }) catch |err|
             std.debug.panic("\naddSwiftAppSources could not write its autolink probe at {s}: {t}\n", .{ source_path, err });
-        const module_cache = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "native-swift-module-cache" });
+        const module_cache = swiftModuleCachePath(b, swiftc, sdk, triple);
         var argv: std.ArrayList([]const u8) = .empty;
         argv.appendSlice(b.allocator, &.{
             swiftc,
@@ -2100,6 +2135,28 @@ fn addTbdExports(allocator: std.mem.Allocator, tbd: []const u8, symbols: []const
     return result.toOwnedSlice(allocator) catch @panic("OOM");
 }
 
+/// Copy a split framework's complete export blocks into its compatibility
+/// umbrella. New APIs guarded by `#available` still need to resolve at link
+/// time even when the app's deployment floor predates the framework split.
+/// Keeping the blocks under the umbrella's install name lets the final binary
+/// retain only the back-deployable umbrella load command.
+fn addTbdExportBlocks(allocator: std.mem.Allocator, parent: []const u8, child: []const u8) []const u8 {
+    const marker = "exports:\n";
+    const parent_marker = std.mem.indexOf(u8, parent, marker) orelse return parent;
+    const child_marker = std.mem.indexOf(u8, child, marker) orelse return parent;
+    const child_start = child_marker + marker.len;
+    const child_end = std.mem.lastIndexOf(u8, child, "\n...") orelse child.len;
+    if (child_start >= child_end) return parent;
+
+    const insertion = parent_marker + marker.len;
+    var result: std.ArrayList(u8) = .empty;
+    result.appendSlice(allocator, parent[0..insertion]) catch @panic("OOM");
+    result.appendSlice(allocator, child[child_start..child_end]) catch @panic("OOM");
+    if (child[child_end - 1] != '\n') result.append(allocator, '\n') catch @panic("OOM");
+    result.appendSlice(allocator, parent[insertion..]) catch @panic("OOM");
+    return result.toOwnedSlice(allocator) catch @panic("OOM");
+}
+
 fn addSwiftFrameworkCompatibilityOverlays(
     b: *std.Build,
     mod: *std.Build.Module,
@@ -2137,7 +2194,7 @@ fn addSwiftFrameworkCompatibilityOverlays(
             const rewritten = removeTbdReexport(b.allocator, parent_tbd, child_install);
             if (rewritten.ptr == parent_tbd.ptr) continue;
             for (child_previous_symbols.items) |symbol| appendUniqueString(b.allocator, &previous_symbols, symbol);
-            parent_tbd = rewritten;
+            parent_tbd = addTbdExportBlocks(b.allocator, rewritten, child_tbd);
             changed = true;
         }
         if (!changed) continue;
@@ -2268,13 +2325,21 @@ pub fn testSwiftBuildHelpers() !void {
     try std.testing.expect(!std.mem.eql(u8, &base, &compiler_changed));
     try std.testing.expect(!std.mem.eql(u8, &base, &sdk_changed));
 
+    const module_cache_a = swiftModuleCacheDigest("/work/app-a", "/work/app-a/.zig-cache", "/Xcode/swiftc", "/Xcode/MacOSX.sdk", "arm64-apple-macosx12.0");
+    const module_cache_b = swiftModuleCacheDigest("/work/app-b", "/work/app-b/.zig-cache", "/Xcode/swiftc", "/Xcode/MacOSX.sdk", "arm64-apple-macosx12.0");
+    const module_cache_elsewhere = swiftModuleCacheDigest("/work/app-a", "/tmp/app-cache", "/Xcode/swiftc", "/Xcode/MacOSX.sdk", "arm64-apple-macosx12.0");
+    try std.testing.expect(!std.mem.eql(u8, &module_cache_a, &module_cache_b));
+    try std.testing.expect(!std.mem.eql(u8, &module_cache_a, &module_cache_elsewhere));
+
     const child_tbd =
         \\--- !tapi-tbd
         \\tbd-version: 4
         \\install-name: '/System/Library/Frameworks/SwiftUICore.framework/Versions/A/SwiftUICore'
         \\exports:
         \\  - targets: [ arm64-macos ]
-        \\    symbols: [ '$ld$previous$/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI$$1$10.15$15.0$_$s7SwiftUI4ViewMp$' ]
+        \\    symbols: [ '$ld$previous$/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI$$1$10.15$15.0$_$s7SwiftUI4ViewMp$',
+        \\               '_$s7SwiftUI11glassEffectyyF' ]
+        \\...
     ;
     var previous_symbols: std.ArrayList([]const u8) = .empty;
     defer {
@@ -2304,8 +2369,11 @@ pub fn testSwiftBuildHelpers() !void {
     const without_reexport = removeTbdReexport(std.testing.allocator, parent_tbd, "/System/Library/Frameworks/SwiftUICore.framework/Versions/A/SwiftUICore");
     defer if (without_reexport.ptr != parent_tbd.ptr) std.testing.allocator.free(without_reexport);
     try std.testing.expect(std.mem.indexOf(u8, without_reexport, "SwiftUICore.framework") == null);
-    const with_previous = addTbdExports(std.testing.allocator, without_reexport, previous_symbols.items);
-    defer if (with_previous.ptr != without_reexport.ptr) std.testing.allocator.free(with_previous);
+    const with_child_exports = addTbdExportBlocks(std.testing.allocator, without_reexport, child_tbd);
+    defer if (with_child_exports.ptr != without_reexport.ptr) std.testing.allocator.free(with_child_exports);
+    try std.testing.expect(std.mem.indexOf(u8, with_child_exports, "'_$s7SwiftUI11glassEffectyyF'") != null);
+    const with_previous = addTbdExports(std.testing.allocator, with_child_exports, previous_symbols.items);
+    defer if (with_previous.ptr != with_child_exports.ptr) std.testing.allocator.free(with_previous);
     try std.testing.expect(std.mem.indexOf(u8, with_previous, "'_$s7SwiftUI4ViewMp'") != null);
 }
 

@@ -92,6 +92,11 @@ jobs:
           otool -L zig-out/bin/swift-toolchain-proof | grep -q "libswiftRegexBuilder"
           ! otool -L zig-out/bin/swift-toolchain-proof | grep -q "/SwiftUICore.framework/"
           ./zig-out/bin/swift-toolchain-proof --swift-proof-smoke
+          cd ../..
+          cp -R tests/swift-toolchain-proof tests/swift-toolchain-proof-relocated
+          cd tests/swift-toolchain-proof-relocated
+          zig build test -Dplatform=macos
+          cd ../swift-toolchain-proof
           zig build package -Dplatform=macos
           test "$(plutil -extract LSMinimumSystemVersion raw zig-out/package/swift-toolchain-proof.app/Contents/Info.plist)" = "12.0"
           zig build signed-package -Dplatform=macos

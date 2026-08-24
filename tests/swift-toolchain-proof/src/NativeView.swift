@@ -5,8 +5,17 @@ import SwiftUI
 
 private struct NativeToolchainProofView: View {
     var body: some View {
-        Text("Native SDK Swift toolchain proof")
-            .padding(24)
+        if #available(macOS 26.0, *) {
+            // SwiftUICore owns this macOS 26 symbol. The macOS 12 build must
+            // resolve it through SwiftUI without gaining a SwiftUICore load
+            // command, exactly as Apple's linker handles guarded new APIs.
+            Text("Native SDK Swift toolchain proof")
+                .padding(24)
+                .glassEffect()
+        } else {
+            Text("Native SDK Swift toolchain proof")
+                .padding(24)
+        }
     }
 }
 
