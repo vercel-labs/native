@@ -68,7 +68,10 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     defer metadata.deinit(allocator);
     if (!metadata.updates.enabled()) return error.UpdatesNotConfigured;
     if (release_notes.len > 16 * 1024) return error.ReleaseNotesTooLarge;
-    validateUpdateArchive(allocator, io, archive, metadata.id, metadata.version, metadata.name) catch return error.InvalidArchive;
+    validateUpdateArchive(allocator, io, archive, metadata.id, metadata.version, metadata.name, release_target) catch |err| switch (err) {
+        error.UpdateArchitectureMismatch => return error.UpdateArchitectureMismatch,
+        else => return error.InvalidArchive,
+    };
 
     var seed: [Ed25519.KeyPair.seed_length]u8 = undefined;
     var key_file = try std.Io.Dir.cwd().openFile(io, private_path, .{});
@@ -156,6 +159,7 @@ fn validateUpdateArchive(
     expected_bundle_id: []const u8,
     expected_version: []const u8,
     expected_executable: []const u8,
+    expected_target: []const u8,
 ) !void {
     var file = try std.Io.Dir.cwd().openFile(io, archive_path, .{});
     defer file.close(io);
@@ -200,6 +204,7 @@ fn validateUpdateArchive(
             std.mem.eql(u8, filename[root.len + executable_prefix.len ..], expected_executable))
         {
             if (entry.uncompressed_size == 0) return error.InvalidArchive;
+            if (!try zipEntryContainsTargetArchitecture(&reader, entry, filename, expected_target)) return error.UpdateArchitectureMismatch;
             executable_count += 1;
         }
     }
@@ -210,6 +215,64 @@ fn validateUpdateArchive(
         !plistStringValueEquals(plist, "CFBundleVersion", expected_version) or
         !plistStringValueEquals(plist, "CFBundleExecutable", expected_executable) or
         !plistStringValueEquals(plist, "CFBundlePackageType", "APPL")) return error.InvalidArchive;
+}
+
+const max_macho_architectures: usize = 64;
+const max_macho_header_bytes: usize = 8 + max_macho_architectures * 32;
+const cpu_type_x86_64: u32 = 0x01000007;
+const cpu_type_arm64: u32 = 0x0100000c;
+
+fn zipEntryContainsTargetArchitecture(
+    reader: *std.Io.File.Reader,
+    entry: std.zip.Iterator.Entry,
+    expected_filename: []const u8,
+    expected_target: []const u8,
+) !bool {
+    const expected_cpu_type: u32 = if (std.mem.eql(u8, expected_target, "macos-aarch64"))
+        cpu_type_arm64
+    else if (std.mem.eql(u8, expected_target, "macos-x86_64"))
+        cpu_type_x86_64
+    else
+        return error.InvalidTarget;
+    var header: [max_macho_header_bytes]u8 = undefined;
+    const prefix = try readZipEntryPrefix(reader, entry, expected_filename, &header);
+    return machoContainsCpuType(prefix, expected_cpu_type);
+}
+
+fn machoContainsCpuType(bytes: []const u8, expected_cpu_type: u32) bool {
+    if (bytes.len < 8) return false;
+    const magic = bytes[0..4];
+    if (std.mem.eql(u8, magic, "\xcf\xfa\xed\xfe") or std.mem.eql(u8, magic, "\xce\xfa\xed\xfe")) {
+        return std.mem.readInt(u32, bytes[4..8], .little) == expected_cpu_type;
+    }
+    if (std.mem.eql(u8, magic, "\xfe\xed\xfa\xcf") or std.mem.eql(u8, magic, "\xfe\xed\xfa\xce")) {
+        return std.mem.readInt(u32, bytes[4..8], .big) == expected_cpu_type;
+    }
+
+    const FatLayout = struct { endian: std.builtin.Endian, arch_size: usize };
+    const layout: FatLayout = if (std.mem.eql(u8, magic, "\xca\xfe\xba\xbe"))
+        .{ .endian = .big, .arch_size = 20 }
+    else if (std.mem.eql(u8, magic, "\xbe\xba\xfe\xca"))
+        .{ .endian = .little, .arch_size = 20 }
+    else if (std.mem.eql(u8, magic, "\xca\xfe\xba\xbf"))
+        .{ .endian = .big, .arch_size = 32 }
+    else if (std.mem.eql(u8, magic, "\xbf\xba\xfe\xca"))
+        .{ .endian = .little, .arch_size = 32 }
+    else
+        return false;
+    const architecture_count = std.mem.readInt(u32, bytes[4..8], layout.endian);
+    if (architecture_count == 0 or architecture_count > max_macho_architectures) return false;
+    const architecture_count_usize: usize = @intCast(architecture_count);
+    const table_bytes = std.math.mul(usize, architecture_count_usize, layout.arch_size) catch return false;
+    const required_bytes = std.math.add(usize, 8, table_bytes) catch return false;
+    if (bytes.len < required_bytes) return false;
+    var index: usize = 0;
+    while (index < architecture_count_usize) : (index += 1) {
+        const offset = 8 + index * layout.arch_size;
+        const cpu_type_bytes: *const [4]u8 = @ptrCast(bytes[offset .. offset + 4].ptr);
+        if (std.mem.readInt(u32, cpu_type_bytes, layout.endian) == expected_cpu_type) return true;
+    }
+    return false;
 }
 
 fn zipEntryFilename(reader: *std.Io.File.Reader, entry: std.zip.Iterator.Entry, buffer: []u8) ![]const u8 {
@@ -280,6 +343,53 @@ fn readZipEntryAlloc(
     }
     if (limited.remaining != .nothing) return error.InvalidArchive;
     if (std.hash.Crc32.hash(output) != entry.crc32) return error.InvalidArchive;
+    return output;
+}
+
+fn readZipEntryPrefix(
+    reader: *std.Io.File.Reader,
+    entry: std.zip.Iterator.Entry,
+    expected_filename: []const u8,
+    output_buffer: []u8,
+) ![]const u8 {
+    if (entry.uncompressed_size == 0 or output_buffer.len == 0) return error.InvalidArchive;
+    const uncompressed_len = std.math.cast(usize, entry.uncompressed_size) orelse output_buffer.len;
+    const output_len = @min(uncompressed_len, output_buffer.len);
+    const compressed_len = std.math.cast(usize, entry.compressed_size) orelse return error.InvalidArchive;
+    if (compressed_len == 0) return error.InvalidArchive;
+
+    var local_header: [@sizeOf(std.zip.LocalFileHeader)]u8 = undefined;
+    try reader.seekTo(entry.file_offset);
+    try reader.interface.readSliceAll(&local_header);
+    if (!std.mem.eql(u8, local_header[0..4], &std.zip.local_file_header_sig)) return error.InvalidArchive;
+    const flags = std.mem.readInt(u16, local_header[6..8], .little);
+    if (flags & 1 != 0) return error.InvalidArchive;
+    const method = std.mem.readInt(u16, local_header[8..10], .little);
+    if (method != @intFromEnum(entry.compression_method)) return error.InvalidArchive;
+    const filename_len = std.mem.readInt(u16, local_header[26..28], .little);
+    const extra_len = std.mem.readInt(u16, local_header[28..30], .little);
+    if (filename_len != expected_filename.len) return error.InvalidArchive;
+    var local_filename: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    if (filename_len > local_filename.len) return error.InvalidArchive;
+    try reader.interface.readSliceAll(local_filename[0..filename_len]);
+    if (!std.mem.eql(u8, local_filename[0..filename_len], expected_filename)) return error.InvalidArchive;
+    try reader.seekTo(entry.file_offset + @sizeOf(std.zip.LocalFileHeader) + filename_len + extra_len);
+
+    const output = output_buffer[0..output_len];
+    var limited_buffer: [4096]u8 = undefined;
+    var limited = reader.interface.limited(.limited(compressed_len), &limited_buffer);
+    switch (entry.compression_method) {
+        .store => {
+            if (entry.compressed_size != entry.uncompressed_size) return error.InvalidArchive;
+            try limited.interface.readSliceAll(output);
+        },
+        .deflate => {
+            var window: [std.compress.flate.max_window_len]u8 = undefined;
+            var decompress = std.compress.flate.Decompress.init(&limited.interface, .raw, &window);
+            try decompress.reader.readSliceAll(output);
+        },
+        else => return error.InvalidArchive,
+    }
     return output;
 }
 
@@ -404,14 +514,41 @@ fn updateInfoPlist(bundle_id: []const u8, version: []const u8, executable: []con
     , .{ bundle_id, version, executable });
 }
 
+fn thinMachO64(cpu_type: u32) [32]u8 {
+    var bytes = [_]u8{0} ** 32;
+    @memcpy(bytes[0..4], "\xcf\xfa\xed\xfe");
+    std.mem.writeInt(u32, bytes[4..8], cpu_type, .little);
+    return bytes;
+}
+
+fn fatMachO64(first_cpu_type: u32, second_cpu_type: u32) [72]u8 {
+    var bytes = [_]u8{0} ** 72;
+    @memcpy(bytes[0..4], "\xca\xfe\xba\xbf");
+    std.mem.writeInt(u32, bytes[4..8], 2, .big);
+    std.mem.writeInt(u32, bytes[8..12], first_cpu_type, .big);
+    std.mem.writeInt(u32, bytes[40..44], second_cpu_type, .big);
+    return bytes;
+}
+
+test "Mach-O target validation accepts thin and universal executables" {
+    const arm64 = thinMachO64(cpu_type_arm64);
+    try std.testing.expect(machoContainsCpuType(&arm64, cpu_type_arm64));
+    try std.testing.expect(!machoContainsCpuType(&arm64, cpu_type_x86_64));
+
+    const universal = fatMachO64(cpu_type_x86_64, cpu_type_arm64);
+    try std.testing.expect(machoContainsCpuType(&universal, cpu_type_x86_64));
+    try std.testing.expect(machoContainsCpuType(&universal, cpu_type_arm64));
+}
+
 test "update archive validation requires one matching app bundle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var plist_buffer: [1024]u8 = undefined;
     const plist = try updateInfoPlist("com.example.demo", "1.2.3", "demo", &plist_buffer);
+    const executable = thinMachO64(cpu_type_arm64);
     const valid_entries = [_]StoredZipEntry{
         .{ .name = "Demo.app/Contents/Info.plist", .data = plist },
-        .{ .name = "Demo.app/Contents/MacOS/demo", .data = "binary" },
+        .{ .name = "Demo.app/Contents/MacOS/demo", .data = &executable },
         .{ .name = "__MACOSX/Demo.app/Contents/._Info.plist", .data = "metadata" },
     };
     const valid_zip = try storedZipAlloc(std.testing.allocator, &valid_entries);
@@ -419,11 +556,12 @@ test "update archive validation requires one matching app bundle" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "valid.zip", .data = valid_zip });
     const valid_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/valid.zip", .{tmp.sub_path});
     defer std.testing.allocator.free(valid_path);
-    try validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.demo", "1.2.3", "demo");
+    try validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.demo", "1.2.3", "demo", "macos-aarch64");
+    try std.testing.expectError(error.UpdateArchitectureMismatch, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.demo", "1.2.3", "demo", "macos-x86_64"));
 
     const extra_root_entries = [_]StoredZipEntry{
         .{ .name = "Demo.app/Contents/Info.plist", .data = plist },
-        .{ .name = "Demo.app/Contents/MacOS/demo", .data = "binary" },
+        .{ .name = "Demo.app/Contents/MacOS/demo", .data = &executable },
         .{ .name = "README.txt", .data = "unexpected" },
     };
     const invalid_zip = try storedZipAlloc(std.testing.allocator, &extra_root_entries);
@@ -431,7 +569,7 @@ test "update archive validation requires one matching app bundle" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "invalid.zip", .data = invalid_zip });
     const invalid_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/invalid.zip", .{tmp.sub_path});
     defer std.testing.allocator.free(invalid_path);
-    try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, invalid_path, "com.example.demo", "1.2.3", "demo"));
-    try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.other", "1.2.3", "demo"));
-    try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.demo", "1.2.4", "demo"));
+    try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, invalid_path, "com.example.demo", "1.2.3", "demo", "macos-aarch64"));
+    try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.other", "1.2.3", "demo", "macos-aarch64"));
+    try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.demo", "1.2.4", "demo", "macos-aarch64"));
 }

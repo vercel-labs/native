@@ -88,7 +88,7 @@ native update sign \
 
 Use `macos-aarch64` for Apple silicon and `macos-x86_64` for Intel. Publish the resulting `native-update.json` at the manifest's `feed_url`. Sign and publish one target-specific feed per app build.
 
-`native update sign` refuses a private key that does not match the public key embedded in the manifest.
+`native update sign` refuses a private key that does not match the public key embedded in the manifest, and refuses an archive whose executable does not contain the architecture named by `--target`.
 
 ## Trigger a check
 

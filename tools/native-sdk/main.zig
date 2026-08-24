@@ -109,6 +109,7 @@ pub fn main(init: std.process.Init) !void {
             error.KeyAlreadyExists => fail("the private update key already exists; choose another --private-key path or move the existing key explicitly"),
             error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes"),
             error.InvalidTarget => fail("update target must be macos-aarch64 or macos-x86_64"),
+            error.UpdateArchitectureMismatch => fail("the update archive executable does not contain the architecture named by --target"),
             error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
             error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),
             error.InvalidUpdatePublicKey => fail("the app manifest update public_key is not a valid base64 Ed25519 public key"),
