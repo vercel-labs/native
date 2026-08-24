@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.10.0";
+const version = "0.10.1";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -204,9 +204,9 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]",
-            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
-            .bool_flags = &.{ "--cef-auto-install", "--archive", "--update-archive" },
+            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]",
+            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--notary-profile", "--optimize" },
+            .bool_flags = &.{ "--cef-auto-install", "--notarize", "--archive", "--update-archive" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json";
         const metadata = tooling.manifest.readMetadata(allocator, init.io, manifest_path) catch |err| switch (err) {
@@ -279,8 +279,9 @@ pub fn main(init: std.process.Init) !void {
             .web_engine = web_engine.engine,
             .web_layer_setting = web_layer_setting,
             .cef_dir = web_engine.cef_dir,
-            .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
+            .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .profile = try flagValue(args, "--notary-profile") },
             .archive = archive,
+            .notarize = flagBool(args, "--notarize"),
             .update_archive = flagBool(args, "--update-archive"),
             .env_map = init.environ_map,
         });
@@ -484,7 +485,7 @@ fn usage() void {
         \\  doctor [--strict] [--manifest app.json] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.json|app.zon]
         \\  bundle-assets [app.json|app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive] [--update-archive]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]
         \\  dev [--manifest app.json] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
         \\  package-windows [--output path] [--binary path] [--service-binary path]
         \\  package-linux [--output path] [--binary path] [--service-binary path]
@@ -974,7 +975,7 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
                 std.mem.eql(u8, arg, "--signing") or
                 std.mem.eql(u8, arg, "--identity") or
                 std.mem.eql(u8, arg, "--entitlements") or
-                std.mem.eql(u8, arg, "--team-id") or
+                std.mem.eql(u8, arg, "--notary-profile") or
                 std.mem.eql(u8, arg, "--command") or
                 std.mem.eql(u8, arg, "--url") or
                 std.mem.eql(u8, arg, "--timeout-ms") or

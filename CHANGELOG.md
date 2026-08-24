@@ -2,9 +2,21 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.10.0
+## 0.10.1
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Complete macOS distribution signing**: Developer ID packages now require an explicit secure timestamp, can notarize through a `notarytool` Keychain profile, and staple and validate both the app and final signed DMG before updater archives are created.
+
+### Contributors
+
+- @ctate
+
+<!-- release:end -->
+
+## 0.10.0
 
 ### New Features
 
@@ -22,8 +34,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @sepehr-safari
-
-<!-- release:end -->
 
 ## 0.9.5
 

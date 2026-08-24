@@ -119,6 +119,9 @@ pub fn build(b: *std.Build) void {
     _ = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux, ios, android") orelse .macos;
     const signing_mode = b.option(SigningMode, "signing", "Signing mode: none, adhoc, identity") orelse .none;
+    const signing_identity = b.option([]const u8, "identity", "Code signing identity for distribution packages");
+    const signing_entitlements = b.option([]const u8, "entitlements", "Entitlements plist for identity signing");
+    const notary_profile = b.option([]const u8, "notary-profile", "notarytool Keychain profile for notarization");
     const package_version = packageVersion(b);
     const optimize_name = @tagName(optimize);
     // Resolve against THIS build's root: as a dependency of a user app the
@@ -2962,6 +2965,8 @@ pub fn build(b: *std.Build) void {
     });
     package_run.addFileArg(embed_lib.getEmittedBin());
     package_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", @tagName(signing_mode), "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
+    if (signing_identity) |identity| package_run.addArgs(&.{ "--identity", identity });
+    if (signing_entitlements) |entitlements| package_run.addArgs(&.{ "--entitlements", entitlements });
     if (cef_auto_install) package_run.addArg("--cef-auto-install");
     package_run.step.dependOn(&embed_lib.step);
     package_run.step.dependOn(&bundle_run.step);
@@ -3095,7 +3100,10 @@ pub fn build(b: *std.Build) void {
         "--binary",
     });
     notarize_run.addFileArg(embed_lib.getEmittedBin());
-    notarize_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", "identity", "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
+    notarize_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", "identity", "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir, "--archive", "--notarize" });
+    if (signing_identity) |identity| notarize_run.addArgs(&.{ "--identity", identity });
+    if (signing_entitlements) |entitlements| notarize_run.addArgs(&.{ "--entitlements", entitlements });
+    if (notary_profile) |profile| notarize_run.addArgs(&.{ "--notary-profile", profile });
     if (cef_auto_install) notarize_run.addArg("--cef-auto-install");
     notarize_run.step.dependOn(&embed_lib.step);
     notarize_run.step.dependOn(&bundle_run.step);
@@ -3118,6 +3126,8 @@ pub fn build(b: *std.Build) void {
     });
     dmg_run.addFileArg(embed_lib.getEmittedBin());
     dmg_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", @tagName(signing_mode), "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir, "--archive" });
+    if (signing_identity) |identity| dmg_run.addArgs(&.{ "--identity", identity });
+    if (signing_entitlements) |entitlements| dmg_run.addArgs(&.{ "--entitlements", entitlements });
     if (cef_auto_install) dmg_run.addArg("--cef-auto-install");
     dmg_run.step.dependOn(&embed_lib.step);
     dmg_run.step.dependOn(&bundle_run.step);

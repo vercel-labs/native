@@ -148,8 +148,10 @@ Package the app for distribution. The manifest is picked up at `app.json` (falli
   <dd>Code signing identity name.</dd>
   <dt><code>--entitlements</code></dt>
   <dd>Path to entitlements file.</dd>
-  <dt><code>--team-id</code></dt>
-  <dd>Apple Developer Team ID.</dd>
+  <dt><code>--notarize</code></dt>
+  <dd>Submit the final macOS artifact to Apple's notary service, then staple and validate the accepted ticket. Requires identity signing.</dd>
+  <dt><code>--notary-profile</code></dt>
+  <dd>Name of a <code>notarytool</code> Keychain profile created with <code>xcrun notarytool store-credentials</code>.</dd>
   <dt><code>--archive</code></dt>
   <dd>Create a distributable archive. On macOS this is a styled DMG with the app, an Applications alias, a generated or custom background, and the Finder layout declared by the app manifest.</dd>
 </dl>
