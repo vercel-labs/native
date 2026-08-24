@@ -8,7 +8,9 @@ or bundled dynamic library.
 release functions with `@_cdecl`, exercises AVFoundation's Swift overlay, uses
 the non-framework `RegexBuilder` module to prove its autolink library is
 forwarded to Zig, and calls a macOS 26 SwiftUI API behind an availability guard
-to prove newer split-framework symbols remain linkable at the macOS 12 floor.
+under Swift 6.2+ to prove newer split-framework symbols remain linkable at the
+macOS 12 floor. Older supported Xcodes compile the same fixture through its
+compiler-gated fallback.
 `src/main.zig` calls only those C symbols; the pointer remains opaque to Zig
 and ownership stays with the app.
 

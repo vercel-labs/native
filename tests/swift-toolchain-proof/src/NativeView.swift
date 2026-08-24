@@ -5,6 +5,7 @@ import SwiftUI
 
 private struct NativeToolchainProofView: View {
     var body: some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             // SwiftUICore owns this macOS 26 symbol. The macOS 12 build must
             // resolve it through SwiftUI without gaining a SwiftUICore load
@@ -16,6 +17,12 @@ private struct NativeToolchainProofView: View {
             Text("Native SDK Swift toolchain proof")
                 .padding(24)
         }
+        #else
+        // Xcode 15.4 is the oldest supported CI toolchain and predates the
+        // split-framework API used by the newer-toolchain regression above.
+        Text("Native SDK Swift toolchain proof")
+            .padding(24)
+        #endif
     }
 }
 
