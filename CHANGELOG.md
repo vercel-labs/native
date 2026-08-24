@@ -2,9 +2,30 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.5
+## 0.10.0
 
 <!-- release:start -->
+
+### New Features
+
+- **Native macOS app updates**: Apps can publish Ed25519-signed update feeds that verify downloads, atomically replace and relaunch the installed bundle, roll back safely on failure, and integrate with new manifest settings plus CLI key-generation, feed-signing, and updater-package commands (#398).
+
+### Bug Fixes
+
+- **Accurate macOS text baselines**: AppKit text rendering now aligns each resolved font by its ascent, preserves fallback ink headroom, and keeps measured and rect-based layouts consistent (#396).
+
+### Improvements
+
+- **Updated compiler integration**: ScriptC advances to 0.0.35 with refreshed compiler-surface calibration, generated contracts, and synchronized package metadata (#395).
+
+### Contributors
+
+- @ctate
+- @sepehr-safari
+
+<!-- release:end -->
+
+## 0.9.5
 
 ### New Features
 
@@ -22,8 +43,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 ### Contributors
 
 - @ctate
-
-<!-- release:end -->
 
 ## 0.9.4
 

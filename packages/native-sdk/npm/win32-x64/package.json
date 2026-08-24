@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli-win32-x64",
-  "version": "0.9.5",
+  "version": "0.10.0",
   "description": "The native CLI binary for Windows x64",
   "os": [
     "win32"
