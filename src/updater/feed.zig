@@ -85,7 +85,10 @@ pub fn validateRelease(release: Release) !void {
 }
 
 pub fn archiveUrlIsValid(value: []const u8) bool {
-    return value.len <= max_archive_url_bytes and std.mem.startsWith(u8, value, "https://");
+    if (value.len == 0 or value.len > max_archive_url_bytes) return false;
+    for (value) |byte| if (byte <= 0x20 or byte == 0x7f) return false;
+    const uri = std.Uri.parse(value) catch return false;
+    return std.mem.eql(u8, uri.scheme, "https") and uri.host != null and !uri.host.?.isEmpty();
 }
 
 pub fn releaseApplies(release: Release, bundle_id: []const u8, current_version: []const u8, target: []const u8) !bool {
@@ -193,4 +196,10 @@ test "archive URLs fit the runtime output buffer" {
         .archive_bytes = 42,
         .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     }));
+
+    try std.testing.expect(!archiveUrlIsValid("https://"));
+    try std.testing.expect(!archiveUrlIsValid("https://example.com/release file.zip"));
+    try std.testing.expect(!archiveUrlIsValid("https://example.com/release.zip\n"));
+    try std.testing.expect(!archiveUrlIsValid("http://example.com/release.zip"));
+    try std.testing.expect(archiveUrlIsValid("https://example.com/releases/demo.zip?channel=stable"));
 }

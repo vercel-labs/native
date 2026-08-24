@@ -3102,6 +3102,26 @@ test "mac updater hashes archives off the main thread and treats user cancellati
     try std.testing.expect(std.mem.indexOf(u8, download_body, "strongSelf.updateCheckRunning = NO;") != null);
 }
 
+test "mac updater presents without relying on the startup window and cleans failed staging" {
+    const host_source = @embedFile("appkit_host.m");
+    const helper_at = std.mem.lastIndexOf(u8, host_source, "- (void)presentUpdateAlert:(NSAlert *)alert completionHandler:") orelse return error.TestExpectedEqual;
+    const helper_tail = host_source[helper_at..];
+    const helper_end = std.mem.indexOf(u8, helper_tail, "- (void)showUpdateError:") orelse return error.TestExpectedEqual;
+    const helper_body = helper_tail[0..helper_end];
+    try std.testing.expect(std.mem.indexOf(u8, helper_body, "[self updatePresentationWindow]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, helper_body, "[alert runModal]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, helper_body, "self.window") == null);
+
+    const install_at = std.mem.indexOf(u8, host_source, "- (void)installDownloadedUpdate:(NSURL *)downloadURL version:") orelse return error.TestExpectedEqual;
+    const install_tail = host_source[install_at..];
+    const create_failure = std.mem.indexOf(u8, install_tail, "if (![manager createDirectoryAtPath:extractPath") orelse return error.TestExpectedEqual;
+    const failure_tail = install_tail[create_failure..];
+    const failure_end = std.mem.indexOf(u8, failure_tail, "NSString *taskOutput") orelse return error.TestExpectedEqual;
+    const failure_body = failure_tail[0..failure_end];
+    try std.testing.expect(std.mem.indexOf(u8, failure_body, "removeItemAtPath:stagePath") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failure_body, "removeItemAtURL:downloadURL") != null);
+}
+
 test "mac transparent raw frames are premultiplied exactly once before Metal upload" {
     const host_source = @embedFile("appkit_host.m");
     const helper_at = std.mem.indexOf(

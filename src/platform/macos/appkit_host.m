@@ -1017,6 +1017,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSTimer *updateDownloadLimitTimer;
 @property(nonatomic, assign) uint64_t updateExpectedArchiveBytes;
 @property(nonatomic, assign) BOOL updateDownloadCancelledByUser;
+@property(nonatomic, assign) BOOL updateDownloadAlertIsAppModal;
 @property(nonatomic, strong) NSAlert *updateDownloadAlert;
 @property(nonatomic, strong) NSString *windowLabel;
 @property(nonatomic, assign) native_sdk_appkit_event_callback_t callback;
@@ -1108,6 +1109,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)addApplicationMenuToMenu:(NSMenu *)mainMenu;
 - (void)checkForUpdatesMenuItem:(id)sender;
 - (void)checkForUpdatesUserInitiated:(BOOL)userInitiated;
+- (NSWindow *)updatePresentationWindow;
+- (void)presentUpdateAlert:(NSAlert *)alert completionHandler:(void (^)(NSModalResponse responseCode))completionHandler;
 - (void)downloadUpdateVersion:(NSString *)version archiveURL:(NSString *)archiveURL archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256 releaseNotes:(NSString *)releaseNotes;
 - (void)installDownloadedUpdate:(NSURL *)downloadURL version:(NSString *)version archiveBytes:(uint64_t)archiveBytes sha256:(NSString *)sha256;
 - (void)showUpdateError:(NSString *)message userInitiated:(BOOL)userInitiated;
@@ -7940,6 +7943,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.updateCheckOnStart = NO;
     self.updateCheckRunning = NO;
     self.updateDownloadCancelledByUser = NO;
+    self.updateDownloadAlertIsAppModal = NO;
     self.windows = [[NSMutableDictionary alloc] init];
     self.webViews = [[NSMutableDictionary alloc] init];
     self.delegates = [[NSMutableDictionary alloc] init];
@@ -9915,6 +9919,29 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [self checkForUpdatesUserInitiated:YES];
 }
 
+- (NSWindow *)updatePresentationWindow {
+    NSWindow *keyWindow = NSApp.keyWindow;
+    if (keyWindow.isVisible && !keyWindow.miniaturized) return keyWindow;
+    for (NSWindow *window in NSApp.orderedWindows) {
+        if (window.isVisible && !window.miniaturized) return window;
+    }
+    for (NSWindow *window in self.windows.allValues) {
+        if (window.isVisible && !window.miniaturized) return window;
+    }
+    return nil;
+}
+
+- (void)presentUpdateAlert:(NSAlert *)alert completionHandler:(void (^)(NSModalResponse responseCode))completionHandler {
+    [NSApp activateIgnoringOtherApps:YES];
+    NSWindow *window = [self updatePresentationWindow];
+    if (window) {
+        [alert beginSheetModalForWindow:window completionHandler:completionHandler];
+        return;
+    }
+    const NSModalResponse response = [alert runModal];
+    if (completionHandler) completionHandler(response);
+}
+
 - (void)showUpdateError:(NSString *)message userInitiated:(BOOL)userInitiated {
     self.updateCheckRunning = NO;
     if (!userInitiated) {
@@ -9926,7 +9953,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     alert.messageText = @"Unable to Check for Updates";
     alert.informativeText = message ?: @"The update could not be checked.";
     [alert addButtonWithTitle:@"OK"];
-    [alert beginSheetModalForWindow:self.window completionHandler:nil];
+    [self presentUpdateAlert:alert completionHandler:nil];
 }
 
 - (void)checkForUpdatesUserInitiated:(BOOL)userInitiated {
@@ -9984,7 +10011,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
                     alert.messageText = [NSString stringWithFormat:@"%@ is up to date", strongSelf.displayName];
                     alert.informativeText = [NSString stringWithFormat:@"You’re running version %@.", strongSelf.appVersion];
                     [alert addButtonWithTitle:@"OK"];
-                    [alert beginSheetModalForWindow:strongSelf.window completionHandler:nil];
+                    [strongSelf presentUpdateAlert:alert completionHandler:nil];
                 }
                 return;
             }
@@ -10011,7 +10038,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
                 : [NSString stringWithFormat:@"Version %@ is ready to install.", version];
             [alert addButtonWithTitle:@"Install Update"];
             [alert addButtonWithTitle:@"Later"];
-            [alert beginSheetModalForWindow:strongSelf.window completionHandler:^(NSModalResponse responseCode) {
+            [strongSelf presentUpdateAlert:alert completionHandler:^(NSModalResponse responseCode) {
                 if (responseCode == NSAlertFirstButtonReturn) {
                     [strongSelf downloadUpdateVersion:version archiveURL:archiveURL archiveBytes:verified.archive_bytes sha256:sha256 releaseNotes:releaseNotes];
                 } else {
@@ -10053,6 +10080,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     self.updateDownloadAlert = progress;
     self.updateExpectedArchiveBytes = archiveBytes;
     self.updateDownloadCancelledByUser = NO;
+    self.updateDownloadAlertIsAppModal = NO;
     __weak NativeSdkAppKitHost *weakSelf = self;
     self.updateDownloadTask = [[NSURLSession sharedSession] downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
         NativeSdkAppKitHost *strongSelf = weakSelf;
@@ -10070,9 +10098,14 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
             [strongSelf.updateDownloadLimitTimer invalidate];
             strongSelf.updateDownloadLimitTimer = nil;
             strongSelf.updateDownloadTask = nil;
-            if (strongSelf.updateDownloadAlert.window.sheetParent) {
-                [strongSelf.updateDownloadAlert.window.sheetParent endSheet:strongSelf.updateDownloadAlert.window returnCode:NSModalResponseOK];
+            NSAlert *downloadAlert = strongSelf.updateDownloadAlert;
+            if (downloadAlert.window.sheetParent) {
+                [downloadAlert.window.sheetParent endSheet:downloadAlert.window returnCode:NSModalResponseOK];
+            } else if (strongSelf.updateDownloadAlertIsAppModal && NSApp.modalWindow == downloadAlert.window) {
+                [NSApp abortModal];
+                [downloadAlert.window orderOut:nil];
             }
+            strongSelf.updateDownloadAlertIsAppModal = NO;
             strongSelf.updateDownloadAlert = nil;
             if (cancelledByUser) {
                 if (copied) [[NSFileManager defaultManager] removeItemAtURL:copied error:nil];
@@ -10086,15 +10119,29 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
             [strongSelf installDownloadedUpdate:copied version:version archiveBytes:archiveBytes sha256:sha256];
         });
     }];
-    [progress beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse responseCode) {
-        NativeSdkAppKitHost *strongSelf = weakSelf;
-        if (responseCode == NSAlertFirstButtonReturn && strongSelf.updateDownloadTask) {
-            strongSelf.updateDownloadCancelledByUser = YES;
-            [strongSelf.updateDownloadTask cancel];
-        }
-    }];
-    [self.updateDownloadTask resume];
     self.updateDownloadLimitTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 target:self selector:@selector(updateDownloadLimitTimerFired:) userInfo:nil repeats:YES];
+    NSWindow *presentationWindow = [self updatePresentationWindow];
+    if (presentationWindow) {
+        [progress beginSheetModalForWindow:presentationWindow completionHandler:^(NSModalResponse responseCode) {
+            NativeSdkAppKitHost *strongSelf = weakSelf;
+            if (responseCode == NSAlertFirstButtonReturn && strongSelf.updateDownloadTask) {
+                strongSelf.updateDownloadCancelledByUser = YES;
+                [strongSelf.updateDownloadTask cancel];
+            }
+        }];
+        [self.updateDownloadTask resume];
+    } else {
+        self.updateDownloadAlertIsAppModal = YES;
+        [NSApp activateIgnoringOtherApps:YES];
+        [self.updateDownloadTask resume];
+        const NSModalResponse responseCode = [progress runModal];
+        const BOOL completedByDownload = !self.updateDownloadAlertIsAppModal;
+        self.updateDownloadAlertIsAppModal = NO;
+        if (!completedByDownload && responseCode == NSAlertFirstButtonReturn && self.updateDownloadTask) {
+            self.updateDownloadCancelledByUser = YES;
+            [self.updateDownloadTask cancel];
+        }
+    }
 }
 
 - (void)updateDownloadLimitTimerFired:(NSTimer *)timer {
@@ -10166,6 +10213,8 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
         NSString *extractPath = [stagePath stringByAppendingPathComponent:@"extracted"];
         NSError *stageError = nil;
         if (![manager createDirectoryAtPath:extractPath withIntermediateDirectories:YES attributes:nil error:&stageError]) {
+            [manager removeItemAtPath:stagePath error:nil];
+            [manager removeItemAtURL:downloadURL error:nil];
             dispatch_async(dispatch_get_main_queue(), ^{ [strongSelf showUpdateError:stageError.localizedDescription userInitiated:YES]; });
             return;
         }
