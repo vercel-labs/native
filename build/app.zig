@@ -1660,19 +1660,20 @@ pub fn addSwiftAppSources(b: *std.Build, artifacts: AppArtifacts, options: Swift
         exe_object
     else
         compileSwiftObject(b, swiftc, sdk, target, test_optimize, options);
-    const exe_autolink = swiftAutolinkOptions(b, swiftc, sdk, target, exe_optimize, options.frameworks);
+    const toolchain_identity = swiftToolchainCacheIdentity(b, swiftc, sdk, target);
+    const exe_autolink = swiftAutolinkOptions(b, swiftc, sdk, target, exe_optimize, options.frameworks, toolchain_identity);
     const test_autolink = if (test_optimize == exe_optimize)
         exe_autolink
     else
-        swiftAutolinkOptions(b, swiftc, sdk, target, test_optimize, options.frameworks);
+        swiftAutolinkOptions(b, swiftc, sdk, target, test_optimize, options.frameworks, toolchain_identity);
 
     // TypeScript apps use a link-only executable module over their cached app
     // object. Zig-core apps point exe.root_module directly at the app module.
     // Tests always own their test app module. Attach Swift to those final-link
     // roots so it is added exactly once in either graph shape.
-    addSwiftLinkInputs(b, artifacts.exe.root_module, exe_object, sdk, swift_macos_lib, exe_autolink, exe_optimize);
+    addSwiftLinkInputs(b, artifacts.exe.root_module, exe_object, sdk, swift_macos_lib, options.frameworks, exe_autolink, exe_optimize);
     if (artifacts.tests.root_module != artifacts.exe.root_module) {
-        addSwiftLinkInputs(b, artifacts.tests.root_module, test_object, sdk, swift_macos_lib, test_autolink, test_optimize);
+        addSwiftLinkInputs(b, artifacts.tests.root_module, test_object, sdk, swift_macos_lib, options.frameworks, test_autolink, test_optimize);
     }
 }
 
@@ -1758,11 +1759,72 @@ const SwiftAutolinkOptions = struct {
     frameworks: []const []const u8,
 };
 
+const SwiftToolchainCacheIdentity = struct {
+    target_info: []const u8,
+    sdk_settings: []const u8,
+};
+
+fn swiftToolchainCacheIdentity(
+    b: *std.Build,
+    swiftc: []const u8,
+    sdk: []const u8,
+    target: std.Build.ResolvedTarget,
+) SwiftToolchainCacheIdentity {
+    const target_info = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ swiftc, "-print-target-info", "-target", swiftMacosTargetTriple(b, target), "-sdk", sdk },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    }) catch |err|
+        std.debug.panic("\naddSwiftAppSources could not read the selected Swift toolchain identity: {t}\n", .{err});
+    defer b.allocator.free(target_info.stderr);
+    if (target_info.term != .exited or target_info.term.exited != 0) {
+        std.debug.panic("\naddSwiftAppSources could not read the selected Swift toolchain identity:\n{s}\n", .{target_info.stderr});
+    }
+
+    const json_path = b.pathJoin(&.{ sdk, "SDKSettings.json" });
+    const plist_path = b.pathJoin(&.{ sdk, "SDKSettings.plist" });
+    const sdk_settings = std.Io.Dir.cwd().readFileAlloc(b.graph.io, json_path, b.allocator, .limited(1024 * 1024)) catch
+        std.Io.Dir.cwd().readFileAlloc(b.graph.io, plist_path, b.allocator, .limited(1024 * 1024)) catch |err|
+        std.debug.panic("\naddSwiftAppSources could not read SDKSettings.json or SDKSettings.plist from the selected macOS SDK at {s}: {t}\n", .{ sdk, err });
+    return .{ .target_info = target_info.stdout, .sdk_settings = sdk_settings };
+}
+
+fn swiftAutolinkCacheDigest(
+    swiftc: []const u8,
+    sdk: []const u8,
+    triple: []const u8,
+    optimize: std.builtin.OptimizeMode,
+    source: []const u8,
+    identity: SwiftToolchainCacheIdentity,
+) [std.crypto.hash.sha2.Sha256.digest_length]u8 {
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update("native-swift-autolink-v2\x00");
+    digest.update(swiftc);
+    digest.update("\x00");
+    digest.update(sdk);
+    digest.update("\x00");
+    digest.update(triple);
+    digest.update("\x00");
+    digest.update(@tagName(optimize));
+    digest.update("\x00");
+    digest.update(source);
+    digest.update("\x00");
+    digest.update(identity.target_info);
+    digest.update("\x00");
+    digest.update(identity.sdk_settings);
+    var result: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    digest.final(&result);
+    return result;
+}
+
 /// Swift records link directives in Mach-O objects, but Zig's Mach-O linker
 /// does not consume LC_LINKER_OPTION. Compile one import-only object for the
 /// requested framework modules and ask Xcode's otool for that toolchain's
-/// exact closure. The probe is content-addressed under the app's build cache,
-/// so unchanged Xcode/SDK/framework inputs configure without recompiling it.
+/// exact runtime-library and framework closure. Framework directives are used
+/// to preserve deployment-aware SDK re-exports; only app-declared modules
+/// become strong direct framework dependencies. The probe is content-addressed under
+/// the app's build cache, including compiler target-info and SDK settings, so
+/// replacing Xcode in place cannot reuse stale directives.
 fn swiftAutolinkOptions(
     b: *std.Build,
     swiftc: []const u8,
@@ -1770,6 +1832,7 @@ fn swiftAutolinkOptions(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     frameworks: []const []const u8,
+    identity: SwiftToolchainCacheIdentity,
 ) SwiftAutolinkOptions {
     var source: std.ArrayList(u8) = .empty;
     source.appendSlice(b.allocator, "// Generated import probe for Swift LC_LINKER_OPTION discovery.\n") catch @panic("OOM");
@@ -1783,14 +1846,7 @@ fn swiftAutolinkOptions(
     source.appendSlice(b.allocator, "@_cdecl(\"native_swift_autolink_probe\") public func nativeSwiftAutolinkProbe() {}\n") catch @panic("OOM");
 
     const triple = swiftMacosTargetTriple(b, target);
-    var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    digest.update(swiftc);
-    digest.update(sdk);
-    digest.update(triple);
-    digest.update(@tagName(optimize));
-    digest.update(source.items);
-    var digest_bytes: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    digest.final(&digest_bytes);
+    const digest_bytes = swiftAutolinkCacheDigest(swiftc, sdk, triple, optimize, source.items, identity);
     const digest_hex = std.fmt.bytesToHex(digest_bytes, .lower);
     const cache_dir = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "native-swift-autolink" });
     const stem = b.fmt("{s}", .{&digest_hex});
@@ -1850,7 +1906,7 @@ fn swiftAutolinkOptions(
     if (inspect.term != .exited or inspect.term.exited != 0) {
         std.debug.panic("\naddSwiftAppSources could not inspect Swift autolink metadata:\n{s}\n", .{inspect.stderr});
     }
-    return parseSwiftAutolinkOptions(b, inspect.stdout);
+    return parseSwiftAutolinkOptions(b.allocator, inspect.stdout);
 }
 
 fn swiftModuleNameValid(name: []const u8) bool {
@@ -1859,7 +1915,7 @@ fn swiftModuleNameValid(name: []const u8) bool {
     return true;
 }
 
-fn parseSwiftAutolinkOptions(b: *std.Build, output: []u8) SwiftAutolinkOptions {
+fn parseSwiftAutolinkOptions(allocator: std.mem.Allocator, output: []const u8) SwiftAutolinkOptions {
     var libraries: std.ArrayList([]const u8) = .empty;
     var frameworks: std.ArrayList([]const u8) = .empty;
     var expect_framework = false;
@@ -1872,25 +1928,210 @@ fn parseSwiftAutolinkOptions(b: *std.Build, output: []u8) SwiftAutolinkOptions {
         const second_space = std.mem.indexOfScalar(u8, rest, ' ') orelse continue;
         const value = std.mem.trim(u8, rest[second_space + 1 ..], " \t\r");
         if (expect_framework) {
-            appendUniqueString(b, &frameworks, value);
+            appendUniqueString(allocator, &frameworks, value);
             expect_framework = false;
         } else if (std.mem.eql(u8, value, "-framework")) {
             expect_framework = true;
         } else if (std.mem.startsWith(u8, value, "-l") and value.len > 2) {
-            appendUniqueString(b, &libraries, value[2..]);
+            appendUniqueString(allocator, &libraries, value[2..]);
         }
     }
-    return .{ .libraries = libraries.items, .frameworks = frameworks.items };
+    return .{
+        .libraries = libraries.toOwnedSlice(allocator) catch @panic("OOM"),
+        .frameworks = frameworks.toOwnedSlice(allocator) catch @panic("OOM"),
+    };
 }
 
-fn appendUniqueString(b: *std.Build, list: *std.ArrayList([]const u8), value: []const u8) void {
+fn appendUniqueString(allocator: std.mem.Allocator, list: *std.ArrayList([]const u8), value: []const u8) void {
     for (list.items) |existing| if (std.mem.eql(u8, existing, value)) return;
-    list.append(b.allocator, b.dupe(value)) catch @panic("OOM");
+    list.append(allocator, allocator.dupe(u8, value) catch @panic("OOM")) catch @panic("OOM");
 }
 
 fn absoluteBuildFileExists(b: *std.Build, path: []const u8) bool {
     std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return false;
     return true;
+}
+
+const TbdVersion = struct {
+    major: u16,
+    minor: u16 = 0,
+    patch: u16 = 0,
+};
+
+fn parseTbdVersion(text_value: []const u8) ?TbdVersion {
+    var parts = std.mem.splitScalar(u8, text_value, '.');
+    const major = std.fmt.parseInt(u16, parts.next() orelse return null, 10) catch return null;
+    const minor = std.fmt.parseInt(u16, parts.next() orelse "0", 10) catch return null;
+    const patch = std.fmt.parseInt(u16, parts.next() orelse "0", 10) catch return null;
+    if (parts.next() != null) return null;
+    return .{ .major = major, .minor = minor, .patch = patch };
+}
+
+fn tbdVersionOrder(lhs: TbdVersion, rhs: TbdVersion) std.math.Order {
+    if (lhs.major != rhs.major) return std.math.order(lhs.major, rhs.major);
+    if (lhs.minor != rhs.minor) return std.math.order(lhs.minor, rhs.minor);
+    return std.math.order(lhs.patch, rhs.patch);
+}
+
+fn appendTbdPreviousSymbols(
+    allocator: std.mem.Allocator,
+    tbd: []const u8,
+    install_name: []const u8,
+    minimum: TbdVersion,
+    symbols: *std.ArrayList([]const u8),
+) void {
+    const prefix = std.fmt.allocPrint(allocator, "$ld$previous${s}$$1$", .{install_name}) catch @panic("OOM");
+    defer allocator.free(prefix);
+    var offset: usize = 0;
+    while (std.mem.indexOfPos(u8, tbd, offset, prefix)) |match| {
+        const start_offset = match + prefix.len;
+        const start_end = std.mem.indexOfScalarPos(u8, tbd, start_offset, '$') orelse return;
+        const end_offset = start_end + 1;
+        const end_end = std.mem.indexOfScalarPos(u8, tbd, end_offset, '$') orelse return;
+        const quote_end = std.mem.indexOfScalarPos(u8, tbd, end_end + 1, '\'') orelse return;
+        const start = parseTbdVersion(tbd[start_offset..start_end]) orelse {
+            offset = quote_end + 1;
+            continue;
+        };
+        const end = parseTbdVersion(tbd[end_offset..end_end]) orelse {
+            offset = quote_end + 1;
+            continue;
+        };
+        const encoded_symbol = tbd[end_end + 1 .. quote_end];
+        if (tbdVersionOrder(minimum, start) != .lt and
+            tbdVersionOrder(minimum, end) == .lt and
+            encoded_symbol.len > 1 and encoded_symbol[encoded_symbol.len - 1] == '$')
+        {
+            appendUniqueString(allocator, symbols, encoded_symbol[0 .. encoded_symbol.len - 1]);
+        }
+        offset = quote_end + 1;
+    }
+}
+
+fn tbdInstallName(tbd: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, tbd, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "install-name:")) continue;
+        const value = std.mem.trim(u8, line["install-name:".len..], " \t\r");
+        if (value.len < 2 or value[0] != '\'' or value[value.len - 1] != '\'') return null;
+        return value[1 .. value.len - 1];
+    }
+    return null;
+}
+
+fn frameworkTbdPath(b: *std.Build, sdk: []const u8, framework: []const u8) ?[]const u8 {
+    const framework_dir = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks", b.fmt("{s}.framework", .{framework}) });
+    const top_level = b.pathJoin(&.{ framework_dir, b.fmt("{s}.tbd", .{framework}) });
+    if (absoluteBuildFileExists(b, top_level)) return top_level;
+    const versioned = b.pathJoin(&.{ framework_dir, "Versions", "A", b.fmt("{s}.tbd", .{framework}) });
+    if (absoluteBuildFileExists(b, versioned)) return versioned;
+    return null;
+}
+
+fn removeTbdReexport(allocator: std.mem.Allocator, tbd: []const u8, install_name: []const u8) []const u8 {
+    const block_start = std.mem.indexOf(u8, tbd, "reexported-libraries:") orelse return tbd;
+    const block_end = std.mem.indexOfPos(u8, tbd, block_start, "\nexports:") orelse tbd.len;
+    const quoted = std.fmt.allocPrint(allocator, "'{s}'", .{install_name}) catch @panic("OOM");
+    defer allocator.free(quoted);
+    const relative = std.mem.indexOf(u8, tbd[block_start..block_end], quoted) orelse return tbd;
+    const value_start = block_start + relative;
+    const value_end = value_start + quoted.len;
+    var remove_start = value_start;
+    var remove_end = value_end;
+    var right = value_end;
+    while (right < block_end and std.ascii.isWhitespace(tbd[right])) : (right += 1) {}
+    if (right < block_end and tbd[right] == ',') {
+        remove_end = right + 1;
+    } else {
+        var left = value_start;
+        while (left > block_start and std.ascii.isWhitespace(tbd[left - 1])) : (left -= 1) {}
+        if (left > block_start and tbd[left - 1] == ',') remove_start = left - 1;
+    }
+    const result = allocator.alloc(u8, tbd.len - (remove_end - remove_start)) catch @panic("OOM");
+    @memcpy(result[0..remove_start], tbd[0..remove_start]);
+    @memcpy(result[remove_start..], tbd[remove_end..]);
+    return result;
+}
+
+fn addTbdExports(allocator: std.mem.Allocator, tbd: []const u8, symbols: []const []const u8) []const u8 {
+    if (symbols.len == 0) return tbd;
+    const marker = "exports:\n";
+    const marker_start = std.mem.indexOf(u8, tbd, marker) orelse return tbd;
+    const insertion = marker_start + marker.len;
+    var result: std.ArrayList(u8) = .empty;
+    result.appendSlice(allocator, tbd[0..insertion]) catch @panic("OOM");
+    result.appendSlice(allocator,
+        \\  - targets:         [ x86_64-macos, arm64-macos, arm64e-macos ]
+        \\    symbols:         [
+    ) catch @panic("OOM");
+    for (symbols, 0..) |symbol, index| {
+        if (index == 0) {
+            result.append(allocator, ' ') catch @panic("OOM");
+        } else {
+            result.appendSlice(allocator, ",\n                       ") catch @panic("OOM");
+        }
+        result.append(allocator, '\'') catch @panic("OOM");
+        result.appendSlice(allocator, symbol) catch @panic("OOM");
+        result.append(allocator, '\'') catch @panic("OOM");
+    }
+    result.appendSlice(allocator, " ]\n") catch @panic("OOM");
+    result.appendSlice(allocator, tbd[insertion..]) catch @panic("OOM");
+    return result.toOwnedSlice(allocator) catch @panic("OOM");
+}
+
+fn addSwiftFrameworkCompatibilityOverlays(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    sdk: []const u8,
+    target: std.Build.ResolvedTarget,
+    declared: []const []const u8,
+    discovered: []const []const u8,
+) void {
+    const minimum_semver = switch (target.query.os_version_min orelse return) {
+        .semver => |value| value,
+        else => return,
+    };
+    const minimum: TbdVersion = .{
+        .major = std.math.cast(u16, minimum_semver.major) orelse return,
+        .minor = std.math.cast(u16, minimum_semver.minor) orelse return,
+        .patch = std.math.cast(u16, minimum_semver.patch) orelse return,
+    };
+    var write_files: ?*std.Build.Step.WriteFile = null;
+    var overlay_root: ?std.Build.LazyPath = null;
+    for (declared) |parent| {
+        const parent_path = frameworkTbdPath(b, sdk, parent) orelse continue;
+        var parent_tbd: []const u8 = std.Io.Dir.cwd().readFileAlloc(b.graph.io, parent_path, b.allocator, .limited(64 * 1024 * 1024)) catch |err|
+            std.debug.panic("\naddSwiftAppSources could not read framework stub {s}: {t}\n", .{ parent_path, err });
+        const parent_install = tbdInstallName(parent_tbd) orelse continue;
+        var changed = false;
+        var previous_symbols: std.ArrayList([]const u8) = .empty;
+        for (discovered) |child| {
+            if (std.mem.eql(u8, child, parent)) continue;
+            const child_path = frameworkTbdPath(b, sdk, child) orelse continue;
+            const child_tbd = std.Io.Dir.cwd().readFileAlloc(b.graph.io, child_path, b.allocator, .limited(64 * 1024 * 1024)) catch continue;
+            const child_install = tbdInstallName(child_tbd) orelse continue;
+            var child_previous_symbols: std.ArrayList([]const u8) = .empty;
+            appendTbdPreviousSymbols(b.allocator, child_tbd, parent_install, minimum, &child_previous_symbols);
+            if (child_previous_symbols.items.len == 0) continue;
+            const rewritten = removeTbdReexport(b.allocator, parent_tbd, child_install);
+            if (rewritten.ptr == parent_tbd.ptr) continue;
+            for (child_previous_symbols.items) |symbol| appendUniqueString(b.allocator, &previous_symbols, symbol);
+            parent_tbd = rewritten;
+            changed = true;
+        }
+        if (!changed) continue;
+        parent_tbd = addTbdExports(b.allocator, parent_tbd, previous_symbols.items);
+        const writer = write_files orelse writer: {
+            const value = b.addWriteFiles();
+            write_files = value;
+            break :writer value;
+        };
+        const generated = writer.add(b.fmt("{s}.framework/{s}.tbd", .{ parent, parent }), parent_tbd);
+        overlay_root = generated.dirname().dirname();
+    }
+    if (overlay_root) |root| {
+        mod.include_dirs.insert(b.allocator, 0, .{ .framework_path = root.dupe(b) }) catch @panic("OOM");
+    }
 }
 
 fn swiftCompatibilityArchives(b: *std.Build, swift_macos_lib: []const u8) []const []const u8 {
@@ -1918,10 +2159,12 @@ fn addSwiftLinkInputs(
     object: std.Build.LazyPath,
     sdk: []const u8,
     swift_macos_lib: []const u8,
+    frameworks: []const []const u8,
     autolink: SwiftAutolinkOptions,
     optimize: std.builtin.OptimizeMode,
 ) void {
     mod.addObjectFile(object);
+    addSwiftFrameworkCompatibilityOverlays(b, mod, sdk, mod.resolved_target.?, frameworks, autolink.frameworks);
     mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
     // System Swift dylibs have lived at this stable OS path since macOS 10.14.
     // The rpath is what Apple's Swift driver itself emits for a macOS link.
@@ -1949,17 +2192,10 @@ fn addSwiftLinkInputs(
             !std.mem.eql(u8, library, "swiftSwiftOnoneSupport");
         mod.linkSystemLibrary(library, .{ .use_pkg_config = .no, .weak = weak });
     }
-    for (autolink.frameworks) |framework| {
-        const framework_dir = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks", b.fmt("{s}.framework", .{framework}) });
-        const top_level_tbd = b.pathJoin(&.{ framework_dir, b.fmt("{s}.tbd", .{framework}) });
-        const versioned_tbd = b.pathJoin(&.{ framework_dir, "Versions", "A", b.fmt("{s}.tbd", .{framework}) });
-        // LC_LINKER_OPTION also names subframeworks/re-exports that Apple's
-        // linker resolves transitively but Zig rejects as top-level
-        // `-framework` inputs. Add only concrete SDK framework bundles; the
-        // owning public framework remains in this same discovered closure.
-        if (!absoluteBuildFileExists(b, top_level_tbd) and !absoluteBuildFileExists(b, versioned_tbd)) continue;
-        mod.linkFramework(framework, .{});
-    }
+    // The caller's explicit imports are the complete direct contract. A newer
+    // split framework is opt-in: declare it and raise the deployment floor.
+    // Undeclared SDK implementation details never become load commands.
+    for (frameworks) |framework| mod.linkFramework(framework, .{});
 
     // Back-deployment shims vary by Swift/Xcode release. Add exactly the set
     // present in this toolchain; older Xcodes are not required to carry newer
@@ -1970,6 +2206,86 @@ fn addSwiftLinkInputs(
     }
     mod.link_libcpp = true;
     mod.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
+}
+
+pub fn testSwiftBuildHelpers() !void {
+    const parsed = parseSwiftAutolinkOptions(std.testing.allocator,
+        \\     cmd LC_LINKER_OPTION
+        \\   count 2
+        \\  string #1 -framework
+        \\  string #2 SwiftUICore
+        \\     cmd LC_LINKER_OPTION
+        \\   count 1
+        \\  string #1 -lswiftCore
+        \\     cmd LC_LINKER_OPTION
+        \\   count 1
+        \\  string #1 -lswiftCore
+    );
+    defer {
+        for (parsed.libraries) |library| std.testing.allocator.free(library);
+        std.testing.allocator.free(parsed.libraries);
+        for (parsed.frameworks) |framework| std.testing.allocator.free(framework);
+        std.testing.allocator.free(parsed.frameworks);
+    }
+    try std.testing.expectEqual(@as(usize, 1), parsed.libraries.len);
+    try std.testing.expectEqualStrings("swiftCore", parsed.libraries[0]);
+    try std.testing.expectEqual(@as(usize, 1), parsed.frameworks.len);
+    try std.testing.expectEqualStrings("SwiftUICore", parsed.frameworks[0]);
+
+    const base = swiftAutolinkCacheDigest("/Xcode/swiftc", "/Xcode/MacOSX.sdk", "arm64-apple-macosx12.0", .ReleaseFast, "import SwiftUI\n", .{
+        .target_info = "Swift 6.2 build A",
+        .sdk_settings = "macOS SDK build A",
+    });
+    const compiler_changed = swiftAutolinkCacheDigest("/Xcode/swiftc", "/Xcode/MacOSX.sdk", "arm64-apple-macosx12.0", .ReleaseFast, "import SwiftUI\n", .{
+        .target_info = "Swift 6.2 build B",
+        .sdk_settings = "macOS SDK build A",
+    });
+    const sdk_changed = swiftAutolinkCacheDigest("/Xcode/swiftc", "/Xcode/MacOSX.sdk", "arm64-apple-macosx12.0", .ReleaseFast, "import SwiftUI\n", .{
+        .target_info = "Swift 6.2 build A",
+        .sdk_settings = "macOS SDK build B",
+    });
+    try std.testing.expect(!std.mem.eql(u8, &base, &compiler_changed));
+    try std.testing.expect(!std.mem.eql(u8, &base, &sdk_changed));
+
+    const child_tbd =
+        \\--- !tapi-tbd
+        \\tbd-version: 4
+        \\install-name: '/System/Library/Frameworks/SwiftUICore.framework/Versions/A/SwiftUICore'
+        \\exports:
+        \\  - targets: [ arm64-macos ]
+        \\    symbols: [ '$ld$previous$/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI$$1$10.15$15.0$_$s7SwiftUI4ViewMp$' ]
+    ;
+    var previous_symbols: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (previous_symbols.items) |symbol| std.testing.allocator.free(symbol);
+        previous_symbols.deinit(std.testing.allocator);
+    }
+    appendTbdPreviousSymbols(std.testing.allocator, child_tbd, "/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI", .{ .major = 12 }, &previous_symbols);
+    try std.testing.expectEqual(@as(usize, 1), previous_symbols.items.len);
+    try std.testing.expectEqualStrings("_$s7SwiftUI4ViewMp", previous_symbols.items[0]);
+    var outside_symbols: std.ArrayList([]const u8) = .empty;
+    defer outside_symbols.deinit(std.testing.allocator);
+    appendTbdPreviousSymbols(std.testing.allocator, child_tbd, "/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI", .{ .major = 15 }, &outside_symbols);
+    try std.testing.expectEqual(@as(usize, 0), outside_symbols.items.len);
+
+    const parent_tbd =
+        \\--- !tapi-tbd
+        \\tbd-version: 4
+        \\install-name: '/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI'
+        \\reexported-libraries:
+        \\  - targets: [ arm64-macos ]
+        \\    libraries: [ '/System/Library/Frameworks/CoreTransferable.framework/Versions/A/CoreTransferable',
+        \\                 '/System/Library/Frameworks/SwiftUICore.framework/Versions/A/SwiftUICore' ]
+        \\exports:
+        \\  - targets: [ arm64-macos ]
+        \\    symbols: [ '_existing' ]
+    ;
+    const without_reexport = removeTbdReexport(std.testing.allocator, parent_tbd, "/System/Library/Frameworks/SwiftUICore.framework/Versions/A/SwiftUICore");
+    defer if (without_reexport.ptr != parent_tbd.ptr) std.testing.allocator.free(without_reexport);
+    try std.testing.expect(std.mem.indexOf(u8, without_reexport, "SwiftUICore.framework") == null);
+    const with_previous = addTbdExports(std.testing.allocator, without_reexport, previous_symbols.items);
+    defer if (with_previous.ptr != without_reexport.ptr) std.testing.allocator.free(with_previous);
+    try std.testing.expect(std.mem.indexOf(u8, with_previous, "'_$s7SwiftUI4ViewMp'") != null);
 }
 
 pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) void {

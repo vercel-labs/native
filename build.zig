@@ -107,6 +107,10 @@ test "service archive support matches ScriptC localized object formats" {
     try std.testing.expect(app_build.serviceArchiveSupported(windows_host, native_windows_msvc));
 }
 
+test "Swift build helpers preserve deployment compatibility and cache identity" {
+    try @import("build/app.zig").testSwiftBuildHelpers();
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const host_target = b.graph.host;

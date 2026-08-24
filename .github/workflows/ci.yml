@@ -89,6 +89,7 @@ jobs:
           cd tests/swift-toolchain-proof
           xcrun vtool -show-build zig-out/bin/swift-toolchain-proof | grep -q "minos 12.0"
           otool -L zig-out/bin/swift-toolchain-proof | grep -q "libswiftAVFoundation"
+          ! otool -L zig-out/bin/swift-toolchain-proof | grep -q "/SwiftUICore.framework/"
           ./zig-out/bin/swift-toolchain-proof --swift-proof-smoke
           zig build signed-package -Dplatform=macos
           codesign --verify --deep --strict zig-out/package/swift-toolchain-proof.app

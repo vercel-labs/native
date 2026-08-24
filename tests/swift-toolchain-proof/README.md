@@ -20,6 +20,8 @@ codesign --verify --deep --strict zig-out/package/swift-toolchain-proof.app
 ```
 
 The fixture declares macOS 12.0 once at the app boundary; the Swift object and
-final Zig executable must both carry that floor. It is exercised with Xcode 26
-and Swift 6.2 in Phase 1; the build helper emits an
+final Zig executable must both carry that floor. Its direct load commands must
+not absorb newer transitive framework splits such as `SwiftUICore`; the SDK's
+back-deployment metadata keeps those symbols on the `SwiftUI` umbrella.
+It is exercised with Xcode 26 and Swift 6.2 in Phase 1; the build helper emits an
 actionable error when Xcode, the macOS SDK, or `swiftc` is unavailable.
