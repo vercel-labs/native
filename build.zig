@@ -394,6 +394,9 @@ pub fn build(b: *std.Build) void {
     markup_cli_mod.addImport("markup_lsp", markup_lsp_mod);
     const markup_cli_tests = testArtifact(b, markup_cli_mod);
 
+    const skills_cli_mod = module(b, target, optimize, "tools/native-sdk/skills.zig");
+    const skills_cli_tests = testArtifact(b, skills_cli_mod);
+
     // The evals harness's Cmd wire-format decoder (copied next to every
     // ts-track case harness at grading time). Its own tests run here —
     // NOT at eval time — because a decoder that lags a
@@ -767,6 +770,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
     test_step.dependOn(&b.addRunArtifact(automation_cli_tests).step);
     test_step.dependOn(&b.addRunArtifact(markup_cli_tests).step);
+    test_step.dependOn(&b.addRunArtifact(skills_cli_tests).step);
     test_step.dependOn(&b.addRunArtifact(evals_cmdview_tests).step);
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-package-types", "Verify package TypeScript platform feature names", &.{
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "NativeSdkCommandInfo" },
@@ -1631,6 +1635,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-automation-protocol", "Run automation protocol tests", automation_protocol_tests);
     addTestStep(b, "test-automation-cli", "Run native automate CLI tests", automation_cli_tests);
     addTestStep(b, "test-markup-cli", "Run native markup CLI tests", markup_cli_tests);
+    addTestStep(b, "test-skills-cli", "Run native skills CLI tests", skills_cli_tests);
     addTestStep(b, "test-evals-cmdview", "Run the evals harness Cmd wire decoder tests", evals_cmdview_tests);
     addTestStep(b, "test-tooling", "Run Native SDK tooling tests", tooling_tests);
     addTestStep(b, "test-eject-components", "Run ejected-component widget-identity tests", eject_components_tests);
