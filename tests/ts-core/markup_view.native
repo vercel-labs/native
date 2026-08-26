@@ -1,3 +1,4 @@
+<import src="components/actions.native"/>
 <column gap="6" padding="10">
   <text>{banner} filter {filter} next {nextId}</text>
   <text>done {doneCount} hover {hoveredId}</text>
@@ -9,14 +10,7 @@
     <text>draft [{draft}]</text>
   </row>
   <media-surface surface="{previewSurface}" width="160" height="40" label="Preview" />
-  <row gap="4">
-    <stack>
-      <button on-press="add">Add</button>
-      <tooltip anchor="above" tooltip-delay="200">Add a task</tooltip>
-    </stack>
-    <button on-press="cycle">Cycle</button>
-    <button on-press="clear">Clear</button>
-  </row>
+  <use template="board-actions" />
   <for each="tasks" as="t" key="id">
     <row key="{t.id}" gap="4" cross="center" on-hover-enter="hover_row:{t.id}" on-hover-leave="hover_off:{t.id}">
       <text grow="1">{t.title} #{t.id}</text>
