@@ -70,7 +70,7 @@ test "fake pty lifecycle: spawn parks the request, feeds deliver, exit retires t
     defer fx.deinit();
     fx.executor = .fake;
 
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 9,
         .argv = &.{ "sh", "-l" },
         .cols = 120,
@@ -98,7 +98,7 @@ test "fake pty lifecycle: spawn parks the request, feeds deliver, exit retires t
 
     // The exit delivery freed the key: a fresh spawn under it is
     // accepted (the families' shared instant).
-    fx.ptySpawn(.{ .key = 9, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 9, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     try testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
 }
 
@@ -108,41 +108,41 @@ test "pty admission: every refused spawn delivers exactly one rejected exit" {
     fx.executor = .fake;
 
     // Empty argv.
-    fx.ptySpawn(.{ .key = 1, .argv = &.{}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 1, .argv = &.{}, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 1, .rejected);
 
     // argv over the entry budget.
     var too_many: [effects_mod.max_effect_argv + 1][]const u8 = undefined;
     for (&too_many) |*arg| arg.* = "x";
-    fx.ptySpawn(.{ .key = 2, .argv = &too_many, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 2, .argv = &too_many, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 2, .rejected);
 
     // argv over the byte budget.
     const big = "y" ** (effects_mod.max_effect_argv_bytes + 1);
-    fx.ptySpawn(.{ .key = 3, .argv = &.{big}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 3, .argv = &.{big}, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 3, .rejected);
 
     // A zero dimension.
-    fx.ptySpawn(.{ .key = 4, .argv = &.{"sh"}, .cols = 0, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 4, .argv = &.{"sh"}, .cols = 0, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 4, .rejected);
 
     // TERM over its bound.
     const long_term = "t" ** (effects_mod.max_effect_pty_term_bytes + 1);
-    fx.ptySpawn(.{ .key = 5, .argv = &.{"sh"}, .term = long_term, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 5, .argv = &.{"sh"}, .term = long_term, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 5, .rejected);
 
     // A duplicate active key.
-    fx.ptySpawn(.{ .key = 6, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
-    fx.ptySpawn(.{ .key = 6, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 6, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 6, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 6, .rejected);
 
     // Table exhaustion: the table already holds key 6; filling the
     // remaining slots leaves the next spawn refused.
     var key: u64 = 7;
     while (key < 7 + effects_mod.max_effect_ptys - 1) : (key += 1) {
-        fx.ptySpawn(.{ .key = key, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = key, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     }
-    fx.ptySpawn(.{ .key = 99, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 99, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 99, .rejected);
     try testing.expectEqual(@as(usize, effects_mod.max_effect_ptys), fx.pendingPtyCount());
 }
@@ -152,7 +152,7 @@ test "fake pty write capture, resize mirror, and kill mirror" {
     defer fx.deinit();
     fx.executor = .fake;
 
-    fx.ptySpawn(.{ .key = 11, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 11, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     try testing.expect(fx.ptyWrite(11, "ls -la"));
     try testing.expect(fx.ptyWrite(11, "\r"));
     try testing.expectEqualStrings("ls -la\r", fx.ptyWrittenBytes(11));
@@ -195,7 +195,7 @@ test "a signaled exit carries its signal; a signaled feed with no signal is refu
     // that names `.signaled` with signal 0 could never come from the live
     // transport and would journal a record replay's damage gate refuses —
     // so the feed boundary refuses it loudly, before it can be recorded.
-    fx.ptySpawn(.{ .key = 51, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 51, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(51, -1, 0, .signaled, 0));
     // The slot is untouched by the refusal: a well-formed signaled exit
     // then delivers, carrying its signal and the -1 code sentinel.
@@ -208,7 +208,7 @@ test "a signaled exit carries its signal; a signaled feed with no signal is refu
     // 0..255 (plus the -1 externally-reaped sentinel) and signals
     // 1..127 — a feed outside those could never come from the live
     // transport and is refused before it can be journaled.
-    fx.ptySpawn(.{ .key = 52, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 52, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(52, 300, 0, .exited, 0));
     try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(52, -2, 0, .exited, 0));
     try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(52, -1, 128, .signaled, 0));
@@ -225,7 +225,7 @@ test "replay-mode ptyWrite returns the journaled verdicts, never a recomputed gu
     fx.armReplay();
 
     // The replayed spawn parks; the parked occupancy holds the key.
-    fx.ptySpawn(.{ .key = 81, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 81, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
 
     // The journal recorded refuse-then-accept (a full FIFO that later
     // drained). The replayed writes must return exactly that — the
@@ -276,7 +276,7 @@ test "a write against a synchronously failed spawn journals the verdict replay's
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.bindJournal(capture.journal());
-        fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
         try testing.expect(!fx.ptyWrite(91, "same dispatch"));
         try testing.expectEqual(@as(u32, 1), capture.write_records);
         try testing.expectEqual(@as(i32, 0), capture.last_code);
@@ -300,7 +300,7 @@ test "a write against a synchronously failed spawn journals the verdict replay's
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
         try fx.pushReplayPtyWriteVerdict(91, false);
         try testing.expect(!fx.ptyWrite(91, "same dispatch"));
         try fx.feedPtyExit(91, -1, 0, .spawn_failed, 1);
@@ -315,7 +315,7 @@ test "the replay verdict queue grows past its inline window and stays keyed" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
     fx.armReplay();
-    fx.ptySpawn(.{ .key = 84, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 84, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
 
     // Every verdict a dispatch recorded feeds BEFORE that dispatch
     // replays, so one update that wrote thousands of chunks (a giant
@@ -351,7 +351,7 @@ test "settle refuses replay write-count divergence in both directions" {
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
         try testing.expect(fx.ptyWrite(82, "past the recording"));
         try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
     }
@@ -362,8 +362,8 @@ test "settle refuses replay write-count divergence in both directions" {
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
-        fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
         try fx.pushReplayPtyWriteVerdict(82, true);
         try testing.expect(fx.ptyWrite(83, "wrong session"));
         try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
@@ -392,7 +392,7 @@ test "settle refuses replay write-count divergence in both directions" {
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        fx.ptySpawn(.{ .key = 85, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = 85, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
         try fx.feedPtyOutput(85, "undelivered");
         try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
         // Delivered, the same feeds settle clean.
@@ -428,7 +428,7 @@ test "settle refuses replay write-count divergence in both directions" {
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        _ = fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
         try fx.pushReplayPtyWriteVerdict(83, false);
         try fx.pushReplayClock(1_000);
         try testing.expect(!fx.ptyWrite(83, "recorded"));
@@ -504,7 +504,7 @@ test "a write after the fed exit is staged refuses and counts - the live rule on
     defer fx.deinit();
     fx.executor = .fake;
 
-    fx.ptySpawn(.{ .key = 58, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 58, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     try testing.expect(fx.ptyWrite(58, "before"));
     try fx.feedPtyExit(58, 0, 0, .exited, 0);
     // The exit is staged but undelivered: the session is already over,
@@ -522,7 +522,7 @@ test "a fake pty refuses a second feed after its exit is queued" {
     defer fx.deinit();
     fx.executor = .fake;
 
-    fx.ptySpawn(.{ .key = 71, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 71, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     try fx.feedPtyExit(71, 0, 0, .exited, 0);
     // One terminal per spawn: a feed before the exit drains is refused
     // loudly, never enqueued and silently dropped.
@@ -536,7 +536,7 @@ test "a fed output batch over the chunk bound is refused, never truncated" {
     defer fx.deinit();
     fx.executor = .fake;
 
-    fx.ptySpawn(.{ .key = 72, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 72, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     var over: [effects_mod.max_effect_pty_chunk_bytes + 1]u8 = undefined;
     @memset(&over, 'x');
     try testing.expectError(error.PtyChunkTooLarge, fx.feedPtyOutput(72, &over));
@@ -547,7 +547,7 @@ test "a fed output batch past the inline entry bound rides a heap payload intact
     defer fx.deinit();
     fx.executor = .fake;
 
-    fx.ptySpawn(.{ .key = 21, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 21, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     var big: [effects_mod.max_effect_line_bytes + 128]u8 = undefined;
     for (&big, 0..) |*byte, index| byte.* = @intCast('a' + (index % 26));
     try fx.feedPtyOutput(21, &big);
@@ -561,7 +561,7 @@ test "pty keys share the keyed families' space" {
     defer fx.deinit();
     fx.executor = .fake;
 
-    fx.ptySpawn(.{ .key = 31, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 31, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     // A channel open under the pty's key is refused (and vice versa —
     // one key space across every keyed family).
     const handle = fx.openChannel(.{ .key = 31, .on_event = undefined });
@@ -594,7 +594,7 @@ test "replay never spawns: an armed channel parks the spawn and feeds deliver th
     defer fx.deinit();
     fx.armReplay();
 
-    fx.ptySpawn(.{ .key = 41, .argv = &.{ "sh", "-c", "echo hi" }, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 41, .argv = &.{ "sh", "-c", "echo hi" }, .on_event = DirectFx.ptyMsg(.pty) });
     // Parked as a fake: no process, no io thread — the journal is the
     // whole world.
     try testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
@@ -606,13 +606,13 @@ test "replay never spawns: an armed channel parks the spawn and feeds deliver th
 
     // A fed start failure retires a park at the spawn's dispatch
     // position (the reserved pending-order stamp).
-    fx.ptySpawn(.{ .key = 42, .argv = &.{"missing-binary"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 42, .argv = &.{"missing-binary"}, .on_event = DirectFx.ptyMsg(.pty) });
     try fx.feedPtyExit(42, effects_mod.effect_error_exit_code, 0, .spawn_failed, 0);
     _ = try expectExit(&fx, 42, .spawn_failed);
     try testing.expectEqual(@as(usize, 0), fx.pendingPtyCount());
 
     // Nothing feeds past a terminal: one exit per spawn.
-    fx.ptySpawn(.{ .key = 43, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 43, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     try fx.feedPtyExit(43, 0, 0, .exited, 0);
     try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyOutput(43, "late"));
 }
@@ -657,7 +657,7 @@ test "live pty end to end: output, coalescing, and the exit code" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 51,
         // 200 one-byte writes; the staging ring coalesces whatever
         // lands between drains, so waiting for the child first proves
@@ -685,7 +685,7 @@ test "live pty back-pressure is lossless past the staging ring" {
     // the ring fills and resumes as the drain frees room; every byte
     // arrives, each record within the chunk bound.
     const total: usize = 1024 * 1024;
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 52,
         .argv = &.{ "/bin/sh", "-c", "dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\\0' 'a'" },
         .on_event = DirectFx.ptyMsg(.pty),
@@ -702,7 +702,7 @@ test "live pty write and kill: input reaches the child, the exit reports cancell
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 53,
         .argv = &.{"/bin/cat"},
         .on_event = DirectFx.ptyMsg(.pty),
@@ -741,7 +741,7 @@ test "a write refused after the exit is staged still counts into dropped_writes"
 
     // A child that exits immediately and prints nothing: the io thread
     // stages the exit; the loop has not delivered it yet.
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 57,
         .argv = &.{ "/bin/sh", "-c", "exit 0" },
         .on_event = DirectFx.ptyMsg(.pty),
@@ -769,10 +769,10 @@ test "a fed output batch over the chunk bound and NUL-bearing term/argv are refu
 
     // TERM with an embedded NUL: refused (a truncated TERM would reach
     // the child as a different value than requested).
-    fx.ptySpawn(.{ .key = 81, .argv = &.{"sh"}, .term = "xterm\x00evil", .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 81, .argv = &.{"sh"}, .term = "xterm\x00evil", .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 81, .rejected);
     // argv with an embedded NUL: refused (fake and real agree).
-    fx.ptySpawn(.{ .key = 82, .argv = &.{ "sh", "a\x00b" }, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = fx.ptySpawn(.{ .key = 82, .argv = &.{ "sh", "a\x00b" }, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 82, .rejected);
 }
 
@@ -781,7 +781,7 @@ test "live pty resize lands as the child's window size" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 54,
         // Report the size the kernel line discipline hands back after
         // the spawn declared 91x33 — proof the initial TIOCSWINSZ took.
@@ -807,7 +807,7 @@ test "live conpty end to end: rendered output carries the child's text, the exit
     if (comptime !live_windows) return;
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 51,
         .argv = &.{ "cmd.exe", "/d", "/c", "echo pty-effects-live-marker& exit 4" },
         .on_event = DirectFx.ptyMsg(.pty),
@@ -830,7 +830,7 @@ test "live conpty back-pressure survives output past the staging ring" {
     // exact byte total non-deterministic; the property under test is
     // that the session stays live through the parking (arrives, keeps
     // flowing, exits cleanly) and every record obeys the chunk bound.
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 52,
         .argv = &.{
             "cmd.exe",
@@ -851,7 +851,7 @@ test "live conpty write and kill: input reaches the child, the exit reports canc
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 53,
         .argv = &.{"cmd.exe"},
         .on_event = DirectFx.ptyMsg(.pty),
@@ -891,7 +891,7 @@ test "live conpty initial grid size reaches the child console" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 54,
         // `mode con` reports the console geometry the pseudoconsole
         // was created with; labels are localized, digits are not.
@@ -924,7 +924,7 @@ else
 test "teardown with a live pty returns promptly and reaps the child" {
     if (comptime !pty_transport.supported) return;
     var fx = DirectFx.init(testing.allocator);
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 55,
         .argv = live_long_lived_argv,
         .on_event = DirectFx.ptyMsg(.pty),
@@ -1008,7 +1008,7 @@ test "a failed bind-site snapshot publication never strands a live pty's exit" {
     // shape where a running pty can meet a failed publication — with a
     // write in flight, so the io thread's outbound machinery is live
     // across the abandon.
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = 56,
         .argv = live_exec_long_lived_argv,
         .on_event = DirectFx.ptyMsg(.pty),
@@ -1104,7 +1104,7 @@ const session_pty_key: u64 = 61;
 
 fn ptySessionUpdate(model: *PtySessionModel, msg: PtySessionMsg, fx: *PtySessionApp.Effects) void {
     switch (msg) {
-        .spawn => fx.ptySpawn(.{
+        .spawn => _ = fx.ptySpawn(.{
             .key = session_pty_key,
             .argv = &.{ "sh", "-i" },
             .cols = 100,
@@ -1113,7 +1113,7 @@ fn ptySessionUpdate(model: *PtySessionModel, msg: PtySessionMsg, fx: *PtySession
         }),
         // The duplicate spawn: refused loop-side on BOTH sides — the
         // journaled `.rejected` exit regenerates at replay.
-        .spawn_dup => fx.ptySpawn(.{
+        .spawn_dup => _ = fx.ptySpawn(.{
             .key = session_pty_key,
             .argv = &.{"sh"},
             .on_event = PtySessionApp.Effects.ptyMsg(.event),
