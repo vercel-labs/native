@@ -21,15 +21,25 @@ try {
   const sdkIn = args.get("sdk-in");
   const staticIn = args.get("static-in");
   const sdkOut = args.get("sdk-out");
+  const sdkEventsOut = args.get("sdk-events-out");
+  const sdkTextOut = args.get("sdk-text-out");
+  const sdkBytesTextMethodsOut = args.get("sdk-bytes-text-methods-out");
+  const sdkEventsDtsOut = args.get("sdk-events-dts-out");
+  const sdkTextDtsOut = args.get("sdk-text-dts-out");
   const staticOut = args.get("static-out");
   const zigOut = args.get("zig-out");
   const metadataOut = args.get("metadata-out");
   const dtsOut = args.get("dts-out");
   const state = args.get("state");
   if (!zigOut) throw new Error("usage: sqlite_cli.ts --src <src> --zig-out <file> [--sdk-in <core.ts> --static-in <core.ts> --sdk-out <file> --static-out <file> --metadata-out <file>] [--state <file>]");
-  const surfaceArgs = [sdkIn, staticIn, sdkOut, staticOut];
+  const surfaceArgs = [
+    sdkIn, staticIn, sdkOut, staticOut,
+    sdkEventsOut, sdkTextOut, sdkBytesTextMethodsOut, sdkEventsDtsOut, sdkTextDtsOut,
+  ];
   const emitsSurface = surfaceArgs.every((value) => value !== undefined);
-  if (!emitsSurface && surfaceArgs.some((value) => value !== undefined)) throw new Error("SQLite SDK generation requires --sdk-in, --static-in, --sdk-out, and --static-out together");
+  if (!emitsSurface && surfaceArgs.some((value) => value !== undefined)) {
+    throw new Error("SQLite SDK generation requires its core, static, and SDK sibling outputs together");
+  }
   const analysis = analyzeSqlite(src);
   const diagnostics = [...analysis.diagnostics, ...(state ? checkMigrationState(analysis, state) : [])];
   for (const diagnostic of [...diagnostics, ...analysis.warnings]) console.error(formatSqliteDiagnostic(diagnostic));
@@ -37,6 +47,16 @@ try {
   if (emitsSurface) {
     const sdkSource = generateCoreSurface(fs.readFileSync(sdkIn!, "utf8"), analysis);
     fs.writeFileSync(sdkOut!, sdkSource);
+    const sdkDir = path.dirname(sdkIn!);
+    for (const [source, destination] of [
+      ["events.ts", sdkEventsOut!],
+      ["text.ts", sdkTextOut!],
+      ["bytes_text_methods.d.ts", sdkBytesTextMethodsOut!],
+      ["events.d.ts", sdkEventsDtsOut!],
+      ["text.d.ts", sdkTextDtsOut!],
+    ] as const) {
+      fs.copyFileSync(path.join(sdkDir, source), destination);
+    }
     if (dtsOut) {
       const compilerOptions: ts.CompilerOptions = {
         strict: true,

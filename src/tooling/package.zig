@@ -54,7 +54,6 @@ pub const SigningConfig = struct {
     identity: ?[]const u8 = null,
     entitlements: ?[]const u8 = null,
     profile: ?[]const u8 = null,
-    team_id: ?[]const u8 = null,
 };
 
 pub const PackageOptions = struct {
@@ -83,6 +82,13 @@ pub const PackageOptions = struct {
     cef_dir: []const u8 = web_engine_tool.default_cef_dir,
     signing: SigningConfig = .{},
     archive: bool = false,
+    /// Submit the final macOS distribution artifact to Apple's notary service,
+    /// then staple and validate its ticket. Requires identity signing and a
+    /// notarytool Keychain profile in `signing.profile`.
+    notarize: bool = false,
+    /// Emit the ZIP consumed by the native updater. macOS only; unlike the
+    /// user-facing DMG, this archive contains exactly the packaged .app.
+    update_archive: bool = false,
     /// The process environment, when the caller has one (the CLI). The
     /// Android artifact probes it for the SDK/NDK toolchain to assemble
     /// the debug APK; without it the generated project is still complete
@@ -149,10 +155,12 @@ pub const PackageStats = struct {
     /// the proof behind the report's "signed, verified" line. A package
     /// whose signing or verification fails never produces stats at all.
     signing_verified: bool = false,
+    notarized: bool = false,
     asset_count: usize = 0,
     web_engine: WebEngine = .system,
     web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
+    update_archive_path: ?[]const u8 = null,
     /// The Windows subsystem verdict: `console` when the package
     /// wrapped a CONSOLE-subsystem exe (the app will flash a terminal
     /// window behind itself on every launch), `gui` for a GUI-subsystem
@@ -217,6 +225,24 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         return err;
     };
     try validateWebEngineTarget(options.target, options.web_engine);
+    if (options.notarize) {
+        if (options.target != .macos) {
+            std.debug.print("error: notarization is supported only for macOS packages\n", .{});
+            return error.UnsupportedNotarizationTarget;
+        }
+        if (options.signing.mode != .identity) {
+            std.debug.print("error: --notarize requires --signing identity and a Developer ID Application certificate\n", .{});
+            return error.NotarizationRequiresIdentity;
+        }
+        if (options.signing.profile == null) {
+            std.debug.print("error: --notarize requires --notary-profile <name>; create it with `xcrun notarytool store-credentials <name>`\n", .{});
+            return error.MissingNotaryProfile;
+        }
+    }
+    if (options.metadata.updates.enabled() and options.target == .macos and options.web_engine == .chromium) {
+        std.debug.print("error: native updates currently require the system macOS host; package with --web-engine system or remove the updates block\n", .{});
+        return error.UnsupportedUpdateHost;
+    }
     if (options.target == .macos and options.archive) {
         manifest_tool.validateDmgPackageSettings(options.metadata) catch |err| {
             std.debug.print("error: app.zon dmg settings are invalid ({s})\n", .{@errorName(err)});
@@ -233,11 +259,28 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         .ios => try createIosArtifact(allocator, io, options),
         .android => try createAndroidArtifact(allocator, io, options),
     };
+    if (options.notarize) {
+        try runNotarization(allocator, io, options.output_path, options.signing.profile.?, true);
+    }
     if (options.archive) {
         const archive_path = try createArchive(allocator, io, options);
         if (archive_path) |path| {
             stats.archive_path = path;
+            if (options.target == .macos and options.signing.mode == .identity) {
+                try signDistributionArtifact(allocator, io, path, options.signing.identity.?);
+            }
+            if (options.notarize) {
+                try runNotarization(allocator, io, path, options.signing.profile.?, false);
+            }
         }
+    }
+    if (options.notarize) {
+        stats.notarized = true;
+    }
+    if (options.update_archive) {
+        if (options.target != .macos) return error.UnsupportedUpdateTarget;
+        if (!options.metadata.updates.enabled()) return error.UpdatesNotConfigured;
+        stats.update_archive_path = try createUpdateArchive(allocator, io, options);
     }
     return stats;
 }
@@ -273,6 +316,9 @@ pub fn printDiagnostic(stats: PackageStats) void {
     if (stats.signing_verified) {
         std.debug.print("  signing: {s} (signed, verified)\n", .{@tagName(stats.signing_mode)});
     }
+    if (stats.notarized) {
+        std.debug.print("  notarization: accepted, stapled, validated\n", .{});
+    }
     if (stats.windows_subsystem) |subsystem| {
         switch (subsystem) {
             .console => std.debug.print("  subsystem: console (a terminal window opens behind the app - rebuild with `native build`)\n", .{}),
@@ -283,6 +329,26 @@ pub fn printDiagnostic(stats: PackageStats) void {
     if (stats.archive_path) |archive| {
         std.debug.print("  archive: {s}\n", .{archive});
     }
+    if (stats.update_archive_path) |archive| {
+        std.debug.print("  update archive: {s}\n", .{archive});
+    }
+}
+
+fn createUpdateArchive(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) ![]const u8 {
+    const parent = std.fs.path.dirname(options.output_path) orelse ".";
+    const archive_name = try std.fmt.allocPrint(allocator, "{s}-{s}-macos-{s}-update.zip", .{ options.metadata.name, options.metadata.version, options.optimize });
+    defer allocator.free(archive_name);
+    const archive_path = try std.fs.path.join(allocator, &.{ parent, archive_name });
+    errdefer allocator.free(archive_path);
+    const app_path = try absolutePathAlloc(allocator, io, options.output_path);
+    defer allocator.free(app_path);
+    const archive_command_path = try absolutePathAlloc(allocator, io, archive_path);
+    defer allocator.free(archive_command_path);
+    if (!runArchiveCommand(io, &.{ "/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app_path, archive_command_path }, null)) {
+        std.debug.print("error: update archive creation failed for {s}\n", .{archive_path});
+        return error.UpdateArchiveFailed;
+    }
+    return archive_path;
 }
 
 pub fn createLocalPackage(io: std.Io, output_path: []const u8) !PackageStats {
@@ -1686,6 +1752,33 @@ fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options
         return error.SignatureVerificationFailed;
     }
     return true;
+}
+
+fn signDistributionArtifact(allocator: std.mem.Allocator, io: std.Io, path: []const u8, identity: []const u8) !void {
+    const signed = try codesign.signIdentityArtifact(allocator, io, path, identity);
+    defer allocator.free(signed.message);
+    if (!signed.ok) {
+        std.debug.print("error: code signing distribution artifact {s} with \"{s}\" failed:\n{s}\n", .{ path, identity, trimmedToolOutput(signed.message) });
+        return error.SigningFailed;
+    }
+    const verified = try codesign.verifyArtifact(allocator, io, path);
+    defer allocator.free(verified.message);
+    if (!verified.ok) {
+        std.debug.print("error: signed distribution artifact {s} failed strict codesign verification:\n{s}\n", .{ path, trimmedToolOutput(verified.message) });
+        return error.SignatureVerificationFailed;
+    }
+}
+
+fn runNotarization(allocator: std.mem.Allocator, io: std.Io, path: []const u8, profile: []const u8, app_bundle: bool) !void {
+    const result = if (app_bundle)
+        try codesign.notarizeApp(allocator, io, .{ .artifact_path = path, .keychain_profile = profile })
+    else
+        try codesign.notarizeArtifact(allocator, io, .{ .artifact_path = path, .keychain_profile = profile }, null);
+    defer allocator.free(result.message);
+    if (!result.ok) {
+        std.debug.print("error: notarization failed for {s}:\n{s}\n", .{ path, trimmedToolOutput(result.message) });
+        return error.NotarizationFailed;
+    }
 }
 
 /// codesign's output, trimmed of trailing newlines so the teaching
@@ -3594,6 +3687,30 @@ test "identity signing without an identity is a loud failure, not a silent unsig
         .output_path = root ++ "/NoIdentity.app",
         .assets_dir = root ++ "/assets",
         .signing = .{ .mode = .identity },
+    }));
+}
+
+test "notarization refuses unsigned non-macos and uncredentialed packages before artifact creation" {
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.notarize", .name = "notarize-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.NotarizationRequiresIdentity, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .macos,
+        .output_path = ".zig-cache/test-notarize-unsigned.app",
+        .notarize = true,
+    }));
+    try std.testing.expectError(error.UnsupportedNotarizationTarget, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = ".zig-cache/test-notarize-linux",
+        .signing = .{ .mode = .identity, .identity = "Developer ID Application: Test" },
+        .notarize = true,
+    }));
+    try std.testing.expectError(error.MissingNotaryProfile, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .macos,
+        .output_path = ".zig-cache/test-notarize-no-profile.app",
+        .signing = .{ .mode = .identity, .identity = "Developer ID Application: Test" },
+        .notarize = true,
     }));
 }
 

@@ -316,6 +316,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             title_buffer: [platform.max_tray_title_bytes]u8 = undefined,
             arena_buffer: [2048]u8 = undefined,
             items: [platform.max_tray_items]platform.TrayMenuItem = undefined,
+            segment_options: [platform.max_tray_items * platform.max_tray_segment_options]platform.TraySegmentOption = undefined,
+            chart_values: [platform.max_tray_items * platform.max_tray_chart_values]f32 = undefined,
         };
 
         /// Scratch for `status_items_fn`. The flat row store gives each
@@ -326,6 +328,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             title_buffers: [platform.max_status_items][platform.max_tray_title_bytes]u8 = undefined,
             arena_buffer: [platform.max_status_items * 2048]u8 = undefined,
             items: [platform.max_status_items * platform.max_tray_items]platform.TrayMenuItem = undefined,
+            segment_options: [platform.max_status_items * platform.max_tray_items * platform.max_tray_segment_options]platform.TraySegmentOption = undefined,
+            chart_values: [platform.max_status_items * platform.max_tray_items * platform.max_tray_chart_values]f32 = undefined,
         };
 
         const AppliedStatusItem = struct {
@@ -4843,7 +4847,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             hasher.update(presentation.title);
             hasher.update(std.mem.asBytes(&presentation.width));
             hasher.update(std.mem.asBytes(&presentation.icon_opacity));
-            hasher.update(&.{ @intFromEnum(presentation.tone), @intFromBool(presentation.monospaced) });
+            hasher.update(std.mem.asBytes(&presentation.font_size));
+            hasher.update(&.{ @intFromEnum(presentation.tone), @intFromBool(presentation.monospaced), @intFromEnum(presentation.font_weight) });
             return hasher.final();
         }
 
@@ -4860,6 +4865,33 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 hasher.update(item.detail);
                 hasher.update(std.mem.asBytes(&item.key.len));
                 hasher.update(item.key);
+                if (item.segmented) |segmented| {
+                    hasher.update(std.mem.asBytes(&segmented.options.len));
+                    for (segmented.options) |option| {
+                        hasher.update(std.mem.asBytes(&option.id));
+                        hasher.update(std.mem.asBytes(&option.label.len));
+                        hasher.update(option.label);
+                        hasher.update(std.mem.asBytes(&option.command.len));
+                        hasher.update(option.command);
+                        hasher.update(&.{ @intFromBool(option.selected), @intFromBool(option.enabled) });
+                    }
+                }
+                if (item.metric) |metric| {
+                    for ([_][]const u8{ metric.primary_text, metric.secondary_text, metric.accessibility_label }) |field| {
+                        hasher.update(std.mem.asBytes(&field.len));
+                        hasher.update(field);
+                    }
+                }
+                if (item.chart) |chart| {
+                    hasher.update(std.mem.asBytes(&chart.values.len));
+                    hasher.update(std.mem.sliceAsBytes(chart.values));
+                    hasher.update(std.mem.asBytes(&chart.min_value));
+                    hasher.update(std.mem.asBytes(&chart.max_value));
+                    for ([_][]const u8{ chart.leading_caption, chart.trailing_summary, chart.accessibility_label }) |field| {
+                        hasher.update(std.mem.asBytes(&field.len));
+                        hasher.update(field);
+                    }
+                }
                 hasher.update(&.{
                     @intFromBool(item.separator),
                     @intFromBool(item.enabled),

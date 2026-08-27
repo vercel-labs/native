@@ -330,6 +330,59 @@ test "null platform preserves the tray title when presentation styles are set" {
     try std.testing.expectEqual(types.TrayTone.warning, retitled.tone);
 }
 
+test "null platform owns retained rich tray row bytes" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+
+    var segment_label = [_]u8{ 'D', 'a', 'y' };
+    var segment_command = [_]u8{ 'r', 'a', 'n', 'g', 'e' };
+    var metric_primary = [_]u8{ '2', '4', '9', '4' };
+    var metric_secondary = [_]u8{ 'T', 'o', 'd', 'a', 'y' };
+    var metric_accessibility = [_]u8{ 'M', 'e', 't', 'r', 'i', 'c' };
+    var chart_caption = [_]u8{ 'C', 'P', 'U' };
+    var chart_summary = [_]u8{ '5', '0', '%' };
+    var chart_accessibility = [_]u8{ 'C', 'P', 'U', ' ', '5', '0' };
+    const chart_values = [_]f32{0.5};
+
+    try null_platform.platform().services.createTray(.{ .items = &.{
+        .{ .role = .segmented, .segmented = .{ .options = &.{.{
+            .id = 20,
+            .label = &segment_label,
+            .command = &segment_command,
+        }} } },
+        .{ .role = .hero, .metric = .{
+            .primary_text = &metric_primary,
+            .secondary_text = &metric_secondary,
+            .accessibility_label = &metric_accessibility,
+        } },
+        .{ .role = .chart, .chart = .{
+            .values = &chart_values,
+            .leading_caption = &chart_caption,
+            .trailing_summary = &chart_summary,
+            .accessibility_label = &chart_accessibility,
+        } },
+    } });
+
+    @memset(&segment_label, 'X');
+    @memset(&segment_command, 'Y');
+    @memset(&metric_primary, 'P');
+    @memset(&metric_secondary, 'S');
+    @memset(&metric_accessibility, 'A');
+    @memset(&chart_caption, 'Z');
+    @memset(&chart_summary, 'W');
+    @memset(&chart_accessibility, 'Q');
+
+    const items = null_platform.trayItems();
+    try std.testing.expectEqualStrings("Day", items[0].segmented.?.options[0].label);
+    try std.testing.expectEqualStrings("range", items[0].segmented.?.options[0].command);
+    try std.testing.expectEqualStrings("2494", items[1].metric.?.primary_text);
+    try std.testing.expectEqualStrings("Today", items[1].metric.?.secondary_text);
+    try std.testing.expectEqualStrings("Metric", items[1].metric.?.accessibility_label);
+    try std.testing.expectEqualStrings("CPU", items[2].chart.?.leading_caption);
+    try std.testing.expectEqualStrings("50%", items[2].chart.?.trailing_summary);
+    try std.testing.expectEqualStrings("CPU 50", items[2].chart.?.accessibility_label);
+}
+
 test "null platform records OS actions" {
     var null_platform = NullPlatform.init(.{});
     defer null_platform.deinit();

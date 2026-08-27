@@ -14,8 +14,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { publishedScriptcArgv } from "./compiler_command.mjs";
 
 const entry = process.argv[2];
 if (!entry) {
@@ -28,9 +28,9 @@ for (let i = 3; i < process.argv.length; i++) {
 }
 const here = path.dirname(fileURLToPath(import.meta.url));
 const coreRoot = path.resolve(here, "..");
-let compilerJs;
+let compilerArgv;
 try {
-  compilerJs = createRequire(path.join(coreRoot, "package.json")).resolve("scriptc/dist/main.js");
+  compilerArgv = publishedScriptcArgv(path.join(coreRoot, "package.json"));
 } catch {
   console.error("the external core compiler is not installed — run `npm ci --include=dev` in the SDK's packages/core");
   process.exit(2);
@@ -124,7 +124,7 @@ try {
     const npmArgs = isService && vendoredPackages.length > 0
       ? ["--npm-static", vendoredPackages.map((pkg) => pkg.name).join(",")]
       : [];
-    const probe = spawnSync(process.execPath, [compilerJs, "coverage", candidate, ...npmArgs, ...maps], { encoding: "utf8" });
+    const probe = spawnSync(compilerArgv[0], [...compilerArgv.slice(1), "coverage", candidate, ...npmArgs, ...maps], { encoding: "utf8" });
     const out = `${probe.stdout ?? ""}${probe.stderr ?? ""}`;
     // Coverage deliberately reports per-package fallback as a note even
     // when the rest of the source graph is analyzable. Native SDK's policy

@@ -1269,6 +1269,14 @@ pub const tooltip_delay_dependent_attr_message = "tooltip-delay needs anchor on 
 
 pub const image_binding_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders nothing (an avatar falls back to its initials)";
 pub const image_binding_element_message = "image is only supported on avatar and image - the remaining image-bearing widget (icon-button) stays a Zig view (ElementOptions.image)";
+pub const image_source_element_message = "source-x, source-y, source-width, and source-height are only supported on avatar and image - they crop a runtime-registered image in decoded-image pixel coordinates";
+pub const image_source_binding_message = "source-x, source-y, source-width, and source-height require the element's image binding - without a registered image the source rectangle is inert";
+pub const image_source_complete_message = "source-x, source-y, source-width, and source-height must be declared together - they form one source rectangle in decoded-image pixel coordinates";
+pub const image_source_attr_names = [_][]const u8{ "source-x", "source-y", "source-width", "source-height" };
+
+pub fn imageSourceAttrName(name: []const u8) bool {
+    return nameInList(name, &image_source_attr_names);
+}
 pub const image_missing_image_message = "image requires image={binding} naming the u64 ImageId the app registered at runtime - without one the leaf can never draw anything (dead markup, same policy as icon without name)";
 pub const image_children_message = "image is a leaf - it takes no children";
 
@@ -1879,7 +1887,7 @@ pub const known_radius_token_names = schema.radius_token_names;
 
 pub const style_token_literal_message = "style token attributes take a literal token name - dynamic styling stays in Zig";
 pub const unknown_color_token_message = "unknown color token: color style attributes take a canvas ColorTokens field name (background, surface, surface_subtle, surface_pressed, text, text_muted, syntax_plain, syntax_comment, syntax_keyword, syntax_literal, syntax_function, syntax_property, syntax_constant, border, accent, accent_text, destructive, destructive_text, success, success_text, warning, warning_text, info, info_text, focus_ring, shadow, scrim, disabled)";
-pub const unknown_radius_token_message = "unknown radius token: radius takes a canvas RadiusTokens field name (sm, md, lg, xl)";
+pub const unknown_radius_token_message = "unknown radius token: radius takes a canvas RadiusTokens field name (sm, md, lg, xl, none)";
 
 pub const for_children_message = "for takes one or more element children (elements, use, if/else, or a nested for) - text content is only allowed inside text-bearing elements";
 pub const else_placement_message = "else must directly follow an if (renders when the test is false) or a for (renders when the iterable is empty)";
@@ -3350,6 +3358,27 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     const expression = parseAttrExpression(attribute.value);
                     if (expression == null or expression.? != .binding) {
                         return attrError(node, attribute, image_binding_message);
+                    }
+                    continue;
+                }
+                if (imageSourceAttrName(attribute.name)) {
+                    // A registered-image crop is one atomic rectangle in
+                    // decoded-image pixel coordinates. Partial declarations
+                    // and crops without an image would otherwise become
+                    // silently inert data.
+                    if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                        return attrError(node, attribute, image_source_element_message);
+                    }
+                    if (node.attr("image") == null) {
+                        return attrError(node, attribute, image_source_binding_message);
+                    }
+                    for (image_source_attr_names) |name| {
+                        if (node.attr(name) == null) {
+                            return attrError(node, attribute, image_source_complete_message);
+                        }
+                    }
+                    if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                        return attrError(node, attribute, message);
                     }
                     continue;
                 }

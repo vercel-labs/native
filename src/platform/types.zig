@@ -255,6 +255,9 @@ pub const max_credential_account_bytes: usize = 256;
 /// Every host accepts this whole range; none silently truncates it.
 pub const max_credential_secret_bytes: usize = 5 * 512;
 pub const max_local_time_text_bytes: usize = 512;
+pub const max_update_feed_url_bytes: usize = 4096;
+pub const max_update_public_key_bytes: usize = 128;
+pub const update_check_command = "app.check-for-updates";
 /// A desktop app may own a small bounded set of independent status items.
 /// macOS implements the whole set; hosts whose tray API is singular accept
 /// only `primary_status_item_id` and reject additional identifiers.
@@ -266,6 +269,10 @@ pub const max_tray_tooltip_bytes: usize = 256;
 pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
 pub const max_tray_item_detail_bytes: usize = 256;
+pub const max_tray_segment_options: usize = 8;
+pub const max_tray_segment_label_bytes: usize = 64;
+pub const max_tray_chart_values: usize = 32;
+pub const max_tray_chart_text_bytes: usize = 128;
 pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
@@ -1301,6 +1308,9 @@ pub const AppInfo = struct {
     window_title: []const u8 = "",
     bundle_id: []const u8 = "dev.native_sdk.app",
     icon_path: []const u8 = "",
+    update_feed_url: []const u8 = "",
+    update_public_key: []const u8 = "",
+    update_check_on_start: bool = false,
     main_window: WindowOptions = .{},
     windows: []const WindowOptions = &.{},
 
@@ -1466,6 +1476,13 @@ pub const TrayTone = enum(u8) {
     critical,
 };
 
+pub const TrayFontWeight = enum(u8) {
+    regular,
+    medium,
+    semibold,
+    bold,
+};
+
 /// The model-derived part of a status item. Keeping this separate from
 /// icon/tooltip/activation options lets UiApp patch presentation without
 /// recreating the native item.
@@ -1477,6 +1494,9 @@ pub const TrayPresentation = struct {
     tone: TrayTone = .normal,
     icon_opacity: f32 = 1,
     monospaced: bool = false,
+    /// Explicit title size in points; zero keeps the host's menu-bar default.
+    font_size: f32 = 0,
+    font_weight: TrayFontWeight = .regular,
 };
 
 pub const TrayOptions = struct {
@@ -1531,6 +1551,45 @@ pub const TrayItemRole = enum(u8) {
     hero,
     agent,
     context,
+    segmented,
+    chart,
+};
+
+/// One choice inside a typed segmented tray row. Its stable id and command
+/// participate in the same namespace and dispatch route as an ordinary tray
+/// command row; the containing row itself is display structure, not an
+/// action. At most one option in a row may be selected.
+pub const TraySegmentOption = struct {
+    id: TrayItemId,
+    label: []const u8,
+    command: []const u8,
+    selected: bool = false,
+    enabled: bool = true,
+};
+
+pub const TraySegmentedRow = struct {
+    options: []const TraySegmentOption = &.{},
+};
+
+/// A prominent two-line metric block inside a tray menu. This is semantic
+/// dropdown content, distinct from the persistent menu-bar title.
+pub const TrayMetricRow = struct {
+    primary_text: []const u8,
+    secondary_text: []const u8 = "",
+    accessibility_label: []const u8,
+};
+
+/// A bounded bar-chart/sparkline readout. Values are finite and must fall in
+/// the explicit `min_value...max_value` domain. The text fields remain
+/// semantic data on every host; capable macOS hosts place them around a
+/// native AppKit-drawn bar chart.
+pub const TrayChartRow = struct {
+    values: []const f32 = &.{},
+    min_value: f32 = 0,
+    max_value: f32 = 1,
+    leading_caption: []const u8 = "",
+    trailing_summary: []const u8 = "",
+    accessibility_label: []const u8 = "",
 };
 
 pub const TrayMenuItem = struct {
@@ -1543,6 +1602,11 @@ pub const TrayMenuItem = struct {
     role: TrayItemRole = .command,
     key: []const u8 = "",
     modifiers: ShortcutModifiers = .{},
+    /// Typed rich-row payloads. Exactly one is present for its matching role;
+    /// both stay null for every existing command/readout row.
+    segmented: ?TraySegmentedRow = null,
+    metric: ?TrayMetricRow = null,
+    chart: ?TrayChartRow = null,
 };
 
 pub const NativeCommandEvent = struct {
@@ -2717,6 +2781,7 @@ pub const PlatformServices = struct {
     reveal_path_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
     add_recent_document_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
     clear_recent_documents_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    check_for_updates_fn: ?*const fn (context: ?*anyopaque, user_initiated: bool) anyerror!void = null,
     create_tray_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, options: TrayOptions) anyerror!void = null,
     update_tray_shell_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, shell: TrayShell) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, items: []const TrayMenuItem) anyerror!void = null,
@@ -2986,6 +3051,9 @@ pub const PlatformServices = struct {
     /// engine-side registered-face provider — both batch engine-side
     /// without any platform seam.
     measure_text_advances_fn: ?*const fn (context: ?*anyopaque, font_id: u64, size: f32, text: []const u8, advances: []f32) bool = null,
+    /// Shaped glyph-path bounds for one single-line run, relative to its
+    /// baseline. Null on platforms without host-side text metrics.
+    measure_text_ink_fn: ?*const fn (context: ?*anyopaque, font_id: u64, size: f32, text: []const u8, metrics: *canvas.TextInkMetrics) bool = null,
     /// Decode encoded image bytes (PNG, JPEG, ... — whatever the platform
     /// codec supports) into tightly packed, row-major, straight-alpha
     /// (non-premultiplied) RGBA8 written into `buffer`, returning the
@@ -3288,6 +3356,11 @@ pub const PlatformServices = struct {
     pub fn clearRecentDocuments(self: PlatformServices) anyerror!void {
         const clear_fn = self.clear_recent_documents_fn orelse return error.UnsupportedService;
         return clear_fn(self.context);
+    }
+
+    pub fn checkForUpdates(self: PlatformServices, user_initiated: bool) anyerror!void {
+        const check_fn = self.check_for_updates_fn orelse return error.UnsupportedService;
+        return check_fn(self.context, user_initiated);
     }
 
     pub fn createStatusItem(self: PlatformServices, status_item_id: StatusItemId, options: TrayOptions) anyerror!void {

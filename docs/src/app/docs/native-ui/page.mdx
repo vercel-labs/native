@@ -104,7 +104,7 @@ Color and radius attributes reference design tokens by name — literals only, v
 </row>
 ```
 
-The color attributes are `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, and `focus-ring`; values are `ColorTokens` field names: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `syntax_plain`, `syntax_comment`, `syntax_keyword`, `syntax_literal`, `syntax_function`, `syntax_property`, `syntax_constant`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `success`, `success_text`, `warning`, `warning_text`, `info`, `info_text`, `focus_ring`, `shadow`, `scrim`, `disabled`. The `syntax_*` roles are the Geist Code Block palette shared by both built-in packs; `ui.code` and Markdown fences use them automatically. `info` is the violet identity hue beside the status trio — merged PR badges, "new" chips, informational callouts. `radius` takes a `RadiusTokens` name: `sm`, `md`, `lg`, `xl`.
+The color attributes are `background`, `foreground`, `accent`, `accent-foreground`, `border-color`, and `focus-ring`; values are `ColorTokens` field names: `background`, `surface`, `surface_subtle`, `surface_pressed`, `text`, `text_muted`, `syntax_plain`, `syntax_comment`, `syntax_keyword`, `syntax_literal`, `syntax_function`, `syntax_property`, `syntax_constant`, `border`, `accent`, `accent_text`, `destructive`, `destructive_text`, `success`, `success_text`, `warning`, `warning_text`, `info`, `info_text`, `focus_ring`, `shadow`, `scrim`, `disabled`. The `syntax_*` roles are the Geist Code Block palette shared by both built-in packs; `ui.code` and Markdown fences use them automatically. `info` is the violet identity hue beside the status trio — merged PR badges, "new" chips, informational callouts. `radius` takes a `RadiusTokens` name: `sm`, `md`, `lg`, `xl`, `none`.
 
 References resolve against the app's live tokens on every rebuild, so themed apps re-resolve them when the theme changes — dark mode flips `surface` for free. Anything dynamic beyond that (raw colors, per-state styling) stays in Zig via `ElementOptions.style`, which always wins over a token reference.
 
@@ -571,6 +571,24 @@ ui.image(.{ .image = model.chart_image, .width = 120, .height = 80, .semantics =
      0 draws nothing / renders the initials -->
 <image image="{chart_image}" width="120" height="80" label="Chart" />
 <avatar image="{avatar_image}" label="Octocat">OC</avatar>
+```
+
+One registered image can be a texture atlas. `ElementOptions.image_src` is an optional `geometry.RectF` in decoded-image pixel coordinates; Native markup spells the same rectangle with all four source attributes. The widget frame stays the destination, a source rectangle crossing the registered image bounds is clipped, and cropped widgets use nearest sampling so adjacent atlas regions cannot bleed into the tile:
+
+```zig
+ui.image(.{
+    .image = model.atlas_image,
+    .image_src = geometry.RectF.init(64, 32, 24, 24),
+    .width = 48,
+    .height = 48,
+    .semantics = .{ .label = "Warning badge" },
+})
+```
+
+```html
+<image image="{atlas_image}" source-x="64" source-y="32"
+  source-width="24" source-height="24" width="48" height="48"
+  label="Warning badge" />
 ```
 
 `fx.registerImage(id, width, height, rgba8)` registers already-decoded pixels (the runtime copies them; your buffer is free on return), `fx.registerImageBytes(id, bytes)` decodes through the platform codec first, and `fx.unregisterImage(id)` frees the slot. Re-registering an id replaces its pixels and every view repaints — GPU caches re-upload off the changed content fingerprint, no invalidation calls. For caches, mint fresh ids (effect-key style, monotonically increasing) and unregister the evictee — never re-key different content onto a live id. Outside `UiApp`, the same registry is `Runtime.registerCanvasImage`/`registerCanvasImageBytes`/`unregisterCanvasImage`.

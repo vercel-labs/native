@@ -2,9 +2,74 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.9.3
+## 0.10.1
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Complete macOS distribution signing**: Developer ID packages now require an explicit secure timestamp, can notarize through a `notarytool` Keychain profile, and staple and validate both the app and final signed DMG before updater archives are created.
+
+### Contributors
+
+- @ctate
+
+<!-- release:end -->
+
+## 0.10.0
+
+### New Features
+
+- **Native macOS app updates**: Apps can publish Ed25519-signed update feeds that verify downloads, atomically replace and relaunch the installed bundle, roll back safely on failure, and integrate with new manifest settings plus CLI key-generation, feed-signing, and updater-package commands (#398).
+
+### Bug Fixes
+
+- **Accurate macOS text baselines**: AppKit text rendering now aligns each resolved font by its ascent, preserves fallback ink headroom, and keeps measured and rect-based layouts consistent (#396).
+
+### Improvements
+
+- **Updated compiler integration**: ScriptC advances to 0.0.35 with refreshed compiler-surface calibration, generated contracts, and synchronized package metadata (#395).
+
+### Contributors
+
+- @ctate
+- @sepehr-safari
+
+## 0.9.5
+
+### New Features
+
+- **JSON manifests by default**: New TypeScript, Zig, web, full, and ejected apps now scaffold with `app.json`, backed by full parsing, discovery, build conversion, validation, vendoring, a published versioned schema, and seamless `app.zon` fallback for existing projects (#385).
+- **Registered-image source cropping**: Canvas image options and Native markup can now select atomic source rectangles from registered images for texture-atlas rendering, with schema, compiler, validation, documentation, and sampling-bleed coverage (#390).
+
+### Bug Fixes
+
+- **Reliable installed TypeScript toolchains**: Core and service builds now resolve ScriptC across nested, hoisted, and global sibling npm layouts, generate the complete SQLite SDK module family, and validate library imports against their actual directories (#389).
+
+### Improvements
+
+- **Focused schema hosting**: `schema.native-sdk.dev` now serves only the versioned app schema and its current-version alias, redirecting every non-schema route to the main Native SDK site (#388).
+
+### Contributors
+
+- @ctate
+
+## 0.9.4
+
+### New Features
+
+- **Model-driven window restore policies**: TypeScript apps can now declare whether each model-driven window restores saved geometry or opens fresh, including center-on-primary placement, with matching defaults, validation, runtime forwarding, tests, and documentation (#381).
+
+### Improvements
+
+- **Faster, more predictable iterative rebuilds**: Generated core and service ABI artifacts now change only when their contents do, markup and app code compile into independently cached objects, SDK module edits invalidate the right inputs, and rebuild diagnostics expose phase timing, memory use, and cache decisions across platforms (#382).
+- **Updated TypeScript compiler integration**: ScriptC advances to 0.0.33 with published compile-cache bootstrapping, explicit development and release library profiles, synchronized compiler-surface artifacts, and Node 24 throughout the TypeScript build and CI toolchain (#384).
+
+### Contributors
+
+- @ctate
+
+## 0.9.3
 
 ### New Features
 
@@ -22,8 +87,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @MohakBajaj
-
-<!-- release:end -->
 
 ## 0.9.2
 

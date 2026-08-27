@@ -106,6 +106,25 @@ test "valid minimal manifest" {
     try validateManifest(manifest);
 }
 
+test "updates require paired HTTPS feed and Ed25519 public key" {
+    try validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        .check_on_start = true,
+    });
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+    }));
+    try std.testing.expectError(error.InvalidUrl, validateUpdates(.{
+        .feed_url = "http://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+    }));
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "not-a-public-key",
+    }));
+}
+
 test "accessory startup requires the tray capability" {
     const tray_capabilities = [_]Capability{.tray};
     try validateManifest(.{

@@ -506,7 +506,7 @@
     },
     {
       "name": "radius",
-      "doc": "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl)."
+      "doc": "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl, none)."
     }
   ],
   "events": [
@@ -746,6 +746,22 @@
       {
         "name": "image",
         "doc": "avatar and image: one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes); 0 draws nothing (an avatar falls back to its initials). Required on the image leaf."
+      },
+      {
+        "name": "source-x",
+        "doc": "avatar and image: left edge of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image."
+      },
+      {
+        "name": "source-y",
+        "doc": "avatar and image: top edge of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image."
+      },
+      {
+        "name": "source-width",
+        "doc": "avatar and image: width of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image."
+      },
+      {
+        "name": "source-height",
+        "doc": "avatar and image: height of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image."
       }
     ],
     "media-surface": [
@@ -1556,7 +1572,8 @@
     "sm",
     "md",
     "lg",
-    "xl"
+    "xl",
+    "none"
   ],
   "ejectable": [
     {

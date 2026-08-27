@@ -1,0 +1,446 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schema.native-sdk.dev/app/v1.json",
+  "title": "Native SDK app manifest",
+  "description": "Complete app.json manifest for a Native SDK application. app.zon remains supported as a legacy alternative.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "version"],
+  "properties": {
+    "$schema": { "type": "string", "format": "uri-reference" },
+    "id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Reverse-DNS application identifier." },
+    "name": { "type": "string", "minLength": 1, "description": "Short machine-readable app name." },
+    "display_name": { "type": "string", "minLength": 1, "description": "Human-readable app name." },
+    "description": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+    "icons": { "$ref": "#/$defs/stringArray" },
+    "platforms": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["macos", "linux", "windows", "ios", "android", "web"] }
+    },
+    "permissions": { "$ref": "#/$defs/stringArray" },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "native_module", "webview", "js_bridge", "native_views", "gpu_surfaces",
+          "menus", "shortcuts", "tray", "filesystem", "network", "notifications",
+          "dialog", "clipboard", "credentials", "persist", "store", "sqlite",
+          "open_url", "reveal_path", "recent_documents", "file_drops",
+          "app_activation_events", "file_associations", "url_schemes"
+        ]
+      }
+    },
+    "dock_visible": { "type": "boolean", "default": true },
+    "persist": { "$ref": "#/$defs/persist" },
+    "images": { "$ref": "#/$defs/images" },
+    "service_packages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/servicePackage" }
+    },
+    "service_carrier": { "enum": ["auto", "in_process", "child"], "default": "auto" },
+    "service_pool_size": { "type": "integer", "minimum": 1, "maximum": 16 },
+    "bridge": { "$ref": "#/$defs/bridge" },
+    "web_engine": { "enum": ["system", "chromium"], "default": "system" },
+    "webview_layer": { "enum": ["auto", "include", "exclude"], "default": "auto" },
+    "core_compiler": { "const": "external", "default": "external" },
+    "theme": { "enum": ["house", "geist"] },
+    "theme_accent": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+    "cef": { "$ref": "#/$defs/cef" },
+    "frontend": { "$ref": "#/$defs/frontend" },
+    "security": { "$ref": "#/$defs/security" },
+    "assets": { "$ref": "#/$defs/assets" },
+    "windows": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/window" }
+    },
+    "shell": { "$ref": "#/$defs/shell" },
+    "commands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/command" }
+    },
+    "menus": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/menu" }
+    },
+    "shortcuts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/shortcut" }
+    },
+    "file_associations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fileAssociation" }
+    },
+    "url_schemes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/urlScheme" }
+    },
+    "updates": { "$ref": "#/$defs/updates" },
+    "dmg": { "$ref": "#/$defs/dmg" }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "y": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "persist": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "restore"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 1 },
+        "debounce_ms": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 500 },
+        "restore": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ok", "none", "err"],
+          "properties": {
+            "ok": { "type": "string", "minLength": 1 },
+            "none": { "type": "string", "minLength": 1 },
+            "err": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_image_pixel_bytes": { "type": "integer", "minimum": 1048576, "maximum": 8388608, "default": 1048576 }
+      }
+    },
+    "servicePackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "content_hash"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "updates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feed_url", "public_key"],
+      "properties": {
+        "feed_url": { "type": "string", "pattern": "^https://", "maxLength": 4096 },
+        "public_key": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" },
+        "check_on_start": { "type": "boolean", "default": false }
+      }
+    },
+    "bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "permissions": { "$ref": "#/$defs/stringArray" },
+              "origins": { "$ref": "#/$defs/stringArray" }
+            }
+          }
+        }
+      }
+    },
+    "cef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dir": { "type": "string", "default": "third_party/cef/macos" },
+        "auto_install": { "type": "boolean", "default": false }
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dist": { "type": "string", "default": "dist" },
+        "entry": { "type": "string", "default": "index.html" },
+        "spa_fallback": { "type": "boolean", "default": true },
+        "dev": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url"],
+          "properties": {
+            "url": { "type": "string", "format": "uri" },
+            "command": { "$ref": "#/$defs/stringArray" },
+            "ready_path": { "type": "string", "default": "/" },
+            "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 30000 }
+          }
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "navigation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allowed_origins": { "$ref": "#/$defs/stringArray" },
+            "external_links": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": { "enum": ["deny", "open_system_browser"], "default": "deny" },
+                "allowed_urls": { "$ref": "#/$defs/stringArray" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "path"],
+            "properties": {
+              "id": { "type": "integer", "minimum": 1 },
+              "path": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "windowBase": {
+      "type": "object",
+      "properties": {
+        "label": { "type": "string", "default": "main" },
+        "title": { "type": "string" },
+        "width": { "type": "number", "exclusiveMinimum": 0, "default": 720 },
+        "height": { "type": "number", "exclusiveMinimum": 0, "default": 480 },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "resizable": { "type": "boolean", "default": true },
+        "restore_state": { "type": "boolean", "default": true },
+        "titlebar": { "enum": ["standard", "hidden_inset", "hidden_inset_tall", "chromeless"], "default": "standard" },
+        "transparent": { "type": "boolean", "default": false },
+        "always_on_top": { "type": "boolean", "default": false },
+        "click_through": { "type": "boolean", "default": false },
+        "activate_on_show": { "type": "boolean", "default": true },
+        "initially_hidden": { "type": "boolean", "default": false },
+        "allows_fullscreen": { "type": "boolean", "default": true },
+        "min_width": { "type": "number", "minimum": 0, "default": 0 },
+        "min_height": { "type": "number", "minimum": 0, "default": 0 },
+        "close_policy": { "enum": ["quit", "hide"], "default": "quit" }
+      }
+    },
+    "window": {
+      "allOf": [{ "$ref": "#/$defs/windowBase" }],
+      "unevaluatedProperties": false
+    },
+    "shell": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "windows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/shellWindow" }
+        },
+        "chrome": { "$ref": "#/$defs/shellChrome" }
+      }
+    },
+    "shellWindow": {
+      "allOf": [
+        { "$ref": "#/$defs/windowBase" },
+        {
+          "type": "object",
+          "properties": {
+            "restore_policy": { "enum": ["clamp_to_visible_screen", "center_on_primary"], "default": "clamp_to_visible_screen" },
+            "views": { "type": "array", "items": { "$ref": "#/$defs/shellView" } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "shellChrome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tabs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/shellTab" }
+        },
+        "primary_action": { "$ref": "#/$defs/shellTab" }
+      }
+    },
+    "shellTab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "icon": { "type": "string", "default": "" }
+      }
+    },
+    "shellView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "kind"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": [
+            "webview", "toolbar", "titlebar_accessory", "sidebar", "statusbar", "split", "stack",
+            "button", "icon_button", "list_item", "checkbox", "toggle", "segmented_control",
+            "text_field", "search_field", "label", "spacer", "gpu_surface", "progress_indicator"
+          ]
+        },
+        "parent": { "type": "string" },
+        "edge": { "enum": ["top", "right", "bottom", "left"] },
+        "axis": { "enum": ["row", "horizontal", "column", "vertical"] },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "min_width": { "type": "number" },
+        "min_height": { "type": "number" },
+        "max_width": { "type": "number" },
+        "max_height": { "type": "number" },
+        "fill": { "type": "boolean", "default": false },
+        "layer": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647, "default": 0 },
+        "visible": { "type": "boolean", "default": true },
+        "enabled": { "type": "boolean", "default": true },
+        "role": { "type": "string" },
+        "accessibility_label": { "type": "string" },
+        "url": { "type": "string" },
+        "text": { "type": "string" },
+        "command": { "type": "string" },
+        "gpu_backend": { "enum": ["none", "metal", "software"] },
+        "gpu_pixel_format": { "enum": ["none", "bgra8_unorm"] },
+        "gpu_present_mode": { "enum": ["none", "timer"] },
+        "gpu_alpha_mode": { "enum": ["none", "opaque", "premultiplied"] },
+        "gpu_color_space": { "enum": ["none", "srgb", "display_p3"] },
+        "gpu_vsync": { "type": "boolean" }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "default": "" },
+        "enabled": { "type": "boolean", "default": true },
+        "checked": { "type": "boolean", "default": false }
+      }
+    },
+    "menu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/menuItem" }
+        }
+      }
+    },
+    "menuItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "default": "" },
+        "command": { "type": "string", "default": "" },
+        "key": { "type": "string", "default": "" },
+        "modifiers": { "$ref": "#/$defs/modifiers" },
+        "separator": { "type": "boolean", "default": false },
+        "enabled": { "type": "boolean", "default": true },
+        "checked": { "type": "boolean", "default": false }
+      }
+    },
+    "modifiers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["primary", "command", "control", "option", "alt", "shift"] }
+    },
+    "shortcut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "key"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "key": { "type": "string", "minLength": 1 },
+        "modifiers": { "$ref": "#/$defs/modifiers" }
+      }
+    },
+    "fileAssociation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "role": { "$ref": "#/$defs/associationRole" },
+        "extensions": { "$ref": "#/$defs/stringArray" },
+        "mime_types": { "$ref": "#/$defs/stringArray" },
+        "icon": { "type": "string" }
+      }
+    },
+    "urlScheme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme"],
+      "properties": {
+        "scheme": { "type": "string", "minLength": 1 },
+        "role": { "$ref": "#/$defs/associationRole" }
+      }
+    },
+    "associationRole": { "enum": ["viewer", "editor", "shell", "none"], "default": "viewer" },
+    "dmg": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "volume_name": { "type": "string" },
+        "background": { "type": "string" },
+        "window_width": { "type": "integer", "minimum": 320, "maximum": 2000, "default": 660 },
+        "window_height": { "type": "integer", "minimum": 240, "maximum": 1400, "default": 400 },
+        "icon_size": { "type": "integer", "minimum": 32, "maximum": 256, "default": 128 },
+        "app_position": { "$ref": "#/$defs/position" },
+        "applications_position": { "$ref": "#/$defs/position" },
+        "applications_link": { "type": "boolean", "default": true },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/dmgItem" }
+        }
+      }
+    },
+    "dmgItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "position"],
+      "properties": {
+        "kind": { "enum": ["app", "applications", "file", "link"] },
+        "path": { "type": "string" },
+        "name": { "type": "string" },
+        "position": { "$ref": "#/$defs/position" }
+      }
+    }
+  }
+}

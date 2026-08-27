@@ -20,7 +20,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # TypeScript cores compile through the external core compiler at
       # build/test time; the compiler and the frontend's toolchain both
       # arrive with this one install (without it the ts-core suites skip
@@ -44,7 +44,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # The exact-pinned external core compiler and the frontend's
       # toolchain, one install (packages/core/package.json is the one
       # place the pin lives).
@@ -65,7 +65,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # gpu-components is a TypeScript-core app, so its smoke build needs
       # the frontend compiler and exact-pinned TypeScript toolchain.
       - run: npm ci --prefix packages/core
@@ -74,7 +74,7 @@ jobs:
       - run: zig build test-example-mobile-canvas-lib-ios-store
       - run: zig build test-webview-system-link
       - run: zig build test-webview-smoke
-      # The zero-config TypeScript runner must load app.zon menus before
+      # The zero-config TypeScript runner must load app manifest menus before
       # automation can select their registered command ids.
       - run: zig build test-menu-bar-smoke
       # Signed-package seal pin: an ad-hoc signed package must pass
@@ -184,7 +184,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # The TypeScript core suites compile through the external core
       # compiler at build/test time; without the install they skip
       # silently, so CI must provide it.
@@ -224,7 +224,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # The TypeScript examples compile through the external core
       # compiler at build time; the compiler and the frontend toolchain
       # arrive with this install.
@@ -358,7 +358,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # The scaffold default is the TypeScript core; its frontend and
       # compiler run at build time from this checkout's packages/core.
       - run: npm ci --prefix packages/core
@@ -463,7 +463,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # The default scaffold is a TypeScript core: its build runs the
       # @native-sdk/core frontend and the external core compiler from
       # this checkout's own install.
@@ -498,7 +498,7 @@ jobs:
             app=".zig-cache/scaffold-${frontend}"
             rm -rf "$app"
             ./zig-out/bin/native init "$app" --frontend "$frontend" --full
-            (cd "$app" && zig build test -Dplatform=null && ../../zig-out/bin/native validate app.zon)
+            (cd "$app" && zig build test -Dplatform=null && ../../zig-out/bin/native validate app.json)
             # Every scaffold ships a CI workflow; parse it as real YAML.
             test -s "$app/.github/workflows/ci.yml"
             python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$app/.github/workflows/ci.yml"

@@ -93,7 +93,7 @@ Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick
 
 ## Examples
 
-The apps pictured above live in [examples/](./examples), most as zero-config projects — `app.zon` plus `src/`, no build files — run straight from their directory with `native dev`. Start with the TypeScript examples when learning the primary authoring path. The `-ts` suffix on `soundboard-ts` and `system-monitor-ts` is historical because those apps are ports kept beside older Zig originals. Chatbot is TypeScript-only and follows the unsuffixed naming used by new apps created with `native init`.
+The apps pictured above live in [examples/](./examples), most as zero-config projects with a manifest plus `src/` and no build files, run straight from their directory with `native dev`. Many examples predate the current `app.json` default and retain `app.zon`; both formats have the same capabilities. Start with the TypeScript examples when learning the primary authoring path. The `-ts` suffix on `soundboard-ts` and `system-monitor-ts` is historical because those apps are ports kept beside older Zig originals. Chatbot is TypeScript-only and follows the unsuffixed naming used by new apps created with `native init`.
 
 | Example | What it shows |
 | --- | --- |

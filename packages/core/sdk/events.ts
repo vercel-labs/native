@@ -63,12 +63,14 @@ export type ThemeState = {
 /// One row in a menu-bar status item's menu. Non-separator rows need a
 /// unique non-zero `id`, a non-empty `label`, and (when actionable) a
 /// command name accepted by `commandMsg`. Rich readout roles may carry
-/// secondary `detail`; command rows may carry a key equivalent. Spell
-/// every field explicitly because app-core records have one exact shape.
+/// secondary `detail`; command rows may carry a key equivalent. Core row
+/// records have one exact shape; only the documented rich payloads and
+/// presentation typography may be omitted.
 /// A status item may expose at most 32 rows.
 export type StatusItemTone = "normal" | "warning" | "critical";
+export type StatusItemFontWeight = "regular" | "medium" | "semibold" | "bold";
 
-export type StatusItemMenuRole = "command" | "info" | "header" | "hero" | "agent" | "context";
+export type StatusItemMenuRole = "command" | "info" | "header" | "hero" | "agent" | "context" | "segmented" | "chart";
 
 export interface StatusItemModifiers {
   readonly primary: boolean;
@@ -78,15 +80,46 @@ export interface StatusItemModifiers {
   readonly shift: boolean;
 }
 
-export interface StatusItemPresentation {
+export type StatusItemPresentation = {
   readonly title: Uint8Array;
   readonly width: number;
   readonly tone: StatusItemTone;
   readonly iconOpacity: number;
   readonly monospaced: boolean;
+  /// Omit to keep the platform menu-bar default size.
+  readonly fontSize?: number;
+  /// Omit to keep regular weight.
+  readonly fontWeight?: StatusItemFontWeight;
+};
+
+export interface StatusItemSegmentOption {
+  readonly id: number;
+  readonly label: Uint8Array;
+  readonly command: Uint8Array;
+  readonly selected: boolean;
+  readonly enabled: boolean;
 }
 
-export interface StatusItemMenuItem {
+export interface StatusItemSegmentedRow {
+  readonly options: readonly StatusItemSegmentOption[];
+}
+
+export interface StatusItemMetricRow {
+  readonly primaryText: Uint8Array;
+  readonly secondaryText: Uint8Array;
+  readonly accessibilityLabel: Uint8Array;
+}
+
+export interface StatusItemChartRow {
+  readonly values: readonly number[];
+  readonly minValue: number;
+  readonly maxValue: number;
+  readonly leadingCaption: Uint8Array;
+  readonly trailingSummary: Uint8Array;
+  readonly accessibilityLabel: Uint8Array;
+}
+
+export type StatusItemMenuItem = {
   readonly id: number;
   readonly label: Uint8Array;
   readonly command: Uint8Array;
@@ -96,7 +129,13 @@ export interface StatusItemMenuItem {
   readonly role: StatusItemMenuRole;
   readonly key: Uint8Array;
   readonly modifiers: StatusItemModifiers;
-}
+  /// Present exactly when `role` is `segmented`.
+  readonly segmented?: StatusItemSegmentedRow;
+  /// Present on a `hero` row to declare a typed dropdown metric block.
+  readonly metric?: StatusItemMetricRow;
+  /// Present exactly when `role` is `chart`.
+  readonly chart?: StatusItemChartRow;
+};
 
 /// The generated launcher's model-derived menu-bar status item. Export
 /// `statusItem(model: Model): StatusItemState` from `src/core.ts`; its

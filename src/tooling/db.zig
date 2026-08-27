@@ -126,7 +126,7 @@ fn migrationSourceVersion(io: std.Io) !u32 {
 }
 
 fn appDbPath(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, buffer: []u8) ![]const u8 {
-    const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+    const metadata = try manifest_tool.readMetadata(allocator, io, manifest_tool.defaultPath(io) orelse return error.FileNotFound);
     var dir_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const data_dir = try app_dirs.resolveOne(
         .{ .name = metadata.id },

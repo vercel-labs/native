@@ -10,6 +10,23 @@ const default_sans_font_id = canvas.default_sans_font_id;
 const default_mono_font_id = canvas.default_mono_font_id;
 const utf8SequenceLength = text_interaction.utf8SequenceLength;
 
+/// Ink bounds for one shaped line, relative to its baseline.
+pub const TextInkMetrics = struct {
+    min_x: f32 = 0,
+    max_x: f32 = 0,
+    min_y: f32 = 0,
+    max_y: f32 = 0,
+
+    pub fn valid(self: TextInkMetrics) bool {
+        return std.math.isFinite(self.min_x) and
+            std.math.isFinite(self.max_x) and
+            std.math.isFinite(self.min_y) and
+            std.math.isFinite(self.max_y) and
+            self.max_x >= self.min_x and
+            self.max_y >= self.min_y;
+    }
+};
+
 /// Injected text measurement. The engine stays pure: platforms provide a
 /// context pointer plus a function that returns the width of a single-line
 /// run of `text` at `size` for `font_id`, shaped with the same font
@@ -29,6 +46,9 @@ pub const TextMeasureProvider = struct {
     /// with line breaks then derived from cumulative advances exactly as
     /// the estimator path derives them.
     measure_advances_fn: ?*const fn (context: ?*anyopaque, font_id: FontId, size: f32, text: []const u8, advances: []f32) bool = null,
+    /// Optional shaped ink bounds for one line, relative to its baseline.
+    /// Returning false keeps callers on conservative engine bounds.
+    measure_ink_fn: ?*const fn (context: ?*anyopaque, font_id: FontId, size: f32, text: []const u8, metrics: *TextInkMetrics) bool = null,
 
     pub fn measureWidth(self: TextMeasureProvider, font_id: FontId, size: f32, text: []const u8) f32 {
         if (text.len == 0) return 0;
@@ -47,6 +67,14 @@ pub const TextMeasureProvider = struct {
         if (text.len == 0) return true;
         if (advances.len < text.len) return false;
         return advances_fn(self.context, font_id, size, text, advances[0..text.len]);
+    }
+
+    pub fn measureInk(self: TextMeasureProvider, font_id: FontId, size: f32, text: []const u8) ?TextInkMetrics {
+        const measure_ink_fn = self.measure_ink_fn orelse return null;
+        if (text.len == 0) return null;
+        var metrics: TextInkMetrics = .{};
+        if (!measure_ink_fn(self.context, font_id, size, text, &metrics)) return null;
+        return if (metrics.valid()) metrics else null;
     }
 };
 
@@ -306,4 +334,3 @@ fn sansVariantWidthFactor(font_id: FontId) f32 {
 pub fn estimatedGlyphAdvance(glyph: Glyph, size: f32) f32 {
     return @max(size * 0.25, glyph.advance);
 }
-

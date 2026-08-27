@@ -253,6 +253,64 @@ test "runtime dispatches menu command events" {
     try std.testing.expectEqual(@as(platform.WindowId, 1), app_state.last_window_id);
 }
 
+test "runtime falls back to the app when the native update service is unavailable" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "update-command", .source = platform.WebViewSource.html("<p>Update</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event_value == .command) self.command_count += 1;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    try harness.runtime.dispatchCommand(app_state.app(), .{ .name = platform.update_check_command, .source = .menu });
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+}
+
+test "runtime reserves the native update command when the platform handles it" {
+    const UpdateService = struct {
+        var check_count: u32 = 0;
+
+        fn check(context: ?*anyopaque, user_initiated: bool) anyerror!void {
+            _ = context;
+            try std.testing.expect(user_initiated);
+            check_count += 1;
+        }
+    };
+    const TestApp = struct {
+        command_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "update-command", .source = platform.WebViewSource.html("<p>Update</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event_value == .command) self.command_count += 1;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    UpdateService.check_count = 0;
+    harness.runtime.options.platform.services.check_for_updates_fn = UpdateService.check;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    try harness.runtime.dispatchCommand(app_state.app(), .{ .name = platform.update_check_command, .source = .menu });
+    try std.testing.expectEqual(@as(u32, 1), UpdateService.check_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.command_count);
+}
+
 test "automation snapshot exposes configured app menus" {
     const items = [_]platform.MenuItem{
         .{ .label = "Refresh", .command = "app.refresh" },

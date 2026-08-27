@@ -14,12 +14,14 @@
 //     --out-sidecar <file>
 //     [--host-platform <arch-os-abi> --target-platform <arch-os-abi>
 //      --zig-exe <path>] [--android-ndk <dir>]
-//     (--compiler <cmd> | --compiler-js <main.js>)
+//     (--compiler <cmd> | --compiler-js <main.js> |
+//      --compiler-package-origin <packages/core/package.json>)
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { compilerArgv, publishedScriptcArgv } from "./compiler_command.mjs";
 
 function parseArgs(argv) {
   const args = {};
@@ -27,7 +29,7 @@ function parseArgs(argv) {
     const key = argv[i];
     const value = argv[i + 1];
     if (!key.startsWith("--") || value === undefined) {
-      console.error("usage: run_external_core_compiler.mjs --stage <dir> --name <n> --manifest <package.json> --frontend-sidecar <file> --out-archive <file> --out-sidecar <file> [--host-platform <arch-os-abi> --target-platform <arch-os-abi> --zig-exe <path>] (--compiler <cmd> | --compiler-js <main.js>)");
+      console.error("usage: run_external_core_compiler.mjs --stage <dir> --name <n> --manifest <package.json> --frontend-sidecar <file> --out-archive <file> --out-sidecar <file> [--host-platform <arch-os-abi> --target-platform <arch-os-abi> --zig-exe <path>] (--compiler <cmd> | --compiler-js <main.js> | --compiler-package-origin <package.json>)");
       process.exit(2);
     }
     args[key.slice(2)] = value;
@@ -38,8 +40,9 @@ function parseArgs(argv) {
       process.exit(2);
     }
   }
-  if (!args.compiler && !args["compiler-js"]) {
-    console.error("run_external_core_compiler.mjs: supply --compiler <cmd> or --compiler-js <main.js>");
+  const compilerModes = [args.compiler, args["compiler-js"], args["compiler-package-origin"]].filter(Boolean);
+  if (compilerModes.length !== 1) {
+    console.error("run_external_core_compiler.mjs: supply exactly one of --compiler <cmd>, --compiler-js <main.js>, or --compiler-package-origin <package.json>");
     process.exit(2);
   }
   if (Boolean(args["host-platform"]) !== Boolean(args["target-platform"])) {
@@ -52,15 +55,23 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv);
 // Every path argument resolves against the INVOCATION's cwd up front:
 // the compile itself runs from a scratch directory.
-for (const key of ["stage", "manifest", "frontend-sidecar", "out-archive", "out-sidecar", "compiler-js", "zig-exe", "android-ndk"]) {
+for (const key of ["stage", "manifest", "frontend-sidecar", "out-archive", "out-sidecar", "compiler-js", "compiler-package-origin", "zig-exe", "android-ndk"]) {
   if (key in args) args[key] = path.resolve(args[key]);
 }
 // --compiler is a COMMAND: a bare executable path (possibly containing
-// spaces) or an interpreter plus script ("node .../main.js"). A path
-// that exists is taken whole; anything else splits on whitespace.
-const argv0 = args.compiler
-  ? (fs.existsSync(args.compiler) ? [args.compiler] : args.compiler.split(/\s+/))
-  : [process.execPath, args["compiler-js"]];
+// spaces) or an interpreter plus script ("node .../main.js"). The shared
+// resolver also unwraps npm's Windows .cmd shim to its declared JS bin.
+let argv0;
+try {
+  argv0 = args.compiler
+    ? compilerArgv(args.compiler)
+    : args["compiler-js"]
+      ? [process.execPath, args["compiler-js"]]
+      : publishedScriptcArgv(args["compiler-package-origin"]);
+} catch (error) {
+  console.error(`the external TypeScript compiler is not installed or has no valid published bin: ${error instanceof Error ? error.message : String(error)} — reinstall @native-sdk/cli, or point NATIVE_SDK_CORE_COMPILER at the pinned release's command`);
+  process.exit(2);
+}
 
 // App and fixture build graphs state the host and target explicitly. A
 // differing target must compile the core archive through the same ScriptC

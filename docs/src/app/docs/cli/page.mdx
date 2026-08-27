@@ -10,7 +10,7 @@ The `native` CLI provides project scaffolding, markup validation, automation, pa
 native init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--full]
 ```
 
-Scaffold a new Native SDK project. The default `native` frontend scaffolds a native-rendered markup app with no web frontend and no build files — the CLI owns the build. The default core is TypeScript: `src/core.ts`, `src/app.native`, `app.zon`, and no language flag anywhere else — the build detects which core the tree carries. Omit `path` to scaffold into the current directory.
+Scaffold a new Native SDK project. The default `native` frontend scaffolds a native-rendered markup app with no web frontend and no build files — the CLI owns the build. The default core is TypeScript: `src/core.ts`, `src/app.native`, `app.json`, and no language flag anywhere else — the build detects which core the tree carries. Omit `path` to scaffold into the current directory.
 
 <dl>
   <dt><code>--template</code></dt>
@@ -26,7 +26,7 @@ Scaffold a new Native SDK project. The default `native` frontend scaffolds a nat
 ```sh
 native dev [dir]
 native dev [dir] --core [--script msgs.ndjson] [--watch]
-native dev --binary <path> [--manifest app.zon] [--url <url>] [--command "<cmd>"] [--timeout-ms <n>]
+native dev --binary <path> [--manifest app.json] [--url <url>] [--command "<cmd>"] [--timeout-ms <n>]
 ```
 
 Build and run the app in the current (or given) app directory — a Debug build by default, printing a one-line completion and naming any failing step. The markup hot-reload watcher and the Debug-only teaching diagnostics are compiled in only in Debug; pass `-Doptimize=...` to override. Apps with a frontend dev config also get the managed dev server — see [Dev Server](/docs/cli/dev).
@@ -41,13 +41,13 @@ Build and run the app in the current (or given) app directory — a Debug build 
   <dt><code>--binary</code></dt>
   <dd>Path to a prebuilt app binary — the legacy prebuilt-shell form: the build step is skipped and only the frontend dev flow runs. Ordinary <code>native dev</code> builds the app itself.</dd>
   <dt><code>--manifest</code></dt>
-  <dd>Path to <code>app.zon</code> (default: <code>app.zon</code>).</dd>
+  <dd>Path to <code>app.json</code> or <code>app.zon</code> (default: auto-detected, JSON first).</dd>
   <dt><code>--url</code></dt>
-  <dd>Override the dev server URL from <code>app.zon</code>.</dd>
+  <dd>Override the dev server URL from the app manifest.</dd>
   <dt><code>--command</code></dt>
   <dd>Override the dev server command (space-separated).</dd>
   <dt><code>--timeout-ms</code></dt>
-  <dd>Milliseconds to wait for the dev server (default from <code>app.zon</code>, or 30000).</dd>
+  <dd>Milliseconds to wait for the dev server (default from the app manifest, or 30000).</dd>
 </dl>
 
 ### `native build`
@@ -72,7 +72,7 @@ Run the app's test suite, printing the zig build summary (step/test tally) plus 
 native check [dir] [--strict]
 ```
 
-Validate the whole tree without building the app. A TypeScript core (`src/core.ts`) runs the subset checker first — real tsc semantics plus the app-core rules, diagnostics verbatim — then every `src/**.native` markup file and `app.zon` are checked as before. With a fresh model contract (`zig-out/model-contract.zon`, refreshed by `native test`) it also checks bindings, iterables, and message tags against your `Model`/`Msg` — for a TypeScript core, against its model contract — and warns on model state no view uses. Without the artifact it degrades to structural checking and says so: "model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks". Markup accessibility findings are reported per file in full, and a failing `src/*.native` file that no Zig source embeds gets a leftover-file hint.
+Validate the whole tree without building the app. A TypeScript core (`src/core.ts`) runs the subset checker first — real tsc semantics plus the app-core rules, diagnostics verbatim — then every `src/**.native` markup file and the app manifest are checked as before. With a fresh model contract (`zig-out/model-contract.zon`, refreshed by `native test`) it also checks bindings, iterables, and message tags against your `Model`/`Msg` — for a TypeScript core, against its model contract — and warns on model state no view uses. Without the artifact it degrades to structural checking and says so: "model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks". Markup accessibility findings are reported per file in full, and a failing `src/*.native` file that no Zig source embeds gets a leftover-file hint.
 
 <dl>
   <dt><code>--strict</code></dt>
@@ -100,7 +100,7 @@ Write an owned copy of a library composite into `src/components/` (once, never o
 ### `native doctor`
 
 ```sh
-native doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
+native doctor [--strict] [--manifest app.json] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
 ```
 
 Check host environment, WebView, manifest, and CEF. See [native doctor](/docs/debugging/doctor) for what each check means.
@@ -108,10 +108,10 @@ Check host environment, WebView, manifest, and CEF. See [native doctor](/docs/de
 ### `native validate`
 
 ```sh
-native validate [app.zon]
+native validate [app.json|app.zon]
 ```
 
-Validate `app.zon` against the manifest schema.
+Validate `app.json` or `app.zon` against the same manifest contract.
 
 ### `native package`
 
@@ -119,13 +119,13 @@ Validate `app.zon` against the manifest schema.
 native package [--target <macos|linux|windows|ios|android>] [flags]
 ```
 
-Package the app for distribution. The manifest is picked up at `app.zon` and the binary at `zig-out/bin/<name>` automatically; the flags below override.
+Package the app for distribution. The manifest is picked up at `app.json` (falling back to `app.zon`) and the binary at `zig-out/bin/<name>` automatically; the flags below override.
 
 <dl>
   <dt><code>--target</code></dt>
   <dd>Target platform (<code>macos</code>, <code>linux</code>, <code>windows</code>, <code>ios</code>, <code>android</code>).</dd>
   <dt><code>--manifest</code></dt>
-  <dd>Path to <code>app.zon</code>.</dd>
+  <dd>Path to <code>app.json</code> or <code>app.zon</code>.</dd>
   <dt><code>--output</code></dt>
   <dd>Output path for the package.</dd>
   <dt><code>--binary</code></dt>
@@ -135,11 +135,11 @@ Package the app for distribution. The manifest is picked up at `app.zon` and the
   <dt><code>--optimize</code></dt>
   <dd>Optimization level.</dd>
   <dt><code>--web-engine</code></dt>
-  <dd>Temporarily override <code>app.zon</code> with <code>system</code> or macOS-only <code>chromium</code>.</dd>
+  <dd>Temporarily override the app manifest with <code>system</code> or macOS-only <code>chromium</code>.</dd>
   <dt><code>--web-layer</code></dt>
-  <dd>Override <code>app.zon</code>'s <code>.webview_layer</code> with <code>auto</code>, <code>include</code>, or <code>exclude</code> — the same precedence as <code>-Dweb-layer</code> in the build graph. <code>zig build package</code> passes the graph's resolved decision here automatically so the package always matches the built executable.</dd>
+  <dd>Override the app manifest's <code>webview_layer</code> with <code>auto</code>, <code>include</code>, or <code>exclude</code> — the same precedence as <code>-Dweb-layer</code> in the build graph. <code>zig build package</code> passes the graph's resolved decision here automatically so the package always matches the built executable.</dd>
   <dt><code>--cef-dir</code></dt>
-  <dd>Temporarily override the CEF distribution path from <code>app.zon</code>.</dd>
+  <dd>Temporarily override the CEF distribution path from the app manifest.</dd>
   <dt><code>--cef-auto-install</code></dt>
   <dd>Temporarily allow prepared CEF installation during Chromium packaging.</dd>
   <dt><code>--signing</code></dt>
@@ -148,10 +148,12 @@ Package the app for distribution. The manifest is picked up at `app.zon` and the
   <dd>Code signing identity name.</dd>
   <dt><code>--entitlements</code></dt>
   <dd>Path to entitlements file.</dd>
-  <dt><code>--team-id</code></dt>
-  <dd>Apple Developer Team ID.</dd>
+  <dt><code>--notarize</code></dt>
+  <dd>Submit the final macOS artifact to Apple's notary service, then staple and validate the accepted ticket. Requires identity signing.</dd>
+  <dt><code>--notary-profile</code></dt>
+  <dd>Name of a <code>notarytool</code> Keychain profile created with <code>xcrun notarytool store-credentials</code>.</dd>
   <dt><code>--archive</code></dt>
-  <dd>Create a distributable archive. On macOS this is a styled DMG with the app, an Applications alias, a generated or custom background, and the Finder layout declared by <code>app.zon</code>.</dd>
+  <dd>Create a distributable archive. On macOS this is a styled DMG with the app, an Applications alias, a generated or custom background, and the Finder layout declared by the app manifest.</dd>
 </dl>
 
 ### Platform shortcuts
@@ -169,7 +171,7 @@ The desktop shortcuts use an explicit `--service-binary` when supplied; otherwis
 ### `native bundle-assets`
 
 ```sh
-native bundle-assets [app.zon] [assets] [output]
+native bundle-assets [app.json|app.zon] [assets] [output]
 ```
 
 Copy frontend assets into the build output.

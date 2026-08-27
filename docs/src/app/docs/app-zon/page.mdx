@@ -1,43 +1,52 @@
 # Config
 
-The `app.zon` manifest declares app metadata, permissions, security rules, window layout, and packaging inputs. It is read by the CLI and tooling at build, package, and validation time.
+The `app.json` manifest declares app metadata, permissions, security rules, window layout, and packaging inputs. It is read by the CLI and tooling at build, package, and validation time. New projects use JSON so TypeScript developers get familiar syntax, completion, and inline validation through [`$schema`](https://schema.native-sdk.dev/app/v1.json). Existing `app.zon` manifests remain fully supported and expose the same fields—there is no reduced JSON feature set. The versioned URL stays compatible for the lifetime of the v1 manifest contract; `/app.json` is the current-version alias.
 
 ## Example: native-rendered app
 
 The manifest `native init` generates — identity, one shell window with a GPU surface view, and the minimal permission set:
 
-```zig:app.zon
-.{
-    .id = "dev.native_sdk.my-app",
-    .name = "my-app",
-    .display_name = "My App",
-    .description = "A counter that lives in one native window.",
-    .version = "0.1.0",
-    .icons = .{"assets/icon.png"},
-    .platforms = .{"macos"},
-    .permissions = .{ "view", "command" },
-    .capabilities = .{ "native_views", "gpu_surfaces" },
-    .shell = .{
-        .windows = .{
-            .{
-                .label = "main",
-                .title = "My App",
-                .width = 480,
-                .height = 320,
-                .views = .{
-                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Counter canvas", .accessibility_label = "Counter", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
-                },
-            },
-        },
-    },
-    .security = .{
-        .navigation = .{
-            .allowed_origins = .{ "zero://app", "zero://inline" },
-            .external_links = .{ .action = "deny" },
-        },
-    },
-    .web_engine = "system",
-    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+```json:app.json
+{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.native_sdk.my-app",
+  "name": "my-app",
+  "display_name": "My App",
+  "description": "A counter that lives in one native window.",
+  "version": "0.1.0",
+  "icons": ["assets/icon.png"],
+  "platforms": ["macos"],
+  "permissions": ["view", "command"],
+  "capabilities": ["native_views", "gpu_surfaces"],
+  "shell": {
+    "windows": [{
+      "label": "main",
+      "title": "My App",
+      "width": 480,
+      "height": 320,
+      "views": [{
+        "label": "main-canvas",
+        "kind": "gpu_surface",
+        "fill": true,
+        "role": "Counter canvas",
+        "accessibility_label": "Counter",
+        "gpu_backend": "metal",
+        "gpu_pixel_format": "bgra8_unorm",
+        "gpu_present_mode": "timer",
+        "gpu_alpha_mode": "opaque",
+        "gpu_color_space": "srgb",
+        "gpu_vsync": true
+      }]
+    }]
+  },
+  "security": {
+    "navigation": {
+      "allowed_origins": ["zero://app", "zero://inline"],
+      "external_links": { "action": "deny" }
+    }
+  },
+  "web_engine": "system",
+  "cef": { "dir": "third_party/cef/macos", "auto_install": false }
 }
 ```
 
@@ -136,7 +145,7 @@ A fuller manifest for an app that also [embeds web content](/docs/frontend) and 
     </tr>
     <tr>
       <td><code>version</code></td>
-      <td>Semver version string — also the version the About panel shows</td>
+      <td>Canonical <code>X.Y.Z</code> version with no leading zeroes — also the version the About panel shows</td>
     </tr>
     <tr>
       <td><code>icons</code></td>
@@ -426,6 +435,6 @@ The optional `frontend.dev` block configures the managed dev server for `native 
 ## Validation
 
 ```bash
-native validate app.zon
-native doctor --manifest app.zon --strict
+native validate app.json
+native doctor --manifest app.json --strict
 ```

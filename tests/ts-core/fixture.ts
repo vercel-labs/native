@@ -102,6 +102,8 @@ export interface Model {
 
 export type Msg =
   | { readonly kind: "toggle" }
+  | { readonly kind: "enable" }
+  | { readonly kind: "disable" }
   | { readonly kind: "refresh" }
   | { readonly kind: "abort" }
   | { readonly kind: "stamp" }
@@ -245,6 +247,10 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "toggle":
       return [{ ...model, polling: !model.polling }, Cmd.none];
+    case "enable":
+      return [{ ...model, polling: true }, Cmd.none];
+    case "disable":
+      return [{ ...model, polling: false }, Cmd.none];
     case "refresh":
       return [model, Cmd.request("status.read", model.status, { key: "status", ok: "loaded", err: "failed" })];
     case "abort":
@@ -580,8 +586,62 @@ export function statusItem(model: Model): StatusItemState {
       tone: model.polling ? "normal" : "warning",
       iconOpacity: model.polling ? 1 : 0.5,
       monospaced: true,
+      fontSize: model.polling ? 12 : 13,
+      fontWeight: model.polling ? "medium" : "semibold",
     },
     items: [
+      {
+        id: 0,
+        label: asciiBytes(""),
+        command: asciiBytes(""),
+        separator: false,
+        enabled: false,
+        detail: asciiBytes(""),
+        role: "hero",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+        metric: {
+          primaryText: asciiBytes(model.polling ? "2,494 requests" : "1,240 requests"),
+          secondaryText: utf8Bytes("Today · production"),
+          accessibilityLabel: asciiBytes(model.polling ? "2,494 requests today" : "1,240 requests today"),
+        },
+      },
+      {
+        id: 0,
+        label: asciiBytes(""),
+        command: asciiBytes(""),
+        separator: false,
+        enabled: true,
+        detail: asciiBytes(""),
+        role: "segmented",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+        segmented: {
+          options: [
+            { id: 11, label: asciiBytes("On"), command: asciiBytes("core.enable"), selected: model.polling, enabled: true },
+            { id: 12, label: asciiBytes("Off"), command: asciiBytes("core.disable"), selected: !model.polling, enabled: true },
+          ],
+        },
+      },
+      {
+        id: 0,
+        label: asciiBytes(""),
+        command: asciiBytes(""),
+        separator: false,
+        enabled: false,
+        detail: asciiBytes(""),
+        role: "chart",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+        chart: {
+          values: model.polling ? [0.25, 0.5, 0.75, 1] : [1, 0.75, 0.5, 0.25],
+          minValue: 0,
+          maxValue: 1,
+          leadingCaption: asciiBytes("Load"),
+          trailingSummary: asciiBytes(model.polling ? "rising" : "falling"),
+          accessibilityLabel: asciiBytes(model.polling ? "Load rising" : "Load falling"),
+        },
+      },
       {
         id: 1,
         label: model.polling ? utf8Bytes("Pause polling…") : utf8Bytes("Resume polling…"),
@@ -610,6 +670,8 @@ export function statusItem(model: Model): StatusItemState {
 }
 
 export function commandMsg(name: string): Msg | null {
+  if (name === "core.enable") return { kind: "enable" };
+  if (name === "core.disable") return { kind: "disable" };
   if (name === "core.toggle") return { kind: "toggle" };
   if (name === "core.refresh") return { kind: "refresh" };
   if (name === "core.open-settings") return { kind: "open_settings" };

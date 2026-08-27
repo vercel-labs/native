@@ -199,6 +199,17 @@ export function statusItem(model: Model): StatusItemState {
   assert.ok(structs.includes("StatusItemMenuItem"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemPresentation"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemSegmentedRow"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemSegmentOption"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemMetricRow"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemChartRow"), `structs: ${structs.join(", ")}`);
+  const presentation = (doc.types as { structs: { name: string; fields: { name: string; type: unknown }[] }[] }).structs
+    .find((record) => record.name === "StatusItemPresentation");
+  assert.ok(presentation);
+  assert.deepEqual(presentation.fields.slice(-2), [
+    { name: "fontSize", type: { kind: "optional", inner: { kind: "i64" } } },
+    { name: "fontWeight", type: { kind: "optional", inner: { kind: "enum", name: "StatusItemFontWeight" } } },
+  ]);
 });
 
 test("themeState projects optional pack, scheme, and string accent as a launcher-bound record", () => {

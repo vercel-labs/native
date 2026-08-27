@@ -837,9 +837,10 @@ test "ime composition owns exact bytes when its preview completes CRLF" {
 }
 
 test "text bounds follow utf8 scalar fallback and shaped y offsets" {
-    // Metric boxes inflate by the ink allowance (left/bottom 0.1em,
-    // right 0.35em) so real glyph outlines never clip at the bounds.
-    try expectRectApprox(geometry.RectF.init(1, 8, 19.47, 13.5), textBounds(.{
+    // Metric boxes inflate by the ink allowance (top 0.35em,
+    // left/bottom 0.1em, right 0.35em) so real and fallback glyph
+    // outlines never clip at the bounds.
+    try expectRectApprox(geometry.RectF.init(1, 4.5, 19.47, 17), textBounds(.{
         .font_id = 1,
         .size = 10,
         .origin = geometry.PointF.init(2, 18),
@@ -851,13 +852,67 @@ test "text bounds follow utf8 scalar fallback and shaped y offsets" {
         .{ .id = 1, .x = 0, .y = -2, .advance = 6 },
         .{ .id = 2, .x = 8, .y = 3, .advance = 5 },
     };
-    try expectRect(geometry.RectF.init(3, 8, 17.5, 18.5), textBounds(.{
+    try expectRect(geometry.RectF.init(3, 4.5, 17.5, 22), textBounds(.{
         .font_id = 1,
         .size = 10,
         .origin = geometry.PointF.init(4, 20),
         .color = Color.rgb8(0, 0, 0),
         .glyphs = &glyphs,
     }));
+}
+
+test "text bounds reserve top ink headroom for fallback glyphs" {
+    const text = DrawText{
+        .font_id = 1,
+        .size = 16,
+        .origin = geometry.PointF.init(4, 20),
+        .color = Color.rgb8(255, 255, 255),
+        .text = "😀",
+    };
+    const bounds = textBounds(text).?;
+    try std.testing.expect(bounds.y < text.origin.y - text.size);
+    try std.testing.expectEqual(@as(f32, 5.6), text.origin.y - text.size - bounds.y);
+}
+
+fn providerInkMetricsForTests(
+    context: ?*anyopaque,
+    font_id: FontId,
+    size: f32,
+    text: []const u8,
+    metrics: *support.TextInkMetrics,
+) bool {
+    _ = context;
+    _ = font_id;
+    _ = size;
+    _ = text;
+    metrics.* = .{
+        .min_x = -2,
+        .max_x = 12,
+        .min_y = -4,
+        .max_y = 18,
+    };
+    return true;
+}
+
+const provider_ink_measure = support.TextMeasureProvider{
+    .measure_fn = coretextLikeMeasureForTests,
+    .measure_ink_fn = providerInkMetricsForTests,
+};
+
+test "text bounds include provider ink metrics for standalone runs" {
+    const text = DrawText{
+        .font_id = 1,
+        .size = 10,
+        .origin = geometry.PointF.init(4, 20),
+        .color = Color.rgb8(255, 255, 255),
+        .text = "A",
+        .measure = &provider_ink_measure,
+    };
+    const bounds = textBounds(text).?;
+    try std.testing.expect(bounds.x <= 2);
+    try std.testing.expect(bounds.y <= 2);
+    try std.testing.expect(bounds.maxX() >= 16);
+    try std.testing.expect(bounds.maxY() >= 24);
 }
 
 test "text bounds and reference renderer honor per-run wrapping" {
@@ -870,13 +925,13 @@ test "text bounds and reference renderer honor per-run wrapping" {
         .text_layout = .{ .max_width = 10, .line_height = 12, .wrap = .character },
     };
     // Metric box (0, 0, 7.11, 48) plus the ink allowance.
-    try expectRectApprox(geometry.RectF.init(-1, 0, 11.61, 49), textBounds(text));
+    try expectRectApprox(geometry.RectF.init(-1, -3.5, 11.61, 52.5), textBounds(text));
 
     const commands = [_]CanvasCommand{.{ .draw_text = text }};
     var render_commands: [1]RenderCommand = undefined;
     const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
     try std.testing.expectEqual(@as(usize, 1), render_plan.commandCount());
-    try expectRectApprox(geometry.RectF.init(-1, 0, 11.61, 49), render_plan.commands[0].bounds);
+    try expectRectApprox(geometry.RectF.init(-1, -3.5, 11.61, 52.5), render_plan.commands[0].bounds);
 
     var pixels: [16 * 32 * 4]u8 = [_]u8{0} ** (16 * 32 * 4);
     const surface = try ReferenceRenderSurface.init(16, 32, &pixels);

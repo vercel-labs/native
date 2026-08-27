@@ -421,6 +421,85 @@ test "style token references resolve against tokens at finalize time" {
     try testing.expectEqual(light_badge.id, dark_badge.id);
 }
 
+test "markup radius none resolves to square button corners" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<button radius=\"none\" on-press=\"add\">Square</button>");
+    var ui = InboxUi.init(arena);
+    const custom_tokens = canvas.DesignTokens{ .radius = .{ .none = 8 } };
+    const tree = try ui.finalizeWithTokens(try view.build(&ui, &model), custom_tokens);
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    var button = tree.root;
+    button.frame = geometry.RectF.init(0, 0, 120, 36);
+    button.state.focused = true;
+    var commands: [4]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, button, .{});
+    switch (builder.displayList().commands[0]) {
+        .fill_rounded_rect => |fill| try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (builder.displayList().commands[2]) {
+        .stroke_rect => |ring| try testing.expectEqualDeep(canvas.Radius.all(2), ring.radius),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "markup radius none keeps a surface content clip square" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<panel radius=\"none\"><row background=\"accent\" /></panel>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    // Give the child the entire panel frame: this is the full-bleed case
+    // where the content clip, rather than layout padding, owns the corners.
+    var panel = tree.root;
+    panel.frame = geometry.RectF.init(0, 0, 120, 72);
+    panel.layout.clip_content = true;
+    var children = [_]canvas.Widget{panel.children[0]};
+    children[0].frame = panel.frame;
+    panel.children = &children;
+
+    var commands: [8]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, panel, .{});
+
+    var saw_panel_chrome = false;
+    var saw_content_clip = false;
+    var saw_full_bleed_child = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == canvas.widgetPartId(panel.id, 2)) {
+                    try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius);
+                    saw_panel_chrome = true;
+                }
+                if (fill.id == canvas.widgetPartId(children[0].id, 1)) {
+                    try testing.expectEqualDeep(panel.frame, fill.rect);
+                    saw_full_bleed_child = true;
+                }
+            },
+            .push_clip => |clip| if (clip.id == canvas.widgetPartId(panel.id, 9)) {
+                try testing.expectEqualDeep(canvas.Radius.all(0), clip.radius);
+                saw_content_clip = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_panel_chrome);
+    try testing.expect(saw_content_clip);
+    try testing.expect(saw_full_bleed_child);
+}
+
 test "explicit style values win over token references" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -2846,6 +2925,9 @@ pub const ImageLeafModel = struct {
     /// A signed id field: bindings evaluate as i64, so a negative must
     /// reach the image seam as a value, never trap in the u64 cast.
     stale_image: i64 = -2,
+    source_x: f32 = 4,
+    source_width: f32 = 32,
+    invalid_source: []const u8 = "wide",
 
     /// A pub fn producing an ImageId binds like a field.
     pub fn thumbnail(model: *const ImageLeafModel) canvas.ImageId {
@@ -2855,7 +2937,7 @@ pub const ImageLeafModel = struct {
 
 pub const image_markup_source =
     \\<row gap="8">
-    \\  <image image="{cover}" width="120" height="80" label="Cover art" />
+    \\  <image image="{cover}" source-x="{source_x}" source-y="8" source-width="{source_width}" source-height="24" width="120" height="80" label="Cover art" />
     \\  <image image="{thumbnail}" width="48" height="48" label="" />
     \\</row>
 ;
@@ -2875,7 +2957,7 @@ pub const ImageLeafUi = canvas.Ui(ImageLeafMsg);
 /// shares.
 pub fn handImageLeafView(ui: *ImageLeafUi, model: *const ImageLeafModel) ImageLeafUi.Node {
     return ui.row(.{ .gap = 8 }, .{
-        ui.image(.{ .image = model.cover, .width = 120, .height = 80, .semantics = .{ .label = "Cover art" } }),
+        ui.image(.{ .image = model.cover, .image_src = geometry.RectF.init(model.source_x, 8, model.source_width, 24), .width = 120, .height = 80, .semantics = .{ .label = "Cover art" } }),
         ui.image(.{ .image = model.thumbnail(), .width = 48, .height = 48, .semantics = .{ .label = "" } }),
     });
 }
@@ -2902,13 +2984,16 @@ test "the image leaf binds a dynamic ImageId from model fields and fns" {
     try collectIds(hand_tree.root, &hand_ids, testing.allocator);
     try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
 
-    // The field binding and the fn binding both land in image_id.
+    // The id and source-coordinate bindings land on the widget. The
+    // second image omits a crop and draws the whole registered image.
     const cover = markup_tree.root.children[0];
     try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
     try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(4, 8, 32, 24)), cover.image_src);
     try testing.expectEqualStrings("Cover art", cover.semantics.label);
     const thumbnail = markup_tree.root.children[1];
     try testing.expectEqual(@as(canvas.ImageId, 43), thumbnail.image_id);
+    try testing.expectEqual(@as(?geometry.RectF, null), thumbnail.image_src);
 
     // 0 is the "no image" sentinel: the leaf renders nothing (the
     // model simply has not loaded the image yet).
@@ -2944,6 +3029,29 @@ test "image leaf misuse fails the build with the teaching messages" {
             // the same construct as a compile error).
             .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>",
             .message = canvas.ui_markup.image_children_message,
+        },
+        .{
+            // A source rectangle is atomic: omitting one coordinate is
+            // a typo, not an implicit zero/default.
+            .source = "<row>\n  <image image=\"{cover}\" source-x=\"0\" source-y=\"0\" source-width=\"16\" label=\"Art\" />\n</row>",
+            .message = canvas.ui_markup.image_source_complete_message,
+        },
+        .{
+            // Cropping without an image would be inert (avatar may omit
+            // image normally for its initials fallback).
+            .source = "<row>\n  <avatar source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">CT</avatar>\n</row>",
+            .message = canvas.ui_markup.image_source_binding_message,
+        },
+        .{
+            // Only registered-image widgets consume source rectangles.
+            .source = "<row>\n  <badge source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">3</badge>\n</row>",
+            .message = canvas.ui_markup.image_source_element_message,
+        },
+        .{
+            // Runtime model values still pass the numeric conversion
+            // gate; a string cannot become a source coordinate.
+            .source = "<row>\n  <image image=\"{cover}\" source-x=\"{invalid_source}\" source-y=\"0\" source-width=\"16\" source-height=\"16\" label=\"Art\" />\n</row>",
+            .message = "expected a number",
         },
         .{
             // Markup that skipped validation (hot reload) can reach the

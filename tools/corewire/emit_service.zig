@@ -29,29 +29,24 @@ fn fingerprintType(hasher: *std.crypto.hash.sha2.Sha256, ref: service.TypeRef) v
     if (ref.name) |name| fingerprintField(hasher, name);
 }
 
-/// Identity of every fact that can change generated dispatch semantics. The
-/// same digest is embedded in the service executable and the Zig registry so
-/// a stale or hand-supplied sibling is refused before numeric indices are used.
+/// Identity of the service ABI facts both carriers put on the wire. The same
+/// digest is embedded in the service executable and the Zig registry so a
+/// stale or hand-supplied sibling is refused before numeric indices are used.
+///
+/// Deliberately excluded: compiler/package identities, implementation module
+/// paths and exports, and `source_hash`. Those facts rebuild the service
+/// executable, but they do not change operation indices or encoded values and
+/// therefore must not rewrite the app runner or recompile the app core.
 fn contractFingerprint(contract: service.Contract) [fingerprint_len]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("native-sdk.services.contract.v3\x00");
+    hasher.update("native-sdk.services.abi.v3\x00");
     var scalar: [8]u8 = undefined;
     std.mem.writeInt(i64, &scalar, contract.format, .little);
     hasher.update(&scalar);
     std.mem.writeInt(i64, &scalar, contract.protocol_version, .little);
     hasher.update(&scalar);
-    hasher.update(&.{@intFromBool(contract.deterministic)});
-    fingerprintField(&hasher, contract.compiler_version);
-    std.mem.writeInt(u64, &scalar, @intCast(contract.packages.len), .little);
-    hasher.update(&scalar);
-    for (contract.packages) |package_entry| {
-        fingerprintField(&hasher, package_entry.name);
-        fingerprintField(&hasher, package_entry.version);
-        fingerprintField(&hasher, package_entry.content_hash);
-    }
     for (contract.types.records) |record| {
         fingerprintField(&hasher, record.name);
-        fingerprintField(&hasher, record.origin);
         for (record.fields) |field| {
             fingerprintField(&hasher, field.name);
             fingerprintType(&hasher, field.type);
@@ -59,12 +54,10 @@ fn contractFingerprint(contract: service.Contract) [fingerprint_len]u8 {
     }
     for (contract.types.enums) |enum_type| {
         fingerprintField(&hasher, enum_type.name);
-        fingerprintField(&hasher, enum_type.origin);
         for (enum_type.members) |member| fingerprintField(&hasher, member);
     }
     for (contract.types.unions) |union_type| {
         fingerprintField(&hasher, union_type.name);
-        fingerprintField(&hasher, union_type.origin);
         for (union_type.arms) |arm| {
             fingerprintField(&hasher, arm.name);
             for (arm.fields) |field| {
@@ -77,9 +70,6 @@ fn contractFingerprint(contract: service.Contract) [fingerprint_len]u8 {
     hasher.update(&scalar);
     for (contract.operations) |op| {
         fingerprintField(&hasher, op.name);
-        fingerprintField(&hasher, op.client);
-        fingerprintField(&hasher, op.module);
-        fingerprintField(&hasher, op.@"export");
         fingerprintType(&hasher, op.request);
         fingerprintType(&hasher, op.result);
         std.mem.writeInt(i64, &scalar, op.deadline_ms orelse 0, .little);
@@ -91,7 +81,6 @@ fn contractFingerprint(contract: service.Contract) [fingerprint_len]u8 {
             std.mem.writeInt(i64, &scalar, stream.in_flight, .little);
             hasher.update(&scalar);
         } else hasher.update(&.{0});
-        fingerprintField(&hasher, op.source_hash);
     }
     return hasher.finalResult();
 }
@@ -601,15 +590,23 @@ pub fn emitInprocMain(arena: std.mem.Allocator, contract: service.Contract) ![]c
 /// and linked by one build graph, and the facade's fingerprint export is
 /// the pairing check. No determinism fences — services run with ambient
 /// authority by contract.
-pub fn emitInprocProfile(arena: std.mem.Allocator) ![]const u8 {
+pub fn emitInprocProfile(arena: std.mem.Allocator, optimization: ?[]const u8) ![]const u8 {
     var out = std.Io.Writer.Allocating.init(arena);
     const w = &out.writer;
-    try w.print(
-        \\{{
+    try w.writeAll(
+        \\{
         \\  "profile_format": 1,
         \\  "name": "native-sdk-services",
         \\  "entry": "service_inproc_main.ts",
         \\  "emission": "llvm",
+    );
+    if (optimization) |value| {
+        try w.print(
+            \\  "optimization": "{s}",
+        , .{value});
+        try w.writeByte('\n');
+    }
+    try w.print(
         \\  "abi": {{
         \\    "prefix": "{s}",
         \\    "init_symbol": "{s}init",
@@ -887,12 +884,13 @@ test "service projection derives host dispatch and registry from one contract" {
     try std.testing.expect(std.mem.indexOf(u8, inproc, "writeHello") == null);
     try std.testing.expect(std.mem.indexOf(u8, inproc, "requestId") == null);
 
-    const profile = try emitInprocProfile(std.testing.allocator);
+    const profile = try emitInprocProfile(std.testing.allocator, "release");
     defer std.testing.allocator.free(profile);
     try std.testing.expect(std.mem.indexOf(u8, profile, "\"prefix\": \"nsc_svc_\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "\"localize_runtime\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "\"instance_per_thread\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "\"entry\": \"service_inproc_main.ts\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "\"optimization\": \"release\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "\"symbol\": \"nsc_svc_dispatch\"") != null);
 
     const registry = try emitRegistry(std.testing.allocator, contract);
@@ -910,6 +908,33 @@ test "service projection derives host dispatch and registry from one contract" {
     try std.testing.expect(std.mem.indexOf(u8, client, "ServiceRoute<Msg, readonly (Uint8Array | null)[]>") != null);
 
     const original_fingerprint = contractFingerprint(contract);
+    // An implementation-only fingerprint input change must leave the ABI
+    // digest alone: source/package/compiler facts rebuild only the service.
+    const implementation_only_fingerprint = contractFingerprint(.{
+        .format = contract.format,
+        .protocol_version = contract.protocol_version,
+        .compiler_version = "9.9.9",
+        .deterministic = contract.deterministic,
+        .packages = &.{.{ .name = "different-package", .version = "4.5.6", .content_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }},
+        .types = contract.types,
+        .operations = &.{
+            .{
+                .name = operations[0].name,
+                .client = "renamedInternalClient",
+                .module = "src/services/moved.ts",
+                .@"export" = "moved",
+                .request = operations[0].request,
+                .result = operations[0].result,
+                .deadline_ms = operations[0].deadline_ms,
+                .cancellable = operations[0].cancellable,
+                .stream = operations[0].stream,
+                .source_hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            },
+            operations[1],
+            operations[2],
+        },
+    });
+    try std.testing.expectEqualSlices(u8, &original_fingerprint, &implementation_only_fingerprint);
     const reordered_operations = [_]service.Operation{ operations[1], operations[0] };
     const reordered_fingerprint = contractFingerprint(.{
         .format = contract.format,

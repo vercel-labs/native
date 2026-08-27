@@ -10,6 +10,8 @@ Sign the bundle with a Developer ID:
 native package --target macos --signing identity --identity "Developer ID Application: Your Name"
 ```
 
+Identity signing enables the hardened runtime and explicitly requests Apple's secure timestamp. If the timestamp service cannot be reached, packaging fails instead of producing a distribution signature that notarization will reject.
+
 Signing modes:
 
 <table>
@@ -69,25 +71,55 @@ For distribution without any dialog, sign with a Developer ID (`--signing identi
       <td>Path to entitlements file (e.g. <code>assets/native-sdk.entitlements</code>)</td>
     </tr>
     <tr>
-      <td><code>--team-id</code></td>
-      <td>Apple Developer Team ID</td>
+      <td><code>--notarize</code></td>
+      <td>Submit the final macOS artifact, then staple and validate the accepted ticket</td>
+    </tr>
+    <tr>
+      <td><code>--notary-profile</code></td>
+      <td>Name of a <code>notarytool</code> Keychain profile created with <code>store-credentials</code></td>
     </tr>
   </tbody>
 </table>
 
 ## Notarization
 
-The framework repository includes a `zig build notarize` helper for local release testing:
+Store notarization credentials in Keychain once. A team App Store Connect API key is the normal CI choice:
 
 ```bash
-zig build notarize
+xcrun notarytool store-credentials "my-app-release" \
+  --key /path/to/AuthKey_KEYID.p8 \
+  --key-id KEYID \
+  --issuer ISSUER_UUID
 ```
 
-Generated apps should use `native package --target macos --signing identity ... --archive` unless they add their own `notarize` build step. This helper does not invoke `xcrun notarytool` directly. After the signed DMG is created, submit and staple it manually (use the archive path printed by the package command):
+Apple ID credentials work too:
 
 ```bash
-xcrun notarytool submit zig-out/package/your-app-1.0.0-macos-ReleaseFast.dmg --apple-id "you@example.com" --team-id "TEAMID" --password "@keychain:AC_PASSWORD" --wait
-xcrun stapler staple zig-out/package/your-app-1.0.0-macos-ReleaseFast.dmg
+xcrun notarytool store-credentials "my-app-release" \
+  --apple-id "you@example.com" \
+  --team-id TEAMID \
+  --password APP_SPECIFIC_PASSWORD
+```
+
+Then package, timestamp-sign, notarize, staple, and validate in one command:
+
+```bash
+native package --target macos \
+  --signing identity \
+  --identity "Developer ID Application: Your Name (TEAMID)" \
+  --archive \
+  --notarize \
+  --notary-profile "my-app-release"
+```
+
+With `--archive`, Native SDK first submits the signed app, staples and validates it, then builds and signs the DMG and submits, staples, and validates that final image. Without `--archive`, only the app submission runs. Any updater ZIP is created afterward from the stapled app.
+
+The framework repository exposes the same path for local release testing:
+
+```bash
+zig build notarize \
+  -Didentity="Developer ID Application: Your Name (TEAMID)" \
+  -Dnotary-profile="my-app-release"
 ```
 
 ## Chromium apps

@@ -267,6 +267,7 @@ pub fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTok
             .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size, tokens)),
             .color = buttonTextColorForWidget(widget, tokens),
             .text = widget.text,
+            .measure = tokens.text_measure,
         });
     }
 }

@@ -64,6 +64,8 @@ fn e2eWindowView(ui: *App.Ui, model: *const fixture.Model, label: []const u8) Ap
 
 fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.toggle")) return .toggle;
+    if (std.mem.eql(u8, name, "core.enable")) return .enable;
+    if (std.mem.eql(u8, name, "core.disable")) return .disable;
     if (std.mem.eql(u8, name, "core.refresh")) return .refresh;
     if (std.mem.eql(u8, name, "core.abort")) return .abort;
     if (std.mem.eql(u8, name, "core.stamp")) return .stamp;
@@ -445,14 +447,24 @@ test "the compiled core's statusItem helper installs and updates title and menu"
     try std.testing.expectEqual(native_sdk.platform.TrayTone.normal, installed_presentation.tone);
     try std.testing.expectEqual(@as(f32, 1), installed_presentation.icon_opacity);
     try std.testing.expect(installed_presentation.monospaced);
-    try std.testing.expectEqual(@as(usize, 3), h.harness.null_platform.trayItems().len);
-    try std.testing.expectEqualStrings("Pause polling…", h.harness.null_platform.trayItems()[0].label);
-    try std.testing.expectEqualStrings("configured ✓", h.harness.null_platform.trayItems()[0].detail);
-    try std.testing.expectEqual(native_sdk.platform.TrayItemRole.agent, h.harness.null_platform.trayItems()[0].role);
-    try std.testing.expect(h.harness.null_platform.trayItems()[1].separator);
-    try std.testing.expect(h.harness.null_platform.trayItems()[2].enabled);
-    try std.testing.expectEqualStrings("r", h.harness.null_platform.trayItems()[2].key);
-    try std.testing.expect(h.harness.null_platform.trayItems()[2].modifiers.primary);
+    try std.testing.expectEqual(@as(f32, 12), installed_presentation.font_size);
+    try std.testing.expectEqual(native_sdk.platform.TrayFontWeight.medium, installed_presentation.font_weight);
+    try std.testing.expectEqual(@as(usize, 6), h.harness.null_platform.trayItems().len);
+    try std.testing.expectEqualStrings("2,494 requests", h.harness.null_platform.trayItems()[0].metric.?.primary_text);
+    try std.testing.expectEqualStrings("Today · production", h.harness.null_platform.trayItems()[0].metric.?.secondary_text);
+    const segmented = h.harness.null_platform.trayItems()[1].segmented.?;
+    try std.testing.expectEqual(@as(usize, 2), segmented.options.len);
+    try std.testing.expectEqualStrings("core.enable", segmented.options[0].command);
+    try std.testing.expect(segmented.options[0].selected);
+    try std.testing.expectEqualStrings("Load rising", h.harness.null_platform.trayItems()[2].chart.?.accessibility_label);
+    try std.testing.expectEqual(@as(f32, 0.75), h.harness.null_platform.trayItems()[2].chart.?.values[2]);
+    try std.testing.expectEqualStrings("Pause polling…", h.harness.null_platform.trayItems()[3].label);
+    try std.testing.expectEqualStrings("configured ✓", h.harness.null_platform.trayItems()[3].detail);
+    try std.testing.expectEqual(native_sdk.platform.TrayItemRole.agent, h.harness.null_platform.trayItems()[3].role);
+    try std.testing.expect(h.harness.null_platform.trayItems()[4].separator);
+    try std.testing.expect(h.harness.null_platform.trayItems()[5].enabled);
+    try std.testing.expectEqualStrings("r", h.harness.null_platform.trayItems()[5].key);
+    try std.testing.expect(h.harness.null_platform.trayItems()[5].modifiers.primary);
     const menu_updates = h.harness.null_platform.trayUpdateCount();
     const title_updates = h.harness.null_platform.trayTitleUpdateCount();
 
@@ -465,12 +477,22 @@ test "the compiled core's statusItem helper installs and updates title and menu"
     try std.testing.expectEqual(@as(f32, 72), updated_presentation.width);
     try std.testing.expectEqual(native_sdk.platform.TrayTone.warning, updated_presentation.tone);
     try std.testing.expectEqual(@as(f32, 0.5), updated_presentation.icon_opacity);
-    try std.testing.expectEqualStrings("Resume polling…", h.harness.null_platform.trayItems()[0].label);
-    try std.testing.expectEqualStrings("warning ⚠", h.harness.null_platform.trayItems()[0].detail);
-    try std.testing.expect(!h.harness.null_platform.trayItems()[2].enabled);
+    try std.testing.expectEqual(@as(f32, 13), updated_presentation.font_size);
+    try std.testing.expectEqual(native_sdk.platform.TrayFontWeight.semibold, updated_presentation.font_weight);
+    try std.testing.expectEqualStrings("1,240 requests", h.harness.null_platform.trayItems()[0].metric.?.primary_text);
+    try std.testing.expect(!h.harness.null_platform.trayItems()[1].segmented.?.options[0].selected);
+    try std.testing.expect(h.harness.null_platform.trayItems()[1].segmented.?.options[1].selected);
+    try std.testing.expectEqualStrings("Load falling", h.harness.null_platform.trayItems()[2].chart.?.accessibility_label);
+    try std.testing.expectEqualStrings("Resume polling…", h.harness.null_platform.trayItems()[3].label);
+    try std.testing.expectEqualStrings("warning ⚠", h.harness.null_platform.trayItems()[3].detail);
+    try std.testing.expect(!h.harness.null_platform.trayItems()[5].enabled);
     try std.testing.expectEqual(title_updates + 1, h.harness.null_platform.trayTitleUpdateCount());
     try std.testing.expectEqual(menu_updates + 1, h.harness.null_platform.trayUpdateCount());
     try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.trayCreateCount());
+
+    // A segment's stable id uses the exact ordinary tray action path.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .tray_action = .{ .item_id = 11 } });
+    try std.testing.expect(Bridge.model().polling);
 }
 
 test "requests round-trip, replace, and cancel through the real dispatch path" {

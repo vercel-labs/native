@@ -1714,6 +1714,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         // ---------------------------------------------------- attributes
 
         fn applyAttrs(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions) BuildError!void {
+            try self.applyImageSourceAttrs(scope, node, options);
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "kind")) continue;
                 if (std.mem.startsWith(u8, attribute.name, "on-")) {
@@ -1751,6 +1752,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applyImageAttr(scope, node, options, attribute);
                     continue;
                 }
+                if (markup.imageSourceAttrName(attribute.name)) continue;
                 if (std.mem.eql(u8, attribute.name, "surface")) {
                     try self.applySurfaceAttr(scope, node, options, attribute);
                     continue;
@@ -1865,6 +1867,32 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 else
                     @intCast(int),
                 else => return self.failVoid(node, markup.image_binding_message),
+            };
+        }
+
+        /// The four `source-*` attributes form one optional source
+        /// rectangle in decoded-image pixel coordinates. Build it before
+        /// the scalar attribute walk so declaration order carries no
+        /// meaning; repeat the validator's shape checks for hot-reloaded
+        /// documents that reached the interpreter without validation.
+        fn applyImageSourceAttrs(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions) BuildError!void {
+            var any = false;
+            for (markup.image_source_attr_names) |name| {
+                if (node.attr(name) != null) any = true;
+            }
+            if (!any) return;
+            if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                return self.failVoid(node, markup.image_source_element_message);
+            }
+            if (node.attr("image") == null) return self.failVoid(node, markup.image_source_binding_message);
+            for (markup.image_source_attr_names) |name| {
+                if (node.attr(name) == null) return self.failVoid(node, markup.image_source_complete_message);
+            }
+            options.image_src = .{
+                .x = try self.floatAttr(scope, node, node.attrEntry("source-x").?),
+                .y = try self.floatAttr(scope, node, node.attrEntry("source-y").?),
+                .width = try self.floatAttr(scope, node, node.attrEntry("source-width").?),
+                .height = try self.floatAttr(scope, node, node.attrEntry("source-height").?),
             };
         }
 

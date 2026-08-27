@@ -138,7 +138,7 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
 /// app tree, so "nothing embeds this" is a false signal that once cost a
 /// user their view.
 fn printOrphanHint(arena: std.mem.Allocator, io: std.Io, file_path: []const u8, cache: *?[]const []const u8) void {
-    if (!fileExists(io, "app.zon")) return;
+    if (!fileExists(io, "app.json") and !fileExists(io, "app.zon")) return;
     const ts_track = fileExists(io, "src/core.ts");
     const basenames: []const []const u8 = if (ts_track) &.{} else cache.* orelse blk: {
         const collected = collectEmbeddedBasenames(arena, io) catch return;
@@ -231,7 +231,7 @@ const ContractState = union(enum) {
 /// app.zon and prove it fresh (the artifact carries a hash over the app's
 /// Zig sources; any drift degrades to structural checking).
 fn discoverContract(arena: std.mem.Allocator, io: std.Io) ContractState {
-    if (!fileExists(io, "app.zon")) return .no_app;
+    if (!fileExists(io, "app.json") and !fileExists(io, "app.zon")) return .no_app;
     const source = readFile(arena, io, ui_markup.contract.default_artifact_path) catch return .missing;
     const parsed = ui_markup.contract.parseArtifact(arena, source) catch return .unreadable;
     if (parsed.format != ui_markup.contract.format_version) return .unreadable;

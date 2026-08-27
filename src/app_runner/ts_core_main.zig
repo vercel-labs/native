@@ -1,7 +1,8 @@
 //! The generated wiring for a TypeScript app core — staged (never written
 //! into the app) by the framework build when the tree carries src/core.ts:
-//! the build transpiles the core beside this file as core.zig, copies the
-//! app's src/app.native beside it too, and roots the app module here. The
+//! the build transpiles the core beside this file as core.zig, links the
+//! app's src/app.native as an isolated data object, and roots the app module
+//! here. The
 //! app tree stays three files of truth — core.ts (logic), app.native
 //! (view), app.zon (manifest) — and every value below derives from them at
 //! comptime:
@@ -79,7 +80,14 @@ const App = Adapter.App;
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
 const canvas_label = native_sdk.app_manifest.firstGpuSurfaceLabel(shell_scene);
-pub const app_markup = @embedFile("app.native");
+extern const native_sdk_app_markup: u8;
+extern const native_sdk_app_markup_len: usize;
+
+/// Primary markup is linked as a data object so changing it does not dirty
+/// this Zig module's already-compiled SDK/app graph.
+pub fn appMarkup() []const u8 {
+    return @as([*]const u8, @ptrCast(&native_sdk_app_markup))[0..native_sdk_app_markup_len];
+}
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
@@ -90,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
+        .markup = .{ .source = appMarkup(), .watch_path = "src/app.native", .io = init.io },
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no

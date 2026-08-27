@@ -1123,11 +1123,18 @@ fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
         // image child, a full-bleed row) shears along the chrome's
         // corners instead of the generic surface radius.
         .bubble => widget_render_surfaces.bubbleWidgetRadius(widget, tokens),
-        .alert, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
+        // Keep a surface's child clip exactly in step with its chrome.
+        // In particular, an explicit `radius="none"` must not round a
+        // full-bleed child after the surface itself has become square.
+        .alert => controlRadius(widget, alertControlVisualTokens(tokens), tokens.radius.lg),
+        .card => controlRadius(widget, cardControlVisualTokens(tokens), tokens.radius.lg),
+        .resizable, .panel, .menu_surface, .dropdown_menu => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .accordion => .{},
-        .dialog, .popover => Radius.all(tokens.radius.xl),
-        .drawer, .sheet => Radius.all(tokens.radius.lg),
-        .tooltip => Radius.all(tokens.radius.md),
+        .dialog => controlRadius(widget, dialogControlVisualTokens(tokens), tokens.radius.xl),
+        .drawer => controlRadius(widget, drawerControlVisualTokens(tokens), tokens.radius.xl),
+        .sheet => controlRadius(widget, sheetControlVisualTokens(tokens), tokens.radius.lg),
+        .popover => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .tooltip => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
         else => .{},
     };
 }
@@ -2673,6 +2680,7 @@ fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size, tokens)),
         .color = widgetForegroundColor(widget, tokens, tokens.colors.text),
         .text = widget.text,
+        .measure = tokens.text_measure,
     });
 }
 
@@ -2697,7 +2705,10 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
         .dst = widget.frame,
         .opacity = widget.image_opacity,
         .fit = widget.image_fit,
-        .sampling = widget.image_sampling,
+        // Packet hosts expose filtering but no per-draw sampler-address
+        // mode. Nearest sampling keeps an atlas crop from filtering
+        // across its source boundary; whole-image draws stay linear.
+        .sampling = if (widget.image_src != null) .nearest else widget.image_sampling,
     });
     if (clips_image) try builder.popClip();
 }
@@ -2987,7 +2998,9 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
             .dst = widget.frame,
             .opacity = widget.image_opacity,
             .fit = widget.image_fit,
-            .sampling = widget.image_sampling,
+            // See emitImageWidget: a cropped avatar is an atlas draw and
+            // must not sample neighboring regions on packet hosts.
+            .sampling = if (widget.image_src != null) .nearest else widget.image_sampling,
             // The render plan flattens the clip stack to rects, so the
             // pill clip above only crops the bounds; the draw's own
             // radius mask is what actually rounds the image.
@@ -3657,6 +3670,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
                 .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(plot.x - chart_axis_label_gap - width, top + size)),
                 .color = tokens.colors.text_muted,
                 .text = text,
+                .measure = tokens.text_measure,
             });
         }
     }
@@ -3688,6 +3702,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
                 .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(x, baseline)),
                 .color = tokens.colors.text_muted,
                 .text = label,
+                .measure = tokens.text_measure,
             });
         }
     }
@@ -4159,6 +4174,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
         .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(card.x + chart_detail_pad_h, row_y + size)),
         .color = tokens.colors.text,
         .text = title_text,
+        .measure = tokens.text_measure,
     });
     row_y += line_height;
     for (data.series, 0..) |series, series_index| {
@@ -4178,6 +4194,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(card.x + chart_detail_pad_h + chart_detail_swatch + chart_detail_swatch_gap, row_y + size)),
             .color = tokens.colors.text_muted,
             .text = chartDetailRowName(series),
+            .measure = tokens.text_measure,
         });
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
         const value_text = try builder.allocChartLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
@@ -4189,6 +4206,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(card.maxX() - chart_detail_pad_h - value_width, row_y + size)),
             .color = tokens.colors.text,
             .text = value_text,
+            .measure = tokens.text_measure,
         });
         row_y += line_height;
     }

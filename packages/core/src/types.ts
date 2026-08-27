@@ -266,7 +266,7 @@ export class TypeTable {
           this.declOrder.push(name);
           continue;
         }
-        const projectOptional = this.isCanonicalThemeState(stmt);
+        const projectOptional = this.isCanonicalOptionalSdkRecord(stmt);
         if (ts.isTypeLiteralNode(stmt.type) && this.tast.propsOfTypeLiteral(stmt.type, projectOptional) !== null) {
           // A plain-record object-literal alias is a struct exactly like
           // an interface; the alias FORM is how a contract projection
@@ -275,8 +275,8 @@ export class TypeTable {
           // promotion walk. Shapes the plain-record walk cannot carry
           // whole (quoted or optional properties) stay unclassified and
           // refuse at emission instead of losing fields silently. The
-          // canonical SDK ThemeState is the sole optional-property record:
-          // omission is its manifest/system inheritance signal.
+          // A tiny closed set of SDK shell records may carry optional
+          // properties; authored records still spell absence as `| null`.
           this.structs.set(name, {
             name,
             decl: stmt,
@@ -323,7 +323,7 @@ export class TypeTable {
         }
         const structInfo = this.structs.get(stmt.name.text);
         if (structInfo && structInfo.decl === stmt && ts.isTypeLiteralNode(stmt.type)) {
-          const projectOptional = this.isCanonicalThemeState(stmt);
+          const projectOptional = this.isCanonicalOptionalSdkRecord(stmt);
           const props = this.tast.propsOfTypeLiteral(stmt.type, projectOptional);
           if (props) structInfo.fields = props.map((p) => this.fieldOf(p, projectOptional));
         }
@@ -331,9 +331,9 @@ export class TypeTable {
     }
   }
 
-  private isCanonicalThemeState(decl: ts.TypeAliasDeclaration): boolean {
+  private isCanonicalOptionalSdkRecord(decl: ts.TypeAliasDeclaration): boolean {
     const events = sdkLibraryModules.get("@native-sdk/core/events");
-    return decl.name.text === "ThemeState" && events !== undefined &&
+    return (decl.name.text === "ThemeState" || decl.name.text === "StatusItemPresentation" || decl.name.text === "StatusItemMenuItem") && events !== undefined &&
       path.resolve(decl.getSourceFile().fileName) === path.resolve(events);
   }
 
@@ -342,8 +342,8 @@ export class TypeTable {
     return {
       tsName: p.name,
       zigName: zigDeclName(p.name),
-      // Only the canonical ThemeState projects JS `undefined` omission onto
-      // the contract's ordinary optional slot. Applying this globally would
+      // Only canonical SDK shell records project JS `undefined` omission
+      // onto the contract's ordinary optional slot. Applying this globally would
       // let service records acquire an absent state while their generated
       // codecs still accept only explicit null.
       type: projectOptional && p.optional && resolved.k !== "void" && resolved.k !== "optional"

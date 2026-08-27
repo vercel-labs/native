@@ -165,6 +165,7 @@ pub const textEllipsisAdvance = text_model.textEllipsisAdvance;
 pub const textLayoutKeysEqual = text_model.textLayoutKeysEqual;
 pub const TextLayoutOptions = text_model.TextLayoutOptions;
 pub const TextMeasureProvider = text_model.TextMeasureProvider;
+pub const TextInkMetrics = text_model.TextInkMetrics;
 /// Batched-measurement invalidation seam (see text_measure_cache.zig):
 /// bump when anything that could change a provider's answers changes —
 /// font registration, appearance flips, runtime construction. Cached

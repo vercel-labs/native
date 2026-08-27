@@ -7,7 +7,8 @@ export type ThemeState = {
     readonly accent?: string;
 };
 export type StatusItemTone = "normal" | "warning" | "critical";
-export type StatusItemMenuRole = "command" | "info" | "header" | "hero" | "agent" | "context";
+export type StatusItemFontWeight = "regular" | "medium" | "semibold" | "bold";
+export type StatusItemMenuRole = "command" | "info" | "header" | "hero" | "agent" | "context" | "segmented" | "chart";
 export interface StatusItemModifiers {
     readonly primary: boolean;
     readonly command: boolean;
@@ -15,14 +16,39 @@ export interface StatusItemModifiers {
     readonly option: boolean;
     readonly shift: boolean;
 }
-export interface StatusItemPresentation {
+export type StatusItemPresentation = {
     readonly title: Uint8Array;
     readonly width: number;
     readonly tone: StatusItemTone;
     readonly iconOpacity: number;
     readonly monospaced: boolean;
+    readonly fontSize?: number;
+    readonly fontWeight?: StatusItemFontWeight;
+};
+export interface StatusItemSegmentOption {
+    readonly id: number;
+    readonly label: Uint8Array;
+    readonly command: Uint8Array;
+    readonly selected: boolean;
+    readonly enabled: boolean;
 }
-export interface StatusItemMenuItem {
+export interface StatusItemSegmentedRow {
+    readonly options: readonly StatusItemSegmentOption[];
+}
+export interface StatusItemMetricRow {
+    readonly primaryText: Uint8Array;
+    readonly secondaryText: Uint8Array;
+    readonly accessibilityLabel: Uint8Array;
+}
+export interface StatusItemChartRow {
+    readonly values: readonly number[];
+    readonly minValue: number;
+    readonly maxValue: number;
+    readonly leadingCaption: Uint8Array;
+    readonly trailingSummary: Uint8Array;
+    readonly accessibilityLabel: Uint8Array;
+}
+export type StatusItemMenuItem = {
     readonly id: number;
     readonly label: Uint8Array;
     readonly command: Uint8Array;
@@ -32,7 +58,10 @@ export interface StatusItemMenuItem {
     readonly role: StatusItemMenuRole;
     readonly key: Uint8Array;
     readonly modifiers: StatusItemModifiers;
-}
+    readonly segmented?: StatusItemSegmentedRow;
+    readonly metric?: StatusItemMetricRow;
+    readonly chart?: StatusItemChartRow;
+};
 export interface StatusItemState {
     readonly iconPath: Uint8Array;
     readonly tooltip: Uint8Array;

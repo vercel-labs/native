@@ -795,6 +795,27 @@ test "the image leaf's image binding checks as a model integer" {
     try testing.expectEqualStrings(markup.image_binding_message, message);
 }
 
+test "registered-image source rectangle bindings check as numbers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const good = try parseFixture(arena,
+        \\<column>
+        \\  <image image="{count}" source-x="{ratio}" source-y="{count}" source-width="32" source-height="16" label="Atlas tile" />
+        \\</column>
+    );
+    try testing.expectEqual(null, try contractMessage(arena, good, null));
+
+    const wrong = try parseFixture(arena,
+        \\<column>
+        \\  <image image="{count}" source-x="{name}" source-y="0" source-width="32" source-height="16" label="Atlas tile" />
+        \\</column>
+    );
+    const message = (try contractMessage(arena, wrong, null)).?;
+    try testing.expect(std.mem.startsWith(u8, message, "expected a number"));
+}
+
 test "app: icon references check against the contract's registered icon list" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

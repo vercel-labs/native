@@ -216,6 +216,7 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
         build_file = try buildgraph.ensureGeneratedBuild(allocator, io, ".", .{
             .app_name = app_name,
             .framework_root = framework_root,
+            .manifest_name = manifest_tool.defaultPath(io) orelse "app.json",
         });
         try argv.appendSlice(allocator, &.{ "--build-file", build_file.? });
     }
@@ -262,15 +263,15 @@ pub const DevOptions = struct {
 /// directory through an Io the desktop runner supplies, and the embed
 /// host supplies neither — edit + rerun is the loop today.
 pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !void {
-    if (!buildgraph.fileExists(io, "app.zon")) {
+    const manifest_path = manifest_tool.defaultPath(io) orelse {
         std.debug.print(
-            \\no app.zon here — `native dev --target ios` runs inside an app directory
+            \\no app.json or app.zon here — `native dev --target ios` runs inside an app directory
             \\(or pass one: `native dev path/to/app --target ios`). Start one with `native init`.
             \\
         , .{});
         return error.MissingManifest;
-    }
-    const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+    };
+    const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path);
     const bundle_id = try bundleIdAlloc(allocator, metadata.id);
     defer allocator.free(bundle_id);
 

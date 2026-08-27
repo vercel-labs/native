@@ -612,7 +612,7 @@ test "render batch plan groups adjacent commands by pipeline and state" {
     try std.testing.expectEqual(@as(usize, 2), batch_plan.batches[1].command_start);
     try std.testing.expectEqual(RenderPipelineKind.glyph_run, batch_plan.batches[2].pipeline);
     try std.testing.expectEqual(@as(usize, 3), batch_plan.batches[2].command_start);
-    // Text command bounds carry the ink allowance (right 0.35em,
+    // Text command bounds carry the ink allowance (top/right 0.35em,
     // bottom/left 0.1em) past the metric box.
     try expectRectApprox(geometry.RectF.init(0, 0, 87.684, 22.2), batch_plan.bounds);
 }

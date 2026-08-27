@@ -12,21 +12,16 @@
 // node's ancestor node_modules walk). Node's own type stripping is never
 // relied on: it refuses node_modules-resident .ts by design
 // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), and outside node_modules
-// it only became DEFAULT in node 22.18 — so a checkout target on
-// 22.15-22.17 would die with ERR_UNKNOWN_FILE_EXTENSION if the hook let it
-// "fall through". Hooking everything makes the 22.15 floor true for both
-// layouts. Then the runner imports the requested module with argv
+// it only became DEFAULT in node 22.18. Hooking everything keeps both layouts
+// identical. scriptc 0.0.35 requires Node 24 for its published compile-cache
+// bootstrap, so this shared runner enforces the same floor before importing
+// any frontend module. Then it imports the requested module with argv
 // respliced so the target sees its usual shape (its own path at argv[1],
 // its arguments from argv[2]).
 //
-// On node builds without module.registerHooks (pre-22.15, or 23.0-23.4 —
-// the hook landed in 22.15 and 23.5, so ">=22.15" alone is not the
-// capability line) NO .ts target can run — node_modules-resident
-// stripping is refused by design and default stripping outside
-// node_modules only landed in 22.18, which is above this tier anyway —
-// so the runner fails fast with one teaching line (upgrade to Node.js
-// 22.15+, on the 23 line 23.5+) before importing it, instead of
-// surfacing node's raw extension/stripping error.
+// A Node 24 build without module.registerHooks is incomplete for this tier,
+// so the runner gives the same Node 24 teaching instead of surfacing a raw
+// extension/stripping error.
 
 import module, { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -39,19 +34,21 @@ if (!target) {
   process.exit(2);
 }
 const targetPath = resolve(target);
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+if (!Number.isInteger(nodeMajor) || nodeMajor < 24) {
+  console.error(`TypeScript apps need Node.js 24+; you're running ${process.version} - upgrade node and re-run.`);
+  process.exit(1);
+}
 // Drop the runner from argv so the target module parses its own argv
 // exactly as when node runs it directly.
 process.argv.splice(1, 1);
 
 if (typeof module.registerHooks !== 'function') {
-  // No load hooks on this node (pre-22.15, or a 23.0-23.4 build). Every
-  // .ts target needs the hook — node_modules-resident stripping is
-  // refused by design, and native default stripping outside node_modules
-  // is 22.18+ — so any .ts target would fail deep inside node with a raw
-  // extension/stripping error. Teach the fix instead.
+  // Every .ts target needs the hook. A supported Node build without it is
+  // incomplete for this tier, so teach the supported installation instead.
   if (targetPath.endsWith('.ts')) {
     console.error(
-      `TypeScript apps need Node.js 22.15+ (on the 23 line: 23.5+); you're running ${process.version} - upgrade node and re-run.`,
+      `TypeScript apps need Node.js 24+ with module.registerHooks; you're running ${process.version} - upgrade or reinstall node and re-run.`,
     );
     process.exit(1);
   }

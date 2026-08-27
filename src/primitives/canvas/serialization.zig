@@ -512,6 +512,7 @@ fn packetDrawText(value: CanvasGpuText) text_model.DrawText {
         .color = value.color,
         .text = value.text,
         .glyphs = value.glyphs,
+        .measure = value.measure,
         .text_layout = value.text_layout,
     };
 }

@@ -116,6 +116,21 @@ On macOS, `title` renders the tray as a menu-bar extra: a titled `NSStatusItem` 
       <td><code>ShortcutModifiers</code></td>
       <td><code>.{}</code></td>
     </tr>
+    <tr>
+      <td><code>segmented</code></td>
+      <td><code>?TraySegmentedRow</code></td>
+      <td><code>null</code></td>
+    </tr>
+    <tr>
+      <td><code>metric</code></td>
+      <td><code>?TrayMetricRow</code></td>
+      <td><code>null</code></td>
+    </tr>
+    <tr>
+      <td><code>chart</code></td>
+      <td><code>?TrayChartRow</code></td>
+      <td><code>null</code></td>
+    </tr>
   </tbody>
 </table>
 
@@ -138,7 +153,7 @@ The singular `*Tray` methods are compatibility wrappers for reserved status-item
 
 ## TypeScript: model-derived status items
 
-In a TypeScript app, export `statusItem(model)` from `src/core.ts`. The generated launcher installs it from the committed boot model and re-runs it after every model update. Shell, presentation, and menu are hashed independently, so changing the icon, tooltip, click hooks, title, width, tone, icon opacity, number style, or rows patches only that channel and never recreates the native status item.
+In a TypeScript app, export `statusItem(model)` from `src/core.ts`. The generated launcher installs it from the committed boot model and re-runs it after every model update. Shell, presentation, and menu are hashed independently, so changing the icon, tooltip, click hooks, title, width, tone, icon opacity, typography, or rows patches only that channel and never recreates the native status item.
 
 ```ts:src/core.ts
 import { asciiBytes, utf8Bytes } from "@native-sdk/core";
@@ -157,6 +172,8 @@ export function statusItem(model: Model): StatusItemState {
       tone: model.failed ? "critical" : "normal",
       iconOpacity: model.stale ? 0.5 : 1,
       monospaced: true,
+      fontSize: 13,
+      fontWeight: "semibold",
     },
     items: [
       { id: 10, label: model.today, command: asciiBytes(""), separator: false, enabled: false, detail: model.quota, role: "hero", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
@@ -171,7 +188,80 @@ export function statusItem(model: Model): StatusItemState {
 
 For multiple independent items, export `statusItems(model): readonly StatusItemDescriptor[]` instead. Each descriptor has the same shell, presentation, and row fields plus a stable non-zero `id` and live `visible` flag. Presence creates, absence removes, and changed fields patch only that identifier; menus update without replacing their `NSStatusItem`. Export either `statusItem` or `statusItems`, not both. This is the Vercel-shaped split: one spend indicator can appear or disappear while a separate control-menu item persists.
 
-Rows use the exact `StatusItemMenuItem` record. `role` is `command`, `info`, `header`, `hero`, `agent`, or `context`; capable macOS hosts render the readout roles as native rich content while simpler hosts degrade them to text. `detail` carries secondary readout content, and `key` plus the five explicit `modifiers` fields declares a menu equivalent. Actionable rows need unique non-zero ids; separators conventionally use id 0 and empty byte fields. The menu may contain at most 32 rows. Map every row/click/open command to an ordinary message with `commandMsg(name): Msg | null`; no Zig `status_item_fn` glue is needed.
+Persistent menu-bar composition uses that collection directly: return one descriptor for compact context text, another for a larger live metric, and another icon-only descriptor that owns the dropdown. Each descriptor independently chooses optional `fontSize` (omitted or `0` keeps the platform default), optional `fontWeight` (omitted means `regular`; otherwise `regular`, `medium`, `semibold`, or `bold`), `monospaced`, width, tone, and icon opacity. They remain separate native status items, so each can appear, disappear, or update without recreating its neighbors.
+
+Rows use the exact `StatusItemMenuItem` record. `role` is `command`, `info`, `header`, `hero`, `agent`, `context`, `segmented`, or `chart`; capable macOS hosts render the readout roles as native rich content while simpler hosts degrade them to text. `detail` carries secondary readout content, and `key` plus the five explicit `modifiers` fields declares a menu equivalent. Actionable rows need unique non-zero ids; separators conventionally use id 0 and empty byte fields. The menu may contain at most 32 rows. Map every row/click/open command to an ordinary message with `commandMsg(name): Msg | null`; no Zig `status_item_fn` glue is needed.
+
+### Typed rich rows
+
+A segmented row carries its choices as data rather than encoding them into `label` or `detail`. Each option has its own stable `id`, label, command, selected state, and enabled state. macOS renders the row as `NSSegmentedControl`; selecting a segment emits its option id through the same tray-action → command → `commandMsg` route as an ordinary command row. Other hosts may expose the options as separate command items.
+
+```ts
+{
+  id: 0,
+  label: asciiBytes(""),
+  command: asciiBytes(""),
+  separator: false,
+  enabled: true,
+  detail: asciiBytes(""),
+  role: "segmented",
+  key: asciiBytes(""),
+  modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+  segmented: {
+    options: [
+      { id: 20, label: asciiBytes("Day"), command: asciiBytes("range.day"), selected: model.range === "day", enabled: true },
+      { id: 21, label: asciiBytes("Week"), command: asciiBytes("range.week"), selected: model.range === "week", enabled: true },
+    ],
+  },
+}
+```
+
+A typed metric row keeps prominent primary and secondary text inside the dropdown, separate from the persistent menu-bar title:
+
+```ts
+{
+  id: 0,
+  label: asciiBytes(""),
+  command: asciiBytes(""),
+  separator: false,
+  enabled: false,
+  detail: asciiBytes(""),
+  role: "hero",
+  key: asciiBytes(""),
+  modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+  metric: {
+    primaryText: asciiBytes("2,494 requests"),
+    secondaryText: utf8Bytes("Today · production"),
+    accessibilityLabel: asciiBytes("2,494 requests today in production"),
+  },
+}
+```
+
+A chart row carries 1–32 finite values plus an explicit numeric domain, leading caption, trailing summary, and required accessibility label. Every value must fall inside `minValue...maxValue`. The macOS system host draws native AppKit bars in a custom `NSView`; hosts without custom tray rows retain the caption and summary as text.
+
+```ts
+{
+  id: 0,
+  label: asciiBytes(""),
+  command: asciiBytes(""),
+  separator: false,
+  enabled: false,
+  detail: asciiBytes(""),
+  role: "chart",
+  key: asciiBytes(""),
+  modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+  chart: {
+    values: model.cpuHistory,
+    minValue: 0,
+    maxValue: 1,
+    leadingCaption: asciiBytes("CPU"),
+    trailingSummary: model.cpuSummary,
+    accessibilityLabel: model.cpuAccessibility,
+  },
+}
+```
+
+A segmented row admits at most eight options and at most one selected option. Option ids share the enclosing menu’s command-id namespace, including other segmented rows. The 32-row menu budget is also the fallback budget: a segmented row consumes one fallback row per option, preventing silent truncation on plain-menu hosts.
 
 Use `utf8Bytes` for titles, labels, tooltips, and details; it preserves characters such as `…`, `·`, and emoji as UTF-8. Use `asciiBytes` for guaranteed-ASCII command names, keys, paths, and empty byte fields. Passing non-ASCII literal/template text to `asciiBytes` is an NS1064 build error.
 

@@ -1,6 +1,10 @@
 const web_engine = @import("web_engine.zig");
 
 pub const RawManifest = struct {
+    /// Editor-only JSON Schema association. The manifest tooling ignores the
+    /// value after parsing; app.json scaffolds point it at the published SDK
+    /// schema so editors can complete and validate the full manifest surface.
+    @"$schema": ?[]const u8 = null,
     id: []const u8,
     name: []const u8,
     display_name: ?[]const u8 = null,
@@ -44,7 +48,14 @@ pub const RawManifest = struct {
     shortcuts: []const RawShortcut = &.{},
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
+    updates: RawUpdates = .{},
     dmg: RawDmg = .{},
+};
+
+pub const RawUpdates = struct {
+    feed_url: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    check_on_start: bool = false,
 };
 
 pub const RawImages = struct {
