@@ -8,9 +8,13 @@ const canvas = @import("canvas");
 // markdown detail pane + run surface): it spent more design effort
 // budgeting nodes than building UI at the old 256-node cap. The
 // widget-node budget quadrupled (256 -> 1024: the measured worst realistic
-// three-pane view is ~500 nodes, so 1024 leaves comfortable headroom), and
-// the frame-content budgets doubled (commands 1024 -> 2048, glyphs
-// 4096 -> 8192, text 16 KiB -> 32 KiB: visible content per frame grows with
+// three-pane view is ~500 nodes, so 1024 leaves comfortable headroom), later
+// doubled (1024 -> 2048) after a production three-pane app — a ~50-row
+// session sidebar, a streaming detail timeline, and a dialog enumerating
+// ~60 model rows — measured 1036 nodes on its dialog frame; at the 1024
+// cap the adoption failure discarded whole frames, leaving controls
+// visibly dead. The frame-content budgets doubled (commands 1024 -> 2048,
+// glyphs 4096 -> 8192, text 16 KiB -> 32 KiB: visible content per frame grows with
 // surface density, not with the retained-node cap — a full-height monospace
 // diff pane is ~7200 glyphs). Memory cost is fixed-capacity address space
 // in the Runtime (in-place constructed, large fields left uninitialized),
@@ -174,13 +178,13 @@ pub const max_media_surface_pixel_bytes: usize = 8 * 1024 * 1024;
 pub const max_registered_canvas_fonts: usize = 8;
 pub const max_registered_canvas_font_bytes: usize = 24 * 1024 * 1024;
 
-// The retained widget-tree budgets (raised 256 -> 1024; see the header
+// The retained widget-tree budgets (raised 256 -> 1024 -> 2048; see the
 // comment). `automation.snapshot.max_widgets_per_view`
 // mirrors the node cap so snapshots never silently truncate widget
 // enumeration; a test in canvas_widget_layout_tests.zig keeps them in
 // lockstep.
-pub const max_canvas_widget_nodes_per_view: usize = 1024;
-pub const max_canvas_widget_semantics_per_view: usize = 1024;
+pub const max_canvas_widget_nodes_per_view: usize = 2048;
+pub const max_canvas_widget_semantics_per_view: usize = 2048;
 // Raised from 2048 with the inline-span/markdown work, then from 64 KiB for
 // editable code surfaces: a simple editor must retain a practical source
 // file (roughly 10k ordinary code lines) plus the surrounding view chrome.
@@ -210,7 +214,7 @@ pub const max_canvas_widget_spans_per_view: usize = 1024;
 // fast — a 24-row sidebar with 4 items + separator per row, a detail-pane
 // menu, and per-step ledger menus measured 124/128 before the app was
 // finished. Quadrupled (128 -> 512)
-// so declared menus scale with the 1024-node budget instead of becoming
+// so declared menus scale with the 2048-node budget instead of becoming
 // the next design-effort cliff. Memory cost is one 24-byte entry (a
 // 16-byte label slice + enabled/separator flags) per slot: 24 B x 512 =
 // 12 KiB per view (was 3 KiB at 128), x 32 view slots = 384 KiB total
