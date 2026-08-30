@@ -39,6 +39,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "text-field", .doc = "Text entry; placeholder and text binding, edits via on-input, enter via on-submit." },
     .{ .name = "search-field", .doc = "Text entry styled for search; edits via on-input." },
     .{ .name = "textarea", .doc = "Multi-line text entry; edits via on-input, enter inserts a newline, submit via primary+enter with on-submit." },
+    .{ .name = "rich-textarea", .doc = "Paragraph-scoped attributed multi-line entry: same TextBuffer/IME/undo path as textarea, with parallel style runs (text_attr / @native-sdk/core/text-attr). Stamps WidgetRuntimeFlags.rich_editor." },
     .{ .name = "list-item", .doc = "Text-bearing item control; the label is the text content." },
     .{ .name = "menu-item", .doc = "Text-bearing menu control; the label is the text content." },
     .{ .name = "status-bar", .doc = "Status bar text leaf: content only, no children." },

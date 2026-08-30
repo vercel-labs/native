@@ -492,6 +492,22 @@ pub const max_text_spans_per_paragraph = text_spans.max_text_spans_per_paragraph
 pub const max_text_span_runs_per_paragraph = text_spans.max_text_span_runs_per_paragraph;
 pub const max_text_span_lines_per_paragraph = text_spans.max_text_span_lines_per_paragraph;
 
+// Attributed style runs over a plain TextBuffer (paragraph-scoped rich edit).
+pub const text_attr = @import("text_attr.zig");
+pub const StyleFlags = text_attr.StyleFlags;
+pub const StyleFlag = text_attr.StyleFlag;
+pub const StyleRun = text_attr.StyleRun;
+pub const AttributedEditState = text_attr.AttributedEditState;
+pub const max_style_runs = text_attr.max_style_runs;
+pub const mapStyleRunsThroughReplace = text_attr.mapStyleRunsThroughReplace;
+pub const normalizeStyleRuns = text_attr.normalizeStyleRuns;
+pub const toggleStyleOnSelection = text_attr.toggleStyleOnSelection;
+pub const applyAttributedTextInputEvent = text_attr.applyAttributedTextInputEvent;
+pub const attributedToTextSpans = text_attr.attributedToTextSpans;
+pub const serializeStyleRuns = text_attr.serializeStyleRuns;
+pub const deserializeStyleRuns = text_attr.deserializeStyleRuns;
+pub const hitTestAttributed = text_attr.hitTestAttributed;
+
 // The terminal grid — the `.terminal` widget's resolved cell model and
 // painter (real text runs, geometric box drawing, selection, cursor,
 // scrollback indicator) — lives in `terminal_grid.zig`; the box-drawing

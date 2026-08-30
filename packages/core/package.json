@@ -26,6 +26,10 @@
       "types": "./sdk/text.ts",
       "default": "./sdk/text.ts"
     },
+    "./text-attr": {
+      "types": "./sdk/text-attr.ts",
+      "default": "./sdk/text-attr.ts"
+    },
     "./events": {
       "types": "./sdk/events.ts",
       "default": "./sdk/events.ts"

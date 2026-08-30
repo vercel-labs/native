@@ -525,6 +525,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // exactly like `Ui.avatar` (a no-op while the id is 0 and
                 // the initials fallback renders).
                 if (kind == .avatar) built.widget.image_fit = .cover;
+                if (std.mem.eql(u8, node.name, "rich-textarea")) {
+                    built.widget.runtime_flags.rich_editor = true;
+                }
                 return built;
             }
 

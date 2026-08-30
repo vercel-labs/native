@@ -1,0 +1,8 @@
+{
+  "name": "rich-textarea",
+  "private": true,
+  "description": "Editor surface for the rich-textarea example. The native CLI resolves @native-sdk/core.",
+  "dependencies": {
+    "@native-sdk/core": "0.10.1"
+  }
+}

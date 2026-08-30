@@ -362,6 +362,10 @@ pub const elements = [_]ElementInfo{
     // line numbers or one horizontal scroll region for unwrapped lines.
     // Markdown fences use the same builder component.
     .{ .code = 70, .name = "code", .rule_hook = "code", .hit_target = false },
+    // Paragraph-scoped attributed editing: same TextBuffer / IME / undo
+    // path as textarea, with parallel style runs painted via TextSpan.
+    // Stamps `WidgetRuntimeFlags.rich_editor` at lower time.
+    .{ .code = 71, .name = "rich-textarea", .widget_kind = "textarea", .a11y_name = .editable },
 };
 
 // ------------------------------------------------------------- attributes

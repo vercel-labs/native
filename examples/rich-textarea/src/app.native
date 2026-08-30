@@ -1,0 +1,24 @@
+<column background="background" padding="16" gap="10">
+  <text size="heading">Rich textarea</text>
+  <text size="sm" foreground="text_muted">
+    Paragraph-scoped attributed editing — TextBuffer bytes + style runs.
+  </text>
+  <row gap="6" cross="center">
+    <button size="sm" variant="secondary" on-press="bold">Bold</button>
+    <button size="sm" variant="secondary" on-press="italic">Italic</button>
+    <button size="sm" variant="secondary" on-press="strike">Strike</button>
+    <spacer grow="1" />
+    <text size="sm" foreground="text_muted">{status}</text>
+  </row>
+  <rich-textarea
+    text="{draft}"
+    placeholder="Type here…"
+    on-input="edit"
+    grow="1"
+    label="Attributed draft"
+  />
+  <text size="sm" foreground="text_muted">GFM preview</text>
+  <scroll height="120">
+    <markdown source="{preview}" />
+  </scroll>
+</column>

@@ -523,6 +523,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 // exactly like `Ui.avatar` and the interpreter (a no-op
                 // while the id is 0 and the initials fallback renders).
                 if (comptime (kind == .avatar)) built.widget.image_fit = .cover;
+                if (comptime std.mem.eql(u8, node.name, "rich-textarea")) {
+                    built.widget.runtime_flags.rich_editor = true;
+                }
                 return built;
             }
 
