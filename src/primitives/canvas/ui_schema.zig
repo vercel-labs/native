@@ -604,6 +604,11 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 100, .name = "source-y", .class = .number, .group = .element },
     .{ .code = 101, .name = "source-width", .class = .number, .group = .element },
     .{ .code = 102, .name = "source-height", .class = .number, .group = .element },
+    // Rich-textarea style runs (rich-textarea only; the validator scopes
+    // it): serialized StyleRun bytes (9 bytes each) from text_attr /
+    // @native-sdk/core/text-attr. Converted to TextSpan at lower time
+    // for in-place attributed paint.
+    .{ .code = 103, .name = "styles", .class = .text, .group = .option, .field = "styles" },
 };
 
 // ----------------------------------------------------------------- events

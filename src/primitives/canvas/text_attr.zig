@@ -457,6 +457,21 @@ test "serialize roundtrip" {
     try std.testing.expect(back[0].flags.italic and back[0].flags.underline);
 }
 
+
+/// Arena-friendly: deserialize `styles` bytes and convert to TextSpans
+/// whose `.text` fields are subslices of `text`. Allocates the span
+/// array from `allocator` (capacity `max_style_runs`).
+pub fn spansFromSerializedStyles(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    styles_bytes: []const u8,
+) error{OutOfMemory}![]text_spans.TextSpan {
+    var run_buf: [max_style_runs]StyleRun = undefined;
+    const runs = deserializeStyleRuns(styles_bytes, &run_buf);
+    const span_buf = try allocator.alloc(text_spans.TextSpan, max_style_runs);
+    return attributedToTextSpans(text, runs, span_buf);
+}
+
 /// Hit-test a point against attributed layout: returns the UTF-8 byte
 /// caret offset (snapped) within `text`. Uses TextSpan conversion so the
 /// same run→span path paint will use stays the measurement source of truth.

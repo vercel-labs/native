@@ -287,14 +287,31 @@ export function applyAttributedTextInputEvent(
   };
 }
 
+function writeU32LE(buf: Uint8Array, offset: number, value: number): void {
+  buf[offset] = value & 0xff;
+  buf[offset + 1] = (value >>> 8) & 0xff;
+  buf[offset + 2] = (value >>> 16) & 0xff;
+  buf[offset + 3] = (value >>> 24) & 0xff;
+}
+
+function readU32LE(buf: Uint8Array, offset: number): number {
+  return (
+    (buf[offset]! |
+      (buf[offset + 1]! << 8) |
+      (buf[offset + 2]! << 16) |
+      (buf[offset + 3]! << 24)) >>>
+    0
+  );
+}
+
 export function serializeStyleRuns(runs: readonly StyleRun[]): Uint8Array {
-  const out = new Uint8Array(Math.min(runs.length, MAX_STYLE_RUNS) * 9);
+  const n = Math.min(runs.length, MAX_STYLE_RUNS);
+  const out = new Uint8Array(n * 9);
   let o = 0;
-  for (const run of runs) {
-    if (o + 9 > out.length) break;
-    const view = new DataView(out.buffer, out.byteOffset + o, 9);
-    view.setUint32(0, run.start >>> 0, true);
-    view.setUint32(4, run.end >>> 0, true);
+  for (let i = 0; i < n; i += 1) {
+    const run = runs[i]!;
+    writeU32LE(out, o, run.start);
+    writeU32LE(out, o + 4, run.end);
     out[o + 8] = flagsByte(run.flags);
     o += 9;
   }
@@ -304,10 +321,9 @@ export function serializeStyleRuns(runs: readonly StyleRun[]): Uint8Array {
 export function deserializeStyleRuns(bytes: Uint8Array): StyleRun[] {
   const out: StyleRun[] = [];
   for (let i = 0; i + 9 <= bytes.length && out.length < MAX_STYLE_RUNS; i += 9) {
-    const view = new DataView(bytes.buffer, bytes.byteOffset + i, 9);
     out.push({
-      start: view.getUint32(0, true),
-      end: view.getUint32(4, true),
+      start: readU32LE(bytes, i),
+      end: readU32LE(bytes, i + 4),
       flags: flagsFromByte(bytes[i + 8]!),
     });
   }
@@ -321,7 +337,8 @@ export function attributedToSpanDescriptors(
 ): Array<{ start: number; end: number; flags: StyleFlags }> {
   const out: Array<{ start: number; end: number; flags: StyleFlags }> = [];
   let cursor = 0;
-  const sorted = runs.slice().sort((a, b) => a.start - b.start);
+  const sorted = runs.slice();
+  sorted.sort((a, b) => a.start - b.start);
   for (const run of sorted) {
     if (run.start > cursor) {
       out.push({ start: cursor, end: run.start, flags: EMPTY_STYLE_FLAGS });
@@ -338,36 +355,55 @@ export function attributedToSpanDescriptors(
   return out;
 }
 
+function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const part of parts) total += part.length;
+  const out = new Uint8Array(total);
+  let cursor = 0;
+  for (const part of parts) {
+    out.set(part, cursor);
+    cursor += part.length;
+  }
+  return out;
+}
+
+function wrapMarkers(inner: Uint8Array, open: Uint8Array, close: Uint8Array): Uint8Array {
+  return concatBytes([open, inner, close]);
+}
+
 /** Export attributed plain text + runs as GFM with ** / * / ` / ~~ markers. */
 export function attributedToMarkdown(
   text: Uint8Array,
   runs: readonly StyleRun[],
 ): Uint8Array {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  const sorted = runs.slice().sort((a, b) => a.start - b.start);
-  let out = "";
+  const sorted = runs.slice();
+  sorted.sort((a, b) => a.start - b.start);
+  const parts: Uint8Array[] = [];
   let cursor = 0;
+  const tick = new Uint8Array([96]);
+  const bold = new Uint8Array([42, 42]);
+  const italic = new Uint8Array([42]);
+  const strike = new Uint8Array([126, 126]);
   for (const run of sorted) {
     if (run.start > cursor) {
-      out += decoder.decode(text.subarray(cursor, run.start));
+      parts.push(text.subarray(cursor, run.start));
     }
-    const slice = decoder.decode(
-      text.subarray(Math.max(run.start, cursor), Math.min(run.end, text.length)),
+    let slice = text.subarray(
+      Math.max(run.start, cursor),
+      Math.min(run.end, text.length),
     );
     if (slice.length === 0) continue;
-    let wrapped = slice;
-    if (run.flags.monospace) wrapped = "`" + wrapped + "`";
-    if (run.flags.bold) wrapped = "**" + wrapped + "**";
-    else if (run.flags.italic) wrapped = "*" + wrapped + "*";
-    if (run.flags.strikethrough) wrapped = "~~" + wrapped + "~~";
-    out += wrapped;
+    if (run.flags.monospace) slice = wrapMarkers(slice, tick, tick);
+    if (run.flags.bold) slice = wrapMarkers(slice, bold, bold);
+    else if (run.flags.italic) slice = wrapMarkers(slice, italic, italic);
+    if (run.flags.strikethrough) slice = wrapMarkers(slice, strike, strike);
+    parts.push(slice);
     cursor = Math.min(run.end, text.length);
   }
   if (cursor < text.length) {
-    out += decoder.decode(text.subarray(cursor));
+    parts.push(text.subarray(cursor));
   }
-  return encoder.encode(out);
+  return concatBytes(parts);
 }
 
 /**
@@ -393,9 +429,9 @@ export function hitTestAttributed(
 export function pushStyleUndo(
   stack: readonly Uint8Array[],
   runs: readonly StyleRun[],
-  maxDepth = 64,
+  maxDepth: number,
 ): Uint8Array[] {
-  const next = [...stack, serializeStyleRuns(runs)];
+  const next: Uint8Array[] = [...stack, serializeStyleRuns(runs)];
   if (next.length <= maxDepth) return next;
   return next.slice(next.length - maxDepth);
 }

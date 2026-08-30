@@ -8,6 +8,7 @@ const widget_model = @import("widgets.zig");
 const widget_access = @import("widget_access.zig");
 const widget_metrics = @import("widget_metrics.zig");
 const widget_text_input = @import("widget_text_input.zig");
+const text_spans_model = @import("text_spans.zig");
 const widget_render_style = @import("widget_render_style.zig");
 const widget_render = @import("widget_render.zig");
 const icon_model = @import("icons.zig");
@@ -40,6 +41,7 @@ const widgetTextInputLayoutOptions = widget_text_input.widgetTextInputLayoutOpti
 const widgetTextInputOrigin = widget_text_input.widgetTextInputOrigin;
 const widgetTextInputClipRect = widget_text_input.widgetTextInputClipRect;
 const widgetTextInputDrawText = widget_text_input.widgetTextInputDrawText;
+const persistWidgetTextInputPresentedText = widget_text_input.persistWidgetTextInputPresentedText;
 const widgetTextInputInset = widget_text_input.widgetTextInputInset;
 const widgetTextInputClipsText = widget_text_input.widgetTextInputClipsText;
 const textInputClearButtonRect = widget_text_input.textInputClearButtonRect;
@@ -458,6 +460,140 @@ fn emitSelectChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, vi
     // affordance, not content, so it never outweighs the chosen label.
     const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
     try emitVectorIcon(builder, widget.id, 4, icon_frame, color, icon);
+}
+
+
+/// Attributed textarea (`rich_editor`): field chrome + TextSpan glyphs from
+/// style runs lowered onto `widget.spans`. Caret/selection still ride the
+/// shared text-input seam (monostyle advances) for dogfood.
+pub fn emitRichEditorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (widget.spans.len == 0) {
+        return emitTextFieldWidget(builder, widget, tokens);
+    }
+
+    const visual = textInputControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const text_size = widgetTextInputSize(widget, tokens);
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const layout_options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
+    const clip_rect = widgetTextInputClipRect(widget, tokens, text_size, text_inset, layout_options);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
+    const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    var draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
+    draw_text.text = persistWidgetTextInputPresentedText(builder, widget.text, draw_text.text);
+    const selection_range = widgetTextSelectionRange(widget);
+    const composition_range = widgetTextCompositionRange(widget);
+    const clips_text = widgetTextInputClipsText(widget, tokens, text_size, text_inset, layout_options);
+
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = textInputFill(widget, tokens, visual),
+    });
+    try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+            .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+        },
+    }));
+    if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 7, widget.frame, radius);
+    if (clips_text) try builder.pushClip(.{ .id = widgetPartId(widget.id, 16), .rect = clip_rect, .radius = radius });
+
+    if (selection_range) |range| {
+        if (!range.isCollapsed(widget.text.len)) {
+            try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, range, 3, 13, max_widget_text_range_rects, tokens);
+        }
+    }
+
+    const span_options = text_spans_model.TextSpanLayoutOptions{
+        .size = text_size,
+        .line_height = layout_options.line_height,
+        .max_width = layout_options.max_width,
+        .wrap = .word,
+        .alignment = .start,
+        .typography = tokens.typography,
+        .measure = tokens.text_measure,
+    };
+    var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+    const layout = text_spans_model.layoutTextSpans(widget.spans, span_options, &runs);
+    const scroll_y = widget.value;
+    for (layout.runs, 0..) |run, ordinal| {
+        if (run.text.len == 0) continue;
+        const span = widget.spans[run.span_index];
+        const color = if (span.color) |ref|
+            text_spans_model.textSpanColorValue(tokens.colors, ref)
+        else
+            text_color;
+        const baseline_y = origin.y - scroll_y + run.baseline;
+        const origin_pt = pixelSnapTextPoint(tokens, geometry.PointF.init(origin.x + run.x, baseline_y));
+        const slot: ObjectId = 40 + @as(ObjectId, @intCast(@min(ordinal, 200)));
+        try builder.drawText(.{
+            .id = widgetPartId(widget.id, slot),
+            .font_id = run.font_id,
+            .size = run.size,
+            .origin = origin_pt,
+            .color = color,
+            .text = run.text,
+            .text_layout = .{
+                .max_width = 0,
+                .line_height = layout.line_height,
+                .wrap = .none,
+                .alignment = .start,
+                .measure = tokens.text_measure,
+            },
+        });
+        const thickness = @max(1, tokens.stroke.hairline);
+        const bounds = text_spans_model.textSpanRunBounds(layout, run);
+        if (span.underline) {
+            const uslot: ObjectId = 80 + @as(ObjectId, @intCast(@min(ordinal, 40)));
+            try builder.fillRect(.{
+                .id = widgetPartId(widget.id, uslot),
+                .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                    origin.x + bounds.x,
+                    origin.y - scroll_y + bounds.y + bounds.height - thickness,
+                    bounds.width,
+                    thickness,
+                )),
+                .fill = colorFill(color),
+            });
+        }
+        if (span.strikethrough) {
+            const sslot: ObjectId = 120 + @as(ObjectId, @intCast(@min(ordinal, 40)));
+            try builder.fillRect(.{
+                .id = widgetPartId(widget.id, sslot),
+                .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                    origin.x + bounds.x,
+                    origin.y - scroll_y + bounds.y + bounds.height * 0.5,
+                    bounds.width,
+                    thickness,
+                )),
+                .fill = colorFill(color),
+            });
+        }
+    }
+
+    if (selection_range) |range| {
+        if (!range.isCollapsed(widget.text.len)) {
+            try emitWidgetTextSelectedGlyphs(builder, widget, draw_text, layout_options, range, max_widget_text_range_rects, tokens);
+        }
+    }
+    if (composition_range) |range| {
+        if (!range.isCollapsed(widget.text.len)) {
+            try emitWidgetTextCompositionLines(builder, widget, draw_text, layout_options, range, 5, 10, max_widget_text_range_rects, tokens);
+        }
+    }
+    if (widget.state.focused) {
+        if (selection_range) |range| {
+            if (range.isCollapsed(widget.text.len)) {
+                try emitWidgetTextCaret(builder, widget, draw_text, layout_options, range.start, 6, tokens);
+            }
+        }
+    }
+    if (clips_text) try builder.popClip();
 }
 
 pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {

@@ -75,6 +75,8 @@ function resolveSpecifiers(text, rel) {
   return text
     .replaceAll('"@native-sdk/core/text"', `"${toSdk("text.ts")}"`)
     .replaceAll('"@native-sdk/core/events"', `"${toSdk("events.ts")}"`)
+    .replaceAll('"@native-sdk/core/text-attr"', `"${toSdk("text-attr.ts")}"`)
+    .replaceAll('"@native-sdk/core/text-doc"', `"${toSdk("text-doc.ts")}"`)
     .replaceAll('"@native-sdk/core"', `"${toSdk("core.ts")}"`)
     .replaceAll('"@native-sdk/services"', `"${path.posix.relative(path.posix.dirname(rel), "services.gen.ts").startsWith(".") ? path.posix.relative(path.posix.dirname(rel), "services.gen.ts") : `./${path.posix.relative(path.posix.dirname(rel), "services.gen.ts")}`}"`)
     .replace(/readonly ([A-Za-z_][A-Za-z0-9_]*(?:<[A-Za-z_, ]*>)?)\[\]/g, "$1[]")
@@ -134,7 +136,7 @@ for (const rel of authorFiles) {
 
 // Transform 5: the staged SDK library modules spell their exported
 // records as object-literal aliases (value storage).
-for (const sdkFile of ["text.ts", "events.ts"]) {
+for (const sdkFile of ["text.ts", "events.ts", "text-attr.ts", "text-doc.ts"]) {
   const staged = fs
     .readFileSync(path.join(args.sdk, sdkFile), "utf8")
     .replace(/^export interface ([A-Za-z0-9_]+) \{/gm, "export type $1 = {");

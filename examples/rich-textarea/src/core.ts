@@ -94,11 +94,3 @@ export function update(model: Model, msg: Msg): Model {
 export function preview(model: Model): Bytes {
   return attributedToMarkdown(model.draft, deserializeStyleRuns(model.styles));
 }
-
-export function draft(model: Model): Bytes {
-  return model.draft;
-}
-
-export function status(model: Model): Bytes {
-  return model.status;
-}

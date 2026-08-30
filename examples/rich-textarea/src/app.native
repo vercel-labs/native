@@ -12,6 +12,7 @@
   </row>
   <rich-textarea
     text="{draft}"
+    styles="{styles}"
     placeholder="Type here…"
     on-input="edit"
     grow="1"

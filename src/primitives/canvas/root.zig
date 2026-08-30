@@ -504,9 +504,22 @@ pub const normalizeStyleRuns = text_attr.normalizeStyleRuns;
 pub const toggleStyleOnSelection = text_attr.toggleStyleOnSelection;
 pub const applyAttributedTextInputEvent = text_attr.applyAttributedTextInputEvent;
 pub const attributedToTextSpans = text_attr.attributedToTextSpans;
+pub const spansFromSerializedStyles = text_attr.spansFromSerializedStyles;
 pub const serializeStyleRuns = text_attr.serializeStyleRuns;
 pub const deserializeStyleRuns = text_attr.deserializeStyleRuns;
 pub const hitTestAttributed = text_attr.hitTestAttributed;
+
+// Multi-block GFM document model (parse / serialize / split / merge).
+pub const text_doc = @import("text_doc.zig");
+pub const DocBlock = text_doc.Block;
+pub const DocBlockKind = text_doc.BlockKind;
+pub const parseDocBlocks = text_doc.parseBlocks;
+pub const serializeDocBlocks = text_doc.serializeBlocks;
+pub const splitDocBlock = text_doc.splitBlock;
+pub const mergeDocBlockWithPrevious = text_doc.mergeWithPrevious;
+pub const changeDocBlockKind = text_doc.changeBlockKind;
+pub const freeDocBlocks = text_doc.freeBlocks;
+pub const max_document_blocks = text_doc.max_document_blocks;
 
 // The terminal grid — the `.terminal` widget's resolved cell model and
 // painter (real text runs, geometric box drawing, selection, cursor,

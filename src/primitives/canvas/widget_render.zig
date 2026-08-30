@@ -510,6 +510,8 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .input, .text_field => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .textarea => if (paint_widget.runtime_flags.code_editor)
             try emitCodeEditorWidget(builder, paint_widget, tokens)
+        else if (paint_widget.runtime_flags.rich_editor)
+            try widget_render_controls.emitRichEditorWidget(builder, paint_widget, tokens)
         else
             try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field, .combobox => try widget_render_controls.emitSearchFieldWidget(builder, paint_widget, tokens),
@@ -900,6 +902,8 @@ fn emitWidgetLayoutNodeContent(
         .input, .text_field => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .textarea => if (paint_widget.runtime_flags.code_editor)
             try emitCodeEditorWidget(builder, paint_widget, tokens)
+        else if (paint_widget.runtime_flags.rich_editor)
+            try widget_render_controls.emitRichEditorWidget(builder, paint_widget, tokens)
         else
             try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field, .combobox => try widget_render_controls.emitSearchFieldWidget(builder, paint_widget, tokens),
@@ -1336,6 +1340,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     });
     if (clip_overflow) try builder.popClip();
 }
+
 
 /// Editable code is a textarea behaviorally and a bare code surface
 /// visually. Selection/caret geometry comes from the shared text-input
