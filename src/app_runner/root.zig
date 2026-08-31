@@ -400,6 +400,45 @@ fn manifestStringField(comptime field: []const u8) []const u8 {
     return value;
 }
 
+fn manifestStringList(comptime source: anytype, comptime field: []const u8) []const []const u8 {
+    comptime {
+        if (!@hasField(@TypeOf(source), field)) return &.{};
+        var values: []const []const u8 = &.{};
+        for (@field(source, field)) |value| {
+            const string: []const u8 = value;
+            values = values ++ &[_][]const u8{string};
+        }
+        return values;
+    }
+}
+
+fn builtinBridgePolicyFrom(comptime source: anytype) native_sdk.BridgePolicy {
+    comptime {
+        if (!@hasField(@TypeOf(source), "bridge")) return .{};
+        if (!@hasField(@TypeOf(source.bridge), "commands")) return .{};
+        var commands: []const native_sdk.BridgeCommandPolicy = &.{};
+        for (source.bridge.commands) |command| {
+            commands = commands ++ &[_]native_sdk.BridgeCommandPolicy{.{
+                .name = command.name,
+                .permissions = manifestStringList(command, "permissions"),
+                .origins = manifestStringList(command, "origins"),
+            }};
+        }
+        return .{
+            .enabled = commands.len > 0,
+            .permissions = manifestStringList(source, "permissions"),
+            .commands = commands,
+        };
+    }
+}
+
+/// The exact built-in bridge policy authored in app.zon. An absent or empty
+/// command list stays disabled; the runner never infers bridge authority from
+/// a broad app permission alone.
+pub fn manifestBuiltinBridgePolicy() native_sdk.BridgePolicy {
+    return comptime builtinBridgePolicyFrom(app_manifest);
+}
+
 /// The theme pack app.zon selects (`theme = "geist"`), resolved at
 /// comptime so an unknown name is a build error naming the field and
 /// the valid packs — never a silent fallback. Absent means the house
@@ -1367,6 +1406,40 @@ test "RunOptions explicit command menu and shortcut slices override manifest val
     try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedCommands(&command_storage).len);
     try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedMenus(&menu_storage).len);
     try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedShortcuts(&shortcut_storage).len);
+}
+
+test "manifest built-in bridge policy is explicit and fail closed" {
+    const absent = .{ .permissions = .{ "view", "window" } };
+    const absent_policy = comptime builtinBridgePolicyFrom(absent);
+    try std.testing.expect(!absent_policy.enabled);
+    try std.testing.expectEqual(@as(usize, 0), absent_policy.commands.len);
+
+    const empty = .{
+        .permissions = .{ "view", "window" },
+        .bridge = .{ .commands = .{} },
+    };
+    const empty_policy = comptime builtinBridgePolicyFrom(empty);
+    try std.testing.expect(!empty_policy.enabled);
+    try std.testing.expectEqual(@as(usize, 0), empty_policy.commands.len);
+
+    const declared = .{
+        .permissions = .{ "view", "window" },
+        .bridge = .{ .commands = .{
+            .{
+                .name = "native-sdk.window.focus",
+                .permissions = .{"window"},
+                .origins = .{"zero://inline"},
+            },
+        } },
+    };
+    const declared_policy = comptime builtinBridgePolicyFrom(declared);
+    try std.testing.expect(declared_policy.enabled);
+    try std.testing.expectEqual(@as(usize, 2), declared_policy.permissions.len);
+    try std.testing.expectEqual(@as(usize, 1), declared_policy.commands.len);
+    try std.testing.expectEqualStrings("native-sdk.window.focus", declared_policy.commands[0].name);
+    try std.testing.expect(declared_policy.allows("native-sdk.window.focus", "zero://inline"));
+    try std.testing.expect(!declared_policy.allows("native-sdk.window.focus", "zero://app"));
+    try std.testing.expect(!declared_policy.allows("native-sdk.window.close", "zero://inline"));
 }
 
 const StateBuffers = struct {

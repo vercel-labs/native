@@ -10,7 +10,8 @@
 //!   scene / canvas   app.zon's `.shell` through `shellConfigFrom`; the
 //!                    canvas is the scene's first gpu_surface view.
 //!   identity         app.zon's `.id`/`.name`/`.display_name`.
-//!   security         app.zon's `.permissions` and navigation origins.
+//!   security         app.zon's `.permissions`, navigation origins, and
+//!                    explicit built-in bridge command policy.
 //!   theme            app.zon's `.theme` pack; the stock tokens compose
 //!                    it with the live system appearance. `.theme_accent`
 //!                    layers the manifest's one-accent brand override
@@ -317,6 +318,7 @@ pub fn main(init: std.process.Init) !void {
         .icon_path = "assets/icon.png",
         .default_frame = comptime defaultFrame(),
         .restore_state = comptime startupRestoreState(),
+        .builtin_bridge = comptime runner.manifestBuiltinBridgePolicy(),
         .js_window_api = false,
         .security = .{
             .permissions = app_permissions,
