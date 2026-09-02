@@ -7044,11 +7044,14 @@ pub fn Effects(comptime Msg: type) type {
         /// `max_effects` slots and the key space with spawns and fetches.
         pub fn writeFile(self: *Self, options: WriteFileOptions) void {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes or
-                options.bytes.len > max_effect_file_bytes)
+                options.bytes.len > max_effect_file_bytes or pathEndsWithSeparator(options.path))
             {
                 return self.rejectFile(options.key, .write, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{
+                .create_parents = true,
+                .preserve_final_component = true,
+            }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
             self.startFile(options.key, .write, &access, options.bytes, options.on_result);
         }
 
@@ -16413,6 +16416,59 @@ pub fn Effects(comptime Msg: type) type {
             ctx.done.store(true, .release);
         }
 
+        const OpenedFileParent = struct {
+            dir: std.Io.Dir,
+            basename: []const u8,
+        };
+
+        fn openOrCreateFileParent(io: std.Io, file_path: []const u8) !OpenedFileParent {
+            const parent_path = std.fs.path.dirname(file_path) orelse ".";
+            const parent = std.Io.Dir.cwd().openDir(io, parent_path, .{ .follow_symlinks = true }) catch |err| switch (err) {
+                error.FileNotFound => create: {
+                    try std.Io.Dir.cwd().createDirPath(io, parent_path);
+                    // A newly created final component must still be a directory,
+                    // not a symlink substituted between creation and opening.
+                    break :create try std.Io.Dir.cwd().openDir(io, parent_path, .{ .follow_symlinks = false });
+                },
+                else => return err,
+            };
+            return .{ .dir = parent, .basename = std.fs.path.basename(file_path) };
+        }
+
+        fn pathEndsWithSeparator(path: []const u8) bool {
+            const last = path[path.len - 1];
+            return last == '/' or (builtin.os.tag == .windows and last == '\\');
+        }
+
+        fn writeThroughOpenedParent(dir: std.Io.Dir, io: std.Io, basename: []const u8, bytes: []const u8) !void {
+            const existing = dir.openFile(io, basename, .{
+                .mode = .write_only,
+                .allow_directory = false,
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound, error.SymLinkLoop => null,
+                else => return err,
+            };
+            if (existing) |file| {
+                const stat = file.stat(io) catch |err| {
+                    file.close(io);
+                    return err;
+                };
+                if (stat.kind != .file and stat.kind != .sym_link) {
+                    defer file.close(io);
+                    try file.writeStreamingAll(io, bytes);
+                    return;
+                }
+                file.close(io);
+            }
+
+            var atomic = try dir.createFileAtomic(io, basename, .{ .replace = true });
+            defer atomic.deinit(io);
+            try atomic.file.writePositionalAll(io, bytes, 0);
+            try atomic.file.sync(io);
+            try atomic.replace(io);
+        }
+
         fn runFileOp(ctx: *FileWorkerContext, io: std.Io) EffectFileOutcome {
             if (ctx.missing) return if (ctx.op == .stat) .ok else .not_found;
             const dir = ctx.parent orelse std.Io.Dir.cwd();
@@ -16420,10 +16476,9 @@ pub fn Effects(comptime Msg: type) type {
             switch (ctx.op) {
                 .write => {
                     if (ctx.parent == null) {
-                        if (std.fs.path.dirname(file_path)) |parent| {
-                            dir.createDirPath(io, parent) catch |err| return fileOpFailure(err);
-                        }
-                        dir.writeFile(io, .{ .sub_path = file_path, .data = ctx.payload() }) catch |err| return fileOpFailure(err);
+                        var opened_parent = openOrCreateFileParent(io, file_path) catch |err| return fileOpFailure(err);
+                        defer opened_parent.dir.close(io);
+                        writeThroughOpenedParent(opened_parent.dir, io, opened_parent.basename, ctx.payload()) catch |err| return fileOpFailure(err);
                         return .ok;
                     }
                     var atomic = dir.createFileAtomic(io, file_path, .{ .make_path = ctx.parent == null, .replace = true }) catch |err| return fileOpFailure(err);
