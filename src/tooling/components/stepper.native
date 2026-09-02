@@ -11,12 +11,14 @@
 
      `step` remains an SDK-owned markup element. Its completed/active/
      pending state still derives from the active index, and the slot is
-     built in the consumer's scope so loop bindings keep working.
+     built in the consumer's scope so loop bindings keep working. The
+     `global_key` template arg uses an underscore because template args are
+     binding names; it forwards to the element's `global-key` attribute.
 
      Deleting this file costs nothing; `native eject component stepper`
      writes it again. -->
-<template name="stepper" args="active">
-  <stepper active="{active}">
+<template name="stepper" args="active key= global_key= label=">
+  <stepper active="{active}" key="{key}" global-key="{global_key}" label="{label}">
     <slot/>
   </stepper>
 </template>

@@ -1439,6 +1439,12 @@ const Checker = struct {
             }
         }
         for (node.children) |child| {
+            if (child.kind == .slot_block) {
+                // Ejected steppers pass their actual children through the
+                // slot. Check those children in the consumer's scope.
+                try self.checkSlot(child);
+                continue;
+            }
             for (child.children) |run| {
                 if (run.kind == .text) try self.checkTextRun(run);
             }

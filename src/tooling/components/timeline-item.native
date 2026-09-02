@@ -11,10 +11,12 @@
 
      A call site that needs a typed `on-press` can keep using the built-in
      `<timeline-item>` element directly; message bindings stay on elements,
-     never in a string-valued component callback.
+     never in a string-valued component callback. The `global_key` template
+     arg uses an underscore because template args are binding names; it
+     forwards to the element's `global-key` attribute.
 
      Deleting this file costs nothing; `native eject component timeline-item`
      writes it again. -->
-<template name="timeline-item" args="title description= meta= indicator= icon= variant=outline connector=true selected=false">
-  <timeline-item title="{title}" description="{description}" meta="{meta}" indicator="{indicator}" icon="{icon}" variant="{variant}" connector="{connector}" selected="{selected}" />
+<template name="timeline-item" args="title description= meta= indicator= icon= variant=outline connector=true selected=false key= global_key=">
+  <timeline-item title="{title}" description="{description}" meta="{meta}" indicator="{indicator}" icon="{icon}" variant="{variant}" connector="{connector}" selected="{selected}" key="{key}" global-key="{global_key}" />
 </template>

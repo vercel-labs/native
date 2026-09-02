@@ -11,9 +11,9 @@ A standalone exclusive-choice segment. Each `segmented-control` is one named, pr
 
 ```html
 <row gap="6">
-  <segmented-control selected="{range == day}" on-press="choose_day">Day</segmented-control>
-  <segmented-control selected="{range == week}" icon="settings" on-press="choose_week">Week</segmented-control>
-  <segmented-control selected="{range == month}" on-press="choose_month">Month</segmented-control>
+  <segmented-control selected="{range == 'day'}" on-press="choose_day">Day</segmented-control>
+  <segmented-control selected="{range == 'week'}" icon="settings" on-press="choose_week">Week</segmented-control>
+  <segmented-control selected="{range == 'month'}" on-press="choose_month">Month</segmented-control>
 </row>
 ```
 
@@ -25,8 +25,8 @@ The `icon` attribute uses the same closed vector-icon vocabulary as [button](/do
 
 ```html
 <row gap="6">
-  <segmented-control size="sm" selected="{view == list}" icon="file-text" label="List" on-press="show_list" />
-  <segmented-control size="sm" selected="{view == board}" icon="settings" label="Board" on-press="show_board" />
+  <segmented-control size="sm" selected="{view == 'list'}" icon="file-text" label="List" on-press="show_list" />
+  <segmented-control size="sm" selected="{view == 'board'}" icon="settings" label="Board" on-press="show_board" />
 </row>
 ```
 

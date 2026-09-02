@@ -96,6 +96,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         const ScopeEntry = struct {
             name: []const u8,
             payload: Payload,
+            defaulted: bool = false,
 
             const Payload = union(enum) {
                 item: struct { type_index: usize, ptr: *const anyopaque },
@@ -1630,7 +1631,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     }
                     break :blk .{ .value = literalValue(default) };
                 } else return self.failNode(node, markup.use_missing_arg_message);
-                scope.entries[saved_len + arg_count] = .{ .name = arg.name, .payload = payload };
+                scope.entries[saved_len + arg_count] = .{
+                    .name = arg.name,
+                    .payload = payload,
+                    .defaulted = node.attrEntry(arg.name) == null and arg.default != null,
+                };
                 arg_count += 1;
             }
             // The slot capture: the use-site children plus the scope state
@@ -2100,13 +2105,23 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             }
         }
 
-        fn attrKey(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!canvas.UiKey {
+        fn attrKey(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!?canvas.UiKey {
+            const omitted_default = switch (markup.attrTyped(attribute)) {
+                .binding => |path| if (scope.lookup(pathHead(path))) |entry|
+                    entry.defaulted and pathTail(path) == null
+                else
+                    false,
+                else => false,
+            };
             const value = try self.evalAttrExpression(scope, node, attribute);
             return switch (value) {
                 // Bijective like itemKey: a negative integer key is a
                 // distinct identity, never a trap.
                 .integer => |int| canvas.uiKey(@as(u64, @bitCast(int))),
-                .string => |text| canvas.uiKey(text),
+                // Empty defaults are the template-language spelling for an
+                // omitted optional key. This lets ejected templates forward
+                // key/global-key without changing unkeyed identity.
+                .string => |text| if (text.len == 0 and omitted_default) null else canvas.uiKey(text),
                 else => self.failKey(node, "keys must be integers or strings"),
             };
         }

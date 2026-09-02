@@ -94,6 +94,16 @@ const InboxCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixt
 
 const SegmentedCompiled = canvas.CompiledMarkupView(fixture.SegmentedModel, fixture.SegmentedMsg, fixture.segmented_markup_source);
 
+const EjectedStepperDefaultMarkup =
+    \\<template name="stepper" args="active key= global_key= label=">
+    \\  <stepper active="{active}" key="{key}" global-key="{global_key}" label="{label}">
+    \\    <slot/>
+    \\  </stepper>
+    \\</template>
+    \\<use template="stepper" active="1"><step>Plan</step><step>Ship</step></use>
+;
+const EjectedStepperDefaultCompiled = canvas.CompiledMarkupView(fixture.TemplateModel, fixture.TemplateMsg, EjectedStepperDefaultMarkup);
+
 test "compiled segmented-control and vector icon button match the interpreter" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -107,6 +117,20 @@ test "compiled segmented-control and vector icon button match the interpreter" {
     try expectSameTree(fixture.SegmentedMsg, interpreted, compiled);
     try testing.expectEqual(canvas.WidgetKind.segmented_control, compiled.root.children[0].kind);
     try testing.expectEqualStrings("settings", compiled.root.children[2].icon);
+}
+
+test "compiled ejected stepper defaults preserve unkeyed identity" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.TemplateModel{};
+    const labels = [_]TemplateUi.StepperStep{ .{ .label = "Plan" }, .{ .label = "Ship" } };
+
+    var library_ui = TemplateUi.init(arena);
+    const library = try library_ui.finalize(library_ui.stepper(.{ .active = 1 }, &labels));
+    var compiled_ui = TemplateUi.init(arena);
+    const compiled = try compiled_ui.finalize(EjectedStepperDefaultCompiled.build(&compiled_ui, &model));
+    try testing.expectEqualDeep(library.root, compiled.root);
 }
 
 const zero_card_padding_markup =

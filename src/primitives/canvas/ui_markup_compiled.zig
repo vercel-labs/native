@@ -142,7 +142,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             slot_nodes: []const markup.MarkupNode = &.{},
             slot_entries: []const ScopeEntry = &.{},
             SiteScope: type = void,
-
+            /// True when a value arg came from a declaration default rather
+            /// than an explicit use-site argument.
+            defaulted: bool = false,
             const Kind = enum { item, value_arg, slice_arg, slot };
         };
 
@@ -1048,6 +1050,11 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 inline for (0..step_nodes.len) |step_index| {
                     const child = comptime step_nodes[step_index];
                     if (comptime (child.kind != .element or !std.mem.eql(u8, child.name, "step"))) fail(child, markup.stepper_children_message);
+                    comptime {
+                        for (child.attrs) |attribute| {
+                            if (!std.mem.eql(u8, attribute.name, "kind")) fail(child, markup.step_attr_message);
+                        }
+                    }
                     steps[step_index] = .{ .label = interpolatedText(child, comptime entries[index].slot_entries, ui, model, site_scope) };
                 }
             } else {
@@ -1726,7 +1733,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 var entries: []const ScopeEntry = &.{};
                 for (specs) |spec| {
                     entries = entries ++ &[_]ScopeEntry{switch (spec.kind) {
-                        .value => .{ .name = spec.name, .kind = .value_arg, .variant = spec.variant },
+                        .value => .{ .name = spec.name, .kind = .value_arg, .variant = spec.variant, .defaulted = spec.defaulted },
                         .slice => .{ .name = spec.name, .kind = .slice_arg, .Item = spec.Item },
                     }};
                 }
@@ -1833,7 +1840,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             const Leaf = comptime (OnType(Item, field_path, false) orelse fail(node, "key does not name a field on the item"));
             comptime requireVariant(bindingVariant(Leaf), &.{ .integer, .string }, node, "key fields must be integers or strings");
             const value = interpreter.valueOf(Leaf, valueOn(Item, field_path, item, ui.arena)) orelse unreachable;
-            return uiKeyFromValue(value, ui);
+            return uiKeyFromValue(value);
         }
 
         // ---------------------------------------------------- attributes
@@ -2149,21 +2156,39 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             }
         }
 
-        fn attrKey(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype, comptime message: []const u8) canvas.UiKey {
+        fn attrKey(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype, comptime message: []const u8) ?canvas.UiKey {
             comptime requireVariant(exprVariant(node, entries, raw), &.{ .integer, .string }, node, message);
-            return uiKeyFromValue(evalExpr(node, entries, raw, ui, model, scope), ui);
+            const omitted_default = comptime blk: {
+                const expression = markup.parseAttrExpression(raw) orelse break :blk false;
+                if (expression != .binding) break :blk false;
+                const path = expression.binding;
+                if (interpreter.pathTail(path) != null) break :blk false;
+                const index = scopeIndex(entries, interpreter.pathHead(path)) orelse break :blk false;
+                break :blk entries[index].defaulted;
+            };
+            return optionalUiKeyFromValue(evalExpr(node, entries, raw, ui, model, scope), ui, omitted_default);
         }
 
-        fn uiKeyFromValue(value: Value, ui: *Ui) canvas.UiKey {
+        fn uiKeyFromValue(value: Value) canvas.UiKey {
+            return switch (value) {
+                .integer => |int| canvas.uiKey(@as(u64, @bitCast(int))),
+                .string => |text| canvas.uiKey(text),
+                else => unreachable,
+            };
+        }
+
+        fn optionalUiKeyFromValue(value: Value, ui: *Ui, omitted_default: bool) ?canvas.UiKey {
             return switch (value) {
                 // Keys are identity, not quantities: a negative integer
                 // id maps bijectively into the u64 key space (the
                 // interpreter's itemKey/attrKey rule), never a trap.
                 .integer => |int| canvas.uiKey(@as(u64, @bitCast(int))),
-                .string => |text| canvas.uiKey(text),
+                // Empty defaults are the template-language spelling for an
+                // omitted optional key; preserve unkeyed structural identity.
+                .string => |text| if (text.len == 0 and omitted_default) null else canvas.uiKey(text),
                 else => blk: {
                     ui.failed = true;
-                    break :blk canvas.uiKey(@as(u64, 0));
+                    break :blk null;
                 },
             };
         }
