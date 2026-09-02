@@ -712,9 +712,11 @@ test "the image attribute validates as one binding on avatar and image" {
         // attribute would be silently inert.
         .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.image_binding_element_message },
         .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.image_binding_element_message },
+        .{ .source = "<row>\n  <button image=\"{user_image}\" label=\"Preview\" />\n</row>", .message = markup.image_binding_element_message },
         // Source rectangles are image/avatar-only, require an image, and
         // are atomic so a missing coordinate never defaults silently.
         .{ .source = "<row>\n  <badge source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">3</badge>\n</row>", .message = markup.image_source_element_message },
+        .{ .source = "<row>\n  <button source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\" label=\"Preview\" />\n</row>", .message = markup.image_source_element_message },
         .{ .source = "<row>\n  <avatar source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">CT</avatar>\n</row>", .message = markup.image_source_binding_message },
         .{ .source = "<row>\n  <image image=\"{atlas}\" source-x=\"0\" source-y=\"0\" source-width=\"16\" label=\"Tile\" />\n</row>", .message = markup.image_source_complete_message },
         // ...and required on the leaf: an unbound image is statically
@@ -1251,6 +1253,31 @@ test "stepper and timeline validate structure with teaching messages" {
         const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(case.message, info.message);
         try testing.expect(info.line > 0);
+    }
+}
+
+test "segmented-control validates as a named text control" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const valid_sources = [_][]const u8{
+        "<row>\n  <segmented-control selected=\"true\" icon=\"settings\" on-press=\"choose\">Settings</segmented-control>\n</row>",
+        "<row>\n  <segmented-control selected=\"{active}\" label=\"View\" on-press=\"choose\" />\n</row>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "<row>\n  <segmented-control icon=\"not-an-icon\">Settings</segmented-control>\n</row>", .message = markup.button_icon_message },
+        .{ .source = "<row>\n  <segmented-control>\n    <text>Settings</text>\n  </segmented-control>\n</row>", .message = markup.text_leaf_children_message },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
     }
 }
 

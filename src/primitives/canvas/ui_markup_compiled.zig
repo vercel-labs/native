@@ -1005,6 +1005,10 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 }
                 if (node.attr("active") == null) fail(node, markup.stepper_active_message);
                 for (node.children) |child| {
+                    if (child.kind == .slot_block) {
+                        if (node.children.len != 1) fail(child, markup.stepper_children_message);
+                        continue;
+                    }
                     if (child.kind != .element or !std.mem.eql(u8, child.name, "step")) {
                         fail(child, markup.stepper_children_message);
                     }
@@ -1029,12 +1033,27 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime (node.attr("label") != null)) {
                 options.semantics.label = stringAttr(node, entries, comptime node.attr("label").?, ui, model, scope, "label expects text");
             }
-            const steps = ui.arena.alloc(Ui.StepperStep, node.children.len) catch {
+            const slot_index: ?usize = comptime if (node.children.len == 1 and node.children[0].kind == .slot_block) innermostSlotIndex(entries) else null;
+            if (comptime (node.children.len == 1 and node.children[0].kind == .slot_block and slot_index == null)) {
+                comptime fail(node.children[0], markup.slot_outside_template_message);
+            }
+            const step_nodes = comptime if (slot_index) |index| entries[index].slot_nodes else node.children;
+            const steps = ui.arena.alloc(Ui.StepperStep, step_nodes.len) catch {
                 ui.failed = true;
                 return ui.el(.row, .{}, .{});
             };
-            inline for (0..node.children.len) |index| {
-                steps[index] = .{ .label = interpolatedText(comptime node.children[index], entries, ui, model, scope) };
+            if (comptime (slot_index != null)) {
+                const index = comptime slot_index.?;
+                const site_scope = scopePayload(entries, index, scope);
+                inline for (0..step_nodes.len) |step_index| {
+                    const child = comptime step_nodes[step_index];
+                    if (comptime (child.kind != .element or !std.mem.eql(u8, child.name, "step"))) fail(child, markup.stepper_children_message);
+                    steps[step_index] = .{ .label = interpolatedText(child, comptime entries[index].slot_entries, ui, model, site_scope) };
+                }
+            } else {
+                inline for (0..step_nodes.len) |index| {
+                    steps[index] = .{ .label = interpolatedText(comptime step_nodes[index], entries, ui, model, scope) };
+                }
             }
             return ui.stepper(options, steps);
         }

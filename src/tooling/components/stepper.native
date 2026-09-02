@@ -1,0 +1,22 @@
+<!-- Your app's stepper.
+     Ejected from the Native SDK component library.
+
+     This file now belongs to your app: edit it freely, and SDK updates
+     never touch it. The template keeps the SDK stepper's typed rendering
+     and inserts the caller's step children at the same structural point:
+
+         before: <stepper active="{stage}">...</stepper>
+         after:  <import src="components/stepper.native"/>
+                 <use template="stepper" active="{stage}">...</use>
+
+     `step` remains an SDK-owned markup element. Its completed/active/
+     pending state still derives from the active index, and the slot is
+     built in the consumer's scope so loop bindings keep working.
+
+     Deleting this file costs nothing; `native eject component stepper`
+     writes it again. -->
+<template name="stepper" args="active">
+  <stepper active="{active}">
+    <slot/>
+  </stepper>
+</template>

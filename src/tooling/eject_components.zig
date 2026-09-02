@@ -4,7 +4,7 @@
 //! The ownership model, stated once: the default is to USE the library
 //! composites and theme them through design tokens; ejecting writes the
 //! composite's canonical source into the app (`src/components/`) for the
-//! moment you need to own its shape. Only honest compositions are on the
+//! moment you need to own its shape. Only library compositions are on the
 //! menu — views the library itself builds from public primitives (rows,
 //! columns, badges, separators, text). Engine control classes (buttons,
 //! text fields, tabs, ...) are never ejectable: their behavior lives in
@@ -12,7 +12,7 @@
 //! fork.
 //!
 //! Each canonical source lives as a real file next to this one
-//! (`components/`), embedded verbatim at compile time, and held honest
+//! (`components/`), embedded verbatim at compile time, and held in parity
 //! by identity tests (`src/tooling/components/identity_tests.zig`) that
 //! build the ejected form and the library form against the same inputs
 //! and require identical widget trees. Whether a component ejects as a
@@ -25,6 +25,8 @@
 const std = @import("std");
 const buildgraph = @import("buildgraph.zig");
 
+pub const ComponentForm = enum { markup, zig };
+
 pub const Component = struct {
     /// The name `native eject component <name>` accepts (the registry
     /// element / builder-sugar name, so users name the thing they see).
@@ -36,6 +38,10 @@ pub const Component = struct {
     /// The canonical source, embedded verbatim — the identity tests keep
     /// it building the exact tree the library builds.
     source: []const u8,
+    /// The source form written into an app. This is explicit so the CLI can
+    /// refuse a future Zig-form component in a TypeScript tree rather than
+    /// violating the app-authoring rule.
+    form_kind: ComponentForm = .markup,
     /// One-line form summary for listings and the success message.
     form: []const u8,
 };
@@ -45,9 +51,10 @@ pub const Component = struct {
 pub const components = [_]Component{
     .{
         .name = "stepper",
-        .path = "src/components/stepper.zig",
-        .source = @embedFile("components/stepper.zig"),
-        .form = "Zig view function",
+        .path = "src/components/stepper.native",
+        .source = @embedFile("components/stepper.native"),
+        .form = "markup template",
+        .form_kind = .markup,
     },
     .{
         .name = "timeline",
@@ -57,9 +64,10 @@ pub const components = [_]Component{
     },
     .{
         .name = "timeline-item",
-        .path = "src/components/timeline_item.zig",
-        .source = @embedFile("components/timeline_item.zig"),
-        .form = "Zig view function",
+        .path = "src/components/timeline-item.native",
+        .source = @embedFile("components/timeline-item.native"),
+        .form = "markup template",
+        .form_kind = .markup,
     },
 };
 
@@ -167,4 +175,12 @@ test "unknown names suggest their nearest ejectable component" {
 
 test "the component list names every ejectable component" {
     try std.testing.expectEqualStrings("stepper, timeline, timeline-item", component_list);
+}
+
+test "current ejectable components all use the markup form" {
+    for (components) |component| {
+        try std.testing.expectEqual(ComponentForm.markup, component.form_kind);
+        try std.testing.expect(std.mem.endsWith(u8, component.path, ".native"));
+        try std.testing.expectEqualStrings("markup template", component.form);
+    }
 }

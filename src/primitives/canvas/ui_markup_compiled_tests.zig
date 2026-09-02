@@ -92,6 +92,23 @@ const InboxUi = canvas.Ui(fixture.Msg);
 const InboxInterpreter = markup_view.MarkupView(fixture.Model, fixture.Msg);
 const InboxCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.inbox_markup_source);
 
+const SegmentedCompiled = canvas.CompiledMarkupView(fixture.SegmentedModel, fixture.SegmentedMsg, fixture.segmented_markup_source);
+
+test "compiled segmented-control and vector icon button match the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.SegmentedModel{};
+    var interpreter_view = try markup_view.MarkupView(fixture.SegmentedModel, fixture.SegmentedMsg).init(arena, fixture.segmented_markup_source);
+    var interpreter_ui = fixture.SegmentedUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter_view.build(&interpreter_ui, &model));
+    var compiled_ui = fixture.SegmentedUi.init(arena);
+    const compiled = try compiled_ui.finalize(SegmentedCompiled.build(&compiled_ui, &model));
+    try expectSameTree(fixture.SegmentedMsg, interpreted, compiled);
+    try testing.expectEqual(canvas.WidgetKind.segmented_control, compiled.root.children[0].kind);
+    try testing.expectEqualStrings("settings", compiled.root.children[2].icon);
+}
+
 const zero_card_padding_markup =
     \\<card padding="0">
     \\  <text>Flush</text>

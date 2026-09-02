@@ -1242,6 +1242,9 @@ const Checker = struct {
             }
             if (std.mem.eql(u8, attribute.name, "image")) {
                 // Runtime image ids are model integers (engine parity).
+                if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                    return self.failAttr(node, attribute, markup.image_binding_element_message);
+                }
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .binding) continue;
                 const resolved = try self.resolveBinding(node, expression.binding, true);

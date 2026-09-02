@@ -362,6 +362,9 @@ pub const elements = [_]ElementInfo{
     // line numbers or one horizontal scroll region for unwrapped lines.
     // Markdown fences use the same builder component.
     .{ .code = 70, .name = "code", .rule_hook = "code", .hit_target = false },
+    // Standalone exclusive-choice trigger. Its item collection is ordinary
+    // markup structure around these text-bearing leaves.
+    .{ .code = 71, .name = "segmented-control", .widget_kind = "segmented_control", .takes_text = true, .icon_attr = true, .a11y_name = .control },
 };
 
 // ------------------------------------------------------------- attributes

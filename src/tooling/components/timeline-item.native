@@ -1,0 +1,20 @@
+<!-- Your app's timeline item.
+     Ejected from the Native SDK component library.
+
+     This file now belongs to your app: edit it freely, and SDK updates
+     never touch it. The template exposes the item's markup-owned shape and
+     keeps its content and state arguments at the same element boundary:
+
+         before: <timeline-item title="Build" variant="primary" />
+         after:  <import src="components/timeline-item.native"/>
+                 <use template="timeline-item" title="Build" variant="primary" />
+
+     A call site that needs a typed `on-press` can keep using the built-in
+     `<timeline-item>` element directly; message bindings stay on elements,
+     never in a string-valued component callback.
+
+     Deleting this file costs nothing; `native eject component timeline-item`
+     writes it again. -->
+<template name="timeline-item" args="title description= meta= indicator= icon= variant=outline connector=true selected=false">
+  <timeline-item title="{title}" description="{description}" meta="{meta}" indicator="{indicator}" icon="{icon}" variant="{variant}" connector="{connector}" selected="{selected}" />
+</template>

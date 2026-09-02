@@ -53,6 +53,10 @@
       "doc": "Text-bearing control; the label is the text content. Dispatch with on-press. icon draws a vector icon inline before the label (icon-only when the content is empty; give it a label) — one hit target, one enabled/disabled tint."
     },
     {
+      "name": "segmented-control",
+      "doc": "Standalone exclusive-choice trigger; the label is the text content, selected marks the active item, and icon may add a vector icon. Compose items with ordinary markup, for, or a template."
+    },
+    {
       "name": "checkbox",
       "doc": "Text-bearing value control; the visible label is text content (or text=), bind checked, dispatch with on-toggle."
     },
@@ -1068,6 +1072,10 @@
       "width": 1120,
       "height": 320
     },
+    "segmented-control": {
+      "width": 1120,
+      "height": 320
+    },
     "toggle": {
       "width": 1120,
       "height": 320
@@ -1396,6 +1404,10 @@
       "width": 704,
       "height": 396
     },
+    "segmented-control-hero": {
+      "width": 704,
+      "height": 396
+    },
     "separator-hero": {
       "width": 704,
       "height": 396
@@ -1578,8 +1590,8 @@
   "ejectable": [
     {
       "name": "stepper",
-      "form": "Zig view function",
-      "path": "src/components/stepper.zig"
+      "form": "markup template",
+      "path": "src/components/stepper.native"
     },
     {
       "name": "timeline",
@@ -1588,8 +1600,8 @@
     },
     {
       "name": "timeline-item",
-      "form": "Zig view function",
-      "path": "src/components/timeline_item.zig"
+      "form": "markup template",
+      "path": "src/components/timeline-item.native"
     }
   ]
 }

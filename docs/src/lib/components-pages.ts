@@ -45,6 +45,7 @@ export const componentPages: ComponentPage[] = [
   { slug: "resizable", name: "Resizable", preview: "resizable-hero", blurb: "Panel with an engine-managed drag handle." },
   { slug: "scroll", name: "Scroll", preview: "scroll-hero", blurb: "Scroll regions with model-observable offsets." },
   { slug: "select", name: "Select", preview: "select-hero", blurb: "Trigger plus the anchored dropdown options pattern." },
+  { slug: "segmented-control", name: "Segmented Control", preview: "segmented-control-hero", blurb: "Standalone selected segments with typed press events." },
   { slug: "separator", name: "Separator", preview: "separator-hero", blurb: "Hairline rules, horizontal and vertical." },
   { slug: "sheet", name: "Sheet", preview: "sheet-hero", blurb: "Bottom-anchored modal surface." },
   { slug: "skeleton", name: "Skeleton", preview: "skeleton-hero", blurb: "Loading placeholders that sketch the content." },

@@ -12,7 +12,7 @@
 //! Scenes are retained widget trees. Most are stateless: the runtime
 //! owns hover, focus, toggle, text-edit, slider, and scroll state, which
 //! is exactly the interactivity those previews expose. Scenes whose
-//! honest demo needs MODEL-owned state (accordion expansion, tab panel
+//! interactive demo needs MODEL-owned state (accordion expansion, tab panel
 //! switching, dialog dismiss/reopen, the select's anchored dropdown)
 //! declare a tiny shared mini-model (`SceneModel`) and build from it;
 //! the wasm host routes the REAL widget event dispatch (press, toggle,
@@ -152,6 +152,7 @@ pub const scenes = [_]Scene{
     .{ .name = "alert", .height = 220, .build = stateless(buildAlert) },
     .{ .name = "accordion", .height = 240, .build = buildAccordion, .model = .{ .flags = .{ true, false, false, false } } },
     .{ .name = "tabs", .height = 230, .build = buildTabs },
+    .{ .name = "segmented-control", .height = 160, .build = buildSegmentedControl },
     .{ .name = "menu", .height = 280, .build = stateless(buildMenu) },
     .{ .name = "tooltip", .height = 160, .build = stateless(buildTooltip), .hover = .{ .kind = .button } },
     .{ .name = "bubble", .height = 300, .build = stateless(buildBubble) },
@@ -218,6 +219,7 @@ pub const scenes = [_]Scene{
     heroScene("resizable-hero", buildResizableHero),
     heroScene("scroll-hero", buildScrollHero),
     .{ .name = "select-hero", .width = hero_tile_width, .height = hero_tile_height, .build = buildSelectHero, .model = .{ .open = true } },
+    heroScene("segmented-control-hero", buildSegmentedControlHero),
     heroScene("separator-hero", buildSeparatorHero),
     heroScene("sheet-hero", buildSheetHero),
     heroScene("skeleton-hero", buildSkeletonHero),
@@ -741,6 +743,17 @@ fn buildTabs(ui: *Ui, model: *const SceneModel) Node {
                     ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, tab_bodies[active]),
                 }),
             }),
+        }),
+    });
+}
+
+fn buildSegmentedControl(ui: *Ui, model: *const SceneModel) Node {
+    const active = @min(model.index, 2);
+    return tile(ui, .{
+        ui.row(.{ .gap = 8, .cross = .center }, .{
+            ui.el(.segmented_control, .{ .text = "Day", .selected = active == 0, .on_press = .{ .select_index = 0 } }, .{}),
+            ui.el(.segmented_control, .{ .text = "Week", .selected = active == 1, .icon = "settings", .on_press = .{ .select_index = 1 } }, .{}),
+            ui.el(.segmented_control, .{ .text = "Month", .selected = active == 2, .on_press = .{ .select_index = 2 } }, .{}),
         }),
     });
 }
@@ -1691,6 +1704,16 @@ fn buildTabsHero(ui: *Ui) Node {
                     ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Make changes to your account here."),
                 }),
             }),
+        }),
+    });
+}
+
+fn buildSegmentedControlHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.row(.{ .gap = 6, .cross = .center }, .{
+            ui.el(.segmented_control, .{ .text = "Day", .selected = true }, .{}),
+            ui.el(.segmented_control, .{ .text = "Week", .icon = "settings" }, .{}),
+            ui.el(.segmented_control, .{ .text = "Month" }, .{}),
         }),
     });
 }

@@ -1,0 +1,47 @@
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+# Segmented Control
+
+A standalone exclusive-choice segment. Each `segmented-control` is one named, pressable item: bind `selected` from the model, dispatch `on-press`, and add a vector `icon` when the label benefits from one. Put several in a row for a compact choice control; use [tabs](/docs/components/tabs) when you also need the tab-strip container and conditional panel.
+
+<ComponentPreview name="segmented-control" alt="Standalone segmented controls rendered by the engine" caption="Day, Week, and Month segments with Week selected" />
+
+## Markup
+
+```html
+<row gap="6">
+  <segmented-control selected="{range == day}" on-press="choose_day">Day</segmented-control>
+  <segmented-control selected="{range == week}" icon="settings" on-press="choose_week">Week</segmented-control>
+  <segmented-control selected="{range == month}" on-press="choose_month">Month</segmented-control>
+</row>
+```
+
+`selected` is model-owned. Pressing a segment sends its message; the next view rebuild reflects the new selection. The segment itself is a text-bearing control, so it needs visible content or a `label` accessible name.
+
+## Icons and sizes
+
+The `icon` attribute uses the same closed vector-icon vocabulary as [button](/docs/components/button). It is drawn as part of the segment's own hit target and follows the segment's state tint. `size` selects the shared control register; `label` supplies an accessible name when the visible content is absent.
+
+```html
+<row gap="6">
+  <segmented-control size="sm" selected="{view == list}" icon="file-text" label="List" on-press="show_list" />
+  <segmented-control size="sm" selected="{view == board}" icon="settings" label="Board" on-press="show_board" />
+</row>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, use the same retained widget kind directly with `canvas.Ui`:
+
+```zig
+ui.row(.{ .gap = 6 }, .{
+    ui.el(.segmented_control, .{ .text = "Day", .selected = model.range == .day, .on_press = .choose_day }, .{}),
+    ui.el(.segmented_control, .{ .text = "Week", .icon = "settings", .selected = model.range == .week, .on_press = .choose_week }, .{}),
+    ui.el(.segmented_control, .{ .text = "Month", .selected = model.range == .month, .on_press = .choose_month }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["text", "selected", "disabled", "size", "icon", "icon-placement", "label", "key", "global-key", "on-press", "on-hold"]} />

@@ -822,6 +822,13 @@ fn runEjectComponent(io: std.Io, name: []const u8) !void {
         }
         std.process.exit(1);
     };
+    if (tooling.ts_core.detect(io) == .ts and component.form_kind == .zig) {
+        std.debug.print(
+            "cannot eject {s} into a TypeScript app as a Zig view - use the markup form ({s}) instead; app authors do not write Zig\n",
+            .{ component.name, component.form },
+        );
+        std.process.exit(1);
+    }
     tooling.eject_components.eject(io, ".", component) catch |err| switch (err) {
         error.AlreadyEjected => {
             std.debug.print("already ejected at {s} - delete it to re-eject\n", .{component.path});

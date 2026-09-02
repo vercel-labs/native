@@ -4,7 +4,7 @@ import { EjectSection } from "@/components/eject-section";
 
 # Timeline
 
-A timeline/ledger list container: a vertical column of `timeline-item` children (`for` and `if` work inside it). Each item pairs a leading indicator badge — `indicator` text or a small dot, colored by `variant` — with a title/description/meta content column, joined by a connector rail; set `connector="false"` on the last item to end the rail. Binding `on-press` makes the whole item pressable with a trailing chevron. For a horizontal stage indicator, see [stepper](/docs/components/stepper).
+A timeline/ledger list container: a vertical column of `timeline-item` children (`for` and `if` work inside it). Each item pairs a leading indicator badge — `indicator` text or a small dot, colored by `variant` — with a title/description/meta content column, joined by a connector rail; set `connector="false"` on the last item to end the rail. Binding `on-press` makes the whole item pressable with a trailing chevron. Both the container and item can be ejected as markup templates when you need to own their shape. For a horizontal stage indicator, see [stepper](/docs/components/stepper).
 
 <ComponentPreview name="timeline" alt="A timeline rendered by the engine" caption="indicator badges, titles with descriptions and meta lines, and the connector rail" />
 

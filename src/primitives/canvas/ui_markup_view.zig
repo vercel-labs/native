@@ -970,17 +970,46 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             }
             if (!has_active) return self.failNode(node, markup.stepper_active_message);
 
-            const steps = try ui.arena.alloc(Ui.StepperStep, node.children.len);
-            for (node.children, 0..) |child, index| {
-                if (child.kind != .element or !std.mem.eql(u8, child.name, "step")) {
-                    return self.failNode(child, markup.stepper_children_message);
+            const is_slotted = node.children.len == 1 and node.children[0].kind == .slot_block;
+            const capture = if (is_slotted) scope.slotCapture() else null;
+            if (is_slotted and capture == null) return self.failNode(node.children[0], markup.slot_outside_template_message);
+            const step_nodes = if (capture) |captured| captured.nodes else node.children;
+            const steps = try ui.arena.alloc(Ui.StepperStep, step_nodes.len);
+            if (capture) |captured| {
+                // Slot content is authored at the use site. Temporarily
+                // restore that consumer scope so interpolated step labels
+                // see the same loop variables as a direct stepper.
+                var saved_entries: [max_scope_depth]ScopeEntry = undefined;
+                const saved_len = scope.len;
+                const saved_floor = scope.floor;
+                const saved_ctx = scope.template_ctx;
+                for (scope.entries[captured.len..saved_len], 0..) |entry, offset| saved_entries[offset] = entry;
+                scope.len = captured.len;
+                scope.floor = captured.floor;
+                scope.template_ctx = captured.template_ctx;
+                defer {
+                    for (saved_entries[0 .. saved_len - captured.len], 0..) |entry, offset| scope.entries[captured.len + offset] = entry;
+                    scope.len = saved_len;
+                    scope.floor = saved_floor;
+                    scope.template_ctx = saved_ctx;
                 }
-                for (child.attrs) |attribute| {
-                    if (!std.mem.eql(u8, attribute.name, "kind")) {
-                        return self.failNode(child, markup.step_attr_message);
+                for (step_nodes, 0..) |child, index| {
+                    if (child.kind != .element or !std.mem.eql(u8, child.name, "step")) return self.failNode(child, markup.stepper_children_message);
+                    for (child.attrs) |attribute| if (!std.mem.eql(u8, attribute.name, "kind")) return self.failNode(child, markup.step_attr_message);
+                    steps[index] = .{ .label = try self.interpolatedText(ui, scope, child) };
+                }
+            } else {
+                for (step_nodes, 0..) |child, index| {
+                    if (child.kind != .element or !std.mem.eql(u8, child.name, "step")) {
+                        return self.failNode(child, markup.stepper_children_message);
                     }
+                    for (child.attrs) |attribute| {
+                        if (!std.mem.eql(u8, attribute.name, "kind")) {
+                            return self.failNode(child, markup.step_attr_message);
+                        }
+                    }
+                    steps[index] = .{ .label = try self.interpolatedText(ui, scope, child) };
                 }
-                steps[index] = .{ .label = try self.interpolatedText(ui, scope, child) };
             }
             return ui.stepper(options, steps);
         }
@@ -1849,8 +1878,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// runtime (`Cmd.imageLoad`, `fx.loadImage`,
         /// `fx.registerImageBytes`) — the id is model data, never a
         /// markup literal, and 0 draws nothing (an avatar keeps its
-        /// initials fallback). The remaining image-bearing widget
-        /// (icon-button) stays a Zig view.
+        /// initials fallback). Image-backed buttons remain a separate
+        /// asset-lifecycle proposal.
         fn applyImageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
             if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
                 return self.failVoid(node, markup.image_binding_element_message);

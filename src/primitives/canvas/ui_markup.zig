@@ -1089,10 +1089,7 @@ fn typedTextSegmentsComptime(comptime text: []const u8) []const TypedTextSegment
 /// Element names the interpreter accepts, derived from the registry
 /// (ui_schema.zig; the registry↔engine conformance tests live in
 /// ui_markup_view_tests.zig). Covers every built-in component whose shape
-/// fits the closed grammar; the deliberate exclusions (image,
-/// icon-button, data-grid, popover, menu-surface, segmented-control) are
-/// documented next to the widget-kind coverage test in
-/// ui_markup_view_tests.zig — write those as Zig view functions.
+/// fits the closed grammar, including standalone segmented-control leaves.
 pub const known_element_names = schema.element_names;
 
 /// Elements whose content is a single run of text (with `{}`
@@ -1268,7 +1265,7 @@ pub const tooltip_delay_element_message = "tooltip-delay is only supported on to
 pub const tooltip_delay_dependent_attr_message = "tooltip-delay needs anchor on the same tooltip - only an anchored tooltip is hover-shown by the runtime (a static tooltip paints whenever the view renders it), so without anchor the delay is silently inert";
 
 pub const image_binding_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders nothing (an avatar falls back to its initials)";
-pub const image_binding_element_message = "image is only supported on avatar and image - the remaining image-bearing widget (icon-button) stays a Zig view (ElementOptions.image)";
+pub const image_binding_element_message = "image is only supported on avatar and image - the remaining image-bearing widget (icon-button) stays deferred until the TypeScript asset lifecycle is decided";
 pub const image_source_element_message = "source-x, source-y, source-width, and source-height are only supported on avatar and image - they crop a runtime-registered image in decoded-image pixel coordinates";
 pub const image_source_binding_message = "source-x, source-y, source-width, and source-height require the element's image binding - without a registered image the source rectangle is inert";
 pub const image_source_complete_message = "source-x, source-y, source-width, and source-height must be declared together - they form one source rectangle in decoded-image pixel coordinates";
@@ -1311,7 +1308,7 @@ pub const icon_missing_name_message = "icon requires a name attribute selecting 
 pub const icon_children_message = "icon is a leaf - it takes no children";
 
 pub const button_icon_message = "icon takes a built-in icon name drawn inside the element (see canvas.icons.known_icon_names, e.g. save, plus, refresh-cw), an app-registered app:<name> (canvas.icons.registerAppIcons), or one {binding} resolving to such a name";
-pub const button_icon_element_message = "icon is only supported on button, toggle-button, list-item, menu-item, and badge - it draws a vector icon inside the element as one hit target; for a bare icon use <icon name=\"...\"/>";
+pub const button_icon_element_message = "icon is only supported on button, toggle-button, list-item, menu-item, badge, and segmented-control - it draws a vector icon inside the element as one hit target; for a bare icon use <icon name=\"...\"/>";
 
 /// The `app:` icon namespace: the markup channel into the app's OWN
 /// registered vector icons (`canvas.icons.registerAppIcons`). Bare names
@@ -1394,8 +1391,8 @@ fn wellShapedIconName(name: []const u8) bool {
 /// enabled/disabled state). Registry-derived from the `icon_attr` element
 /// predicate; mirrors the engine kinds that consume `Widget.icon`:
 /// buttons and toggle-buttons draw it before the label (tab strips are
-/// toggle-button children, so tabs get icons through this), list items
-/// and menu items draw it as a leading slot.
+/// toggle-button children, so tabs get icons through this), list items,
+/// menu items, and segmented controls draw it as an inline slot.
 pub const known_icon_attr_element_names = schema.icon_attr_element_names;
 
 pub fn iconAttrElement(name: []const u8) bool {
@@ -2371,7 +2368,7 @@ fn validateCode(node: MarkupNode) ?MarkupErrorInfo {
 /// `<stepper active="{index}">` takes only `<step>` text-leaf children:
 /// each step's state (completed/active/pending) derives from its position
 /// against the active index, so steps carry no attributes of their own.
-fn validateStepper(node: MarkupNode) ?MarkupErrorInfo {
+fn validateStepper(node: MarkupNode, slot_rule: SlotRule) ?MarkupErrorInfo {
     var has_active = false;
     for (node.attrs) |attribute| {
         if (std.mem.eql(u8, attribute.name, "active")) {
@@ -2391,6 +2388,16 @@ fn validateStepper(node: MarkupNode) ?MarkupErrorInfo {
     }
     if (!has_active) return errorAt(node, stepper_active_message);
     for (node.children) |child| {
+        if (child.kind == .slot_block) {
+            // Ejected steppers use a single slot to pass their step items
+            // through the built-in composite. The use-site children are
+            // checked by validateUseChildren; a slot is only legal in a
+            // template body.
+            if (slot_rule != .template_body) return errorAt(child, slot_outside_template_message);
+            if (child.attrs.len > 0) return attrError(child, child.attrs[0], slot_attrs_message);
+            if (child.children.len > 0) return errorAt(child.children[0], slot_children_message);
+            continue;
+        }
         if (child.kind != .element or !std.mem.eql(u8, child.name, "step")) {
             return errorAt(child, stepper_children_message);
         }
@@ -2980,10 +2987,24 @@ comptime {
 fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode, parent_element: ?[]const u8, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
     if (std.mem.eql(u8, hook, "markdown")) return validateMarkdown(node);
     if (std.mem.eql(u8, hook, "code")) return validateCode(node);
-    if (std.mem.eql(u8, hook, "stepper")) return validateStepper(node);
+    if (std.mem.eql(u8, hook, "stepper")) return validateStepper(node, slot_rule);
     if (std.mem.eql(u8, hook, "step")) {
         // Steps inside a stepper are consumed by validateStepper; one
-        // reaching the generic pass sits outside a stepper.
+        // reaching the generic pass sits outside a stepper. A use site's
+        // slot children are validated before expansion, with the same
+        // step shape and a template parent that is not yet known.
+        if (slot_rule == .use_children) {
+            for (node.attrs) |attribute| return attrError(node, attribute, step_attr_message);
+            var text_runs: usize = 0;
+            for (node.children) |child| {
+                if (child.kind != .text) return errorAt(child, text_leaf_children_message);
+                text_runs += 1;
+                if (text_runs > 1) return errorAt(child, text_leaf_single_run_message);
+                if (textInterpolationError(child)) |info| return info;
+                if (textNodeCoverageError(child)) |info| return info;
+            }
+            return null;
+        }
         return errorAt(node, step_parent_message);
     }
     if (std.mem.eql(u8, hook, "timeline")) return validateTimeline(document, node, template_limit, slot_rule);

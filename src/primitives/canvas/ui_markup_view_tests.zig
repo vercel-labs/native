@@ -1597,20 +1597,13 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
     }
 }
 
-/// Widget kinds deliberately NOT expressible in markup v1 — each needs
-/// something the closed grammar cannot carry, so these are written as Zig
-/// view functions instead of forcing a bad markup shape:
-/// - image, icon_button: reference image assets by runtime ImageId,
-///   which markup's literal/binding attribute values cannot express.
-///   (icon IS expressible: the built-in vector set is a closed literal
-///   vocabulary, comptime-validated.)
+/// Widget kinds deliberately NOT expressible as direct markup leaves —
+/// each is either a composite form or awaits a separate admission:
 /// - data_grid: a virtualized data grid needs per-column cell templates
 ///   (arbitrary render callbacks).
 /// - popover, menu_surface: floating surfaces anchored to runtime geometry
 ///   the static tree cannot express (dropdown-menu covers the declarative
 ///   menu case).
-/// - segmented_control: engine kind for shell chrome segments; tabs and
-///   toggle-group cover the component catalog's use cases.
 /// - chart: expressible as the `<chart>` COMPOSITE (series children whose
 ///   values bind model f32 iterables, lowered through `Ui.chart`), so no
 ///   plain element maps to the kind here — like the other composites, the
@@ -1623,8 +1616,23 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 ///   lowered through `Ui.inputGroup`), so no plain element maps to the
 ///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
-    .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
+    .icon_button, .data_grid, .popover, .menu_surface, .chart, .split_divider, .input_group,
 };
+
+pub const SegmentedModel = struct {
+    mode: u8 = 1,
+};
+pub const SegmentedMsg = union(enum) { choose };
+pub const SegmentedUi = canvas.Ui(SegmentedMsg);
+const SegmentedMarkup = markup_view.MarkupView(SegmentedModel, SegmentedMsg);
+
+pub const segmented_markup_source =
+    \\<column gap="8">
+    \\  <segmented-control selected="{mode == 0}" on-press="choose">List</segmented-control>
+    \\  <segmented-control selected="{mode == 1}" icon="settings" on-press="choose">Grid</segmented-control>
+    \\  <button size="icon" icon="settings" label="Preview" on-press="choose" />
+    \\</column>
+;
 
 fn kindExpressible(kind: canvas.WidgetKind) bool {
     for (canvas.ui_markup.known_element_names) |name| {
@@ -1640,6 +1648,32 @@ test "known_element_names covers every markup-expressible widget kind" {
         const excluded = std.mem.indexOfScalar(canvas.WidgetKind, &markup_excluded_widget_kinds, kind) != null;
         try testing.expectEqual(!excluded, kindExpressible(kind));
     }
+}
+
+test "segmented-control and vector icon button build and dispatch" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parser = canvas.ui_markup.Parser.init(arena, segmented_markup_source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+    const model = SegmentedModel{};
+    var view = try SegmentedMarkup.init(arena, segmented_markup_source);
+    var ui = SegmentedUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const list = tree.root.children[0];
+    const grid = tree.root.children[1];
+    const preview = tree.root.children[2];
+    try testing.expectEqual(canvas.WidgetKind.segmented_control, list.kind);
+    try testing.expectEqual(canvas.WidgetKind.segmented_control, grid.kind);
+    try testing.expect(!list.state.selected);
+    try testing.expect(grid.state.selected);
+    try testing.expectEqualStrings("settings", grid.icon);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(list.id, .up).?);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(grid.id, .up).?);
+    try testing.expectEqual(canvas.WidgetKind.button, preview.kind);
+    try testing.expectEqualStrings("settings", preview.icon);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(preview.id, .up).?);
 }
 
 test "every built-in component is expressible in markup" {
