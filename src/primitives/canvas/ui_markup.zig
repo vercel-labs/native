@@ -4083,7 +4083,7 @@ pub fn resolveImportPath(root_dir: []const u8, importer_path: []const u8, src: [
     // `//server/share/...` to `/server/share/...` makes the escape check
     // reject every otherwise-valid import under that share.
     const absolute = importer_path.len > 0 and importer_path[0] == '/';
-    const unc = importer_path.len >= 2 and importer_path[1] == '/';
+    const unc = absolute and importer_path.len >= 2 and importer_path[1] == '/';
     var segments: [max_import_path_segments][]const u8 = undefined;
     var count: usize = 0;
     var dir_it = std.mem.tokenizeScalar(u8, dirnamePath(importer_path), '/');

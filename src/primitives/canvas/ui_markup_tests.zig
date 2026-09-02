@@ -1469,6 +1469,17 @@ test "a UNC root path preserves both leading slashes while resolving imports" {
     try testing.expectEqualStrings(markup.import_src_escape_message, escaped.message);
 }
 
+test "a relative importer with a one-character directory is not treated as UNC" {
+    var buffer: [markup.max_import_path_len]u8 = undefined;
+    const resolved = markup.resolveImportPath(
+        "a",
+        "a/view.native",
+        "components/card.native",
+        &buffer,
+    );
+    try testing.expectEqualStrings("a/components/card.native", resolved.path);
+}
+
 test "an explicit app root lets an independently checked component import a sibling directory" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
