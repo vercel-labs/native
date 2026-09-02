@@ -535,6 +535,10 @@ pub fn Ui(comptime Msg: type) type {
             /// this with their content argument.
             text: []const u8 = "",
             placeholder: []const u8 = "",
+            /// Serialized style runs for `rich-textarea` (markup `styles=`).
+            /// Converted to `Widget.spans` at markup lower time. Empty on
+            /// every other element.
+            styles: []const u8 = "",
             value: f32 = 0,
             /// HORIZONTAL scroll offset for a horizontal-capable
             /// `scroll` container (markup `value-x`) — the sideways

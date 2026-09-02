@@ -25,6 +25,8 @@ test {
     _ = @import("text_metrics_tests.zig");
     _ = @import("text_batch_tests.zig");
     _ = @import("text_span_tests.zig");
+    _ = @import("text_attr.zig");
+    _ = @import("text_doc.zig");
     _ = @import("code_tests.zig");
     _ = @import("markdown_tests.zig");
     _ = @import("markdown_hostile_tests.zig");

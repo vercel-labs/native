@@ -1,0 +1,48 @@
+<column background="background" padding="16" gap="10">
+  <text size="heading">Rich document</text>
+  <text size="sm" foreground="text_muted">
+    Multi-block GFM — headings and lists paint as chrome; bodies stay plain bytes.
+  </text>
+  <row gap="6" cross="center">
+    <button size="sm" variant="secondary" on-press="kind_h1">H1</button>
+    <button size="sm" variant="secondary" on-press="kind_h2">H2</button>
+    <button size="sm" variant="secondary" on-press="kind_p">P</button>
+    <button size="sm" variant="secondary" on-press="kind_bullet">Bullet</button>
+    <button size="sm" variant="secondary" on-press="bold">Bold</button>
+    <button size="sm" variant="secondary" on-press="italic">Italic</button>
+    <spacer grow="1" />
+    <text size="sm" foreground="text_muted">{status}</text>
+  </row>
+  <scroll grow="1">
+    <column gap="8">
+      <for each="blockRows" key="index" as="b">
+        <column gap="2" padding="4">
+          <button size="sm" variant="ghost" on-press="focus:{b.index}" label="{b.kind_label}">
+            <row gap="6" cross="center">
+              <text size="sm" foreground="text_muted" width="56">{b.kind_label}</text>
+              <text size="sm" grow="1" wrap="false">{b.preview}</text>
+            </row>
+          </button>
+          <if test="{b.focused}">
+            <row gap="6" cross="start">
+              <text width="24">{b.marker}</text>
+              <rich-textarea
+                text="{editorText}"
+                styles="{editorStyles}"
+                placeholder="Type…"
+                on-input="edit"
+                grow="1"
+                height="72"
+                label="Block body"
+              />
+            </row>
+          </if>
+        </column>
+      </for>
+    </column>
+  </scroll>
+  <text size="sm" foreground="text_muted">Serialized GFM</text>
+  <scroll height="100">
+    <markdown source="{serialized}" />
+  </scroll>
+</column>

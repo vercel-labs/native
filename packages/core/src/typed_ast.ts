@@ -50,6 +50,8 @@ export const sdkCoreModulePath = path.join(sdkModuleDir, "core.ts");
 export const sdkLibraryModules: ReadonlyMap<string, string> = new Map([
   ["@native-sdk/core/text", path.join(sdkModuleDir, "text.ts")],
   ["@native-sdk/core/events", path.join(sdkModuleDir, "events.ts")],
+  ["@native-sdk/core/text-attr", path.join(sdkModuleDir, "text-attr.ts")],
+  ["@native-sdk/core/text-doc", path.join(sdkModuleDir, "text-doc.ts")],
 ]);
 
 /// The ambient byte-text method surface (declaration merging into

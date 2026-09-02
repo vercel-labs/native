@@ -1,0 +1,33 @@
+.{
+    .id = "dev.native_sdk.rich-textarea",
+    .name = "rich-textarea",
+    .display_name = "Rich Textarea",
+    .description = "Paragraph-scoped attributed editing dogfood: TextBuffer + style runs via <rich-textarea>.",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    .permissions = .{"view"},
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Rich Textarea",
+                .width = 640,
+                .height = 480,
+                .min_width = 480,
+                .min_height = 360,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "rich-canvas", .kind = "gpu_surface", .fill = true, .role = "Rich textarea canvas", .accessibility_label = "Attributed text editor", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+}

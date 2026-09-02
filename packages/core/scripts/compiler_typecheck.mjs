@@ -43,6 +43,8 @@ for (const [specifier, file] of [
   ["@native-sdk/core", "sdk/core.d.ts"],
   ["@native-sdk/core/text", "sdk/text.d.ts"],
   ["@native-sdk/core/events", "sdk/events.d.ts"],
+  ["@native-sdk/core/text-attr", "sdk/text-attr.d.ts"],
+  ["@native-sdk/core/text-doc", "sdk/text-doc.d.ts"],
 ]) {
   const p = specifier === "@native-sdk/core" && generatedCore !== null
     ? path.resolve(generatedCore)

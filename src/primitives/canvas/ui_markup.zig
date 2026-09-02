@@ -1176,6 +1176,7 @@ pub fn deadHandlerOnNonHitTarget(attr_name: []const u8) bool {
 pub const autofocus_element_message = "autofocus is only supported on focusable controls (text fields, buttons, checkboxes, ...) - it moves keyboard focus to the element when it mounts or when the flag turns on, and nothing about this element can take focus";
 
 pub const submit_on_enter_element_message = "submit-on-enter is only supported on textarea - it makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; single-line fields already submit on Enter, and other elements have no multiline Enter policy";
+pub const styles_element_message = "styles is only supported on rich-textarea - it carries serialized StyleRun bytes for in-place attributed paint";
 
 pub const non_hit_target_handler_message = "on-change/on-submit/on-input never fire here: this element has no control or text behavior - put them on a control (input, checkbox, slider) inside it (on-press/on-double-press/on-toggle/on-hold/on-drag are fine anywhere: they make any element interactive, and presses on plain text or icons inside it fall through to it)";
 
@@ -3312,6 +3313,15 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     // and decoration kinds can never take the keyboard.
                     if (nameInList(node.name, &known_non_hit_target_element_names)) {
                         return attrError(node, attribute, autofocus_element_message);
+                    }
+                    if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                        return attrError(node, attribute, message);
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "styles")) {
+                    if (!std.mem.eql(u8, node.name, "rich-textarea")) {
+                        return attrError(node, attribute, styles_element_message);
                     }
                     if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
                         return attrError(node, attribute, message);
