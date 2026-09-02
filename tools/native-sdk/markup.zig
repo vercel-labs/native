@@ -56,12 +56,43 @@ pub const CheckOutcome = struct {
 };
 
 pub const CheckOptions = struct {
-    /// Shared import boundary for every checked file. `native check` sets
-    /// this to `src`, matching the generated app resolver; the standalone
-    /// markup command leaves it null so each explicitly named file remains
-    /// rooted at its own directory.
+    /// Shared import boundary for every checked file. Callers that need one
+    /// common boundary can set this explicitly; the standalone markup
+    /// command leaves it null so each explicitly named file remains rooted
+    /// at its own directory.
     import_root: ?[]const u8 = null,
+    /// Optional per-file import boundary. App-wide checks use this to keep
+    /// secondary-window markup rooted at `src/windows` while the main view
+    /// and ordinary components remain rooted at `src`.
+    import_root_for_file: ?*const fn (file_path: []const u8) []const u8 = null,
 };
+
+/// Match the generated TypeScript app resolvers: the main view uses the
+/// app-wide `src/` root, while every secondary-window file uses the narrower
+/// `src/windows/` root. Accept both host path separator spellings because
+/// app-wide checks receive paths from a filesystem walk.
+pub fn importRootForFile(file_path: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, file_path, "src/windows/")) return "src/windows";
+    if (std.mem.startsWith(u8, file_path, "src/windows\\")) return "src/windows";
+    if (std.mem.indexOf(u8, file_path, "/src/windows/")) |index| {
+        return file_path[0 .. index + "/src/windows".len];
+    }
+    if (std.mem.indexOf(u8, file_path, "\\src\\windows\\")) |index| {
+        return file_path[0 .. index + "\\src\\windows".len];
+    }
+    if (std.mem.startsWith(u8, file_path, "src/") or
+        std.mem.startsWith(u8, file_path, "src\\"))
+    {
+        return "src";
+    }
+    if (std.mem.indexOf(u8, file_path, "/src/")) |index| {
+        return file_path[0 .. index + "/src".len];
+    }
+    if (std.mem.indexOf(u8, file_path, "\\src\\")) |index| {
+        return file_path[0 .. index + "\\src".len];
+    }
+    return "src";
+}
 
 /// The `check` body shared by `native markup check` and `native check`:
 /// structural validation of every file, plus — when the working directory
@@ -73,6 +104,7 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    std.debug.assert(options.import_root == null or options.import_root_for_file == null);
 
     var outcome = CheckOutcome{};
     var contract_value: ?ui_markup.contract.Contract = null;
@@ -108,11 +140,15 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
     // for the scan).
     var embedded_basenames: ?[]const []const u8 = null;
     for (files) |file_path| {
+        const import_root = if (options.import_root_for_file) |root_for_file|
+            root_for_file(file_path)
+        else
+            options.import_root;
         const checked = checkFile(allocator, io, file_path, .{
             .contract = if (contract_value) |*parsed| parsed else null,
             .usage = if (usage_state) |*live_usage| live_usage else null,
             .arena = arena,
-            .import_root = options.import_root,
+            .import_root = import_root,
         }) catch {
             outcome.failures += 1;
             printOrphanHint(arena, io, file_path, &embedded_basenames);
@@ -201,6 +237,55 @@ test "orphanNote: Zig track hints only for unembedded files" {
     try std.testing.expectEqual(@as(?[]const u8, null), orphanNote(false, &embedded, "app.native"));
     const note = orphanNote(false, &embedded, "leftover.native") orelse return error.TestExpectedNote;
     try std.testing.expect(std.mem.indexOf(u8, note, "@embedFile") != null);
+}
+
+test "importRootForFile preserves the secondary-window boundary" {
+    try std.testing.expectEqualStrings("src", importRootForFile("src/app.native"));
+    try std.testing.expectEqualStrings("src", importRootForFile("src/components/card.native"));
+    try std.testing.expectEqualStrings("src/windows", importRootForFile("src/windows/settings.native"));
+    try std.testing.expectEqualStrings("src/windows", importRootForFile("src/windows/components/shared.native"));
+    try std.testing.expectEqualStrings("src/windows", importRootForFile("src/windows\\components\\shared.native"));
+}
+
+test "app-wide checking applies the secondary-window boundary per file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "src/windows/components");
+    try tmp.dir.createDirPath(io, "src/shared");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/windows/settings.native",
+        .data = "<import src=\"components/shared.native\"/>\n<column />",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/windows/components/shared.native",
+        .data = "<template name=\"shared\"><text>shared</text></template>\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/shared/common.native",
+        .data = "<template name=\"common\"><text>common</text></template>\n",
+    });
+
+    var root_buffer: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    var window_path_buffer: [320]u8 = undefined;
+    const window_path = try std.fmt.bufPrint(&window_path_buffer, "{s}/src/windows/settings.native", .{root});
+    var main_path_buffer: [320]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&main_path_buffer, "{s}/src/shared/common.native", .{root});
+    const files = [_][]const u8{ window_path, main_path };
+    const outcome = try checkFiles(std.testing.allocator, io, &files, .{
+        .import_root_for_file = importRootForFile,
+    });
+    try std.testing.expectEqual(@as(usize, 0), outcome.failures);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/windows/settings.native",
+        .data = "<import src=\"../shared/common.native\"/>\n<column />",
+    });
+    const escaped = try checkFiles(std.testing.allocator, io, &files, .{
+        .import_root_for_file = importRootForFile,
+    });
+    try std.testing.expectEqual(@as(usize, 1), escaped.failures);
 }
 
 test "app-wide checking preserves src as the component import root" {

@@ -159,7 +159,7 @@ test "native check preserves the app markup root for component files" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         source,
-        "checkFiles(allocator, io, markup_files.items, .{ .import_root = \"src\" })",
+        "checkFiles(allocator, io, markup_files.items, .{\n            .import_root_for_file = markup_cli.importRootForFile,\n        })",
     ) != null);
 }
 

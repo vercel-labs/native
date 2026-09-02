@@ -733,7 +733,9 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     try collectMarkupFiles(allocator, io, "src", &markup_files);
     var outcome = markup_cli.CheckOutcome{};
     if (markup_files.items.len > 0) {
-        outcome = try markup_cli.checkFiles(allocator, io, markup_files.items, .{ .import_root = "src" });
+        outcome = try markup_cli.checkFiles(allocator, io, markup_files.items, .{
+            .import_root_for_file = markup_cli.importRootForFile,
+        });
         if (outcome.failures > 0) return error.MarkupCheckFailed;
     }
 
