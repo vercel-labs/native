@@ -258,6 +258,10 @@ test "resolver paths normalize filesystem separators" {
         "src/windows/settings.native",
         try normalizeResolverPath(arena_state.allocator(), "src\\windows\\settings.native"),
     );
+    try std.testing.expectEqualStrings(
+        "//server/share/src/windows/settings.native",
+        try normalizeResolverPath(arena_state.allocator(), "\\\\server\\share\\src\\windows\\settings.native"),
+    );
 }
 
 test "app-wide checking applies the secondary-window boundary per file" {

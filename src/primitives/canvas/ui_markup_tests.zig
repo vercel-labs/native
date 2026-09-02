@@ -1450,6 +1450,25 @@ test "an absolute root path resolves imports the same as a relative one" {
     try testing.expectEqualStrings(markup.import_src_escape_message, escaped.message);
 }
 
+test "a UNC root path preserves both leading slashes while resolving imports" {
+    var buffer: [markup.max_import_path_len]u8 = undefined;
+    const resolved = markup.resolveImportPath(
+        "//server/share/src",
+        "//server/share/src/view.native",
+        "components/card.native",
+        &buffer,
+    );
+    try testing.expectEqualStrings("//server/share/src/components/card.native", resolved.path);
+
+    const escaped = markup.resolveImportPath(
+        "//server/share/src",
+        "//server/share/src/view.native",
+        "../other.native",
+        &buffer,
+    );
+    try testing.expectEqualStrings(markup.import_src_escape_message, escaped.message);
+}
+
 test "an explicit app root lets an independently checked component import a sibling directory" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

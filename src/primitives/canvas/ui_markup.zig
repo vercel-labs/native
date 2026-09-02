@@ -4077,12 +4077,13 @@ pub const ImportPathResult = union(enum) {
 /// messages. Comptime-callable; the returned path slices `buffer`.
 pub fn resolveImportPath(root_dir: []const u8, importer_path: []const u8, src: []const u8, buffer: []u8) ImportPathResult {
     if (importSrcShapeError(src)) |message| return .{ .message = message };
-    // Tokenizing drops the leading "/" of an absolute importer path, so
-    // remember it and restore it when the path is rebuilt below. Without
-    // this, checking a view by absolute path rebuilds imports as relative
-    // strings, and the escape check against the absolute markup root
-    // rejects every import (and the loader would read the wrong file).
+    // Tokenizing drops the leading slash(es) of an absolute importer path,
+    // so remember them and restore them when the path is rebuilt below.
+    // Keeping both slashes matters for Windows UNC paths: collapsing
+    // `//server/share/...` to `/server/share/...` makes the escape check
+    // reject every otherwise-valid import under that share.
     const absolute = importer_path.len > 0 and importer_path[0] == '/';
+    const unc = importer_path.len >= 2 and importer_path[1] == '/';
     var segments: [max_import_path_segments][]const u8 = undefined;
     var count: usize = 0;
     var dir_it = std.mem.tokenizeScalar(u8, dirnamePath(importer_path), '/');
@@ -4103,12 +4104,13 @@ pub fn resolveImportPath(root_dir: []const u8, importer_path: []const u8, src: [
         segments[count] = segment;
         count += 1;
     }
-    var len: usize = 0;
-    if (absolute) {
-        if (buffer.len == 0) return .{ .message = import_src_too_long_message };
+    const prefix_len: usize = if (unc) 2 else if (absolute) 1 else 0;
+    if (buffer.len < prefix_len) return .{ .message = import_src_too_long_message };
+    if (prefix_len > 0) {
         buffer[0] = '/';
-        len = 1;
+        if (prefix_len == 2) buffer[1] = '/';
     }
+    var len: usize = prefix_len;
     for (segments[0..count], 0..) |segment, index| {
         const extra = segment.len + @intFromBool(index > 0);
         if (len + extra > buffer.len) return .{ .message = import_src_too_long_message };
