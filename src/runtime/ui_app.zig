@@ -1821,11 +1821,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // ahead of this wake's event record answers a request from
             // an earlier dispatch, so replay's file-order feed always
             // finds the parked request (see Effects.DrainBoundary).
+            const effects_begin = runtime.frame_profile.begin();
             var boundary = self.effects.drainBoundary();
             while (self.effects.takeMsgWithin(&boundary)) |msg| {
                 self.applyMsg(msg);
                 dispatched = true;
             }
+            runtime.frame_profile.end(.effects, effects_begin);
             self.publishAudioState(runtime);
             var rebuild_error: ?anyerror = null;
             if (dispatched) {

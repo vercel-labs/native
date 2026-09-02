@@ -1004,6 +1004,7 @@ test "snapshot emits the frame_profile line only while profiling" {
     var writer = std.Io.Writer.fixed(&buffer);
     const windows = [_]Window{.{ .title = "Test", .bounds = geometry.RectF.init(0, 0, 100, 100) }};
     const stages = [_]FrameProfileStage{
+        .{ .name = "effects", .p50_us = 75, .p90_us = 180, .max_us = 240, .count = 4 },
         .{ .name = "rebuild", .p50_us = 120, .p90_us = 340, .max_us = 900, .count = 12 },
         .{ .name = "encode", .p50_us = 8, .p90_us = 15, .max_us = 22, .count = 60 },
     };
@@ -1012,7 +1013,7 @@ test "snapshot emits the frame_profile line only while profiling" {
         .frame_profile = .{ .stages = &stages },
     }, &writer);
     const text = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "\nframe_profile rebuild_p50_us=120 rebuild_p90_us=340 rebuild_max_us=900 rebuild_n=12 encode_p50_us=8 encode_p90_us=15 encode_max_us=22 encode_n=60\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\nframe_profile effects_p50_us=75 effects_p90_us=180 effects_max_us=240 effects_n=4 rebuild_p50_us=120 rebuild_p90_us=340 rebuild_max_us=900 rebuild_n=12 encode_p50_us=8 encode_p90_us=15 encode_max_us=22 encode_n=60\n") != null);
 
     // Profiling off -> no frame_profile line.
     var off_buffer: [512]u8 = undefined;
