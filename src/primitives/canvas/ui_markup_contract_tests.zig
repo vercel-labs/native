@@ -893,7 +893,6 @@ test "the contract checker validates a forwarded template-root press" {
     );
     try testing.expectEqual(null, try contract.checkDocument(arena, document, &model_contract, null));
 }
-
 test "the contract checker validates stepper slot content in the consumer scope" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

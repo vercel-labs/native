@@ -113,7 +113,6 @@ const ForwardedCompiled = canvas.CompiledMarkupView(ForwardedModel, ForwardedMsg
     \\</template>
     \\<use template="item" title="Build" on-press="open:{id}" />
 );
-
 test "compiled segmented-control and vector icon button match the interpreter" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -152,7 +151,6 @@ test "compiled template use forwards a typed root press" {
     try testing.expectEqual(ForwardedMsg{ .open = 7 }, tree.msgForPointer(tree.root.id, .up).?);
     try testing.expectEqual(@as(usize, 1), tree.root.children.len);
 }
-
 const zero_card_padding_markup =
     \\<card padding="0">
     \\  <text>Flush</text>
