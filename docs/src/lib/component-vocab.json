@@ -304,7 +304,7 @@
     },
     {
       "name": "use",
-      "doc": "Expands a template in place: template names an earlier definition, other attributes must match its args exactly (defaulted args may be omitted). Children are slot content: built in the consumer's scope and inserted at the template's <slot/>."
+      "doc": "Expands a template in place: template names an earlier definition, value attributes must match its args exactly (defaulted args may be omitted), and on-press may forward a typed message to the expanded root. Children are slot content: built in the consumer's scope and inserted at the template's <slot/>."
     },
     {
       "name": "import",

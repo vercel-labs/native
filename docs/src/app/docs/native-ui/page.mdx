@@ -164,7 +164,7 @@ Paths resolve relative to the importing file, subdirectories and transitive impo
 
 In a default TypeScript app, `src/app.native` may import any component file under `src/`. The generated build discovers and embeds every other `.native` file for the runtime and compiled engines, including mobile builds. `native dev` re-resolves the imported closure from disk, so editing a component file refreshes the view without restarting. Secondary-window roots keep their narrower `src/windows/` import root.
 
-A template can also take markup children. The body marks the insertion point with a single `<slot/>`, and the use site's children build in the consumer's scope — they see the model paths and loop variables where the `<use>` is written — then land at the slot's position:
+A template can also take markup children. The body marks the insertion point with a single `<slot/>`, and the use site's children build in the consumer's scope — they see the model paths and loop variables where the `<use>` is written — then land at the slot's position. A `<use>` may also carry `on-press="tag"` or `on-press="tag:{binding}"` to forward a typed press to the expanded root:
 
 ```html
 <template name="section" args="title">

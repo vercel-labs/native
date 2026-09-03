@@ -9,9 +9,9 @@
          after:  <import src="components/timeline-item.native"/>
                  <use template="timeline-item" title="Build" variant="primary" />
 
-     A call site that needs a typed `on-press` can keep using the built-in
-     `<timeline-item>` element directly; message bindings stay on elements,
-     never in a string-valued component callback. The `global_key` template
+     A call site that needs a typed `on-press` forwards it on the `<use>`:
+     `<use template="timeline-item" ... on-press="open:{entry.id}" />`.
+     Message bindings stay typed and resolve at the use site. The `global_key` template
      arg uses an underscore because template args are binding names; it
      forwards to the element's `global-key` attribute.
 

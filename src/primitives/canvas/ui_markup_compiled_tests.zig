@@ -104,6 +104,16 @@ const EjectedStepperDefaultMarkup =
 ;
 const EjectedStepperDefaultCompiled = canvas.CompiledMarkupView(fixture.TemplateModel, fixture.TemplateMsg, EjectedStepperDefaultMarkup);
 
+const ForwardedModel = struct { id: u32 = 7 };
+const ForwardedMsg = union(enum) { open: u32 };
+const ForwardedUi = canvas.Ui(ForwardedMsg);
+const ForwardedCompiled = canvas.CompiledMarkupView(ForwardedModel, ForwardedMsg,
+    \\<template name="item" args="title">
+    \\  <timeline-item title="{title}" />
+    \\</template>
+    \\<use template="item" title="Build" on-press="open:{id}" />
+);
+
 test "compiled segmented-control and vector icon button match the interpreter" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -131,6 +141,16 @@ test "compiled ejected stepper defaults preserve unkeyed identity" {
     var compiled_ui = TemplateUi.init(arena);
     const compiled = try compiled_ui.finalize(EjectedStepperDefaultCompiled.build(&compiled_ui, &model));
     try testing.expectEqualDeep(library.root, compiled.root);
+}
+
+test "compiled template use forwards a typed root press" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var ui = ForwardedUi.init(arena);
+    const tree = try ui.finalize(ForwardedCompiled.build(&ui, &ForwardedModel{}));
+    try testing.expectEqual(ForwardedMsg{ .open = 7 }, tree.msgForPointer(tree.root.id, .up).?);
+    try testing.expectEqual(@as(usize, 1), tree.root.children.len);
 }
 
 const zero_card_padding_markup =

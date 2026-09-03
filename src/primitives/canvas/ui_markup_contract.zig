@@ -1032,6 +1032,15 @@ const Checker = struct {
         const template_node = self.document.templates[template_index];
         if (template_node.children.len != 1 or template_node.children[0].kind != .element) return;
 
+        // A use-site press is forwarded to the expanded template root. It
+        // is a message expression, not a template argument, and its payload
+        // resolves in the consumer's scope.
+        for (node.attrs) |attribute| {
+            if (std.mem.eql(u8, attribute.name, "on-press")) {
+                try self.checkMessageAttr(node, attribute);
+            }
+        }
+
         // Evaluate every arg's kind against the pristine use-site scope
         // before any entry is pushed, so args cannot see each other.
         const saved_len = self.len;

@@ -1687,6 +1687,7 @@ test "slot placement rules validate with teaching messages" {
         .{ .source = "<row>\n  <slot/>\n</row>", .message = markup.slot_outside_template_message },
         .{ .source = "<template name=\"t\"><column><slot gap=\"2\"/></column></template>\n<row />", .message = markup.slot_attrs_message },
         .{ .source = "<template name=\"t\"><column><slot><text>x</text></slot></column></template>\n<row />", .message = markup.slot_children_message },
+        .{ .source = "<template name=\"t\"><text>x</text></template>\n<use template=\"t\" on-toggle=\"toggle\" />", .message = markup.use_forwarded_event_message },
         .{ .source = "<template name=\"a\"><column><slot/></column></template>\n<template name=\"b\"><column><use template=\"a\"><slot/></use></column></template>\n<row />", .message = markup.slot_in_use_children_message },
     };
     for (cases) |case| {

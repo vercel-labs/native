@@ -195,7 +195,18 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// funnels through here, so the stamp covers the whole vocabulary
         /// in one place. `finalize` pairs the stamp with the structural id.
         fn buildElement(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
-            var built = try self.buildElementInner(ui, scope, node);
+            return self.buildElementForwardedPress(ui, scope, node, null);
+        }
+
+        fn buildElementForwardedPress(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: ?MsgT) BuildError!Ui.Node {
+            var built = try self.buildElementInner(ui, scope, node, forwarded_press);
+            if (forwarded_press) |msg| {
+                // A press declared on <use> belongs to the expanded root.
+                // Set it after the root-specific builder has run so generic
+                // template roots become interactive as well.
+                built.on_press = msg;
+                built.widget.semantics.focusable = true;
+            }
             if (ui.provenance_sink != null) {
                 const source = try ui.arena.create(ui_provenance.NodeSource);
                 source.* = .{
@@ -210,7 +221,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             return built;
         }
 
-        fn buildElementInner(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+        fn buildElementInner(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: ?MsgT) BuildError!Ui.Node {
             if (std.mem.eql(u8, node.name, "markdown")) {
                 return self.buildMarkdown(ui, scope, node);
             }
@@ -228,7 +239,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 return self.buildTimeline(ui, scope, node);
             }
             if (std.mem.eql(u8, node.name, "timeline-item")) {
-                return self.buildTimelineItem(ui, scope, node);
+                return self.buildTimelineItem(ui, scope, node, forwarded_press);
             }
             if (std.mem.eql(u8, node.name, "chart")) {
                 return self.buildChart(ui, scope, node);
@@ -1145,7 +1156,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// `<timeline-item title="{entry.title}" description="..."
         /// meta="..." variant="primary" on-press="open_step:{entry.slot}"/>`:
         /// one composite ledger item; mirrors `Ui.timelineItem`.
-        fn buildTimelineItem(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+        fn buildTimelineItem(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: ?MsgT) BuildError!Ui.Node {
             if (node.children.len != 0) {
                 return self.failNode(node.children[0], markup.timeline_item_children_message);
             }
@@ -1217,6 +1228,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 return self.failNode(node, markup.timeline_item_attr_message);
             }
             if (!has_title) return self.failNode(node, markup.timeline_item_title_message);
+            if (forwarded_press) |msg| options.on_press = msg;
             return ui.timelineItem(options);
         }
 
@@ -1599,10 +1611,20 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "template")) continue;
+                if (std.mem.eql(u8, attribute.name, "on-press")) continue;
+                if (std.mem.startsWith(u8, attribute.name, "on-")) {
+                    return self.failNode(node, markup.use_forwarded_event_message);
+                }
                 if (!markup.templateDeclaresArg(template_node, attribute.name)) {
                     return self.failNode(node, markup.use_extra_arg_message);
                 }
             }
+
+            const forwarded_press = if (node.attrEntry("on-press")) |attribute| blk: {
+                var scratch: Ui.ElementOptions = .{};
+                try self.applyMessageAttr(scope, node, &scratch, attribute);
+                break :blk scratch.on_press;
+            } else null;
 
             // Evaluate every arg against the pristine use-site scope before
             // any entry is pushed, so args cannot see each other.
@@ -1681,7 +1703,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 scope.template_ctx = saved_ctx;
                 scope.source_chain = saved_chain;
             }
-            return self.buildElement(ui, scope, template_node.children[0]);
+            return self.buildElementForwardedPress(ui, scope, template_node.children[0], forwarded_press);
         }
 
         /// A template arg's scope payload: a `{binding}` naming an iterable

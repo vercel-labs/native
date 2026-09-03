@@ -22,11 +22,15 @@ const canvas = native_sdk.canvas;
 const stepper_template = @embedFile("stepper.native");
 const timeline_item_template = @embedFile("timeline-item.native");
 const timeline_template = @embedFile("timeline.native");
+const legacy_stepper = @import("stepper.zig");
+const legacy_timeline_item = @import("timeline_item.zig");
 
 /// A stand-in app model/message pair: the composites under test bind no
 /// model state themselves (their inputs arrive as options/args), so an
 /// empty model and one payload-carrying message tag cover the surface.
-const Model = struct {};
+const Model = struct {
+    open_id: u32 = 7,
+};
 const Msg = union(enum) { open: u32 };
 const Ui = canvas.Ui(Msg);
 
@@ -84,8 +88,7 @@ test "ejected timeline-item markup builds the library item's exact tree" {
     const arena = arena_state.allocator();
 
     // The full visual shape: indicator variant, description, meta,
-    // connector, and selection. The built-in element remains the typed
-    // event boundary; template values do not invent callback values.
+    // connector, selection, and a forwarded typed press handler.
     var library_ui = Ui.init(arena);
     const library_tree = try library_ui.finalize(library_ui.timelineItem(.{
         .key = canvas.uiKey("item"),
@@ -96,15 +99,17 @@ test "ejected timeline-item markup builds the library item's exact tree" {
         .description = "Compile, test, and package the app",
         .meta = "2m 14s",
         .selected = true,
+        .on_press = Msg{ .open = 7 },
     }));
 
-    const source = "<import src=\"components/timeline-item.native\"/>\n<use template=\"timeline-item\" title=\"Build the release\" description=\"Compile, test, and package the app\" meta=\"2m 14s\" icon=\"check\" variant=\"primary\" selected=\"true\" key=\"item\" global_key=\"item-global\" />";
+    const source = "<import src=\"components/timeline-item.native\"/>\n<use template=\"timeline-item\" title=\"Build the release\" description=\"Compile, test, and package the app\" meta=\"2m 14s\" icon=\"check\" variant=\"primary\" selected=\"true\" key=\"item\" global_key=\"item-global\" on-press=\"open:{open_id}\" />";
     const files = [_]canvas.ui_markup.SourceFile{.{ .path = "components/timeline-item.native", .source = timeline_item_template }};
     var ejected_ui = Ui.init(arena);
     const ejected_tree = try buildMarkupTree(arena, &ejected_ui, source, &files);
 
     try testing.expectEqualDeep(library_tree.root, ejected_tree.root);
     try testing.expectEqualDeep(library_tree.handlers, ejected_tree.handlers);
+    try testing.expectEqual(Msg{ .open = 7 }, ejected_tree.msgForPointer(ejected_tree.root.id, .up).?);
     // The minimal shape: dot indicator (no badge content), title only,
     // no connector, no press — the other half of every conditional.
     var minimal_library_ui = Ui.init(arena);
@@ -118,6 +123,19 @@ test "ejected timeline-item markup builds the library item's exact tree" {
     const minimal_ejected = try buildMarkupTree(arena, &minimal_ejected_ui, minimal_source, &minimal_files);
     try testing.expectEqualDeep(minimal_library.root, minimal_ejected.root);
     try testing.expectEqualDeep(minimal_library.handlers, minimal_ejected.handlers);
+}
+
+test "legacy Zig ejection sources remain compilable for Zig-core apps" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stepper_ui = Ui.init(arena);
+    const steps = [_]legacy_stepper.Step{.{ .label = "Build" }};
+    _ = legacy_stepper.build(&stepper_ui, .{}, &steps);
+
+    var timeline_ui = Ui.init(arena);
+    _ = legacy_timeline_item.TimelineItem(Msg).build(&timeline_ui, .{ .title = "Build", .on_press = .{ .open = 7 } });
 }
 
 /// Build a markup view over the test Model through the interpreter,

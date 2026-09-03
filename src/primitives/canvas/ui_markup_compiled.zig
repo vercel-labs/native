@@ -262,6 +262,22 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         // ------------------------------------------------------ building
 
         fn buildElement(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            return buildElementWithForwardedPress(node, entries, ui, model, scope, null);
+        }
+
+        fn buildElementWithForwardedPress(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, forwarded_press: ?MsgT) Ui.Node {
+            var built = buildElementInner(node, entries, ui, model, scope, forwarded_press);
+            if (forwarded_press) |msg| {
+                // A press declared on <use> belongs to the expanded root.
+                // The root-specific builder may also use it to render its
+                // press affordance; this final stamp covers generic roots.
+                built.on_press = msg;
+                built.widget.semantics.focusable = true;
+            }
+            return built;
+        }
+
+        fn buildElementInner(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, forwarded_press: ?MsgT) Ui.Node {
             if (comptime std.mem.eql(u8, node.name, "markdown")) {
                 return buildMarkdown(node, entries, ui, model, scope);
             }
@@ -279,7 +295,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 return buildTimeline(node, entries, ui, model, scope);
             }
             if (comptime std.mem.eql(u8, node.name, "timeline-item")) {
-                return buildTimelineItem(node, entries, ui, model, scope);
+                return buildTimelineItem(node, entries, ui, model, scope, forwarded_press);
             }
             if (comptime std.mem.eql(u8, node.name, "chart")) {
                 return buildChart(node, entries, ui, model, scope);
@@ -1197,7 +1213,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         }
 
         /// Comptime mirror of the interpreter's `buildTimelineItem`.
-        fn buildTimelineItem(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+        fn buildTimelineItem(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, forwarded_press: ?MsgT) Ui.Node {
             comptime {
                 if (node.children.len != 0) fail(node.children[0], markup.timeline_item_children_message);
                 if (node.attr("title") == null) fail(node, markup.timeline_item_title_message);
@@ -1277,6 +1293,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime (node.attr("global-key") != null)) {
                 options.global_key = attrKey(node, entries, comptime node.attr("global-key").?, ui, model, scope, "keys must be integers or strings");
             }
+            if (forwarded_press) |msg| options.on_press = msg;
             return ui.timelineItem(options);
         }
 
@@ -1649,7 +1666,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 .parent = buildArgScope(specs, entries, node, ui, model, scope),
                 .item = scope,
             };
-            return buildElement(comptime template_node.children[0], body_entries, ui, model, body_scope);
+            const forwarded_press: ?MsgT = if (comptime (node.attr("on-press") != null)) blk: {
+                const press_attr = comptime node.attrEntry("on-press").?;
+                var scratch: Ui.ElementOptions = .{};
+                applyMessageAttr(node, press_attr, entries, ui, model, scope, &scratch);
+                break :blk scratch.on_press;
+            } else null;
+            return buildElementWithForwardedPress(comptime template_node.children[0], body_entries, ui, model, body_scope, forwarded_press);
         }
 
         fn useArgSpecs(comptime node: markup.MarkupNode, comptime template_node: markup.MarkupNode, comptime site_entries: []const ScopeEntry) []const ArgSpec {
@@ -1657,6 +1680,10 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 @setEvalBranchQuota(10_000);
                 for (node.attrs) |attribute| {
                     if (std.mem.eql(u8, attribute.name, "template")) continue;
+                    if (std.mem.eql(u8, attribute.name, "on-press")) continue;
+                    if (std.mem.startsWith(u8, attribute.name, "on-")) {
+                        fail(node, markup.use_forwarded_event_message);
+                    }
                     if (!markup.templateDeclaresArg(template_node, attribute.name)) {
                         fail(node, markup.use_extra_arg_message);
                     }

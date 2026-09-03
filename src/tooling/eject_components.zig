@@ -26,6 +26,7 @@ const std = @import("std");
 const buildgraph = @import("buildgraph.zig");
 
 pub const ComponentForm = enum { markup, zig };
+pub const ComponentCore = enum { ts, zig };
 
 pub const Component = struct {
     /// The name `native eject component <name>` accepts (the registry
@@ -44,7 +45,40 @@ pub const Component = struct {
     form_kind: ComponentForm = .markup,
     /// One-line form summary for listings and the success message.
     form: []const u8,
+    /// Legacy Zig source retained for Zig-core apps. TypeScript apps use the
+    /// markup source above; Zig apps keep the builder-shaped component API
+    /// that existed before markup templates became the default.
+    zig_path: ?[]const u8 = null,
+    zig_source: ?[]const u8 = null,
+    zig_form: []const u8 = "Zig view function",
 };
+
+pub const Ejection = struct {
+    name: []const u8,
+    path: []const u8,
+    source: []const u8,
+    form: []const u8,
+    form_kind: ComponentForm,
+};
+
+pub fn forCore(component: *const Component, core: ComponentCore) ?Ejection {
+    return switch (core) {
+        .ts => .{
+            .name = component.name,
+            .path = component.path,
+            .source = component.source,
+            .form = component.form,
+            .form_kind = component.form_kind,
+        },
+        .zig => if (component.zig_path != null and component.zig_source != null) .{
+            .name = component.name,
+            .path = component.zig_path.?,
+            .source = component.zig_source.?,
+            .form = component.zig_form,
+            .form_kind = .zig,
+        } else null,
+    };
+}
 
 /// The ejectable set. Growing it is three steps: add the canonical
 /// source under `components/`, add its identity test, add a row here.
@@ -55,12 +89,16 @@ pub const components = [_]Component{
         .source = @embedFile("components/stepper.native"),
         .form = "markup template",
         .form_kind = .markup,
+        .zig_path = "src/components/stepper.zig",
+        .zig_source = @embedFile("components/stepper.zig"),
     },
     .{
         .name = "timeline",
         .path = "src/components/timeline.native",
         .source = @embedFile("components/timeline.native"),
         .form = "markup template",
+        .zig_path = null,
+        .zig_source = null,
     },
     .{
         .name = "timeline-item",
@@ -68,6 +106,8 @@ pub const components = [_]Component{
         .source = @embedFile("components/timeline-item.native"),
         .form = "markup template",
         .form_kind = .markup,
+        .zig_path = "src/components/timeline_item.zig",
+        .zig_source = @embedFile("components/timeline_item.zig"),
     },
 };
 
@@ -127,6 +167,10 @@ fn editDistance(a: []const u8, b: []const u8) ?usize {
 /// destination already exists — eject transfers ownership exactly once
 /// and never overwrites a component the user may have edited.
 pub fn eject(io: std.Io, app_dir: []const u8, component: *const Component) error{ AlreadyEjected, WriteFailed }!void {
+    return ejectSelection(io, app_dir, forCore(component, .ts).?);
+}
+
+pub fn ejectSelection(io: std.Io, app_dir: []const u8, component: Ejection) error{ AlreadyEjected, WriteFailed }!void {
     var dir = std.Io.Dir.cwd().openDir(io, app_dir, .{}) catch return error.WriteFailed;
     defer dir.close(io);
     if (buildgraph.fileExistsIn(io, dir, component.path)) return error.AlreadyEjected;
@@ -183,4 +227,12 @@ test "current ejectable components all use the markup form" {
         try std.testing.expect(std.mem.endsWith(u8, component.path, ".native"));
         try std.testing.expectEqualStrings("markup template", component.form);
     }
+}
+
+test "Zig-core selection preserves the legacy builder sources" {
+    try std.testing.expectEqualStrings("src/components/stepper.zig", forCore(&components[0], .zig).?.path);
+    try std.testing.expectEqual(ComponentForm.zig, forCore(&components[0], .zig).?.form_kind);
+    try std.testing.expect(forCore(&components[1], .zig) == null);
+    try std.testing.expectEqualStrings("src/components/timeline_item.zig", forCore(&components[2], .zig).?.path);
+    try std.testing.expect(std.mem.indexOf(u8, forCore(&components[2], .zig).?.source, "on_press") != null);
 }

@@ -879,6 +879,21 @@ test "segmented-control bindings and messages check through the model contract" 
     try testing.expectEqual(null, try contract.checkDocument(arena, document, &model_contract, &usage));
 }
 
+test "the contract checker validates a forwarded template-root press" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const document = try parseFixture(arena,
+        \\<template name="item" args="title">
+        \\  <timeline-item title="{title}" />
+        \\</template>
+        \\<row>
+        \\  <use template="item" title="Build" on-press="remove:{profile.age}" />
+        \\</row>
+    );
+    try testing.expectEqual(null, try contract.checkDocument(arena, document, &model_contract, null));
+}
+
 test "the contract checker validates stepper slot content in the consumer scope" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

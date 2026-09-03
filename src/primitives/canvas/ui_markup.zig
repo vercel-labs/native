@@ -810,7 +810,9 @@ pub const MessageExpression = struct {
     payload: []const u8 = "",
 };
 
-/// Parse an `on-*` attribute value: `msg` or `msg:{path}`.
+/// Parse an `on-*` attribute value: `msg` or `msg:{path}`. Event attributes
+/// on `<use>` are limited to `on-press`; the use forwards that message to
+/// the template root after resolving it in the consumer's scope.
 pub fn parseMessageExpression(value: []const u8) ?MessageExpression {
     if (std.mem.indexOfScalar(u8, value, ':')) |colon| {
         const tag = value[0..colon];
@@ -1995,6 +1997,7 @@ pub const use_undefined_template_message = "use references an undefined template
 pub const use_earlier_template_message = "use may only reference templates defined earlier in the file";
 pub const use_missing_arg_message = "use is missing an argument the template declares in args (only args declared with a default, like trend=flat, may be omitted)";
 pub const use_extra_arg_message = "use passes an argument the template does not declare in args";
+pub const use_forwarded_event_message = "use only forwards on-press to the template root (the message is resolved at the use site)";
 pub const use_children_without_slot_message = "this template has no <slot/> - use-site children need an insertion point; add <slot/> to the template body or remove the children";
 pub const slot_outside_template_message = "slot is only allowed inside a template body - it marks where use-site children are inserted";
 pub const slot_in_use_children_message = "a slot cannot sit inside use-site children - slot forwarding is not supported; each template body declares its own slot";
@@ -2174,6 +2177,15 @@ fn validateUse(document: MarkupDocument, node: MarkupNode, template_limit: usize
     }
     for (node.attrs) |attribute| {
         if (std.mem.eql(u8, attribute.name, "template")) continue;
+        if (std.mem.eql(u8, attribute.name, "on-press")) {
+            if (parseMessageExpression(attribute.value) == null) {
+                return attrError(node, attribute, "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")");
+            }
+            continue;
+        }
+        if (std.mem.startsWith(u8, attribute.name, "on-")) {
+            return attrError(node, attribute, use_forwarded_event_message);
+        }
         if (!templateDeclaresArg(template_node, attribute.name)) {
             return attrError(node, attribute, use_extra_arg_message);
         }
