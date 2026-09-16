@@ -49,3 +49,8 @@ packages/core/node_modules/
 # TS scaffold writes into a new app's .gitignore)
 examples/soundboard-ts/node_modules/
 examples/system-monitor-ts/node_modules/
+
+# The external-link warning fixtures exercise the CLI's generated TypeScript
+# editor surface. Keep that materialized package out of fixture source.
+tests/app-runner/external-link-warning-json/node_modules/
+tests/app-runner/external-link-warning-zon/node_modules/

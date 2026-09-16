@@ -158,6 +158,43 @@ pub const RunOptions = struct {
     }
 };
 
+fn manifestStringList(comptime value: anytype, comptime field: []const u8) []const []const u8 {
+    comptime {
+        if (!@hasField(@TypeOf(value), field)) return &.{};
+        var out: []const []const u8 = &.{};
+        for (@field(value, field)) |entry| {
+            const string: []const u8 = entry;
+            out = out ++ &[_][]const u8{string};
+        }
+        return out;
+    }
+}
+
+/// Project the normalized manifest's external-link policy into the runtime's
+/// security shape. The generated TypeScript runner uses this while custom Zig
+/// runners retain their explicitly authored `RunOptions.security`.
+pub fn manifestExternalLinkPolicy() native_sdk.ExternalLinkPolicy {
+    return comptime manifestExternalLinkPolicyFrom(app_manifest);
+}
+
+pub fn manifestExternalLinkPolicyFrom(comptime manifest_value: anytype) native_sdk.ExternalLinkPolicy {
+    if (comptime !@hasField(@TypeOf(manifest_value), "security")) return .{};
+    if (comptime !@hasField(@TypeOf(manifest_value.security), "navigation")) return .{};
+    const navigation = manifest_value.security.navigation;
+    if (comptime !@hasField(@TypeOf(navigation), "external_links")) return .{};
+    const external_links = navigation.external_links;
+    const action = if (comptime !@hasField(@TypeOf(external_links), "action"))
+        native_sdk.ExternalLinkAction.deny
+    else if (comptime std.mem.eql(u8, external_links.action, "open_system_browser"))
+        native_sdk.ExternalLinkAction.open_system_browser
+    else
+        native_sdk.ExternalLinkAction.deny;
+    return .{
+        .action = action,
+        .allowed_urls = manifestStringList(external_links, "allowed_urls"),
+    };
+}
+
 fn manifestUpdateString(comptime field: []const u8) []const u8 {
     if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return "";
     const updates = app_manifest.updates;
@@ -780,6 +817,10 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     // `NullPlatform.createWithOptions`/`destroy`).
     const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
     defer null_platform.destroy();
+    // Generated TypeScript apps are canvas-first: give the headless runner
+    // the same GPU-surface capability their manifest declares so a startup
+    // smoke can reach the runtime policy setup instead of failing scene load.
+    null_platform.gpu_surfaces = true;
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -1319,6 +1360,34 @@ test "RunOptions resolves manifest commands menus and shortcuts" {
     try std.testing.expectEqualStrings("app.refresh", shortcuts[0].id);
     try std.testing.expectEqualStrings("r", shortcuts[0].key);
     try std.testing.expect(shortcuts[0].modifiers.primary);
+}
+
+test "external link policies project missing deny and explicit manifest settings" {
+    const missing_security: struct {} = .{};
+    const missing = comptime manifestExternalLinkPolicyFrom(missing_security);
+    try std.testing.expectEqual(native_sdk.ExternalLinkAction.deny, missing.action);
+    try std.testing.expectEqual(@as(usize, 0), missing.allowed_urls.len);
+
+    const denied = comptime manifestExternalLinkPolicyFrom(.{ .security = .{ .navigation = .{ .external_links = .{
+        .action = "deny",
+        .allowed_urls = .{"https://example.com/ignored-by-deny"},
+    } } } });
+    try std.testing.expectEqual(native_sdk.ExternalLinkAction.deny, denied.action);
+    try std.testing.expectEqual(@as(usize, 1), denied.allowed_urls.len);
+    try std.testing.expectEqualStrings("https://example.com/ignored-by-deny", denied.allowed_urls[0]);
+
+    const explicit = comptime manifestExternalLinkPolicyFrom(.{ .security = .{ .navigation = .{ .external_links = .{
+        .action = "open_system_browser",
+        .allowed_urls = .{ "https://example.com/docs/*", "https://*.example.com/*" },
+    } } } });
+    try std.testing.expectEqual(native_sdk.ExternalLinkAction.open_system_browser, explicit.action);
+    try std.testing.expectEqual(@as(usize, 2), explicit.allowed_urls.len);
+    try std.testing.expectEqualStrings("https://example.com/docs/*", explicit.allowed_urls[0]);
+    try std.testing.expectEqualStrings("https://*.example.com/*", explicit.allowed_urls[1]);
+
+    const fixture = comptime manifestExternalLinkPolicy();
+    try std.testing.expectEqual(native_sdk.ExternalLinkAction.open_system_browser, fixture.action);
+    try std.testing.expectEqual(@as(usize, 2), fixture.allowed_urls.len);
 }
 
 test "RunOptions explicit command menu and shortcut slices override manifest values" {

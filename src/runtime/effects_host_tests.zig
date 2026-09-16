@@ -323,6 +323,16 @@ test "native system commands use runtime validation and platform services" {
     defer h.destroy();
     const fx = &h.app_state.effects;
 
+    const host_wildcard_urls = [_][]const u8{"https://*.example.com/*"};
+    h.harness.runtime.options.security.navigation.external_links = .{
+        .action = .open_system_browser,
+        .allowed_urls = &host_wildcard_urls,
+    };
+    // Host sends are fire-and-forget, so an unmatchable configuration must
+    // never reach the platform even though the denied effect has no result.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .open_external_url);
+    try std.testing.expectEqual(@as(usize, 0), h.harness.null_platform.lastExternalUrl().len);
+
     const allowed_urls = [_][]const u8{"https://example.com/*"};
     h.harness.runtime.options.security.navigation.external_links = .{
         .action = .open_system_browser,

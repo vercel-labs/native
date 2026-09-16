@@ -555,6 +555,41 @@ pub fn build(b: *std.Build) void {
         .name = "native",
         .root_module = host_cli_mod,
     });
+
+    // Exercise the generated TypeScript entry rather than only the runner's
+    // comptime projection. Both app.json and legacy app.zon use the null
+    // platform so their startup diagnostics can be asserted headlessly, with
+    // tracing disabled to prove the warning does not rely on a trace sink.
+    const external_link_warning_json_build = managedExampleRun(b, host_cli_exe, &.{ "build", "-Dplatform=null", "-Dtrace=off", "-Doptimize=Debug" });
+    // The pinned TypeScript compiler emits current LLVM IR; use the
+    // compatible compiler bundled with the required Zig toolchain.
+    external_link_warning_json_build.setEnvironmentVariable("SCRIPTC_CC", "zigcc");
+    external_link_warning_json_build.setCwd(b.path("tests/app-runner/external-link-warning-json"));
+    const external_link_warning_zon_build = managedExampleRun(b, host_cli_exe, &.{ "build", "-Dplatform=null", "-Dtrace=off", "-Doptimize=Debug" });
+    external_link_warning_zon_build.setEnvironmentVariable("SCRIPTC_CC", "zigcc");
+    external_link_warning_zon_build.setCwd(b.path("tests/app-runner/external-link-warning-zon"));
+    const external_link_warning_smoke_run = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\for format in json zon; do
+        \\  app="tests/app-runner/external-link-warning-$format/zig-out/bin/external-link-warning-$format"
+        \\  log="tests/app-runner/external-link-warning-$format/.native/external-link-warning.log"
+        \\  "$app" >"$log" 2>&1
+        \\  output="$(cat "$log")"
+        \\  case "$output" in *"native warning: security.navigation.external_links.allowed_urls[1] = 'https://*.example.com/*': host wildcards are unsupported"*) ;; *) echo "$format manifest did not report its unsupported host wildcard" >&2; cat "$log" >&2; exit 1 ;; esac
+        \\  case "$output" in *"native warning: security.navigation.external_links.allowed_urls[2] = 'https://*/': host wildcards are unsupported"*) ;; *) echo "$format manifest did not report its all-host wildcard" >&2; cat "$log" >&2; exit 1 ;; esac
+        \\  case "$output" in *"only a standalone '*' or the final '*' in an eligible URL prefix expands"*"https://example.com/docs/*"*) ;; *) echo "$format manifest warning did not explain the supported replacement" >&2; cat "$log" >&2; exit 1 ;; esac
+        \\  case "$output" in *"security.external_url_pattern"*) echo "$format manifest emitted trace output with -Dtrace=off" >&2; cat "$log" >&2; exit 1 ;; *) ;; esac
+        \\done
+        \\echo "external-link warning smoke ok"
+        ,
+        "sh",
+    });
+    external_link_warning_smoke_run.step.dependOn(&external_link_warning_json_build.step);
+    external_link_warning_smoke_run.step.dependOn(&external_link_warning_zon_build.step);
+    const external_link_warning_smoke_step = b.step("test-app-runner-external-link-warning-smoke", "Run generated TypeScript external-link warning startup smoke tests");
+    external_link_warning_smoke_step.dependOn(&external_link_warning_smoke_run.step);
+
     // Docs component-preview generator: renders the built-in component
     // catalog offscreen through the deterministic reference renderer and
     // writes theme-aware webp pairs plus the markup vocabulary JSON into
@@ -719,6 +754,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_window_placement_tests).step);
     test_step.dependOn(&app_runner_test_run.step);
+    // Keep the generated JSON/ZON runner smoke in the ordinary aggregate
+    // suite: fast gates and CI invoke this step through `zig build test`.
+    test_step.dependOn(&external_link_warning_smoke_run.step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&gtk_pixels_test_run.step);
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);

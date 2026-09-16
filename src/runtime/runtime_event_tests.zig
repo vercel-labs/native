@@ -85,6 +85,98 @@ test "runtime configures platform keyboard shortcuts" {
     try std.testing.expectEqualStrings("command.palette", harness.null_platform.configuredShortcuts()[0].id);
 }
 
+test "runtime warns about external host wildcards while preserving the configured policy" {
+    const TestApp = struct {
+        started: bool = false,
+
+        fn start(context: *anyopaque, runtime: *Runtime) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.started = true;
+        }
+
+        fn app(self: *@This()) App {
+            return .{
+                .context = self,
+                .name = "external-link-warning",
+                .source = platform.WebViewSource.html("<h1>External links</h1>"),
+                .start_fn = start,
+            };
+        }
+    };
+    const WarningTraceCapture = struct {
+        count: usize = 0,
+        valid: bool = true,
+
+        fn sink(self: *@This()) trace.Sink {
+            return .{ .context = self, .write_fn = write };
+        }
+
+        fn stringFieldMatches(field: trace.Field, key: []const u8, expected: []const u8) bool {
+            if (!std.mem.eql(u8, field.key, key)) return false;
+            return switch (field.value) {
+                .string => |value| std.mem.eql(u8, value, expected),
+                else => false,
+            };
+        }
+
+        fn uintFieldMatches(field: trace.Field, key: []const u8, expected: u64) bool {
+            if (!std.mem.eql(u8, field.key, key)) return false;
+            return switch (field.value) {
+                .uint => |value| value == expected,
+                else => false,
+            };
+        }
+
+        fn write(context: *anyopaque, record: trace.Record) trace.WriteError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, record.name, "security.external_url_pattern")) return;
+            const expected_pattern = switch (self.count) {
+                0 => "https://*.example.com/*",
+                1 => "https://*/",
+                else => "",
+            };
+            self.valid = self.valid and record.level == .warn and
+                std.mem.eql(u8, record.message orelse "", "external-link pattern may not authorize the intended URLs; use an explicit host such as https://example.com/docs/*") and
+                record.fields.len == 4;
+            if (record.fields.len == 4) {
+                self.valid = self.valid and
+                    stringFieldMatches(record.fields[0], "policy_path", "security.navigation.external_links.allowed_urls") and
+                    uintFieldMatches(record.fields[1], "policy_index", @intCast(self.count + 1)) and
+                    stringFieldMatches(record.fields[2], "pattern", expected_pattern) and
+                    stringFieldMatches(record.fields[3], "reason", "host wildcards are unsupported");
+            }
+            self.count += 1;
+        }
+    };
+
+    const allowed_urls = [_][]const u8{
+        "https://example.com/docs/*",
+        "https://*.example.com/*",
+        "https://*/",
+        "https://example.com/guides/*",
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.security.navigation.external_links = .{
+        .action = .open_system_browser,
+        .allowed_urls = &allowed_urls,
+    };
+    var warning_trace: WarningTraceCapture = .{};
+    harness.runtime.options.trace_sink = warning_trace.sink();
+    var app_state: TestApp = .{};
+    try harness.runtime.run(app_state.app());
+
+    try std.testing.expect(app_state.started);
+    const configured = harness.null_platform.security_policy.navigation.external_links;
+    try std.testing.expectEqual(security.ExternalLinkAction.open_system_browser, configured.action);
+    try std.testing.expectEqual(@as(usize, 4), configured.allowed_urls.len);
+    try std.testing.expectEqualStrings("https://*.example.com/*", configured.allowed_urls[1]);
+
+    try std.testing.expect(warning_trace.valid);
+    try std.testing.expectEqual(@as(usize, 2), warning_trace.count);
+}
+
 test "runtime dispatches app activation lifecycle events" {
     const TestApp = struct {
         events: [4]LifecycleEvent = undefined,

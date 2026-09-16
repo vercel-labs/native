@@ -275,6 +275,14 @@ test "runtime validates native OS actions before platform dispatch" {
     try std.testing.expectError(error.NavigationDenied, harness.runtime.openExternalUrl("https://example.com/docs"));
     try std.testing.expectError(error.InvalidExternalUrl, harness.runtime.openExternalUrl("mailto:hello@example.com"));
 
+    const host_wildcard_urls = [_][]const u8{"https://*.example.com/*"};
+    harness.runtime.options.security.navigation.external_links = .{
+        .action = .open_system_browser,
+        .allowed_urls = &host_wildcard_urls,
+    };
+    try std.testing.expectError(error.NavigationDenied, harness.runtime.openExternalUrl("https://docs.example.com/guide"));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.lastExternalUrl().len);
+
     const allowed_urls = [_][]const u8{"https://example.com/*"};
     harness.runtime.options.security.navigation.external_links = .{
         .action = .open_system_browser,
@@ -398,6 +406,7 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
         .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = &filesystem_permission, .origins = &origins },
         .{ .name = "native-sdk.command.invoke", .permissions = &command_permission, .origins = &origins },
     };
+    const host_wildcard_urls = [_][]const u8{"https://*.example.com/*"};
     const allowed_urls = [_][]const u8{"https://example.com/*"};
 
     const allowed = try TestHarness().create(std.testing.allocator, .{});
@@ -405,7 +414,7 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     allowed.runtime.options.security.permissions = &grants;
     allowed.runtime.options.security.navigation.external_links = .{
         .action = .open_system_browser,
-        .allowed_urls = &allowed_urls,
+        .allowed_urls = &host_wildcard_urls,
     };
     allowed.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &policies };
 
@@ -444,6 +453,17 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
 
     try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"open\",\"command\":\"native-sdk.os.openUrl\",\"payload\":{\"url\":\"https://example.com/docs\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), allowed.null_platform.lastExternalUrl().len);
+
+    allowed.runtime.options.security.navigation.external_links = .{
+        .action = .open_system_browser,
+        .allowed_urls = &allowed_urls,
+    };
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"open-corrected\",\"command\":\"native-sdk.os.openUrl\",\"payload\":{\"url\":\"https://example.com/docs\"}}",
         .origin = "zero://inline",
     } });
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);

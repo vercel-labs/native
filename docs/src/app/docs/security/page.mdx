@@ -314,16 +314,24 @@ Unknown main-frame navigations are blocked unless the external-link policy expli
 
 External links are denied by default. To open links in the system browser, opt in and list URL prefixes:
 
-```zig
-.security = .{
-    .navigation = .{
-        .external_links = .{
-            .action = "open_system_browser",
-            .allowed_urls = .{ "https://example.com/docs/*" },
-        },
-    },
-},
+```json
+{
+  "security": {
+    "navigation": {
+      "external_links": {
+        "action": "open_system_browser",
+        "allowed_urls": ["https://example.com/docs/*"]
+      }
+    }
+  }
+}
 ```
+
+Each entry is case-sensitive. A complete URL is an exact match. The standalone `"*"` allows every HTTP(S) URL. Otherwise, only a final `*` expands a literal prefix, and that prefix must include an `http://` or `https://` scheme, a concrete host, and a path slash. Prefixes need not end in `/*`: `https://example.com/docs*` is a valid literal prefix too.
+
+Subdomain and host globbing are not supported. `https://*.example.com/*` does not match `https://docs.example.com/`; write each explicit host instead. Asterisks embedded anywhere other than the final wildcard are literal, including in a path, query, or fragment. The runtime prints an advisory startup warning when it sees a host wildcard so an accepted legacy configuration is visible without changing its authorization behavior.
+
+Custom Zig runners supply the effective runtime policy themselves. The generated TypeScript runner projects this manifest policy automatically.
 
 Do not allow broad external patterns for pages that can be influenced by remote content.
 

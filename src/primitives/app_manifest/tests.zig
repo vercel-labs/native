@@ -779,6 +779,17 @@ test "security validation catches invalid navigation and external policies" {
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .allowed_origins = &.{"bad origin"} } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"ssh://example.com"} } } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"https://example.com*"} } } }));
+    try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"https://*"} } } }));
+    try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"ftp://example.com/*"} } } }));
+    try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"https://example.com /docs/*"} } } }));
+
+    // These host wildcard forms remain accepted for compatibility. Runtime
+    // startup now warns that host globbing is not part of the matcher.
+    try validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{
+        "https://*.example.com/*",
+        "https://*/*",
+        "https://*/",
+    } } } });
 }
 
 test "package metadata validation catches empty authors and invalid keywords" {

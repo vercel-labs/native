@@ -13,6 +13,14 @@
     .shortcuts = .{
         .{ .id = "app.refresh", .key = "r", .modifiers = .{"primary"} },
     },
+    .security = .{
+        .navigation = .{
+            .external_links = .{
+                .action = "open_system_browser",
+                .allowed_urls = .{ "https://example.com/docs/*", "https://*.example.com/*" },
+            },
+        },
+    },
     .menus = .{
         .{
             .title = "View",

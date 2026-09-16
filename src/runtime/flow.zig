@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const geometry = @import("geometry");
 const trace = @import("trace");
 const json = @import("json");
@@ -100,6 +101,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             }
             log(self, "runtime.init", "runtime initialized", init_fields[0..init_field_count]);
             try app_manifest.validateCommands(self.options.commands);
+            warnAboutExternalUrlPatterns(self);
             try self.options.platform.services.configureSecurityPolicy(self.options.security);
             try self.options.platform.services.configureMenus(self.options.menus);
             try self.options.platform.services.configureShortcuts(self.options.shortcuts);
@@ -1270,6 +1272,35 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         /// see it (`dropped_trace_records`).
         fn log(self: *Runtime, name_value: []const u8, message: ?[]const u8, fields: []const trace.Field) void {
             logAt(self, .info, name_value, message, fields);
+        }
+
+        /// External-link matching accepts only exact URLs, a standalone `*`,
+        /// and literal prefixes whose final `*` follows a scheme/host/path
+        /// boundary. Keep suspicious entries in place, but make a likely
+        /// host-glob typo visible before any startup effect can be sent.
+        fn warnAboutExternalUrlPatterns(self: *Runtime) void {
+            for (self.options.security.navigation.external_links.allowed_urls, 0..) |pattern, index| {
+                const diagnostic = security.externalUrlPatternDiagnostic(pattern) orelse continue;
+                const reason = switch (diagnostic) {
+                    .unsupported_host_wildcard => "host wildcards are unsupported",
+                    .invalid_wildcard_prefix => "a final wildcard must follow an http(s) scheme, host, and path slash",
+                };
+                const fields = [_]trace.Field{
+                    trace.string("policy_path", "security.navigation.external_links.allowed_urls"),
+                    trace.uint("policy_index", index),
+                    trace.string("pattern", pattern),
+                    trace.string("reason", reason),
+                };
+                logAt(self, .warn, "security.external_url_pattern", "external-link pattern may not authorize the intended URLs; use an explicit host such as https://example.com/docs/*", &fields);
+                // The trace sink is optional (and app runners may filter it),
+                // so startup policy feedback must not depend on tracing.
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "native warning: security.navigation.external_links.allowed_urls[{d}] = '{s}': {s}; only a standalone '*' or the final '*' in an eligible URL prefix expands. Use an explicit host such as 'https://example.com/docs/*'.\n",
+                        .{ index, pattern, reason },
+                    );
+                }
+            }
         }
 
         fn logAt(self: *Runtime, level: trace.Level, name_value: []const u8, message: ?[]const u8, fields: []const trace.Field) void {

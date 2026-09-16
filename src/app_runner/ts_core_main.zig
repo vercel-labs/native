@@ -10,7 +10,7 @@
 //!   scene / canvas   app.zon's `.shell` through `shellConfigFrom`; the
 //!                    canvas is the scene's first gpu_surface view.
 //!   identity         app.zon's `.id`/`.name`/`.display_name`.
-//!   security         app.zon's `.permissions` and navigation origins.
+//!   security         app.zon's `.permissions` and navigation policy.
 //!   theme            app.zon's `.theme` pack; the stock tokens compose
 //!                    it with the live system appearance. `.theme_accent`
 //!                    layers the manifest's one-accent brand override
@@ -336,7 +336,10 @@ pub fn main(init: std.process.Init) !void {
         .js_window_api = false,
         .security = .{
             .permissions = app_permissions,
-            .navigation = .{ .allowed_origins = allowed_origins },
+            .navigation = .{
+                .allowed_origins = allowed_origins,
+                .external_links = comptime runner.manifestExternalLinkPolicy(),
+            },
         },
         .relational_migrations = &relational_migrations.migrations,
     }, init);
