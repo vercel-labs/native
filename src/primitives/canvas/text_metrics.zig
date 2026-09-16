@@ -152,8 +152,8 @@ comptime {
 /// The bundled face's `.notdef` advance in em units (0.6 em in Geist).
 /// This is the width the face itself declares for "I do not have this
 /// glyph", so it is what layout charges for codepoints outside the
-/// face's coverage (and for control or malformed bytes, which paint as
-/// the same block fallback).
+/// face's coverage. Decodable misses render that face's glyph-0 outline
+/// when it has one, while malformed bytes retain the renderer fallback.
 const notdef_advance_em: f32 = faceAdvanceEm(&font_ttf.geist_regular, 0);
 
 /// Em-unit advances for the printable ASCII range, read from the
@@ -207,7 +207,7 @@ pub fn estimatedTextEllipsisAdvance(font_id: FontId, size: f32) f32 {
 /// the face's own `hmtx` advance (so layout measures exactly what the
 /// reference renderer inks), uncovered codepoints take the same three
 /// documented fallback classes (East Asian wide 1.0 em, uncovered
-/// symbol/pictograph blocks 0.8 em, everything else that face's own
+/// symbol/pictograph glyphs 0.8 em, everything else that face's own
 /// `.notdef` advance).
 pub fn estimateTextWidthForFace(face: *const font_ttf.Face, text: []const u8, size: f32) f32 {
     var width: f32 = 0;
@@ -252,8 +252,8 @@ fn clusterAdvanceEmForFace(face: *const font_ttf.Face, bytes: []const u8) f32 {
 /// is definitionally in lockstep with the bytes the renderer inks), and
 /// three documented fallbacks for what the face cannot answer — East
 /// Asian wide/fullwidth codepoints charge a full em (the advance CJK
-/// fallback fonts such as PingFang use, and the cell a fullwidth block
-/// glyph should occupy), uncovered symbol/pictograph blocks charge
+/// fallback fonts such as PingFang use), uncovered symbol/pictograph
+/// glyphs charge
 /// 0.8 em (the AppleSymbols cascade class real macOS text falls back
 /// to), everything else charges the face's own `.notdef` advance.
 fn clusterAdvanceEm(bytes: []const u8) f32 {

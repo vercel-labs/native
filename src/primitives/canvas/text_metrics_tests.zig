@@ -250,8 +250,9 @@ test "CoreText cascades codepoints the bundled face lacks" {
     defer CFRelease(font);
 
     for ([_][]const u8{ "☐", "☑" }) |sample| {
-        // The bundled face itself has no glyph (that is why the reference
-        // renderer draws its documented .notdef block)...
+        // The bundled face itself has no glyph (so the reference renderer
+        // uses glyph 0's `.notdef` outline; an empty or unusable glyph 0
+        // intentionally contributes no ink)...
         const codepoint = try std.unicode.utf8Decode(sample);
         try testing.expectEqual(@as(u16, 0), font_ttf.geist_regular.glyphIndex(codepoint));
         // ...but the shaped line cascades to a real symbol font.

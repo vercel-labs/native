@@ -271,6 +271,142 @@ test "registered faces answer the batched advances seam identically to per-prefi
     }
 }
 
+test "registered faces use glyph-zero outlines and ink metrics for uncovered text" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+
+    // A BMP ideograph, a symbol, and an astral pictograph all miss the
+    // bundled mono cmap. Registering its exact bytes under an app id
+    // must still render and measure the face's glyph 0 rather than a
+    // full text-colored cell.
+    const text = "\xE6\x97\xA5\xE2\x9C\x85\xF0\x9F\x98\x80"; // 日✅😀
+    try harness.runtime.registerCanvasFont(registered_font_id, mono_bytes);
+    const face = harness.runtime.registeredCanvasFontFace(registered_font_id).?;
+    for ([_]u21{ 0x65E5, 0x2705, 0x1F600 }) |codepoint| {
+        try std.testing.expectEqual(@as(u16, 0), face.glyphIndex(codepoint));
+    }
+    const glyph_zero_bounds = (try face.glyphBounds(0)).?;
+
+    const provider = harness.runtime.textMeasureProvider().?;
+    const size: f32 = 20;
+    const width = provider.measureWidth(registered_font_id, size, text);
+    // This correction changes ink only: registered-face width remains
+    // the existing face-aware advance answer, and the batched provider
+    // keeps the same total.
+    try std.testing.expectApproxEqAbs(canvas.estimateTextWidthForFace(face, text, size), width, 0.001);
+    var advances: [text.len]f32 = undefined;
+    try std.testing.expect(provider.measureAdvances(registered_font_id, size, text, &advances));
+    var advance_sum: f32 = 0;
+    for (advances) |advance| advance_sum += advance;
+    try std.testing.expectEqual(width, advance_sum);
+
+    // The provider mirrors reference placement: each decoded miss uses
+    // glyph 0's natural advance inset and its actual outline bounds.
+    const scale = size / face.units_per_em;
+    const natural_advance = face.advance(0) * scale;
+    var expected: canvas.TextInkMetrics = .{};
+    var expected_has_ink = false;
+    var pen_x: f32 = 0;
+    var offset: usize = 0;
+    while (offset < text.len) {
+        const next = offset + canvas.utf8SequenceLength(text[offset]);
+        const cell_advance = canvas.estimateTextWidthForFace(face, text[offset..next], size);
+        const inset = @max(0, (cell_advance - natural_advance) * 0.5);
+        const min_x = pen_x + inset + glyph_zero_bounds.x * scale;
+        const max_x = pen_x + inset + (glyph_zero_bounds.x + glyph_zero_bounds.width) * scale;
+        const min_y = -((glyph_zero_bounds.y + glyph_zero_bounds.height) * scale);
+        const max_y = -(glyph_zero_bounds.y * scale);
+        if (!expected_has_ink) {
+            expected = .{ .min_x = min_x, .max_x = max_x, .min_y = min_y, .max_y = max_y };
+            expected_has_ink = true;
+        } else {
+            expected.min_x = @min(expected.min_x, min_x);
+            expected.max_x = @max(expected.max_x, max_x);
+            expected.min_y = @min(expected.min_y, min_y);
+            expected.max_y = @max(expected.max_y, max_y);
+        }
+        pen_x += cell_advance;
+        offset = next;
+    }
+    const metrics = provider.measureInk(registered_font_id, size, text).?;
+    try std.testing.expectApproxEqAbs(expected.min_x, metrics.min_x, 0.001);
+    try std.testing.expectApproxEqAbs(expected.max_x, metrics.max_x, 0.001);
+    try std.testing.expectApproxEqAbs(expected.min_y, metrics.min_y, 0.001);
+    try std.testing.expectApproxEqAbs(expected.max_y, metrics.max_y, 0.001);
+
+    // One-byte controls are valid Unicode scalars too. They are not
+    // whitespace breaks, so their ink metrics must use the same glyph-0
+    // outline placement the reference renderer uses rather than the
+    // historical full-cell fallback.
+    const control_text = "\x01";
+    try std.testing.expectEqual(@as(u16, 0), face.glyphIndex(0x01));
+    const control_advance = canvas.estimateTextWidthForFace(face, control_text, size);
+    const control_inset = @max(0, (control_advance - natural_advance) * 0.5);
+    const control_metrics = provider.measureInk(registered_font_id, size, control_text).?;
+    try std.testing.expectApproxEqAbs(control_inset + glyph_zero_bounds.x * scale, control_metrics.min_x, 0.001);
+    try std.testing.expectApproxEqAbs(control_inset + (glyph_zero_bounds.x + glyph_zero_bounds.width) * scale, control_metrics.max_x, 0.001);
+    try std.testing.expectApproxEqAbs(-((glyph_zero_bounds.y + glyph_zero_bounds.height) * scale), control_metrics.min_y, 0.001);
+    try std.testing.expectApproxEqAbs(-(glyph_zero_bounds.y * scale), control_metrics.max_y, 0.001);
+
+    // The runtime's registered resource reaches the reference renderer.
+    // With explicit shaped cells, the registered face and bundled mono
+    // have identical source bytes and must paint identical glyph-0
+    // fallback pixels; visible ink plus background inside the first cell
+    // distinguishes an outline from the historical solid rectangle.
+    const reference_width: usize = 80;
+    const reference_height: usize = 48;
+    const reference_baseline: f32 = 32;
+    const reference_bounds = geometry.RectF.init(0, 0, @floatFromInt(reference_width), @floatFromInt(reference_height));
+    const shaped = [_]canvas.Glyph{
+        .{ .id = 0, .x = 0, .y = 0, .advance = size, .text_start = 0, .text_len = 3 },
+        .{ .id = 0, .x = size, .y = 0, .advance = size, .text_start = 3, .text_len = 3 },
+        .{ .id = 0, .x = 2 * size, .y = 0, .advance = size, .text_start = 6, .text_len = 4 },
+    };
+    const registered_command = canvas.RenderCommand{
+        .command = .{ .draw_text = .{
+            .id = 1,
+            .font_id = registered_font_id,
+            .size = size,
+            .origin = geometry.PointF.init(0, reference_baseline),
+            .color = canvas.Color.rgba8(255, 255, 255, 255),
+            .text = text,
+            .glyphs = &shaped,
+        } },
+        .local_bounds = reference_bounds,
+        .bounds = reference_bounds,
+    };
+    var builtin_command = registered_command;
+    builtin_command.command.draw_text.font_id = canvas.default_mono_font_id;
+    const registered_commands = [_]canvas.RenderCommand{registered_command};
+    const builtin_commands = [_]canvas.RenderCommand{builtin_command};
+    var registered_pixels: [reference_width * reference_height * 4]u8 = undefined;
+    var builtin_pixels: [reference_width * reference_height * 4]u8 = undefined;
+    const registered_surface = (try canvas.ReferenceRenderSurface.init(reference_width, reference_height, &registered_pixels)).withFonts(harness.runtime.registeredCanvasFonts());
+    const builtin_surface = try canvas.ReferenceRenderSurface.init(reference_width, reference_height, &builtin_pixels);
+    try registered_surface.renderPass(.{
+        .surface_size = geometry.SizeF.init(@floatFromInt(reference_width), @floatFromInt(reference_height)),
+        .full_repaint = true,
+        .commands = &registered_commands,
+    }, canvas.Color.rgba8(0, 0, 0, 0));
+    try builtin_surface.renderPass(.{
+        .surface_size = geometry.SizeF.init(@floatFromInt(reference_width), @floatFromInt(reference_height)),
+        .full_repaint = true,
+        .commands = &builtin_commands,
+    }, canvas.Color.rgba8(0, 0, 0, 0));
+    try std.testing.expectEqualSlices(u8, &builtin_pixels, &registered_pixels);
+    var fallback_ink: usize = 0;
+    var fallback_background: usize = 0;
+    for (12..32) |y| {
+        for (0..@as(usize, @intFromFloat(size))) |x| {
+            if (registered_pixels[(y * reference_width + x) * 4 + 3] == 0) fallback_background += 1 else fallback_ink += 1;
+        }
+    }
+    try std.testing.expect(fallback_ink > 0);
+    try std.testing.expect(fallback_background > 0);
+}
+
 /// Byte offset of the `maxp` table in a TrueType file (test fixture
 /// helper for building over-declaring faces out of the bundled bytes).
 fn maxpTableOffset(bytes: []const u8) usize {
@@ -432,7 +568,7 @@ test "the real Noto Sans JP face registers and outlines dense kanji (guarded by 
     try std.testing.expect(provider.measureWidth(registered_font_id, 16.0, "鬱") > 0);
 }
 
-fn installFontFixtureWidgets(harness: anytype) !void {
+fn installFontFixtureWidgets(harness: anytype, text: []const u8) !void {
     _ = try harness.runtime.createView(.{
         .window_id = 1,
         .label = "canvas",
@@ -443,7 +579,7 @@ fn installFontFixtureWidgets(harness: anytype) !void {
         .id = 2,
         .kind = .text,
         .frame = geometry.RectF.init(10, 10, 220, 40),
-        .text = "Hello 123",
+        .text = text,
     }};
     var nodes: [2]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 240, 140), &nodes);
@@ -472,7 +608,7 @@ test "a registered face renders pixel-identically on the present path and the re
     defer harness.destroy(std.testing.allocator);
     var app_state: RegistryApp = .{};
     try harness.start(app_state.app());
-    try installFontFixtureWidgets(harness);
+    try installFontFixtureWidgets(harness, "Hello 123");
 
     try harness.runtime.registerCanvasFont(registered_font_id, mono_bytes);
 

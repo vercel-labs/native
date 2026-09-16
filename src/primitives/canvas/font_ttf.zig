@@ -221,7 +221,8 @@ pub const Face = struct {
     }
 
     /// Glyph index for a unicode codepoint via the format-4 subtable;
-    /// 0 (`.notdef`) when unmapped (callers fall back to block glyphs).
+    /// 0 (`.notdef`) when unmapped or outside the BMP. Callers render the
+    /// face-owned glyph-0 outline when it has one, or intentionally no ink.
     pub fn glyphIndex(self: *const Face, codepoint: u32) u16 {
         if (codepoint > 0xFFFF) return 0;
         const cp: u16 = @intCast(codepoint);

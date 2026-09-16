@@ -505,6 +505,103 @@ fn buildSyntheticFont(declared: DeclaredMaxima, glyf_bytes: []const u8, loca_off
     return font;
 }
 
+fn expectUnmappedGlyphZeroLeavesNoInk(face: *const font_ttf.Face, text: []const u8) !void {
+    const reference = @import("reference.zig");
+    const render_model = @import("render.zig");
+    const text_model = @import("text.zig");
+
+    const width: usize = 64;
+    const height: usize = 48;
+    const size: f32 = 32;
+    const bounds = geometry.RectF.init(0, 0, @floatFromInt(width), @floatFromInt(height));
+    const fonts = [_]reference.ReferenceFont{.{ .id = 64, .face = face }};
+    const shaped = [_]text_model.Glyph{.{
+        .id = 0,
+        .x = 0,
+        .y = 0,
+        .advance = size,
+        .text_start = 0,
+        .text_len = text.len,
+    }};
+
+    for ([_]bool{ false, true }) |use_shaped_glyphs| {
+        const glyphs: []const text_model.Glyph = if (use_shaped_glyphs) &shaped else &.{};
+        const commands = [_]render_model.RenderCommand{.{
+            .command = .{ .draw_text = .{
+                .id = 1,
+                .font_id = 64,
+                .size = size,
+                .origin = geometry.PointF.init(0, 40),
+                .color = drawing.Color.rgba8(255, 255, 255, 255),
+                .text = text,
+                .glyphs = glyphs,
+            } },
+            .local_bounds = bounds,
+            .bounds = bounds,
+        }};
+        var pixels: [width * height * 4]u8 = undefined;
+        const surface = (try reference.ReferenceRenderSurface.init(width, height, &pixels)).withFonts(&fonts);
+        try surface.renderPass(.{
+            .surface_size = geometry.SizeF.init(@floatFromInt(width), @floatFromInt(height)),
+            .full_repaint = true,
+            .commands = &commands,
+        }, drawing.Color.rgba8(0, 0, 0, 0));
+        for (pixels) |pixel| try std.testing.expectEqual(@as(u8, 0), pixel);
+    }
+}
+
+test "empty and unusable glyph zero fallbacks never become solid reference cells" {
+    const text_metrics = @import("text_metrics.zig");
+    const uncovered = [_]struct { codepoint: u21, text: []const u8 }{
+        .{ .codepoint = 0x65E5, .text = "\xE6\x97\xA5" }, // 日
+        .{ .codepoint = 0x1F600, .text = "\xF0\x9F\x98\x80" }, // 😀
+    };
+
+    // Glyph 0 is intentionally empty, but it still has a valid hmtx
+    // advance. Valid decoded misses therefore paint nothing without
+    // collapsing the measurement path.
+    var empty_glyf = ByteBuilder{};
+    var empty_loca: [3]u32 = undefined;
+    empty_loca[0] = 0;
+    empty_loca[1] = 0;
+    appendSimpleGlyph(&empty_glyf, 1, 4);
+    empty_loca[2] = @intCast(empty_glyf.len);
+    const empty_font = buildSyntheticFont(.{ .points = 4, .contours = 1 }, empty_glyf.slice(), &empty_loca);
+    const empty_face = try font_ttf.Face.parse(empty_font.slice());
+    try std.testing.expectEqual(@as(?geometry.RectF, null), try empty_face.glyphBounds(0));
+    try std.testing.expect(empty_face.advance(0) > 0);
+
+    // Glyph 0 is a point-matched composite, a form the outline parser
+    // deliberately declines. A valid face can still contain it; failure
+    // to draw this fallback must be no-ink rather than a solid cell.
+    var unusable_glyf = ByteBuilder{};
+    var unusable_loca: [3]u32 = undefined;
+    unusable_loca[0] = 0;
+    appendPointMatchedComposite(&unusable_glyf, 1);
+    unusable_loca[1] = @intCast(unusable_glyf.len);
+    appendSimpleGlyph(&unusable_glyf, 1, 4);
+    unusable_loca[2] = @intCast(unusable_glyf.len);
+    const unusable_font = buildSyntheticFont(.{
+        .points = 4,
+        .contours = 1,
+        .component_elements = 1,
+        .component_depth = 1,
+    }, unusable_glyf.slice(), &unusable_loca);
+    const unusable_face = try font_ttf.Face.parse(unusable_font.slice());
+    var builder = vector.PathBuilder(32){};
+    try std.testing.expectError(error.FontGlyphTooComplex, unusable_face.glyphOutline(0, Affine.identity(), &builder));
+    try std.testing.expect(unusable_face.advance(0) > 0);
+
+    for (uncovered) |case| {
+        try std.testing.expectEqual(@as(u16, 0), empty_face.glyphIndex(case.codepoint));
+        try std.testing.expectEqual(@as(u16, 0), unusable_face.glyphIndex(case.codepoint));
+        try std.testing.expect(text_metrics.estimateTextWidthForFace(&empty_face, case.text, 32) > 0);
+        try std.testing.expect(text_metrics.estimateTextWidthForFace(&unusable_face, case.text, 32) > 0);
+        try expectUnmappedGlyphZeroLeavesNoInk(&empty_face, case.text);
+        try expectUnmappedGlyphZeroLeavesNoInk(&unusable_face, case.text);
+    }
+}
+
 test "synthetic dense glyphs beyond the old Latin-sized budgets parse and outline correctly" {
     // CJK-shaped density, truthfully declared: 84 rings x 12 points
     // (1008 points — the measured Noto Sans JP contour high-water is 84,
