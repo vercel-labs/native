@@ -814,6 +814,16 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NativeSdkBridgeScriptHandler *bridgeScriptHandler;
 @property(nonatomic, strong) NativeSdkAssetSchemeHandler *assetSchemeHandler;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSWindow *> *windows;
+/// Declared window-control offsets, by window id. Kept rather than
+/// applied once: AppKit lays the standard buttons out again on its own
+/// schedule (fullscreen transitions, toolbar visibility), so the offset
+/// has to be re-appliable.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *windowControlOffsets;
+/// Where AppKit puts the three buttons when left alone, captured the
+/// first time a window's cluster moves. Applies use base + offset, so
+/// re-applying lands in the same place instead of nudging the buttons
+/// further along each time.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSArray<NSValue *> *> *windowControlBaseOrigins;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, WKWebView *> *webViews;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkWindowDelegate *> *delegates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkBridgeScriptHandler *> *bridgeScriptHandlers;
@@ -1058,6 +1068,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
 - (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
 - (void)orderWindowForImplicitShow:(uint64_t)windowId;
+- (void)applyWindowControlsOffsetForWindowId:(uint64_t)windowId;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
 - (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
 - (void)focusWindowWithId:(uint64_t)windowId;
@@ -1302,6 +1313,7 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 - (void)windowDidEnterFullScreen:(NSNotification *)notification {
     (void)notification;
     [self setToolbarVisible:NO];
+    [self reapplyWindowControlsOffset];
 }
 
 - (void)windowWillExitFullScreen:(NSNotification *)notification {
@@ -1312,12 +1324,20 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 - (void)windowDidExitFullScreen:(NSNotification *)notification {
     (void)notification;
     [self setToolbarVisible:YES];
+    [self reapplyWindowControlsOffset];
 }
 
 - (void)setToolbarVisible:(BOOL)visible {
     NSWindow *window = self.host.windows[@(self.windowId)];
     if (!window.toolbar) return;
     window.toolbar.visible = visible;
+}
+
+/// Fullscreen transitions relayout the standard buttons and discard our
+/// placement, so re-apply the declared offset after each. A window that
+/// declared none returns immediately.
+- (void)reapplyWindowControlsOffset {
+    [self.host applyWindowControlsOffsetForWindowId:self.windowId];
 }
 
 // Registered for tall-titlebar windows only (`observesContentLayout`):
@@ -7957,6 +7977,8 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.updateDownloadCancelledByUser = NO;
     self.updateDownloadAlertIsAppModal = NO;
     self.windows = [[NSMutableDictionary alloc] init];
+    self.windowControlOffsets = [[NSMutableDictionary alloc] init];
+    self.windowControlBaseOrigins = [[NSMutableDictionary alloc] init];
     self.webViews = [[NSMutableDictionary alloc] init];
     self.delegates = [[NSMutableDictionary alloc] init];
     self.bridgeScriptHandlers = [[NSMutableDictionary alloc] init];
@@ -8393,6 +8415,48 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
     [window performWindowDragWithEvent:event];
     return YES;
+}
+
+/// Put the window's three standard buttons at their declared offset.
+/// Callable as often as AppKit relayouts them: it sets an absolute
+/// origin from the captured base rather than nudging the current
+/// frames, which would walk the buttons across the titlebar one
+/// fullscreen toggle at a time.
+///
+/// The declared offset is positive-down like the rest of the SDK's
+/// geometry, but the titlebar's view space is positive-up — hence the
+/// negated y here and nowhere else.
+- (void)applyWindowControlsOffsetForWindowId:(uint64_t)windowId {
+    NSValue *stored = self.windowControlOffsets[@(windowId)];
+    if (!stored) return;
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    NSButton *buttons[3] = {
+        [window standardWindowButton:NSWindowCloseButton],
+        [window standardWindowButton:NSWindowMiniaturizeButton],
+        [window standardWindowButton:NSWindowZoomButton],
+    };
+    for (int index = 0; index < 3; index += 1) {
+        if (!buttons[index]) return;
+    }
+
+    NSArray<NSValue *> *base = self.windowControlBaseOrigins[@(windowId)];
+    if (!base) {
+        base = @[
+            [NSValue valueWithPoint:buttons[0].frame.origin],
+            [NSValue valueWithPoint:buttons[1].frame.origin],
+            [NSValue valueWithPoint:buttons[2].frame.origin],
+        ];
+        self.windowControlBaseOrigins[@(windowId)] = base;
+    }
+
+    NSPoint offset = stored.pointValue;
+    for (int index = 0; index < 3; index += 1) {
+        NSPoint origin = base[index].pointValue;
+        NSRect frame = buttons[index].frame;
+        frame.origin = NSMakePoint(origin.x + offset.x, origin.y - offset.y);
+        buttons[index].frame = frame;
+    }
 }
 
 // Chrome overlay geometry for hidden-titlebar windows: how far the
@@ -13309,6 +13373,20 @@ int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t win
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
     return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags makeMain:NO] ? 1 : 0;
+}
+
+int native_sdk_appkit_set_window_controls_offset(native_sdk_appkit_host_t *host, uint64_t window_id, double dx, double dy) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    if (dx == 0 && dy == 0) {
+        [object.windowControlOffsets removeObjectForKey:@(window_id)];
+        return 1;
+    }
+    // Store before applying: the apply reads this back on every relayout.
+    object.windowControlOffsets[@(window_id)] = [NSValue valueWithPoint:NSMakePoint(dx, dy)];
+    [object applyWindowControlsOffsetForWindowId:window_id];
+    return 1;
 }
 
 int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height) {
