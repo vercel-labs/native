@@ -1,6 +1,14 @@
 .{
     .id = "dev.native_sdk.runner_fixture",
     .name = "runner-fixture",
+    .permissions = .{"window"},
+    .bridge = .{ .commands = .{
+        .{
+            .name = "native-sdk.window.focus",
+            .permissions = .{"window"},
+            .origins = .{"zero://inline"},
+        },
+    } },
     .updates = .{
         .feed_url = "https://example.com/native-update.json",
         .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",

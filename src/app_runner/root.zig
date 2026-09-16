@@ -400,6 +400,71 @@ fn manifestStringField(comptime field: []const u8) []const u8 {
     return value;
 }
 
+fn manifestStringList(comptime source: anytype, comptime field: []const u8) []const []const u8 {
+    comptime {
+        if (!@hasField(@TypeOf(source), field)) return &.{};
+        var values: []const []const u8 = &.{};
+        for (@field(source, field)) |value| {
+            const string: []const u8 = value;
+            values = values ++ &[_][]const u8{string};
+        }
+        return values;
+    }
+}
+
+fn builtinBridgePermission(comptime name: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, name, "native-sdk.command.")) return "command";
+    if (std.mem.startsWith(u8, name, "native-sdk.platform.")) return "window";
+    if (std.mem.startsWith(u8, name, "native-sdk.window.")) return "window";
+    if (std.mem.startsWith(u8, name, "native-sdk.webview.")) return "window";
+    if (std.mem.startsWith(u8, name, "native-sdk.view.")) return "view";
+    if (std.mem.startsWith(u8, name, "native-sdk.dialog.")) return "dialog";
+    if (std.mem.startsWith(u8, name, "native-sdk.clipboard.")) return "clipboard";
+    if (std.mem.startsWith(u8, name, "native-sdk.credentials.")) return "credentials";
+    if (std.mem.eql(u8, name, "native-sdk.os.openUrl")) return "network";
+    if (std.mem.eql(u8, name, "native-sdk.os.showNotification")) return "notifications";
+    if (std.mem.eql(u8, name, "native-sdk.os.revealPath")) return "filesystem";
+    if (std.mem.eql(u8, name, "native-sdk.os.addRecentDocument")) return "filesystem";
+    if (std.mem.eql(u8, name, "native-sdk.os.clearRecentDocuments")) return "filesystem";
+    return null;
+}
+
+fn builtinBridgePermissions(comptime command: anytype) []const []const u8 {
+    const declared = manifestStringList(command, "permissions");
+    const required = builtinBridgePermission(command.name) orelse return declared;
+    for (declared) |permission| {
+        if (std.mem.eql(u8, permission, required)) return declared;
+    }
+    return declared ++ &[_][]const u8{required};
+}
+
+fn builtinBridgePolicyFrom(comptime source: anytype) native_sdk.BridgePolicy {
+    comptime {
+        if (!@hasField(@TypeOf(source), "bridge")) return .{};
+        if (!@hasField(@TypeOf(source.bridge), "commands")) return .{};
+        var commands: []const native_sdk.BridgeCommandPolicy = &.{};
+        for (source.bridge.commands) |command| {
+            commands = commands ++ &[_]native_sdk.BridgeCommandPolicy{.{
+                .name = command.name,
+                .permissions = builtinBridgePermissions(command),
+                .origins = manifestStringList(command, "origins"),
+            }};
+        }
+        return .{
+            .enabled = commands.len > 0,
+            .permissions = manifestStringList(source, "permissions"),
+            .commands = commands,
+        };
+    }
+}
+
+/// The exact built-in bridge policy authored in app.zon. An absent or empty
+/// command list stays disabled; the runner never infers bridge authority from
+/// a broad app permission alone.
+pub fn manifestBuiltinBridgePolicy() native_sdk.BridgePolicy {
+    return comptime builtinBridgePolicyFrom(app_manifest);
+}
+
 /// The theme pack app.zon selects (`theme = "geist"`), resolved at
 /// comptime so an unknown name is a build error naming the field and
 /// the valid packs — never a silent fallback. Absent means the house
@@ -1367,6 +1432,92 @@ test "RunOptions explicit command menu and shortcut slices override manifest val
     try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedCommands(&command_storage).len);
     try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedMenus(&menu_storage).len);
     try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedShortcuts(&shortcut_storage).len);
+}
+
+test "manifest built-in bridge policy is explicit and fail closed" {
+    const manifest_policy = comptime manifestBuiltinBridgePolicy();
+    try std.testing.expect(manifest_policy.enabled);
+    try std.testing.expectEqual(@as(usize, 1), manifest_policy.commands.len);
+    try std.testing.expect(manifest_policy.allows("native-sdk.window.focus", "zero://inline"));
+    try std.testing.expect(!manifest_policy.allows("native-sdk.window.focus", "zero://app"));
+
+    const absent = .{ .permissions = .{ "view", "window" } };
+    const absent_policy = comptime builtinBridgePolicyFrom(absent);
+    try std.testing.expect(!absent_policy.enabled);
+    try std.testing.expectEqual(@as(usize, 0), absent_policy.commands.len);
+
+    const empty = .{
+        .permissions = .{ "view", "window" },
+        .bridge = .{ .commands = .{} },
+    };
+    const empty_policy = comptime builtinBridgePolicyFrom(empty);
+    try std.testing.expect(!empty_policy.enabled);
+    try std.testing.expectEqual(@as(usize, 0), empty_policy.commands.len);
+
+    const declared = .{
+        .permissions = .{ "view", "window" },
+        .bridge = .{ .commands = .{
+            .{
+                .name = "native-sdk.window.focus",
+                .permissions = .{"window"},
+                .origins = .{"zero://inline"},
+            },
+        } },
+    };
+    const declared_policy = comptime builtinBridgePolicyFrom(declared);
+    try std.testing.expect(declared_policy.enabled);
+    try std.testing.expectEqual(@as(usize, 2), declared_policy.permissions.len);
+    try std.testing.expectEqual(@as(usize, 1), declared_policy.commands.len);
+    try std.testing.expectEqualStrings("native-sdk.window.focus", declared_policy.commands[0].name);
+    try std.testing.expect(declared_policy.allows("native-sdk.window.focus", "zero://inline"));
+    try std.testing.expect(!declared_policy.allows("native-sdk.window.focus", "zero://app"));
+    try std.testing.expect(!declared_policy.allows("native-sdk.window.close", "zero://inline"));
+}
+
+test "manifest built-in bridge policy enforces canonical permissions" {
+    const cases = .{
+        .{ "native-sdk.command.invoke", "command" },
+        .{ "native-sdk.platform.supports", "window" },
+        .{ "native-sdk.window.focus", "window" },
+        .{ "native-sdk.webview.navigate", "window" },
+        .{ "native-sdk.view.focus", "view" },
+        .{ "native-sdk.dialog.openFile", "dialog" },
+        .{ "native-sdk.clipboard.readText", "clipboard" },
+        .{ "native-sdk.credentials.get", "credentials" },
+        .{ "native-sdk.os.openUrl", "network" },
+        .{ "native-sdk.os.showNotification", "notifications" },
+        .{ "native-sdk.os.revealPath", "filesystem" },
+        .{ "native-sdk.os.addRecentDocument", "filesystem" },
+        .{ "native-sdk.os.clearRecentDocuments", "filesystem" },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqualStrings(case[1], builtinBridgePermission(case[0]).?);
+    }
+    try std.testing.expect(builtinBridgePermission("native.ping") == null);
+
+    const sensitive = .{
+        .permissions = .{"window"},
+        .bridge = .{ .commands = .{
+            .{ .name = "native-sdk.credentials.get", .origins = .{"zero://app"} },
+        } },
+    };
+    const sensitive_policy = comptime builtinBridgePolicyFrom(sensitive);
+    try std.testing.expectEqualStrings("credentials", sensitive_policy.commands[0].permissions[0]);
+    try std.testing.expect(!sensitive_policy.allows("native-sdk.credentials.get", "zero://app"));
+
+    const sensitive_allowed = .{
+        .permissions = .{ "credentials", "com.example.audit" },
+        .bridge = .{ .commands = .{
+            .{
+                .name = "native-sdk.credentials.get",
+                .permissions = .{"com.example.audit"},
+                .origins = .{"zero://app"},
+            },
+        } },
+    };
+    const sensitive_allowed_policy = comptime builtinBridgePolicyFrom(sensitive_allowed);
+    try std.testing.expectEqual(@as(usize, 2), sensitive_allowed_policy.commands[0].permissions.len);
+    try std.testing.expect(sensitive_allowed_policy.allows("native-sdk.credentials.get", "zero://app"));
 }
 
 const StateBuffers = struct {
