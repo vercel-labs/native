@@ -27,7 +27,7 @@ export function update(model: Model, msg: Msg): Model {
   switch (msg.kind) {
     // The runtime-applied view state (scrollback, history, cols, rows).
     // Echo scrollback back and user scrollback survives rebuilds.
-    case "termState": return { ...model, scrollback: msg.state.scrollback };
+    case "termState": return { ...model, scrollback: msg.state.scrollback | 0 };
   }
 }
 ```
