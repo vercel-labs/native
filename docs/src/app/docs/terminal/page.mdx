@@ -17,7 +17,7 @@ The declarative shape is one element. Spawn a pty from your model (`fx.ptySpawn`
 ```ts
 import { Cmd } from "@native-sdk/core";
 
-const shellKey = 1;
+const shellKey = "shell";
 
 export function view(model: Model) {
   return terminal({ pty: shellKey, scrollback: model.scrollback, grow: 1, label: "Shell", onTerminal: "termState" });
@@ -90,7 +90,7 @@ The pty key is ordinary model data — pick it like an effect key. Spawn the she
 ```ts
 import { Cmd, asciiBytes } from "@native-sdk/core";
 
-const shellKey = 1;
+const shellKey = "shell";
 
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
