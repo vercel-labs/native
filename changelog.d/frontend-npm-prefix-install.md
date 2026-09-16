@@ -1,0 +1,1 @@
+fix: **Frontend install command compatibility**: generated web-frontend builds now run `npm --prefix frontend install`, matching the existing build/dev command shape and avoiding npm versions that look for a root `package.json` when `--prefix` follows `install`.
