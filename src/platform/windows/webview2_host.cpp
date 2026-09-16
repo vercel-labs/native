@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <timeapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -22,6 +23,7 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -176,6 +178,9 @@ constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
  * menu on a fresh loop turn — the same deferral the macOS host's
  * dispatch_async performs before popUpMenuPositioningItem. */
 constexpr UINT kShowContextMenuMessage = WM_APP + 47;
+/* Timer-queue callbacks run off-loop; this message returns the high-resolution
+ * frame deadline to the owning child HWND's UI thread. */
+constexpr UINT kGpuEmitMessage = WM_APP + 48;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -367,6 +372,12 @@ struct Window {
      * created. The per-window frame timer owns the one-second safety
      * reveal; immediate/already shown windows do not consult it. */
     ULONGLONG deferred_show_started_ms = 0;
+    /* Inside the system modal move/size loop (WM_ENTERSIZEMOVE until
+     * WM_EXITSIZEMOVE), and whether a WM_MOVE was swallowed while there.
+     * Programmatic moves (SetWindowPos, snap gestures, Win+arrow) never
+     * enter the loop, so they keep emitting immediately. */
+    bool in_modal_move_loop = false;
+    bool deferred_frame_event = false;
     /* Last DWMWA_CAPTION_COLOR pushed for the hidden styles (sampled
      * from the presented header pixels so the DWM caption material
      * behind the button cluster matches the app's header). */
@@ -470,6 +481,30 @@ struct NativeView {
      * frames are demand-driven, so an idle surface emits ZERO frame events
      * (the idle law the macOS host enforces). */
     bool gpu_emission_scheduled = false;
+    /* One-shot timer-queue handle. Unlike SetTimer, timer queues can honor the
+     * 4.17 ms deadline of a 240 Hz display; the callback only posts
+     * kGpuEmitMessage, so all app/runtime work remains on the UI thread. */
+    HANDLE gpu_emit_timer = nullptr;
+    PVOID gpu_emit_context = nullptr;
+    uint64_t gpu_emit_generation = 0;
+    HMONITOR gpu_frame_monitor = nullptr;
+    uint64_t gpu_frame_interval_ns = 16666667ull;
+    /* Pointer motion is latest-wins, wheel deltas accumulate. Both flush at
+     * most once per display frame, matching the AppKit surface policy. */
+    bool gpu_pointer_motion_pending = false;
+    int gpu_pointer_motion_kind = 0;
+    double gpu_pointer_motion_x = 0;
+    double gpu_pointer_motion_y = 0;
+    int gpu_pointer_motion_button = 0;
+    uint32_t gpu_pointer_motion_modifiers = 0;
+    uint64_t gpu_pointer_motion_timestamp_ns = 0;
+    bool gpu_scroll_pending = false;
+    double gpu_scroll_x = 0;
+    double gpu_scroll_y = 0;
+    double gpu_scroll_delta_x = 0;
+    double gpu_scroll_delta_y = 0;
+    uint32_t gpu_scroll_modifiers = 0;
+    uint64_t gpu_scroll_timestamp_ns = 0;
     bool gpu_presented = false;
     /* One-shot: the next scheduled emission must fire at grid
      * promptness even while minimized. Two producers set it — an input
@@ -485,6 +520,11 @@ struct NativeView {
      * the presenter can reject a patch and request a resync. */
     bool gpu_force_full_repaint_pending = false;
     uint64_t gpu_last_emit_ns = 0;
+    /* The pacing interval the pending emission was scheduled against:
+     * kGpuOccludedHeartbeatNs while parked, the frame interval otherwise.
+     * Reveal paths supersede only a parked deadline (see the WM_SIZE
+     * handler); re-arming a grid-paced one just pushes the frame out. */
+    uint64_t gpu_emit_pace_ns = 0;
     uint64_t gpu_frame_index = 0;
     double gpu_emitted_width = 0;
     double gpu_emitted_height = 0;
@@ -574,6 +614,11 @@ constexpr UINT_PTR kAppTimerIdBase = 0x1000;
 /* The 16 ms per-window frame-pump timer (SetTimer id on each top-level
  * window; distinct from the app-timer id range). */
 constexpr UINT_PTR kFrameTimerId = 1;
+/* Placeholder pump timer on each gpu-surface child (repeating, retired
+ * by the first present or a hide; re-armed on reveal). Declared beside
+ * its window-level sibling because the view-state show path, which
+ * precedes the gpu section, arms it too. */
+constexpr UINT_PTR kGpuFrameTimerId = 1;
 constexpr ULONGLONG kDeferredShowDeadlineMs = 1000;
 
 struct AppTimer {
@@ -1939,12 +1984,33 @@ static void applyNativeViewFrame(Host *host, NativeView &view) {
     if (!view.hwnd) return;
     const double scale = nativeViewFrameScale(host, view);
     RECT frame = nativeViewPhysicalFrame(host, view, scale);
+    /* An unchanged frame must not repaint. MoveWindow(..., TRUE)
+     * invalidates the child even when nothing moved, and the shell
+     * relayout that answers every window-frame event re-applies EVERY
+     * view's frame — so without this an event that moved nothing still
+     * flushed the whole window's pixels. */
+    RECT current = {};
+    if (GetWindowRect(view.hwnd, &current)) {
+        POINT origin = { current.left, current.top };
+        if (HWND parent = GetParent(view.hwnd)) ScreenToClient(parent, &origin);
+        if (origin.x == frame.left && origin.y == frame.top &&
+            current.right - current.left == frame.right - frame.left &&
+            current.bottom - current.top == frame.bottom - frame.top) return;
+    }
     MoveWindow(view.hwnd, frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top, TRUE);
 }
 
 static void applyNativeViewState(NativeView &view, bool update_text, const std::string &text) {
     if (!view.hwnd) return;
     ShowWindow(view.hwnd, view.visible ? SW_SHOW : SW_HIDE);
+    /* The placeholder frame pump retires while a never-presented view is
+     * hidden (see the kGpuFrameTimerId handler); a reveal must re-arm it or
+     * a first-shown surface never establishes its frame channel. SetTimer
+     * with the same id resets the running timer, so a repeated show is
+     * harmless. */
+    if (view.kind == kViewGpuSurface && view.visible && !view.gpu_presented) {
+        (void)SetTimer(view.hwnd, kGpuFrameTimerId, 16, nullptr);
+    }
     EnableWindow(view.hwnd, view.enabled ? TRUE : FALSE);
     if (update_text) applyNativeViewText(view, text);
     applyNativeViewAccessibility(view);
@@ -2011,6 +2077,8 @@ static void applyNativeChildFrames(Host *host, uint64_t window_id, const std::st
     }
 }
 
+static void cancelGpuSurfaceFrameEmission(NativeView &view);
+
 static void destroyNativeViewAndChildren(Host *host, const std::string &key) {
     if (!host) return;
     auto found = host->native_views.find(key);
@@ -2022,6 +2090,7 @@ static void destroyNativeViewAndChildren(Host *host, const std::string &key) {
         if (entry.second.window_id == window_id && entry.second.parent == label) children.push_back(entry.first);
     }
     for (const std::string &child : children) destroyNativeViewAndChildren(host, child);
+    if (found->second.kind == kViewGpuSurface) cancelGpuSurfaceFrameEmission(found->second);
     if (found->second.hwnd) DestroyWindow(found->second.hwnd);
     host->native_views.erase(found);
     gpuSurfaceRefreshFrameWakeTimer(host);
@@ -2087,7 +2156,7 @@ constexpr int kGpuInputImeSetComposition = 8;
 constexpr int kGpuInputImeCommitComposition = 9;
 constexpr int kGpuInputImeCancelComposition = 10;
 constexpr int kGpuInputPointerCancel = 11;
-constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
+constexpr uint64_t kGpuDefaultFrameIntervalNs = 16666667ull;
 /* Pacing interval for logical frame completions while the top-level
  * window is MINIMIZED: a ~1 Hz heartbeat instead of the frame grid. A
  * minimized window's presents reach nothing (WM_PAINT never arrives for
@@ -2108,11 +2177,10 @@ constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
  * presentation path, so covered-but-not-minimized windows keep full
  * cadence deliberately rather than guess. */
 constexpr uint64_t kGpuOccludedHeartbeatNs = 1000000000ull;
-/* Placeholder pump timer (repeating, retired by the first present). */
-constexpr UINT_PTR kGpuFrameTimerId = 1;
-/* The one-shot scheduled-emission timer (the single frame-event gate). */
-constexpr UINT_PTR kGpuEmitTimerId = 2;
-
+/* GPU emission deadlines use the high-resolution timer queue below.
+ * (kGpuFrameTimerId, the placeholder pump, is declared beside
+ * kFrameTimerId near the top — the view-state show path arms it before
+ * this section.) */
 static uint64_t gpuTimestampNs() {
     static LARGE_INTEGER frequency = {};
     if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
@@ -2128,6 +2196,36 @@ static uint64_t gpuTimestampNs() {
  * resolution (dpiForWindow) over the 96-dpi baseline. In a DPI-unaware
  * process the resolved DPI is 96, so logical size == client pixels,
  * matching how the rest of this host treats coordinates. */
+/* Refresh interval for the monitor currently carrying the surface.
+ * EnumDisplaySettings reports the desktop mode's nominal rate; clamp only
+ * obviously invalid driver sentinels, not high-refresh panels. */
+constexpr uint64_t gpuFrameIntervalForHz(uint32_t refresh_hz) {
+    return refresh_hz > 0 ? 1000000000ull / static_cast<uint64_t>(refresh_hz) : kGpuDefaultFrameIntervalNs;
+}
+static_assert(gpuFrameIntervalForHz(240) == 4166666ull, "240 Hz surfaces require a 4.17 ms frame grid");
+
+static uint64_t gpuSurfaceFrameIntervalNs(NativeView &view) {
+    HMONITOR monitor = view.hwnd ? MonitorFromWindow(view.hwnd, MONITOR_DEFAULTTONEAREST) : nullptr;
+    if (monitor && monitor == view.gpu_frame_monitor && view.gpu_frame_interval_ns > 0) {
+        return view.gpu_frame_interval_ns;
+    }
+    uint64_t interval = kGpuDefaultFrameIntervalNs;
+    if (monitor) {
+        MONITORINFOEXW info = {};
+        info.cbSize = sizeof(info);
+        DEVMODEW mode = {};
+        mode.dmSize = sizeof(mode);
+        if (GetMonitorInfoW(monitor, &info) &&
+            EnumDisplaySettingsExW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode, 0) &&
+            mode.dmDisplayFrequency >= 30 && mode.dmDisplayFrequency <= 1000) {
+            interval = gpuFrameIntervalForHz(mode.dmDisplayFrequency);
+        }
+    }
+    view.gpu_frame_monitor = monitor;
+    view.gpu_frame_interval_ns = interval;
+    return interval;
+}
+
 static double gpuSurfaceScale(HWND hwnd) {
     return hwnd ? (double)dpiForWindow(hwnd) / 96.0 : 1.0;
 }
@@ -2608,12 +2706,12 @@ static void emitGpuSurfaceEvent(Host *host, const NativeView &view, WindowsEvent
     host->callback(host->callback_context, &event);
 }
 
-static void emitGpuSurfaceInput(Host *host, NativeView &view, int input_kind, double x, double y, int button, double delta_x, double delta_y, const char *key, const char *text, uint32_t modifiers) {
+static void emitGpuSurfaceInput(Host *host, NativeView &view, int input_kind, double x, double y, int button, double delta_x, double delta_y, const char *key, const char *text, uint32_t modifiers, uint64_t timestamp_ns = 0) {
     WindowsEvent event = {};
     event.kind = kGpuSurfaceInput;
     event.x = x;
     event.y = y;
-    event.timestamp_ns = gpuTimestampNs();
+    event.timestamp_ns = timestamp_ns > 0 ? timestamp_ns : gpuTimestampNs();
     event.input_kind = input_kind;
     event.button = button;
     event.delta_x = delta_x;
@@ -2629,6 +2727,68 @@ static void emitGpuSurfaceInput(Host *host, NativeView &view, int input_kind, do
 /* Text/composition emit variant: no pointer payload, optional byte cursor
  * into the UTF-8 text (mirrors native_sdk_emit_gpu_surface_text_input in
  * the GTK host and emitTextInputEventWithKind in the AppKit host). */
+static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view);
+
+static void queueGpuSurfacePointerMotionInput(Host *host, NativeView &view, int input_kind, double x, double y, int button, uint32_t modifiers) {
+    view.gpu_pointer_motion_pending = true;
+    view.gpu_pointer_motion_kind = input_kind;
+    view.gpu_pointer_motion_x = x;
+    view.gpu_pointer_motion_y = y;
+    view.gpu_pointer_motion_button = button;
+    view.gpu_pointer_motion_modifiers = modifiers;
+    view.gpu_pointer_motion_timestamp_ns = gpuTimestampNs();
+    view.gpu_prompt_frame_pending = true;
+    gpuSurfaceScheduleFrameEmission(host, view);
+}
+
+static void emitQueuedGpuSurfacePointerMotionInput(Host *host, NativeView &view) {
+    if (!view.gpu_pointer_motion_pending) return;
+    const int kind = view.gpu_pointer_motion_kind;
+    const double x = view.gpu_pointer_motion_x;
+    const double y = view.gpu_pointer_motion_y;
+    const int button = view.gpu_pointer_motion_button;
+    const uint32_t modifiers = view.gpu_pointer_motion_modifiers;
+    const uint64_t timestamp = view.gpu_pointer_motion_timestamp_ns;
+    view.gpu_pointer_motion_pending = false;
+    view.gpu_pointer_motion_timestamp_ns = 0;
+    emitGpuSurfaceInput(host, view, kind, x, y, button, 0, 0, "", "", modifiers, timestamp);
+}
+
+static void queueGpuSurfaceScrollInput(Host *host, NativeView &view, double x, double y, double delta_x, double delta_y, uint32_t modifiers) {
+    if (delta_x == 0 && delta_y == 0) return;
+    view.gpu_scroll_pending = true;
+    view.gpu_scroll_x = x;
+    view.gpu_scroll_y = y;
+    view.gpu_scroll_delta_x += delta_x;
+    view.gpu_scroll_delta_y += delta_y;
+    view.gpu_scroll_modifiers = modifiers;
+    view.gpu_scroll_timestamp_ns = gpuTimestampNs();
+    view.gpu_prompt_frame_pending = true;
+    gpuSurfaceScheduleFrameEmission(host, view);
+}
+
+static void emitQueuedGpuSurfaceScrollInput(Host *host, NativeView &view) {
+    if (!view.gpu_scroll_pending) return;
+    const double x = view.gpu_scroll_x;
+    const double y = view.gpu_scroll_y;
+    const double delta_x = view.gpu_scroll_delta_x;
+    const double delta_y = view.gpu_scroll_delta_y;
+    const uint32_t modifiers = view.gpu_scroll_modifiers;
+    const uint64_t timestamp = view.gpu_scroll_timestamp_ns;
+    view.gpu_scroll_pending = false;
+    view.gpu_scroll_delta_x = 0;
+    view.gpu_scroll_delta_y = 0;
+    view.gpu_scroll_timestamp_ns = 0;
+    if (delta_x != 0 || delta_y != 0) {
+        emitGpuSurfaceInput(host, view, kGpuInputScroll, x, y, 0, delta_x, delta_y, "", "", modifiers, timestamp);
+    }
+}
+
+static void emitQueuedGpuSurfaceInputs(Host *host, NativeView &view) {
+    emitQueuedGpuSurfacePointerMotionInput(host, view);
+    emitQueuedGpuSurfaceScrollInput(host, view);
+}
+
 static void emitGpuSurfaceTextInput(Host *host, NativeView &view, int input_kind, const std::string &text, bool has_composition_cursor, size_t composition_cursor) {
     WindowsEvent event = {};
     event.kind = kGpuSurfaceInput;
@@ -2781,17 +2941,18 @@ static bool gpuSurfaceLogicalSize(const NativeView &view, HWND hwnd, double scal
  * latency) never happens. */
 static void gpuSurfaceAdvancePacingClock(NativeView &view) {
     const uint64_t now = gpuTimestampNs();
+    const uint64_t frame_interval_ns = gpuSurfaceFrameIntervalNs(view);
     if (view.gpu_last_emit_ns == 0) {
         view.gpu_last_emit_ns = now;
         return;
     }
-    const uint64_t scheduled_ns = view.gpu_last_emit_ns + kGpuFrameIntervalNs;
+    const uint64_t scheduled_ns = view.gpu_last_emit_ns + frame_interval_ns;
     if (now < scheduled_ns) {
         /* Fired before the deadline (timer granularity); re-basing at
          * now keeps the next delay a full interval. */
         view.gpu_last_emit_ns = now;
     } else {
-        view.gpu_last_emit_ns = scheduled_ns + ((now - scheduled_ns) / kGpuFrameIntervalNs) * kGpuFrameIntervalNs;
+        view.gpu_last_emit_ns = scheduled_ns + ((now - scheduled_ns) / frame_interval_ns) * frame_interval_ns;
     }
 }
 
@@ -2827,10 +2988,12 @@ static void gpuSurfaceRefreshFrameWakeTimer(Host *host) {
     if (!host) return;
     const uint64_t now = gpuTimestampNs();
     uint64_t earliest_ns = UINT64_MAX;
-    for (const auto &entry : host->native_views) {
-        const NativeView &view = entry.second;
+    /* Non-const: the monitor-derived interval memoizes its HMONITOR and
+     * period on the view, so the pacing lookup mutates that cache. */
+    for (auto &entry : host->native_views) {
+        NativeView &view = entry.second;
         if (view.kind != kViewGpuSurface || !view.hwnd || !view.gpu_emission_scheduled) continue;
-        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : gpuSurfaceFrameIntervalNs(view);
         const uint64_t due_ns = view.gpu_last_emit_ns == 0 ? now : view.gpu_last_emit_ns + pace_ns;
         earliest_ns = std::min(earliest_ns, due_ns);
     }
@@ -2870,6 +3033,10 @@ static void gpuSurfaceDestroyFrameWakeTimer(Host *host) {
  * color, buffer geometry) is the payload, so one event serves frame
  * requests and present completions alike. */
 static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
+    /* Flush latest-wins pointer motion and accumulated wheel deltas before
+     * the frame callback so the app's rebuilt display list is available to
+     * this same visible frame. */
+    emitQueuedGpuSurfaceInputs(host, view);
     /* The input's responding frame is THIS one; the follow-up schedule
      * (an armed animation re-requesting) returns to the minimized
      * heartbeat unless another input lands. */
@@ -2897,7 +3064,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
     event.scale = scale;
     event.frame_index = view.gpu_frame_index;
     event.timestamp_ns = gpuTimestampNs();
-    event.frame_interval_ns = kGpuFrameIntervalNs;
+    event.frame_interval_ns = gpuSurfaceFrameIntervalNs(view);
     event.nonblank = view.gpu_nonblank;
     event.sample_color = view.gpu_sample_color;
     event.gpu_backend = view.gpu_backend;
@@ -2920,8 +3087,39 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
  * is queued fold into it. Always fires through the message loop — a
  * request lands mid engine dispatch and a synchronous emission would
  * re-enter the engine — and the pacing clock's grid stamping keeps the
- * message hop out of the period. The waitable timer supplies the precise
- * wake; SetTimer is only the compatibility fallback. */
+ * message hop out of the period.
+ *
+ * The deadline is a timer-queue one-shot rather than SetTimer. Two reasons:
+ * SetTimer cannot express a 240 Hz grid (its resolution floor is coarser
+ * than the 4.17 ms such a display asks for), and WM_TIMER is SYNTHESIZED
+ * ONLY WHEN THE QUEUE IS EMPTY — so a drag, a trackpad, or any input storm
+ * starves it exactly when frames matter most, and DefWindowProc's modal
+ * move/size loop never yields to the run loop that would otherwise notice.
+ * The callback posts kGpuEmitMessage, an ordinary queued message every pump
+ * delivers, and does nothing else: all app and runtime work stays on the UI
+ * thread. */
+struct GpuEmitTimerContext {
+    HWND hwnd;
+    uint64_t generation;
+};
+
+static VOID CALLBACK gpuSurfaceEmitTimerCallback(PVOID raw_context, BOOLEAN) {
+    const GpuEmitTimerContext *context = static_cast<const GpuEmitTimerContext *>(raw_context);
+    if (context && context->hwnd) {
+        PostMessageW(context->hwnd, kGpuEmitMessage, static_cast<WPARAM>(context->generation), 0);
+    }
+}
+
+static void cancelGpuSurfaceFrameEmission(NativeView &view) {
+    HANDLE timer = view.gpu_emit_timer;
+    GpuEmitTimerContext *context = static_cast<GpuEmitTimerContext *>(view.gpu_emit_context);
+    view.gpu_emit_timer = nullptr;
+    view.gpu_emit_context = nullptr;
+    view.gpu_emission_scheduled = false;
+    if (timer) DeleteTimerQueueTimer(nullptr, timer, INVALID_HANDLE_VALUE);
+    delete context;
+}
+
 static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
     if (!view.hwnd || view.gpu_emission_scheduled) return;
     const uint64_t now = gpuTimestampNs();
@@ -2932,14 +3130,35 @@ static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
      * timer at the grid delay (restore through the top-level WM_SIZE
      * handler, re-show through the show verb), so the long delay never
      * gates the return to full cadence. */
-    const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+    const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : gpuSurfaceFrameIntervalNs(view);
     uint64_t delay_ns = 0;
     if (view.gpu_last_emit_ns > 0 && now < view.gpu_last_emit_ns + pace_ns) {
         delay_ns = view.gpu_last_emit_ns + pace_ns - now;
     }
-    const UINT delay_ms = (UINT)((delay_ns + 500000ull) / 1000000ull);
-    view.gpu_emission_scheduled = true;
-    (void)SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr);
+    /* Nearest-millisecond rounding preserves a 240 Hz grid as a 4 ms wait;
+     * ceiling it to 5 ms would impose an artificial 200 Hz cap. */
+    const DWORD delay_ms = static_cast<DWORD>((delay_ns + 500000ull) / 1000000ull);
+    /* Remember which cadence this deadline was placed on, so a reveal can
+     * tell a parked heartbeat emission (worth superseding) from one already
+     * due on the frame grid (worth leaving alone). */
+    view.gpu_emit_pace_ns = pace_ns;
+    /* The generation fences a re-arm against the timer already in flight:
+     * a callback that fires after cancellation posts a stale generation the
+     * UI thread drops, so a superseded deadline can never emit a frame. */
+    view.gpu_emit_generation += 1;
+    GpuEmitTimerContext *context = new (std::nothrow) GpuEmitTimerContext{
+        view.hwnd, view.gpu_emit_generation,
+    };
+    if (!context) return;
+    HANDLE timer = nullptr;
+    if (CreateTimerQueueTimer(&timer, nullptr, gpuSurfaceEmitTimerCallback, context,
+            delay_ms, 0, WT_EXECUTEONLYONCE)) {
+        view.gpu_emit_timer = timer;
+        view.gpu_emit_context = context;
+        view.gpu_emission_scheduled = true;
+    } else {
+        delete context;
+    }
     gpuSurfaceRefreshFrameWakeTimer(host);
 }
 
@@ -2960,10 +3179,10 @@ static void gpuSurfaceDrainDueFrameEmissions(Host *host) {
     if (!host || !host->running) return;
     const uint64_t now = gpuTimestampNs();
     std::vector<std::string> due_keys;
-    for (const auto &entry : host->native_views) {
-        const NativeView &view = entry.second;
+    for (auto &entry : host->native_views) {
+        NativeView &view = entry.second;
         if (view.kind != kViewGpuSurface || !view.hwnd || !view.gpu_emission_scheduled) continue;
-        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : gpuSurfaceFrameIntervalNs(view);
         if (view.gpu_last_emit_ns == 0 || now >= view.gpu_last_emit_ns + pace_ns) {
             due_keys.push_back(entry.first);
         }
@@ -2978,11 +3197,14 @@ static void gpuSurfaceDrainDueFrameEmissions(Host *host) {
         NativeView &view = found->second;
         if (view.kind != kViewGpuSurface || !view.hwnd || !view.gpu_emission_scheduled) continue;
         const uint64_t current_ns = gpuTimestampNs();
-        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+        const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : gpuSurfaceFrameIntervalNs(view);
         if (view.gpu_last_emit_ns > 0 && current_ns < view.gpu_last_emit_ns + pace_ns) continue;
         const HWND hwnd = view.hwnd;
-        KillTimer(hwnd, kGpuEmitTimerId);
-        view.gpu_emission_scheduled = false;
+        /* Retire the in-flight deadline (and its context) rather than
+         * killing a WM_TIMER: the emission is happening now, and the
+         * generation bump keeps a callback already queued from emitting
+         * a second frame behind this one. */
+        cancelGpuSurfaceFrameEmission(view);
         gpuSurfaceEmitFrame(host, view, hwnd);
         if (!host->running) return;
     }
@@ -3307,29 +3529,37 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
     if (!view) return DefWindowProcW(hwnd, message, wparam, lparam);
     const double scale = gpuSurfaceScale(hwnd);
     switch (message) {
+        case kGpuEmitMessage:
+            if (!view->gpu_emission_scheduled ||
+                static_cast<uint64_t>(wparam) != view->gpu_emit_generation) return 0;
+            cancelGpuSurfaceFrameEmission(*view);
+            gpuSurfaceEmitFrame(host, *view, hwnd);
+            return 0;
         case WM_TIMER:
             if (wparam == kGpuFrameTimerId) {
                 /* Placeholder pump: arm the scheduler until the first
                  * present lands, then retire (SetTimer repeats until
-                 * KillTimer). */
-                if (view->gpu_presented) {
+                 * KillTimer). HIDDEN views retire too — a view the app
+                 * declares but keeps hidden (an overlay awaiting its
+                 * first open) never presents, so the pump would tick
+                 * 60x/s for the whole session, and its posted frame
+                 * traffic competes with hardware input in the message
+                 * queue. The show path re-arms the pump for
+                 * never-presented views, so a first reveal still
+                 * establishes frames. The view's OWN visibility gates
+                 * this, never IsWindowVisible: that walks the ancestor
+                 * chain, and during the deferred-show startup window the
+                 * top-level is still hidden — retiring every view's pump
+                 * there left the adopted monitor wells without the first
+                 * frame events their presents ride on. */
+                if (view->gpu_presented || !view->visible) {
                     KillTimer(hwnd, kGpuFrameTimerId);
                     return 0;
                 }
                 gpuSurfaceScheduleFrameEmission(host, *view);
                 return 0;
             }
-            if (wparam == kGpuEmitTimerId) {
-                /* The one scheduled emission fires: one-shot semantics
-                 * (KillTimer before the emit — SetTimer timers repeat),
-                 * and the scheduled flag clears BEFORE emitting so the
-                 * emission's engine dispatch can re-arm the scheduler. */
-                KillTimer(hwnd, kGpuEmitTimerId);
-                view->gpu_emission_scheduled = false;
-                gpuSurfaceEmitFrame(host, *view, hwnd);
-                if (host->running) gpuSurfaceRefreshFrameWakeTimer(host);
-                return 0;
-            }
+            /* High-resolution emissions arrive through kGpuEmitMessage. */
             break;
         case WM_PAINT: {
             RECT paint_rects[kGpuPaintRegionRectCap] = {};
@@ -3392,8 +3622,32 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_SIZE: {
             double width = 0;
             double height = 0;
-            if (gpuSurfaceLogicalSize(*view, hwnd, scale, &width, &height)) {
-                (void)syncGpuSurfaceGeometry(host, *view, width, height, scale);
+            if (gpuSurfaceLogicalSize(*view, hwnd, scale, &width, &height) &&
+                syncGpuSurfaceGeometry(host, *view, width, height, scale)) {
+                /* A geometry change is a reason to draw, and nothing else
+                 * in this host treats it as one. Emissions are scheduled by
+                 * input, by animation, and by explicit frame requests; the
+                 * top-level WM_SIZE handler further down only RE-ARMS
+                 * surfaces that already had one pending. So a panel that
+                 * happened to be idle when the window (or a dock divider)
+                 * moved never heard about its new bounds: it kept
+                 * presenting the packet it rendered for the old ones and
+                 * only repaired itself once the pointer wandered in and
+                 * woke it for unrelated reasons. That is the "some panels
+                 * resize live, others wait for the mouse" split.
+                 *
+                 * The repaint has to be FORCED. The runtime plans an idle
+                 * frame for an unchanged scene, and a resize does not
+                 * change the scene -- only the viewport it is laid out
+                 * against. AppKit already forces one across its view-frame
+                 * and backing-scale transitions; this is the Win32 half of
+                 * the same contract.
+                 *
+                 * Cost is bounded by the frame grid rather than the message
+                 * rate: a drag delivers WM_SIZE per mouse step and every
+                 * one of them folds into the single in-flight emission. */
+                view->gpu_force_full_repaint_pending = true;
+                gpuSurfaceScheduleFrameEmission(host, *view);
             }
             return 0;
         }
@@ -3442,7 +3696,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             view->gpu_pointer_x = x;
             view->gpu_pointer_y = y;
             const int kind = view->gpu_pointer_down ? kGpuInputPointerDrag : kGpuInputPointerMove;
-            emitGpuSurfaceInput(host, *view, kind, x, y, 0, 0, 0, "", "", gpuModifierFlags());
+            queueGpuSurfacePointerMotionInput(host, *view, kind, x, y, 0, gpuModifierFlags());
             return 0;
         }
         case WM_MOUSELEAVE: {
@@ -3480,6 +3734,8 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                     }
                 }
                 if (!suppressed) {
+                    /* Flush the final hover sample before leave cancellation. */
+                    emitQueuedGpuSurfacePointerMotionInput(host, *view);
                     emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
                 }
             }
@@ -3488,6 +3744,8 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_CAPTURECHANGED:
             if (view->gpu_pointer_down) {
                 view->gpu_pointer_down = 0;
+                /* Preserve the final drag sample before capture cancellation. */
+                emitQueuedGpuSurfacePointerMotionInput(host, *view);
                 emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
             }
             break;
@@ -3506,7 +3764,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             const double delta = (double)(short)HIWORD(wparam) / (double)WHEEL_DELTA * 40.0;
             const double delta_x = message == WM_MOUSEHWHEEL ? delta : 0;
             const double delta_y = message == WM_MOUSEWHEEL ? -delta : 0;
-            emitGpuSurfaceInput(host, *view, kGpuInputScroll, x, y, 0, delta_x, delta_y, "", "", gpuModifierFlags());
+            queueGpuSurfaceScrollInput(host, *view, x, y, delta_x, delta_y, gpuModifierFlags());
             return 0;
         }
         case WM_KEYDOWN:
@@ -5799,13 +6057,25 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                  * one-shot timer. SetTimer with the same id REPLACES the
                  * pending timer, so re-arming at the frame-grid delay
                  * (the last emit is at least a heartbeat old, so that
-                 * delay computes to zero) is a clean supersede. */
+                 * delay computes to zero) is a clean supersede.
+                 *
+                 * Only a PARKED deadline is worth superseding. WM_SIZE also
+                 * arrives on every step of a live resize drag, and re-arming
+                 * a grid-paced emission there discards a frame that was
+                 * already due and starts its wait over — so a drag whose
+                 * steps outpace the frame interval keeps resetting the
+                 * deadline just before it fires, and most emissions never
+                 * happen at all. */
                 if (wparam != SIZE_MINIMIZED) {
                     for (auto &view_entry : host->native_views) {
                         NativeView &surface = view_entry.second;
                         if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
                         if (GetAncestor(surface.hwnd, GA_ROOT) != hwnd) continue;
-                        surface.gpu_emission_scheduled = false;
+                        /* Only a PARKED deadline is worth superseding. One
+                         * already due on the frame grid would just be pushed
+                         * further out by the re-arm. */
+                        if (surface.gpu_emit_pace_ns <= gpuSurfaceFrameIntervalNs(surface)) continue;
+                        cancelGpuSurfaceFrameEmission(surface);
                         gpuSurfaceScheduleFrameEmission(host, surface);
                     }
                 }
@@ -5825,10 +6095,42 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 }
             }
             return 0;
+        case WM_ENTERSIZEMOVE:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd != hwnd) continue;
+                    entry.second.in_modal_move_loop = true;
+                    entry.second.deferred_frame_event = false;
+                }
+            }
+            break;
+        case WM_EXITSIZEMOVE:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd != hwnd) continue;
+                    const bool deferred = entry.second.deferred_frame_event;
+                    entry.second.in_modal_move_loop = false;
+                    entry.second.deferred_frame_event = false;
+                    /* The one emission the whole drag owed: the runtime
+                     * relayouts and persists the settled frame once. */
+                    if (deferred) emit(host, entry.second, kWindowFrame);
+                }
+            }
+            break;
         case WM_MOVE:
             if (host) {
                 for (auto &entry : host->windows) {
-                    if (entry.second.hwnd == hwnd) emit(host, entry.second, kWindowFrame);
+                    if (entry.second.hwnd != hwnd) continue;
+                    /* A drag delivers WM_MOVE at mouse rate, and the
+                     * runtime answers each one with a full shell relayout
+                     * plus a window-state file rewrite. A move changes no
+                     * client size, so nothing needs either until the drag
+                     * settles. */
+                    if (entry.second.in_modal_move_loop) {
+                        entry.second.deferred_frame_event = true;
+                        continue;
+                    }
+                    emit(host, entry.second, kWindowFrame);
                 }
             }
             return 0;
@@ -6041,6 +6343,13 @@ static bool createNativeWindow(Host *host, Window &window) {
         style = WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX;
         if (window.resizable) style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
     }
+    /* The client area belongs to child HWNDs (canvas views, webviews, and
+     * whatever the app adopts into them), so the parent must never paint
+     * over them: without this, DefWindowProc's erase — the class brush is
+     * COLOR_WINDOW, i.e. white in BOTH OS schemes — flashes across every
+     * child on any parent repaint. Adopted media surfaces hold that flash
+     * longest, since they only repaint when a new frame is presented. */
+    style |= WS_CLIPCHILDREN;
     /* The requested frame is a CONTENT size in LOGICAL points (the
      * other hosts size the content area); scale it to physical pixels
      * at the DPI the window opens at (the system DPI — WM_DPICHANGED
@@ -6220,6 +6529,13 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
         emit(host, entry.second, kResize);
         emit(host, entry.second, kWindowFrame);
     }
+    /* 1 ms system timer resolution for the loop's lifetime: every pacing
+     * primitive this host uses (the placeholder SetTimer pump, the
+     * timer-queue frame deadlines, the waitable frame wake) quantizes to
+     * the system timer, and the default ~15.6 ms granularity caps a 240 Hz
+     * frame grid — and the coalesced input flush riding it — near 64 Hz.
+     * Per-process since Windows 10 2004, released on loop exit. */
+    const bool timer_resolution_raised = timeBeginPeriod(1) == TIMERR_NOERROR;
     MSG message = {};
     while (host->running) {
         HANDLE handles[1] = {};
@@ -6239,6 +6555,7 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
         DispatchMessageW(&message);
         if (host->running) gpuSurfaceDrainDueFrameEmissions(host);
     }
+    if (timer_resolution_raised) timeEndPeriod(1);
     WindowsEvent shutdown = {};
     shutdown.kind = kShutdown;
     shutdown.window_id = 1;
@@ -6820,7 +7137,7 @@ int native_sdk_windows_show_window(Host *host, uint64_t window_id) {
         NativeView &surface = view_entry.second;
         if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
         if (surface.window_id != window_id) continue;
-        surface.gpu_emission_scheduled = false;
+        cancelGpuSurfaceFrameEmission(surface);
         gpuSurfaceScheduleFrameEmission(host, surface);
     }
     emit(host, found->second, kWindowFrame);
@@ -6940,7 +7257,10 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
             break;
         case kViewGpuSurface:
             class_name = gpuSurfaceClassName(host);
-            style |= WS_TABSTOP;
+            /* Same contract as the top-level: a container hosting an
+             * adopted app surface must not paint its own canvas content
+             * over it. No-op for the containers that have no children. */
+            style |= WS_TABSTOP | WS_CLIPCHILDREN;
             wide_text.clear();
             break;
         default:
@@ -7014,7 +7334,7 @@ int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, co
     NativeView &view = found->second;
     view.gpu_prompt_frame_pending = true;
     if (view.gpu_emission_scheduled) {
-        view.gpu_emission_scheduled = false;
+        cancelGpuSurfaceFrameEmission(view);
         gpuSurfaceScheduleFrameEmission(host, view);
     }
     return 1;
@@ -7111,6 +7431,17 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
                 InvalidateRect(view.hwnd, &info.dirty_rects[index], FALSE);
             }
         }
+        /* Service that invalidation NOW rather than leaving it to the
+         * message queue. WM_PAINT is synthesized only when the queue has
+         * nothing else to deliver, so a resize — which floods the queue —
+         * starves it: measured at 15 surfaces re-rendering per step and
+         * barely one of them reaching the glass, every other panel showing
+         * pixels laid out for a size the window no longer has. Rendering a
+         * frame nobody sees is worse than not rendering it, and the frame
+         * is already in the target here; UpdateWindow just spends the blit
+         * that makes it count. No-op when the update region is empty, so a
+         * render that changed nothing still costs nothing. */
+        UpdateWindow(view.hwnd);
     }
 
     const bool first_present = !view.gpu_presented;
@@ -7270,6 +7601,12 @@ int native_sdk_windows_update_view(Host *host, uint64_t window_id, const char *l
         applyNativeViewFrame(host, view);
         applyNativeChildFrames(host, window_id, view.label);
     }
+    /* A supplied layer is not a CHANGED layer. The shell relayout patches
+     * every view with both a frame and its layer on every WM_SIZE, so
+     * keying the Z-order rebuild off `has_layer` reordered every child of
+     * the window once per view per resize step — measured at ~300
+     * SetWindowPos calls a step, and the dominant cost of a live resize. */
+    const bool layer_changed = has_layer && view.layer != layer;
     if (has_layer) view.layer = layer;
     if (has_visible) view.visible = visible != 0;
     if (has_enabled) view.enabled = enabled != 0;
@@ -7284,7 +7621,7 @@ int native_sdk_windows_update_view(Host *host, uint64_t window_id, const char *l
     bool update_text = has_text || (has_role && !view.explicit_text);
     std::string display_text = has_text ? view.text : nativeViewDisplayText(view);
     if (has_visible || has_enabled || has_role || has_accessibility_label || update_text) applyNativeViewState(view, update_text, display_text);
-    if (has_layer) reorderWindowChildren(host, window_id);
+    if (layer_changed) reorderWindowChildren(host, window_id);
     if (view.kind == kViewGpuSurface && (has_frame || has_layer || has_visible)) {
         auto window = host->windows.find(window_id);
         if (window != host->windows.end() && window->second.transparent) {
