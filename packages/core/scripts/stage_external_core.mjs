@@ -80,7 +80,15 @@ function resolveSpecifiers(text, rel) {
     .replace(/readonly ([A-Za-z_][A-Za-z0-9_]*(?:<[A-Za-z_, ]*>)?)\[\]/g, "$1[]")
     .replace(/(?<![A-Za-z0-9_])Bytes(?![A-Za-z0-9_])/g, "Uint8Array")
     .split("\n")
-    .filter((line) => line !== "export type Uint8Array = Uint8Array;" && !/^ *type Uint8Array,$/.test(line))
+    // Both drops tolerate a trailing CR for the same reason transform 4's
+    // terminator does: on a CRLF checkout the split leaves one behind, and
+    // an exact-equality drop (or a `$`-anchored one) would quietly keep the
+    // folded alias it is meant to remove.
+    .filter(
+      (line) =>
+        line.replace(/\r$/, "") !== "export type Uint8Array = Uint8Array;" &&
+        !/^ *type Uint8Array,\r?$/.test(line),
+    )
     .map((line) => line.replaceAll("type Uint8Array, ", "").replace(/, type Uint8Array([,}])/g, "$1"))
     .join("\n");
 }
@@ -99,18 +107,29 @@ function exportedAliasNames(text) {
 /// Transform 4: drop the static surface's copy of any alias another
 /// staged file declares (single-line aliases and multi-line ones,
 /// through the terminating `;`).
+///
+/// The `\r?` in the terminator is load-bearing on a CRLF checkout (Git
+/// for Windows defaults to core.autocrlf=true, and this repo carries no
+/// .gitattributes to override it): splitting on "\n" leaves a trailing
+/// CR on every line, so a `;$` terminator matches nothing. Without it a
+/// SINGLE-line alias reads as multi-line, `skipping` latches on and
+/// never clears, and the rest of the static surface — Cmd and Sub
+/// included — is silently dropped from the stage, surfacing far away as
+/// "Module './sdk/core.ts' has no exported member 'Cmd'". It is a no-op
+/// on LF input, so the staged bytes the compiled-core batteries pin are
+/// unchanged.
 function dedupeAliases(text, dropNames) {
   const drop = new Set(dropNames);
   const out = [];
   let skipping = false;
   for (const line of text.split("\n")) {
     if (skipping) {
-      if (/;[ \t]*$/.test(line)) skipping = false;
+      if (/;[ \t]*\r?$/.test(line)) skipping = false;
       continue;
     }
     const match = /^export type ([A-Za-z0-9_]+) =/.exec(line);
     if (match && drop.has(match[1])) {
-      if (!/;[ \t]*$/.test(line)) skipping = true;
+      if (!/;[ \t]*\r?$/.test(line)) skipping = true;
       continue;
     }
     out.push(line);
