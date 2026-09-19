@@ -2101,6 +2101,20 @@ test "windows context menu action event maps token and item id" {
     try std.testing.expectEqual(@as(u32, 3), action.item_id);
 }
 
+test "windows coalesced input is delivered before pointer button transitions" {
+    const source = @embedFile("webview2_host.cpp");
+    for ([_][]const u8{ "case WM_MBUTTONDOWN: {", "case WM_MBUTTONUP: {" }) |marker| {
+        const start = std.mem.indexOf(u8, source, marker) orelse return error.TestExpectedEqual;
+        const tail = source[start..];
+        const end = std.mem.indexOfPos(u8, tail, marker.len, "case WM_") orelse return error.TestExpectedEqual;
+        const handler = tail[0..end];
+        const flush = std.mem.indexOf(u8, handler, "emitQueuedGpuSurfaceInputs(host, *view);") orelse return error.TestExpectedEqual;
+        const transition = std.mem.indexOf(u8, handler, "view->gpu_pointer_down =") orelse return error.TestExpectedEqual;
+        const emit = std.mem.indexOf(u8, handler, "emitGpuSurfaceInput(host, *view,") orelse return error.TestExpectedEqual;
+        try std.testing.expect(flush < transition and transition < emit);
+    }
+}
+
 test "windows gpu surface input maps pointer cancel" {
     var event = std.mem.zeroes(WindowsEvent);
     event.input_kind = 11;
@@ -2616,14 +2630,16 @@ test "windows busy message loop drains due gpu frames outside input callbacks" {
     const loop_at = std.mem.indexOf(u8, helper, "for (const std::string &key : due_keys)") orelse return error.TestExpectedEqual;
     const loop = helper[loop_at..];
     const before_emit_guard_at = std.mem.indexOf(u8, loop, "if (!host->running) return;") orelse return error.TestExpectedEqual;
-    const kill_at = std.mem.indexOf(u8, helper, "KillTimer(hwnd, kGpuEmitTimerId);") orelse return error.TestExpectedEqual;
-    const clear_at = std.mem.indexOf(u8, helper, "view.gpu_emission_scheduled = false;") orelse return error.TestExpectedEqual;
+    // Retiring the deadline is one call now that the one-shot is a timer-queue
+    // timer rather than a WM_TIMER: it cancels the timer, frees its context,
+    // bumps the generation so an already-queued callback cannot emit a second
+    // frame behind this one, and clears gpu_emission_scheduled.
+    const retire_at = std.mem.indexOf(u8, helper, "cancelGpuSurfaceFrameEmission(view);") orelse return error.TestExpectedEqual;
     const emit_at = std.mem.indexOf(u8, helper, "gpuSurfaceEmitFrame(host, view, hwnd);") orelse return error.TestExpectedEqual;
     const after_emit = helper[emit_at + "gpuSurfaceEmitFrame(host, view, hwnd);".len ..];
     try std.testing.expect(std.mem.indexOf(u8, after_emit, "if (!host->running) return;") != null);
     try std.testing.expect(loop_at + before_emit_guard_at < emit_at);
-    try std.testing.expect(kill_at < clear_at);
-    try std.testing.expect(clear_at < emit_at);
+    try std.testing.expect(retire_at < emit_at);
 }
 
 test "windows gpu frame deadlines use a high resolution waitable timer" {
@@ -2644,11 +2660,18 @@ test "windows gpu frame deadlines use a high resolution waitable timer" {
     const wake_at = std.mem.indexOf(u8, schedule, "gpuSurfaceRefreshFrameWakeTimer(host);") orelse return error.TestExpectedEqual;
     try std.testing.expect(scheduled_at < wake_at);
 
-    const timer_at = std.mem.indexOf(u8, host_source, "if (wparam == kGpuEmitTimerId)") orelse return error.TestExpectedEqual;
+    // The deadline fires on a timer-queue thread, so it cannot touch app state
+    // directly: the callback posts kGpuEmitMessage and the UI thread emits.
+    // Pin that the handler fences on the generation before doing anything (a
+    // callback that raced a cancellation carries a stale one and must drop),
+    // then retires the deadline before entering application code.
+    const timer_at = std.mem.indexOf(u8, host_source, "case kGpuEmitMessage:") orelse return error.TestExpectedEqual;
     const timer_tail = host_source[timer_at..];
+    const generation_at = std.mem.indexOf(u8, timer_tail, "static_cast<uint64_t>(wparam) != view->gpu_emit_generation") orelse return error.TestExpectedEqual;
+    const retire_at = std.mem.indexOf(u8, timer_tail, "cancelGpuSurfaceFrameEmission(*view);") orelse return error.TestExpectedEqual;
     const emit_at = std.mem.indexOf(u8, timer_tail, "gpuSurfaceEmitFrame(host, *view, hwnd);") orelse return error.TestExpectedEqual;
-    const refresh_at = std.mem.indexOf(u8, timer_tail, "gpuSurfaceRefreshFrameWakeTimer(host);") orelse return error.TestExpectedEqual;
-    try std.testing.expect(emit_at < refresh_at);
+    try std.testing.expect(generation_at < retire_at);
+    try std.testing.expect(retire_at < emit_at);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "gpuSurfaceDestroyFrameWakeTimer(host);") != null);
 }
 
@@ -2753,4 +2776,30 @@ fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []cons
 
 test "windows platform module exports type" {
     _ = WindowsPlatform;
+}
+
+test "a resized windows gpu surface asks for its own repaint" {
+    const host_source = @embedFile("webview2_host.cpp");
+
+    // The host's only other resize-driven wake re-arms surfaces that
+    // ALREADY have an emission pending, so an idle panel would never hear
+    // that its bounds moved. Both halves matter: the schedule delivers a
+    // frame event carrying the new size, and the forced full repaint stops
+    // the runtime from planning an idle frame for a scene that did not
+    // change — only the viewport did.
+    const forced_at = std.mem.indexOf(
+        u8,
+        host_source,
+        "view->gpu_force_full_repaint_pending = true;\n                gpuSurfaceScheduleFrameEmission(host, *view);",
+    );
+    try std.testing.expect(forced_at != null);
+
+    // ...and it is gated on the geometry actually changing. Waking on
+    // every WM_SIZE regardless would hold a full-rate frame loop open for
+    // as long as the message keeps arriving.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "syncGpuSurfaceGeometry(host, *view, width, height, scale)) {",
+    ) != null);
 }

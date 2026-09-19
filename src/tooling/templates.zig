@@ -1942,6 +1942,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        app_mod.linkSystemLibrary("mf", .{});
         \\        app_mod.linkSystemLibrary("mfplat", .{});
         \\        app_mod.linkSystemLibrary("winhttp", .{});
+        \\        app_mod.linkSystemLibrary("winmm", .{});
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
         \\    }
         \\}
@@ -4908,4 +4909,13 @@ fn readTestFile(allocator: std.mem.Allocator, io: std.Io, root: []const u8, path
     var read_buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &read_buffer);
     return reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
+}
+
+test "web frontend build template links the Windows frame timer" {
+    const names = try TemplateNames.init(std.testing.allocator, "app");
+    defer names.deinit(std.testing.allocator);
+    const build_zig = try buildZig(std.testing.allocator, names, "..", .vite);
+    defer std.testing.allocator.free(build_zig);
+    const host = std.mem.indexOf(u8, build_zig, "src/platform/windows/webview2_host.cpp") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOfPos(u8, build_zig, host, "app_mod.linkSystemLibrary(\"winmm\", .{});") != null);
 }
