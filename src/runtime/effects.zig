@@ -17,7 +17,11 @@
 //! fire-and-forget exception: the OS owns delivery after the one
 //! loop-thread platform call, so there is no meaningful terminal Msg.
 //! Invalid requests and unavailable services fail closed; fake execution
-//! and session replay never emit a real notification. Clipboard effects
+//! and session replay never emit a real notification. Opening a URL in
+//! the user's default handler (`openUrl`) is the same shape, with the
+//! same reasoning, over an ALLOWLIST of schemes (http, https, mailto) —
+//! app cores hand it untrusted bytes, so anything else is a whole
+//! no-op. Clipboard effects
 //! (`writeClipboard`/`readClipboard`) keep
 //! the same shape over the platform pasteboard — the seam the
 //! runtime's cmd+C copy uses — executed synchronously on the loop
@@ -8595,6 +8599,44 @@ pub fn Effects(comptime Msg: type) type {
             validation.validateNotificationOptions(options) catch return;
             const services = self.services orelse return;
             services.showNotification(options) catch {};
+        }
+
+        /// Ask the desktop host to open `url` in the user's default
+        /// handler — the browser for `http`/`https`, the mail client for
+        /// `mailto`. This is the `update`-side seam for the same
+        /// platform verb the webview bridge exposes as
+        /// `native-sdk.os.openUrl`; before it, a Zig core with no
+        /// webview had no way to reach it. Fire-and-forget for the same
+        /// reason `showNotification` is: the OS owns whether a handler
+        /// actually launched, so no success Msg would be truthful.
+        ///
+        /// The URL is treated as HOSTILE — apps hand this bytes that
+        /// came from terminal output, fetch bodies, and pastes — and is
+        /// validated against an ALLOWLIST of schemes
+        /// (`validation.open_url_schemes`: http, https, mailto) before
+        /// the platform sees it. Empty, over-bound
+        /// (`platform.max_external_url_bytes`), NUL- or control-byte-
+        /// bearing, and unrecognised-scheme URLs — `file:` and
+        /// `javascript:` among them — fail closed: a refused request is
+        /// a whole no-op, never a trimmed or coerced open. Nothing
+        /// reaches the platform, so a test's null platform records
+        /// nothing (`lastExternalUrl()`), which is how a rejection is
+        /// observed.
+        ///
+        /// Unlike the runtime's `openExternalUrl`, this is NOT gated on
+        /// the app's webview external-link policy: that policy governs
+        /// links WEB CONTENT follows, and this call comes from the app's
+        /// own `update`.
+        ///
+        /// The call runs synchronously on the loop thread, where the
+        /// platform launch services expect to be entered. Fake execution
+        /// and session replay suppress the platform call so tests stay
+        /// hermetic and a replay never reopens an external window.
+        pub fn openUrl(self: *Self, url: []const u8) void {
+            if (self.executor == .fake or self.replay) return;
+            validation.validateOpenUrl(url) catch return;
+            const services = self.services orelse return;
+            services.openExternalUrl(url) catch {};
         }
 
         /// Put text on the system clipboard through the platform

@@ -21,6 +21,7 @@ test {
     _ = @import("effects_file_tests.zig");
     _ = @import("effects_clipboard_tests.zig");
     _ = @import("effects_notification_tests.zig");
+    _ = @import("effects_open_url_tests.zig");
     _ = @import("effects_audio_tests.zig");
     _ = @import("effects_audio_capture_tests.zig");
     _ = @import("effects_video_tests.zig");

@@ -12,6 +12,43 @@ pub fn validateCommandName(name: []const u8) !void {
     }
 }
 
+/// The schemes an app-facing open-URL request may name, matched
+/// case-insensitively against the front of the URL (schemes are
+/// case-insensitive per RFC 3986). An ALLOWLIST, not a denylist:
+/// `file:` (hands the local disk to whatever handler claims it) and
+/// `javascript:` (runs code inside the receiving handler) are refused by
+/// simply not appearing, and so is every scheme nobody has vetted. A URL
+/// assembled from untrusted bytes — terminal output, a fetch body, a
+/// paste — can only reach the OS by matching an entry here.
+pub const open_url_schemes = [_][]const u8{ "http://", "https://", "mailto:" };
+
+/// Validate a URL the app asked the OS to open in the user's default
+/// handler (`Effects.openUrl`). Bounded by
+/// `platform.max_external_url_bytes`, the same bound the webview
+/// bridge's `native-sdk.os.openUrl` enforces. Every failure rejects the
+/// URL WHOLE — nothing here trims, escapes, or coerces a malformed URL
+/// into a valid one.
+pub fn validateOpenUrl(url: []const u8) !void {
+    if (url.len == 0) return error.InvalidOpenUrl;
+    if (url.len > platform.max_external_url_bytes) return error.OpenUrlTooLarge;
+    // A NUL truncates the URL at the C boundary every host crosses, and
+    // control bytes, whitespace, and DEL never appear in a well-formed
+    // URL — the whole class is refused rather than stripped, so a
+    // "https://ok\x00javascript:..." style splice cannot survive as its
+    // prefix.
+    for (url) |ch| {
+        if (ch <= 0x20 or ch == 0x7f) return error.InvalidOpenUrl;
+    }
+    for (open_url_schemes) |scheme| {
+        if (!std.ascii.startsWithIgnoreCase(url, scheme)) continue;
+        // A bare scheme names no target; only a scheme with something
+        // after it is worth handing to the OS.
+        if (url.len == scheme.len) return error.InvalidOpenUrl;
+        return;
+    }
+    return error.UnsupportedOpenUrlScheme;
+}
+
 pub fn validateRevealPath(path: []const u8) !void {
     if (path.len == 0) return error.InvalidRevealPath;
     if (path.len > platform.max_reveal_path_bytes) return error.RevealPathTooLarge;
