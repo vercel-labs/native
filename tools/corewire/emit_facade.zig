@@ -352,6 +352,7 @@ const FacadeEmitter = struct {
         try body.helperCall();
         try body.generatedTables();
         try body.codecSection();
+        try body.bootState();
         if (self.diags.hasErrors()) return;
 
         try self.header();
@@ -1223,13 +1224,6 @@ const FacadeEmitter = struct {
             \\
             \\
         );
-        if (self.sidecar.init_returns_cmd) {
-            // Boot through the normalized init wrapper: the boot pair's
-            // command already rides as bytes.
-            try self.print("const nscfBootPair = init();\nlet nscfCommitted: {s} = nscfBootPair[0];\n", .{self.sidecar.model});
-        } else {
-            try self.print("let nscfCommitted: {s} = nscfInitialModel();\n", .{self.sidecar.model});
-        }
         if (self.sidecar.update_returns_cmd) {
             try self.print(
                 \\
@@ -1283,6 +1277,18 @@ const FacadeEmitter = struct {
         try self.dispatchRecord();
         try self.dispatchTextInput();
         try self.dispatchScrollState();
+    }
+
+    fn bootState(self: *FacadeEmitter) Error!void {
+        // A boot command is encoded as this module initializes. Its encoder
+        // may read lookup tables (fetch method, audio verb, video verb), so
+        // evaluate the boot model only after codecSection declares them.
+        try self.raw("\n// Boot after the command encoder's lookup tables are initialized.\n");
+        if (self.sidecar.init_returns_cmd) {
+            try self.print("const nscfBootPair = init();\nlet nscfCommitted: {s} = nscfBootPair[0];\n", .{self.sidecar.model});
+        } else {
+            try self.print("let nscfCommitted: {s} = nscfInitialModel();\n", .{self.sidecar.model});
+        }
     }
 
     /// The dispatch expression committing one update cycle for a
