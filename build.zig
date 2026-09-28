@@ -261,6 +261,12 @@ pub fn build(b: *std.Build) void {
     gtk_pixels_test_run.expectExitCode(0);
     const gtk_pixels_test_step = b.step("test-gtk-pixels", "Run GTK software pixel conversion tests");
     gtk_pixels_test_step.dependOn(&gtk_pixels_test_run.step);
+    const spectrum_bins_test_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc", "-cflags", "-std=c11", "-Wall", "-Wextra", "-Werror", "--" });
+    spectrum_bins_test_run.addFileArg(b.path("src/platform/macos/spectrum_bins_test.c"));
+    spectrum_bins_test_run.addFileInput(b.path("src/platform/macos/spectrum_bins.h"));
+    spectrum_bins_test_run.expectExitCode(0);
+    const spectrum_bins_test_step = b.step("test-spectrum-bins", "Run audio spectrum bin range tests");
+    spectrum_bins_test_step.dependOn(&spectrum_bins_test_run.step);
 
     const desktop_mod = module(b, target, optimize, "src/root.zig");
     desktop_mod.addImport("geometry", geometry_mod);
@@ -721,6 +727,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&app_runner_test_run.step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&gtk_pixels_test_run.step);
+    test_step.dependOn(&spectrum_bins_test_run.step);
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);
     for (desktop_test_shards) |shard_tests| {

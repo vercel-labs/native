@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include "../ios/apple_image_fit.h"
+#include "spectrum_bins.h"
 
 @class NativeSdkAppKitHost;
 @class NativeSdkAudioCaptureTarget;
@@ -11031,17 +11032,16 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
      * bin, matching how a bar analyzer reads (an average would smear
      * narrow tones into invisibility). Bin 0 (DC) never contributes. */
     const double ratio = NATIVE_SDK_SPECTRUM_HIGH_HZ / NATIVE_SDK_SPECTRUM_LOW_HZ;
-    const double hz_per_bin = sample_rate / (double)NATIVE_SDK_SPECTRUM_FFT_SIZE;
     for (int band = 0; band < NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS; band += 1) {
         const double low_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)band / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
         const double high_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)(band + 1) / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
-        int low_bin = (int)(low_hz / hz_per_bin);
-        int high_bin = (int)ceil(high_hz / hz_per_bin);
-        if (low_bin < 1) low_bin = 1;
-        if (high_bin > NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1) high_bin = NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1;
-        if (high_bin < low_bin) high_bin = low_bin;
+        native_sdk_spectrum_bin_range_t bins;
+        if (!native_sdk_spectrum_bin_range(low_hz, high_hz, sample_rate, NATIVE_SDK_SPECTRUM_FFT_SIZE, &bins)) {
+            bands[band] = 0;
+            continue;
+        }
         float peak = 0.0f;
-        for (int bin = low_bin; bin <= high_bin; bin += 1) {
+        for (int bin = bins.first; bin <= bins.last; bin += 1) {
             if (power[bin] > peak) peak = power[bin];
         }
         const float amplitude = 2.0f * sqrtf(peak) / (float)NATIVE_SDK_SPECTRUM_FFT_SIZE;
