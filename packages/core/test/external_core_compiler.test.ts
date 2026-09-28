@@ -60,7 +60,7 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "global-siblin
   }
 });
 
-test("the external core compile lane uses the target-aware zig-cc environment", () => {
+test("the external core compile lane uses zig-cc for cross-target and native Windows GNU builds", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-cross-"));
   try {
     const stage = path.join(root, "stage");
@@ -90,28 +90,33 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "cross-target"
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
     const archive = path.join(root, "libfixture_core.a");
     const compiledSidecar = path.join(root, "compiled.contract.json");
-    const result = spawnSync(process.execPath, [
-      script,
-      "--stage", stage,
-      "--name", "fixture_core",
-      "--manifest", manifest,
-      "--frontend-sidecar", frontendSidecar,
-      "--out-archive", archive,
-      "--out-sidecar", compiledSidecar,
-      "--host-platform", "aarch64-macos-none",
-      "--target-platform", "x86_64-windows-gnu",
-      "--zig-exe", path.join(zigDir, "zig"),
-      "--compiler-js", compiler,
-    ], { encoding: "utf8" });
-    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
-    assert.equal(fs.readFileSync(archive, "utf8"), "target archive bytes");
-    assert.deepEqual(JSON.parse(fs.readFileSync(compiledSidecar, "utf8")), {
-      build_id: "cross-target",
-      model_fingerprint: "0123456789abcdef",
-      has_migrate: false,
-      model_unbound: ["phase"],
-      msg: { unbound: ["loaded"] },
-    });
+    const env = { ...process.env };
+    delete env.SCRIPTC_CC;
+    delete env.SCRIPTC_TARGET;
+    for (const hostPlatform of ["aarch64-macos-none", "x86_64-windows-gnu"]) {
+      const result = spawnSync(process.execPath, [
+        script,
+        "--stage", stage,
+        "--name", "fixture_core",
+        "--manifest", manifest,
+        "--frontend-sidecar", frontendSidecar,
+        "--out-archive", archive,
+        "--out-sidecar", compiledSidecar,
+        "--host-platform", hostPlatform,
+        "--target-platform", "x86_64-windows-gnu",
+        "--zig-exe", path.join(zigDir, "zig"),
+        "--compiler-js", compiler,
+      ], { encoding: "utf8", env });
+      assert.equal(result.status, 0, `${hostPlatform}: ${result.stdout}${result.stderr}`);
+      assert.equal(fs.readFileSync(archive, "utf8"), "target archive bytes");
+      assert.deepEqual(JSON.parse(fs.readFileSync(compiledSidecar, "utf8")), {
+        build_id: "cross-target",
+        model_fingerprint: "0123456789abcdef",
+        has_migrate: false,
+        model_unbound: ["phase"],
+        msg: { unbound: ["loaded"] },
+      });
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

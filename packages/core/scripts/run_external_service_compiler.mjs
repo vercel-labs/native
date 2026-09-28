@@ -7,8 +7,9 @@
 // The compiler version is verified against the one packages/core pin and the
 // echo in services.contract.json before any compiler work starts. Host/target
 // pairings follow the pinned compiler's build matrix: same-triple compiles run
-// natively; Linux and Windows GNU targets cross-compile from any desktop host
-// over the compiler's zig-cc lane; macOS targets need a macOS build host.
+// natively except Windows GNU, which needs zig-cc even on a Windows host;
+// Linux and Windows GNU targets cross-compile from any desktop host over
+// zig-cc; macOS targets need a macOS build host.
 // Mobile targets (aarch64 iOS, iOS simulator, and Android) are archive-only:
 // --out-archive is admitted (iOS from a macOS host, Android from any desktop
 // host with an NDK), --out-exe refuses with the in-process pointer.
@@ -50,9 +51,9 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv);
 
-// The pairing matrix the pinned compiler covers. Same-triple compiles run
-// the native lane (host clang, no cross env). Different triples run the
-// compiler's zig-cc lane: Linux and Windows GNU targets build from any
+// The pairing matrix the pinned compiler covers. Same-triple compiles are
+// local pairings, though Windows GNU still needs zig-cc for headers and CRT.
+// Different triples use zig-cc: Linux and Windows GNU targets build from any
 // desktop host (the compiler cross-compiles its runtime and localizes ELF and
 // COFF objects itself); macOS targets build on a macOS host only, where Apple
 // linking rides the host toolchain's SDK.
@@ -78,11 +79,12 @@ const scriptcTarget = iosTarget
   ? `aarch64-apple-ios${targetAbi === "simulator" ? "-simulator" : ""}`
   : args["target-platform"];
 // Zig names a native Windows host with the GNU ABI by default, while a user
-// may explicitly target MSVC on that same machine. That remains native
-// compiler work; an exact native GNU triple does too.
+// may explicitly target MSVC on that same machine. Both pairings are local
+// for the build matrix; the GNU compiler lane is selected separately below.
 const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch === targetArch &&
   (targetAbi === hostAbi || targetAbi === "msvc");
 const cross = args["target-platform"] !== args["host-platform"] && !nativeWindows;
+const zigCcCompile = cross || (targetOs === "windows" && targetAbi === "gnu");
 if (mobileTarget) {
   // Mobile services are archive-only: there is no child process to spawn on
   // iOS or Android, so the plain-scriptc executable lane refuses here.
@@ -156,14 +158,12 @@ try {
   process.exit(2);
 }
 
-// Cross compiles hand the compiler its zig-cc lane: the target triple as
-// SCRIPTC_TARGET (the compiler's own mobile spellings for iOS/Android), and
-// (when the build graph supplied its own zig) that zig's directory at the
-// front of PATH so the lane never depends on an ambient install. An Android
-// build threads the NDK location the same way (--android-ndk becomes
-// ANDROID_NDK_ROOT for the compiler's sysroot discovery). Native compiles
+// Zig-cc compiles include native Windows GNU: host Clang alone cannot supply
+// that target's headers and CRT. SCRIPTC_TARGET uses the compiler's mobile
+// spellings for iOS/Android, and --zig-exe's directory fronts PATH. Android
+// builds pass --android-ndk through as ANDROID_NDK_ROOT. Other native compiles
 // keep the process environment untouched.
-const compileEnv = cross
+const compileEnv = zigCcCompile
   ? {
       ...process.env,
       SCRIPTC_CC: "zigcc",

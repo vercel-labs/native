@@ -929,7 +929,7 @@ test("the service archive lane refuses architectures outside the localized-objec
   }
 });
 
-test("the service compile lane cross-compiles an admitted pairing over the compiler's zig-cc lane", () => {
+test("the service compile lane uses zig-cc for cross-target and native Windows GNU builds", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-service-cross-"));
   try {
     const stage = path.join(root, "stage");
@@ -950,19 +950,24 @@ fs.writeFileSync(process.argv[process.argv.indexOf("-o") + 1], "cross exe bytes"
 `);
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_service_compiler.mjs");
     const output = path.join(root, "service-host.exe");
-    const result = spawnSync(process.execPath, [
-      script,
-      "--stage", stage,
-      "--manifest", path.join(root, "package.json"),
-      "--contract", path.join(root, "services.contract.json"),
-      "--out-exe", output,
-      "--host-platform", "aarch64-macos-none",
-      "--target-platform", "x86_64-windows-gnu",
-      "--zig-exe", path.join(root, "toolchain", "zig"),
-      "--compiler-js", compiler,
-    ], { encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(fs.readFileSync(output, "utf8"), "cross exe bytes");
+    const env = { ...process.env };
+    delete env.SCRIPTC_CC;
+    delete env.SCRIPTC_TARGET;
+    for (const hostPlatform of ["aarch64-macos-none", "x86_64-windows-gnu"]) {
+      const result = spawnSync(process.execPath, [
+        script,
+        "--stage", stage,
+        "--manifest", path.join(root, "package.json"),
+        "--contract", path.join(root, "services.contract.json"),
+        "--out-exe", output,
+        "--host-platform", hostPlatform,
+        "--target-platform", "x86_64-windows-gnu",
+        "--zig-exe", path.join(root, "toolchain", "zig"),
+        "--compiler-js", compiler,
+      ], { encoding: "utf8", env });
+      assert.equal(result.status, 0, `${hostPlatform}: ${result.stderr}`);
+      assert.equal(fs.readFileSync(output, "utf8"), "cross exe bytes");
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -79,8 +79,9 @@ try {
 // build mixes a host-format core archive with target-format Zig and service
 // objects. Standalone host-only callers may omit both platform arguments.
 // The pairing matrix is the pinned compiler's build matrix, shared with
-// run_external_service_compiler.mjs: same-triple compiles run the native
-// lane; Linux and Windows GNU targets cross-compile from any desktop host;
+// run_external_service_compiler.mjs: same-triple compiles normally run the
+// native lane, but Windows GNU always uses zig-cc for its headers and CRT;
+// Linux and Windows GNU targets cross-compile from any desktop host, while
 // macOS targets need a macOS build host.
 const hostParts = args["host-platform"]?.split("-") ?? [];
 const targetParts = args["target-platform"]?.split("-") ?? [];
@@ -109,6 +110,7 @@ const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch
   (targetAbi === hostAbi || targetAbi === "msvc");
 const cross = args["host-platform"] !== undefined &&
   args["target-platform"] !== args["host-platform"] && !nativeWindows;
+const zigCcCompile = cross || (targetOs === "windows" && targetAbi === "gnu");
 if (mobileTarget) {
   const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
   const admitted = desktopHost && targetArch === "aarch64" && (!iosTarget || hostOs === "macos");
@@ -137,11 +139,11 @@ if (mobileTarget) {
     process.exit(2);
   }
 }
-// Cross compiles ride the compiler's zig-cc lane: SCRIPTC_TARGET carries the
-// compiler's own mobile spellings for iOS/Android, --zig-exe's directory
-// fronts PATH, and an Android build threads the NDK location the same way
-// (--android-ndk becomes ANDROID_NDK_ROOT for the sysroot discovery).
-const compileEnv = cross
+// Zig-cc compiles include native Windows GNU: host Clang alone cannot supply
+// that target's headers and CRT. SCRIPTC_TARGET carries the compiler's mobile
+// spellings for iOS/Android, --zig-exe's directory fronts PATH, and Android
+// builds pass --android-ndk through as ANDROID_NDK_ROOT.
+const compileEnv = zigCcCompile
   ? {
       ...process.env,
       SCRIPTC_CC: "zigcc",
