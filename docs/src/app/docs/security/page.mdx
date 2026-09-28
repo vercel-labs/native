@@ -312,7 +312,7 @@ Unknown main-frame navigations are blocked unless the external-link policy expli
 
 ## External links
 
-External links are denied by default. To open links in the system browser, opt in and list URL prefixes:
+External links are denied by default. To open links in the system browser, opt in and list allowed URLs:
 
 ```zig
 .security = .{
@@ -327,7 +327,9 @@ External links are denied by default. To open links in the system browser, opt i
 
 Do not allow broad external patterns for pages that can be influenced by remote content.
 
-The same policy gates `Cmd.openExternalUrl(...)`, `runtime.openExternalUrl(...)`, and `window.zero.os.openUrl(...)`. A bridge grant for `native-sdk.os.openUrl` is not enough by itself; the URL must also match `external_links.allowed_urls`.
+Each entry is an exact HTTP(S) URL, `*` to allow every HTTP(S) URL, or an HTTP(S) prefix ending in a single `*` after the host and a `/`. A `*` in the hostname or anywhere before the final character is invalid; `native check` rejects it. For example, `https://example.com/docs/*` allows paths under `/docs/`, but not `https://example.com/docs` or the bare origin. List those URLs separately if needed.
+
+The same policy gates `Cmd.openExternalUrl(...)`, `runtime.openExternalUrl(...)`, and `window.zero.os.openUrl(...)`. A bridge grant for `native-sdk.os.openUrl` is not enough by itself; the URL must also match `external_links.allowed_urls`. A denied `Cmd.openExternalUrl(...)` emits a warning in the app's stderr output; `window.zero.os.openUrl(...)` returns an error to the caller.
 
 ## CSP guidance
 

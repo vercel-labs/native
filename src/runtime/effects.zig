@@ -9530,7 +9530,13 @@ pub fn Effects(comptime Msg: type) type {
         fn performNativeHostSend(self: *Self, name: []const u8, payload: []const u8) void {
             const binding = self.system_services orelse return;
             if (std.mem.eql(u8, name, "native-sdk.os.openUrl")) {
-                binding.open_external_url_fn(binding.context, payload) catch {};
+                binding.open_external_url_fn(binding.context, payload) catch |err| {
+                    if (err == error.NavigationDenied) {
+                        std.debug.print("native warning: external URL denied by security.navigation.external_links\n", .{});
+                    } else {
+                        std.debug.print("native warning: external URL open failed: {s}\n", .{@errorName(err)});
+                    }
+                };
             } else {
                 binding.reveal_path_fn(binding.context, payload) catch {};
             }
