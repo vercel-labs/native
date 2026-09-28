@@ -2140,6 +2140,8 @@ pub const GpuSurfaceInputEvent = struct {
     pressure: f32 = 0,
     delta_x: f32 = 0,
     delta_y: f32 = 0,
+    /// True for a mechanical wheel notch; smooth scroll input retains momentum.
+    scroll_is_detented: bool = false,
     key: []const u8 = "",
     text: []const u8 = "",
     composition_cursor: ?usize = null,

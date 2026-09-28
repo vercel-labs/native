@@ -938,6 +938,7 @@ static GtkWidget *native_sdk_make_native_widget(int kind, const char *label, con
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_COMMIT_COMPOSITION 9
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION 10
 #define NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL 11
+#define NATIVE_SDK_GTK_GPU_INPUT_DETENTED_SCROLL 15
 
 static uint64_t native_sdk_gpu_timestamp_ns(void) {
     return (uint64_t)g_get_monotonic_time() * 1000ull;
@@ -1500,17 +1501,20 @@ static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, doub
     if (!view) return FALSE;
     double delta_x = dx;
     double delta_y = dy;
+    int input_kind = NATIVE_SDK_GTK_GPU_INPUT_SCROLL;
 #if GTK_CHECK_VERSION(4, 8, 0)
     if (gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_WHEEL) {
         delta_x *= 40.0;
         delta_y *= 40.0;
+        input_kind = NATIVE_SDK_GTK_GPU_INPUT_DETENTED_SCROLL;
     }
 #else
     delta_x *= 40.0;
     delta_y *= 40.0;
+    input_kind = NATIVE_SDK_GTK_GPU_INPUT_DETENTED_SCROLL;
 #endif
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
-    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_SCROLL, view->gpu_pointer_x, view->gpu_pointer_y, 0, delta_x, delta_y, "", "", modifiers);
+    native_sdk_emit_gpu_surface_input(view, input_kind, view->gpu_pointer_x, view->gpu_pointer_y, 0, delta_x, delta_y, "", "", modifiers);
     return TRUE;
 }
 

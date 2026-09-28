@@ -3,9 +3,9 @@ import fs from "node:fs";
 // Kept in lockstep with `zig build print-pins`; the Node test suite checks
 // both values so a runtime wire change cannot silently strand dev-host
 // recordings.
-// EffectFileOp appended `delete`; the reflected journal layout fingerprint
-// moves so older recordings refuse cleanly instead of decoding op 8 wrongly.
-export const journalFormatFingerprint = 0xc510d4b0292ac71an;
+// GPU surface scroll input records now carry the detented-wheel flag;
+// older recordings must refuse before their input payloads are decoded.
+export const journalFormatFingerprint = 0x985475e24f954212n;
 export const automationProtocolFingerprint = 0x51f7889bbe3305e7n;
 
 const requestKeyBase = 0x5453525100000000n;

@@ -46,6 +46,8 @@ pub const WidgetPointerEvent = struct {
     phase: WidgetPointerPhase,
     point: geometry.PointF,
     delta: geometry.OffsetF = .{},
+    /// Mechanical wheel input scrolls by its delta without kinetic velocity.
+    scroll_is_detented: bool = false,
     captured_id: ?ObjectId = null,
     /// How many rapid same-spot primary clicks this pointer event is
     /// part of: 1 = plain click, 2 = double (text inputs select the

@@ -13,6 +13,7 @@ const canvasWidgetSingleLineTextKind = canvas_widget_runtime.canvasWidgetSingleL
 pub const CanvasWidgetScrollSource = enum {
     discrete,
     wheel,
+    detented_wheel,
 };
 
 /// Virtualized containers whose scroll offset stays MODEL-driven (the
@@ -234,8 +235,8 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             // pull it back.
             const physics = canvas.widgetScrollPhysics(scroll_node.widget, self.widget_tokens.scroll);
             const rubberband = allow_rubberband and !scroll_node.widget.runtime_flags.native_scroll;
-            const next = switch (source) {
-                .wheel => if (rubberband)
+            var next = switch (source) {
+                .wheel, .detented_wheel => if (rubberband)
                     current.applyWheel(delta, physics)
                 else
                     current.applyWheelClamped(delta, physics),
@@ -246,6 +247,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     break :discrete axis_state.clamped();
                 },
             };
+            if (source == .detented_wheel) next.velocity = 0;
             self.widget_scroll_states[scroll_index] = state.withAxis(axis, next);
             if (next.offset == current.offset) return null;
 
@@ -290,7 +292,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     canvas.textInputContentWidthForWidget(widget, self.widget_tokens),
             };
             const next = switch (source) {
-                .wheel => current.applyWheelClamped(delta, self.widget_tokens.scroll),
+                .wheel, .detented_wheel => current.applyWheelClamped(delta, self.widget_tokens.scroll),
                 .discrete => discrete: {
                     var state = current;
                     state.offset += delta;

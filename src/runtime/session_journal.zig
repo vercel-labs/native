@@ -709,6 +709,7 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeF32(input.pressure);
             try cursor.writeF32(input.delta_x);
             try cursor.writeF32(input.delta_y);
+            try cursor.writeBool(input.scroll_is_detented);
             try cursor.writeStr(input.key);
             try cursor.writeStr(input.text);
             try cursor.writeBool(input.composition_cursor != null);
@@ -961,6 +962,7 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             const pressure = try cursor.readF32();
             const delta_x = try cursor.readF32();
             const delta_y = try cursor.readF32();
+            const scroll_is_detented = try cursor.readBool();
             const key = try cursor.readStr();
             const text = try cursor.readStr();
             var composition_cursor: ?usize = null;
@@ -980,6 +982,7 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
                     .pressure = pressure,
                     .delta_x = delta_x,
                     .delta_y = delta_y,
+                    .scroll_is_detented = scroll_is_detented,
                     .key = key,
                     .text = text,
                     .composition_cursor = composition_cursor,
@@ -1614,6 +1617,18 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqual(@as(?usize, 3), decoded.gpu_surface_input.composition_cursor);
         try testing.expect(decoded.gpu_surface_input.modifiers.control);
         try testing.expectEqual(@as(f32, 0), decoded.gpu_surface_input.scale);
+        try testing.expect(!decoded.gpu_surface_input.scroll_is_detented);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .gpu_surface_input = .{
+            .label = "feed-canvas",
+            .kind = .scroll,
+            .delta_y = 40,
+            .scroll_is_detented = true,
+        } });
+        try testing.expectEqual(platform.GpuSurfaceInputKind.scroll, decoded.gpu_surface_input.kind);
+        try testing.expectEqual(@as(f32, 40), decoded.gpu_surface_input.delta_y);
+        try testing.expect(decoded.gpu_surface_input.scroll_is_detented);
     }
     {
         // Command+Backspace journals as the raw platform key chord; replay

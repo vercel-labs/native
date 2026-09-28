@@ -2087,6 +2087,7 @@ constexpr int kGpuInputImeSetComposition = 8;
 constexpr int kGpuInputImeCommitComposition = 9;
 constexpr int kGpuInputImeCancelComposition = 10;
 constexpr int kGpuInputPointerCancel = 11;
+constexpr int kGpuInputDetentedScroll = 15;
 constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
 /* Pacing interval for logical frame completions while the top-level
  * window is MINIMIZED: a ~1 Hz heartbeat instead of the frame grid. A
@@ -3503,10 +3504,14 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
              * host uses; forward wheel rotation (positive Win32 delta) means
              * scroll up, which the shared input semantics express as a
              * negative delta_y. */
-            const double delta = (double)(short)HIWORD(wparam) / (double)WHEEL_DELTA * 40.0;
+            const int wheel_delta = (short)HIWORD(wparam);
+            const double delta = (double)wheel_delta / (double)WHEEL_DELTA * 40.0;
             const double delta_x = message == WM_MOUSEHWHEEL ? delta : 0;
             const double delta_y = message == WM_MOUSEWHEEL ? -delta : 0;
-            emitGpuSurfaceInput(host, *view, kGpuInputScroll, x, y, 0, delta_x, delta_y, "", "", gpuModifierFlags());
+            // Precision touchpads can send fractional wheel deltas; keep
+            // those on the smooth scroll path while full notches stop on arrival.
+            const int input_kind = wheel_delta % WHEEL_DELTA == 0 ? kGpuInputDetentedScroll : kGpuInputScroll;
+            emitGpuSurfaceInput(host, *view, input_kind, x, y, 0, delta_x, delta_y, "", "", gpuModifierFlags());
             return 0;
         }
         case WM_KEYDOWN:

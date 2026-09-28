@@ -752,6 +752,37 @@ test "runtime applies stored design token scroll physics" {
     try std.testing.expectApproxEqAbs(@as(f32, 21.28), retained.nodes[0].widget.value, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, -21.28), retained.nodes[1].frame.y, 0.001);
     try std.testing.expectEqual(@as(f32, 80), harness.runtime.views[0].widget_scroll_states[0].velocity_y);
+
+    // A mechanical notch uses the same distance multiplier, but cancels
+    // the preceding smooth scroll's velocity and cannot start a fling.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .scroll,
+        .scroll_is_detented = true,
+        .x = 20,
+        .y = 20,
+        .delta_y = 40,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectApproxEqAbs(@as(f32, 41.28), retained.nodes[0].widget.value, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity_y);
+    try std.testing.expect(!harness.runtime.views[0].canvasWidgetKineticScrollActive());
+
+    for (1..3) |frame_index| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = 1,
+            .label = "canvas",
+            .size = geometry.SizeF.init(180, 72),
+            .scale_factor = 1,
+            .frame_index = frame_index,
+            .timestamp_ns = 1_000_000_000 + frame_index * 16_000_000,
+            .frame_interval_ns = 16_000_000,
+        } });
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectApproxEqAbs(@as(f32, 41.28), retained.nodes[0].widget.value, 0.001);
+    }
 }
 
 test "runtime refreshes hovered canvas widget after scroll clipping" {
