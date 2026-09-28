@@ -1835,6 +1835,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-examples-native-shard-3", "Run the third native-first example test shard"),
         b.step("test-examples-native-shard-4", "Run the fourth native-first example test shard"),
     };
+    const ui_inbox_example_step = addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned);
     const native_example_steps = [_]*std.Build.Step{
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned),
@@ -1844,7 +1845,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-relational-notes", "Run relational notes example tests", "examples/relational-notes", .managed),
-        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned),
+        ui_inbox_example_step,
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard", .managed),
@@ -1874,6 +1875,16 @@ pub fn build(b: *std.Build) void {
     }
     for (native_example_steps, 0..) |example_step, index| {
         native_example_shard_steps[index % native_example_shard_steps.len].dependOn(example_step);
+    }
+    if (b.graph.host.result.os.tag == .macos) {
+        // The optimized test and model-contract links retain AppKit's C host
+        // without analyzing the app's runtime entry point.
+        const optimized_ui_inbox = b.addSystemCommand(&.{ "zig", "build", "test", "-Doptimize=ReleaseFast", "-Dplatform=macos" });
+        optimized_ui_inbox.setCwd(b.path("examples/ui-inbox"));
+        optimized_ui_inbox.step.dependOn(ui_inbox_example_step);
+        const optimized_step = b.step("test-example-ui-inbox-macos-optimized", "Link optimized macOS app tests and model contract against AppKit");
+        optimized_step.dependOn(&optimized_ui_inbox.step);
+        native_examples_step.dependOn(optimized_step);
     }
     // Keep this companion check in the same shard as capabilities. The
     // aggregate step depends on every shard, so `test-examples-native`

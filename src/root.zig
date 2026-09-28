@@ -1,3 +1,5 @@
+const builtin = @import("builtin");
+
 pub const geometry = @import("geometry");
 pub const assets = @import("assets");
 pub const app_dirs = @import("app_dirs");
@@ -23,6 +25,16 @@ pub const frontend = @import("frontend/root.zig");
 pub const security = @import("security/root.zig");
 pub const updater = @import("updater/root.zig");
 pub const update_check_command = platform.update_check_command;
+
+// App test and model-contract binaries can link the AppKit host without
+// analyzing platform.macos. Keep its Zig C exports in every macOS SDK module
+// so those binaries can resolve the host's updater calls too.
+comptime {
+    if (builtin.os.tag == .macos) {
+        _ = updater.c_api.native_sdk_update_verify_feed;
+        _ = updater.c_api.native_sdk_update_verify_archive;
+    }
+}
 
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.Options;
