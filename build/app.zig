@@ -1706,14 +1706,12 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
     });
 
     const lib_step = b.step("lib", "Build the mobile embed static library");
-    if (options.ts_core != null and target.result.abi.isAndroid()) {
-        // Zig's ELF static-library emission stores the compiled TypeScript
-        // archives as nested members instead of merging their objects (the
-        // Mach-O emission merges), and the NDK's -shared host link would
-        // skip those blobs with only a warning. Flatten to one plain
-        // object archive so the Android host tier keeps linking exactly
-        // the archive it already stages.
-        const merged = mergeMobileArchive(b, dep, lib, options.name);
+    if (options.ts_core != null and (target.result.os.tag == .ios or target.result.abi.isAndroid())) {
+        // Android's ELF archive contains nested TypeScript archives that
+        // the NDK linker skips. On iOS, Zig's Mach-O archive can place
+        // members off an 8-byte boundary, which Apple ld64 rejects.
+        // Rebuild either output as a plain object archive before install.
+        const merged = mergeMobileArchive(b, dep, lib, options.name, if (target.result.os.tag == .ios) "darwin" else "gnu");
         const lib_name = b.fmt("lib{s}.a", .{options.name});
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(merged, .lib, lib_name).step);
         lib_step.dependOn(&b.addInstallFileWithDir(merged, .lib, lib_name).step);
@@ -1723,15 +1721,14 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
     }
 }
 
-/// Flatten an Android embed library whose members include the compiled
-/// TypeScript archives (see the call site above). Runs under node like the
-/// rest of the TypeScript lane's drivers.
-fn mergeMobileArchive(b: *std.Build, dep: *std.Build.Dependency, lib: *std.Build.Step.Compile, name: []const u8) std.Build.LazyPath {
+/// Rebuild a TypeScript embed library from its object members. Android
+/// needs flattening; iOS needs Darwin archive member alignment.
+fn mergeMobileArchive(b: *std.Build, dep: *std.Build.Dependency, lib: *std.Build.Step.Compile, name: []const u8, format: []const u8) std.Build.LazyPath {
     const node = b.findProgram(&.{"node"}, &.{}) catch
         @panic("\nmerging the mobile TypeScript archives needs node on PATH (the TypeScript core lane already requires it).\n");
     const merge = b.addSystemCommand(&.{node});
     merge.addFileArg(dep.path("packages/core/scripts/merge_static_archives.mjs"));
-    merge.addArgs(&.{ "--zig", b.graph.zig_exe, "--format", "gnu" });
+    merge.addArgs(&.{ "--zig", b.graph.zig_exe, "--format", format });
     merge.addArg("--out");
     const merged = merge.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
     merge.addArg("--in");

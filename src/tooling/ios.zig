@@ -36,6 +36,7 @@ pub const host_image_fit_header = @import("ios_host").apple_image_fit_h;
 pub const host_source_name = "uikit_host.m";
 pub const host_header_name = "native_sdk_app.h";
 pub const host_image_fit_header_name = "apple_image_fit.h";
+const ubsan_runtime_name = "libclang_rt.ubsan_iossim_dynamic.dylib";
 
 pub const deployment_target = "15.0";
 
@@ -307,18 +308,40 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
     // target (ELF from the Android tier) must fail here with the real
     // cause, not as a confusing linker error.
     embedlib.requireArchiveClass(allocator, io, lib_path, .macho, LibSlice.simulator.zigTriple()) catch return error.HostCompileFailed;
-    try runInherit(io, &.{
-        "xcrun",         "--sdk",        LibSlice.simulator.clangSdk(),
-        "clang",         "-target",      LibSlice.simulator.clangTriple(),
-        "-fobjc-arc",    "-O2",          ".native/ios/host/" ++ host_source_name,
-        lib_path,        "-framework",   "UIKit",
-        "-framework",    "Metal",        "-framework",
-        "QuartzCore",    "-framework",   "Foundation",
-        "-framework",    "CoreGraphics", "-framework",
-        "AVFoundation",  "-framework",   "ImageIO",
-        "-framework",    "Security",     "-o",
-        executable_path,
-    }, error.HostCompileFailed);
+    const ubsan_runtime = if (try archiveNeedsUbsan(allocator, io, lib_path)) try simulatorUbsanRuntimePathAlloc(allocator, io) else null;
+    defer if (ubsan_runtime) |path| allocator.free(path);
+    var clang_args: std.ArrayList([]const u8) = .empty;
+    defer clang_args.deinit(allocator);
+    try clang_args.appendSlice(allocator, &.{
+        "xcrun",      "--sdk",   LibSlice.simulator.clangSdk(),
+        "clang",      "-target", LibSlice.simulator.clangTriple(),
+        "-fobjc-arc", "-O2",     ".native/ios/host/" ++ host_source_name,
+        lib_path,
+    });
+    if (ubsan_runtime) |path| {
+        // ScriptC's Debug runtime references Clang UBSan handlers. Link
+        // the runtime directly so the UIKit host itself stays uninstrumented.
+        try clang_args.appendSlice(allocator, &.{ path, "-Wl,-rpath,@executable_path" });
+    }
+    try clang_args.appendSlice(allocator, &.{
+        "-framework", "UIKit",
+        "-framework", "Metal",
+        "-framework", "QuartzCore",
+        "-framework", "Foundation",
+        "-framework", "CoreGraphics",
+        "-framework", "AVFoundation",
+        "-framework", "ImageIO",
+        "-framework", "Security",
+        "-o",         executable_path,
+    });
+    try runInherit(io, clang_args.items, error.HostCompileFailed);
+    if (ubsan_runtime) |path| {
+        const bundled_runtime = try std.fs.path.join(allocator, &.{ bundle_path, ubsan_runtime_name });
+        defer allocator.free(bundled_runtime);
+        const arch = if (builtin.cpu.arch == .x86_64) "x86_64" else "arm64";
+        try runInherit(io, &.{ "xcrun", "lipo", "-thin", arch, path, "-output", bundled_runtime }, error.HostCompileFailed);
+        try runInherit(io, &.{ "codesign", "--force", "--sign", "-", bundled_runtime }, error.HostCompileFailed);
+    }
     try runInherit(io, &.{ "codesign", "--force", "--sign", "-", bundle_path }, error.HostCompileFailed);
 
     const device = options.device orelse try pickSimulatorDevice(allocator, io);
@@ -410,6 +433,37 @@ pub fn hasOptimizeFlag(args: []const []const u8) bool {
         if (std.mem.startsWith(u8, arg, "--release")) return true;
     }
     return false;
+}
+
+fn archiveNeedsUbsan(allocator: std.mem.Allocator, io: std.Io, lib_path: []const u8) !bool {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "xcrun", "nm", "-u", "-j", lib_path },
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch return error.HostCompileFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        std.debug.print("native dev (ios): could not inspect the embed archive for sanitizer references: {s}\n", .{result.stderr});
+        return error.HostCompileFailed;
+    }
+    return std.mem.indexOf(u8, result.stdout, "___ubsan_handle_") != null;
+}
+
+fn simulatorUbsanRuntimePathAlloc(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "xcrun", "--sdk", "iphonesimulator", "clang", "-print-file-name=" ++ ubsan_runtime_name },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch return error.HostCompileFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    const path = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (result.term != .exited or result.term.exited != 0 or !buildgraph.fileExists(io, path)) {
+        std.debug.print("native dev (ios): Xcode's simulator UBSan runtime ({s}) is unavailable\n", .{ubsan_runtime_name});
+        return error.HostCompileFailed;
+    }
+    return allocator.dupe(u8, path);
 }
 
 /// Spawn with inherited stdio and turn a non-zero exit into `fail_error`
