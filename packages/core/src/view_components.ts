@@ -332,10 +332,12 @@ export function native_menu_policy(request: Uint8Array): Uint8Array {
   return result;
 }
 
-/** Toggle state requests: operation 8 (activate) or 9 (reconcile), then
+/** Toggle state requests: operation 8 (activate), 9 (chip reconcile), or
+ * 10 (checkbox/switch/toggle reconcile), then
  * flags (1 current/source selected, 2 previous source selected, 4 retained
  * selected). A source asserted now or previously wins; otherwise retain
- * the uncontrolled state. Results are one selected byte.
+ * the uncontrolled chip state. Checkboxes, switches, and plain toggles
+ * always preserve retained state on rebuild. Results are one selected byte.
  * Focus requests: operation 4/5 (Left/Right), 6/7 (Home/End), subject/count
  * u16LE, then parent u16LE, kind (0 other/1 toggle/2 toggle group/3 button
  * group), flags (2 visible focus). Arrows stay on visible direct children
@@ -344,11 +346,12 @@ export function native_menu_policy(request: Uint8Array): Uint8Array {
 export function native_toggle_policy(request: Uint8Array): Uint8Array {
   if (request.length === 0) throw new Error("invalid toggle policy request");
   const operation = request[0]!;
-  if (operation === 8 || operation === 9) {
+  if (operation === 8 || operation === 9 || operation === 10) {
     if (request.length !== 2 || request[1]! > 7) throw new Error("invalid toggle state request");
     const flags = request[1]!, source = (flags & 1) !== 0;
     let selected = !source;
     if (operation === 9) selected = (source || (flags & 2) !== 0) ? source : (flags & 4) !== 0;
+    if (operation === 10) selected = (flags & 4) !== 0;
     const result = new Uint8Array(1);
     result[0] = selected ? 1 : 0;
     return result;

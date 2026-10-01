@@ -838,7 +838,8 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 copy.widget.value = if (selected) 1 else 0;
             },
             .checkbox, .switch_control, .toggle => {
-                const selected = entry.state.selected or entry.value >= 0.5;
+                const selected = canvasWidgetCompiledToggleSelected(copy.widget, 10, false, entry.state.selected or entry.value >= 0.5) orelse
+                    entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
             },
@@ -1765,7 +1766,7 @@ pub fn canvasWidgetMenuPolicy(layout: canvas.WidgetLayoutTree, subject: usize, o
 /// Toggle transitions and source/retained reconciliation run without a tree
 /// scan. The native caller applies the returned selected state and value.
 pub fn canvasWidgetCompiledToggleSelected(widget: canvas.Widget, operation: u8, previously_selected: bool, retained_selected: bool) ?bool {
-    if (widget.kind != .toggle_button) return null;
+    if (widget.kind != .toggle_button and widget.kind != .checkbox and widget.kind != .switch_control and widget.kind != .toggle) return null;
     const policy = widget.interaction_policy orelse return null;
     const request = [_]u8{
         operation,

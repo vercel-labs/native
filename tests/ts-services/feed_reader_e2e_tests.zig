@@ -604,7 +604,9 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     const toggle_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 2, 0, 0, 1, 2 };
     var toggle_state: [1]u8 = undefined;
     var accordion_state: [1]u8 = undefined;
+    var checkable_state: [1]u8 = undefined;
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 10, 5 }, &checkable_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeAccordionPolicy(&.{ 9, 13 }, &accordion_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 9, 4 }, &toggle_state));
         try std.testing.expectEqual(@as(usize, 2), core.nativeTogglePolicy(&toggle_request, &policy_output));
@@ -625,6 +627,7 @@ test "compiled primary and window view copies survive alternating scriptc arena 
         try std.testing.expectEqualSlices(u8, &.{ 1, 0, 0, 1 }, &menu_clear);
         try std.testing.expectEqualSlices(u8, &.{1}, &toggle_state);
         try std.testing.expectEqualSlices(u8, &.{1}, &accordion_state);
+        try std.testing.expectEqualSlices(u8, &.{1}, &checkable_state);
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
@@ -1548,4 +1551,113 @@ test "compiled accordion toggle retains disclosure animation and concealed input
         try std.testing.expect(retained.focusTargetById(inside.widget.id) != null);
     }
     try std.testing.expectEqualSlices(f32, &heights[0], &heights[1]);
+}
+
+test "compiled checkable policy preserves retained state against source changes" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-checkable-reconcile", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const Fixture = struct {
+        fn layout(kind: canvas.WidgetKind, source: bool, compiled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            const tree = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .column, .children = &.{
+                .{ .id = 11, .kind = kind, .frame = geometry.RectF.init(0, 0, 200, 32), .value = if (source) 0.75 else 0 },
+                .{ .id = 12, .kind = kind, .frame = geometry.RectF.init(0, 40, 200, 32), .value = 0.75 },
+                .{ .id = 13, .kind = kind, .frame = geometry.RectF.init(0, 80, 200, 32), .value = 0.75, .state = .{ .disabled = true } },
+            } }, geometry.RectF.init(0, 0, 300, 160), nodes);
+            if (compiled) for (nodes[0..tree.nodes.len]) |*node| {
+                if (node.widget.kind == kind) node.widget.interaction_policy = core.nativeTogglePolicy;
+            };
+            return tree;
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        for ([_]canvas.WidgetKind{ .checkbox, .switch_control, .toggle }) |kind| {
+            const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+            defer harness.destroy(std.testing.allocator);
+            harness.null_platform.gpu_surfaces = true;
+            var state: TestApp = .{};
+            try harness.start(state.app());
+            _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 300, 160) });
+            var nodes: [8]canvas.WidgetLayoutNode = undefined;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(kind, false, compiled, &nodes));
+            const view = &harness.runtime.views[0];
+            _ = try view.toggleCanvasWidgetBooleanControl(11);
+            _ = try view.toggleCanvasWidgetBooleanControl(12);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(kind, true, compiled, &nodes));
+            var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expect(retained.findById(11).?.widget.state.selected);
+            try std.testing.expectEqual(@as(f32, 1), retained.findById(11).?.widget.value);
+            // A numeric true source cannot reassert a user-cleared control.
+            try std.testing.expect(!retained.findById(12).?.widget.state.selected);
+            try std.testing.expectEqual(@as(f32, 0), retained.findById(12).?.widget.value);
+            _ = try view.toggleCanvasWidgetBooleanControl(11);
+            _ = try view.toggleCanvasWidgetBooleanControl(12);
+            for ([_]bool{ true, false, true, false }) |source| {
+                _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(kind, source, compiled, &nodes));
+                retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+                try std.testing.expect(!retained.findById(11).?.widget.state.selected);
+                try std.testing.expect(retained.findById(12).?.widget.state.selected);
+                try std.testing.expectEqual(@as(f32, 0), retained.findById(11).?.widget.value);
+                try std.testing.expectEqual(@as(f32, 1), retained.findById(12).?.widget.value);
+            }
+            try std.testing.expectEqual(@as(?geometry.RectF, null), try view.toggleCanvasWidgetBooleanControl(13));
+        }
+    }
+}
+
+test "compiled switch activation retains native knob animation and reversal" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-switch-animation", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    var samples: [2][3]f32 = undefined;
+    for ([_]bool{ false, true }, 0..) |compiled, backend| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 220, 100) });
+        const controls = [_]canvas.Widget{.{
+            .id = 4,
+            .kind = .switch_control,
+            .frame = geometry.RectF.init(10, 20, 112, 32),
+            .text = "Live",
+            .interaction_policy = if (compiled) core.nativeTogglePolicy else null,
+        }};
+        var nodes: [2]canvas.WidgetLayoutNode = undefined;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 220, 100), &nodes));
+        _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up }, 0..) |kind, i| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = kind, .timestamp_ns = 100 + i * 10, .x = 66, .y = 36 } });
+        }
+        const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(retained.findById(4).?.widget.state.selected);
+        const travel = canvas.toggleWidgetKnobTravel(retained.findById(4).?.widget, harness.runtime.views[0].widget_tokens);
+        const animations = try harness.runtime.canvasRenderAnimations(1, "canvas");
+        try std.testing.expectEqual(@as(usize, 1), animations.len);
+        try std.testing.expectEqual(canvas.toggleWidgetKnobCommandId(4), animations[0].id);
+        try std.testing.expectEqual(@as(u64, 110), animations[0].start_ns);
+        try std.testing.expectEqual(harness.runtime.views[0].widget_tokens.motion.durationMs(.fast), animations[0].duration_ms);
+        samples[backend][0] = animations[0].from_transform.?.tx;
+        try std.testing.expectApproxEqAbs(-travel, samples[backend][0], 0.001);
+        var overrides: [1]canvas.CanvasRenderOverride = undefined;
+        const sampled = try canvas.sampleCanvasRenderAnimations(animations, 110 + 60_000_000, &overrides);
+        try std.testing.expectEqual(@as(usize, 1), sampled.len);
+        samples[backend][1] = sampled[0].transform.?.tx;
+        try std.testing.expect(samples[backend][1] > -travel and samples[backend][1] < 0);
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up }, 0..) |kind, i| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = kind, .timestamp_ns = 200 + i * 10, .x = 66, .y = 36 } });
+        }
+        const reverse = try harness.runtime.canvasRenderAnimations(1, "canvas");
+        try std.testing.expectEqual(@as(usize, 1), reverse.len);
+        samples[backend][2] = reverse[0].from_transform.?.tx;
+        try std.testing.expectApproxEqAbs(travel, samples[backend][2], 0.001);
+        try std.testing.expect(!((try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(4).?.widget.state.selected));
+    }
+    try std.testing.expectEqualSlices(f32, &samples[0], &samples[1]);
 }

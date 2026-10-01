@@ -1,0 +1,36 @@
+<column key="{profile}" padding="24" gap="16">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Preferences</text>
+    <button on-press="refresh">Refresh</button>
+    <button on-press="lock">Lock settings</button>
+    <button on-press="new_profile">New profile</button>
+  </row>
+  <text>changes {changes} | refreshes {refreshes} | profile {profile}</text>
+  <text foreground="text_muted">Choose the updates you receive and how your workspace behaves.</text>
+  <row gap="32" cross="start">
+    <column grow="1" gap="12">
+      <text size="lg">Email preferences</text>
+      <row gap="8">
+        <button on-press="reverse">Reverse</button>
+        <button on-press="hide">Hide product</button>
+        <button on-press="empty">Empty</button>
+      </row>
+      <for each="choices" key="id" as="choice">
+        <checkbox text="{choice.title}" checked="{choice.checked}" disabled="{choice.disabled}" on-toggle="check:{choice.id}" />
+      </for>
+      <if test="{empty}"><text>No email preferences</text></if>
+    </column>
+    <column grow="1" gap="12">
+      <text size="lg">Workspace</text>
+      <switch checked="{notifications}" disabled="{locked}" on-toggle="notifications">Notifications</switch>
+      <switch checked="{sync}" disabled="{locked}" on-toggle="sync">Sync over mobile data</switch>
+      <switch checked="true" disabled="true">Managed sync</switch>
+      <column gap="8">
+        <text foreground="text_muted">Display</text>
+        <toggle checked="{compact}" disabled="{locked}" on-toggle="compact">Compact rows</toggle>
+      </column>
+    </column>
+  </row>
+  <text foreground="text_muted">Enter or Space toggles the focused setting. Tab moves between available controls.</text>
+  <text foreground="text_muted">Refresh keeps your choices. New profile starts with the default preferences.</text>
+</column>

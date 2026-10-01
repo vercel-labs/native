@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -103,7 +103,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (!std.math.isFinite(value.anchorOffset)) return error.InvalidView;
     if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu) return error.InvalidView;
     if (value.anchor == null and (value.anchorAlignment != .start or value.anchorOffset != 4)) return error.InvalidView;
-    if (value.toggle != null and !tree_row and value.kind != .switch_control and value.kind != .radio and value.kind != .toggle_button and value.kind != .accordion) return error.InvalidView;
+    if (value.toggle != null and !tree_row and value.kind != .checkbox and value.kind != .switch_control and value.kind != .toggle and value.kind != .radio and value.kind != .toggle_button and value.kind != .accordion) return error.InvalidView;
     if ((value.expanded != null or value.treeLevel != 0) and value.role != .treeitem) return error.InvalidView;
     if (value.change != null and value.kind != .radio) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
@@ -180,7 +180,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         if (value.kind == .dropdown_menu or value.kind == .menu_item) result.widget.interaction_policy = core.nativeMenuPolicy;
     }
     if (comptime @hasDecl(core, "nativeTogglePolicy")) {
-        if (value.kind == .toggle_group or value.kind == .toggle_button) result.widget.interaction_policy = core.nativeTogglePolicy;
+        if (value.kind == .toggle_group or value.kind == .toggle_button or value.kind == .checkbox or value.kind == .switch_control or value.kind == .toggle) result.widget.interaction_policy = core.nativeTogglePolicy;
     }
     if (comptime @hasDecl(core, "nativeAccordionPolicy")) {
         if (value.kind == .accordion) result.widget.interaction_policy = core.nativeAccordionPolicy;
@@ -313,6 +313,12 @@ test "compiled view refuses bad versions, spans, kinds and geometry" {
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_group\",\"text\":\"\",\"toggle\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_button\",\"text\":\"\",\"change\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"toggle_button\",\"text\":\"Mixed\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"checkbox\",\"text\":\"Setting\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"checkbox\",\"text\":\"Setting\",\"change\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"switch_control\",\"text\":\"Setting\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"switch_control\",\"text\":\"Setting\",\"change\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle\",\"text\":\"Setting\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle\",\"text\":\"Setting\",\"change\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"press\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"change\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"placeholder\":\"Help\"}]}",

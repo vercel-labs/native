@@ -405,3 +405,24 @@ test("accordion headers preserve nested content, expansion and toggle envelopes"
   assert.throws(() => compileView('<accordion text="Section">Mixed<text>child</text></accordion>', contract), /mixed content/);
   assert.throws(() => compileView('<accordion text="Section" role="treeitem"/>', contract), /compiled treeitem requires/);
 });
+
+test("checkable controls preserve labels, initial state and toggle envelopes", () => {
+  const { view } = evaluate('<column><checkbox text="Product café" checked="true" on-toggle="reset"/><switch checked="false" on-toggle="increment">Sync</switch><toggle checked="true" disabled="true">Compact</toggle></column>');
+  const nodes = view().nodes;
+  assert.equal(nodes[1].kind, "checkbox");
+  assert.equal(nodes[1].text, "Product café");
+  assert.equal(nodes[1].checked, true);
+  assert.deepEqual(nodes[1].toggle, [1, 5]);
+  assert.equal(nodes[2].kind, "switch_control");
+  assert.equal(nodes[2].checked, false);
+  assert.deepEqual(nodes[2].toggle, [1, 3]);
+  assert.equal(nodes[3].kind, "toggle");
+  assert.equal(nodes[3].disabled, true);
+  for (const kind of ["checkbox", "switch", "toggle"]) {
+    assert.throws(() => compileView(`<${kind} on-press="reset"/>`, contract), /unsupported on/);
+    assert.throws(() => compileView(`<${kind} on-change="reset"/>`, contract), /unsupported on/);
+    assert.throws(() => compileView(`<${kind} placeholder="Help"/>`, contract), /placeholder requires/);
+    assert.throws(() => compileView(`<${kind}>Mixed<text>child</text></${kind}>`, contract), /mixed content/);
+    assert.throws(() => compileView(`<${kind} role="treeitem"/>`, contract), /compiled treeitem requires/);
+  }
+});
