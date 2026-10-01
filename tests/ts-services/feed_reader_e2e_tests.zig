@@ -601,7 +601,12 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     const menu_request = [_]u8{ 2, 0, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 2, 0, 0, 1, 14 };
     const menu_select_request = [_]u8{ 8, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 2, 0, 0, 1, 14 };
     var menu_clear: [4]u8 = undefined;
+    const toggle_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 2, 0, 0, 1, 2 };
+    var toggle_state: [1]u8 = undefined;
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 9, 4 }, &toggle_state));
+        try std.testing.expectEqual(@as(usize, 2), core.nativeTogglePolicy(&toggle_request, &policy_output));
+        try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
         try std.testing.expectEqual(@as(usize, 4), core.nativeMenuPolicy(&menu_select_request, &menu_clear));
         try std.testing.expectEqual(@as(usize, 2), core.nativeMenuPolicy(&menu_request, &policy_output));
         try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
@@ -616,6 +621,7 @@ test "compiled primary and window view copies survive alternating scriptc arena 
         try std.testing.expectEqualStrings(primary, core.nativeView(allocator));
         try std.testing.expectEqualStrings(secondary, core.nativeWindowView("feed", allocator));
         try std.testing.expectEqualSlices(u8, &.{ 1, 0, 0, 1 }, &menu_clear);
+        try std.testing.expectEqualSlices(u8, &.{1}, &toggle_state);
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
@@ -1241,5 +1247,152 @@ test "compiled menu policy preserves visible entry traversal committed choice an
         view.widget_layout_nodes[valued_index].widget.value = 1;
         try std.testing.expectEqual(@as(?canvas.ObjectId, 46), view.canvasWidgetMenuSurfaceEntryId(nested_index, true));
         try std.testing.expect((try view.setCanvasWidgetSelected(41, true)) != null);
+    }
+}
+
+test "compiled toggle policy preserves visible focus and nested group boundaries" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-toggle-focus", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 600, 240) });
+        const children = [_]canvas.Widget{
+            .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 180, 32), .layout = .{ .clip_content = true }, .children = &.{
+                .{ .id = 10, .kind = .toggle_group, .frame = geometry.RectF.init(0, 0, 300, 32), .children = &.{
+                    .{ .id = 11, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 60, 32), .state = .{ .selected = true } },
+                    .{ .id = 12, .kind = .toggle_button, .frame = geometry.RectF.init(70, 0, 60, 32), .state = .{ .disabled = true } },
+                    .{ .id = 13, .kind = .toggle_button, .frame = geometry.RectF.init(140, 0, 60, 32) },
+                    .{ .id = 14, .kind = .toggle_button, .frame = geometry.RectF.init(230, 0, 60, 32) },
+                } },
+            } },
+            .{ .id = 20, .kind = .toggle_group, .frame = geometry.RectF.init(0, 60, 300, 100), .children = &.{
+                .{ .id = 21, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 60, 32) },
+                .{ .id = 22, .kind = .toggle_group, .frame = geometry.RectF.init(70, 0, 140, 32), .children = &.{
+                    .{ .id = 23, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 60, 32) },
+                    .{ .id = 24, .kind = .toggle_button, .frame = geometry.RectF.init(70, 0, 60, 32) },
+                } },
+                .{ .id = 25, .kind = .toggle_button, .frame = geometry.RectF.init(220, 0, 60, 32) },
+            } },
+            // Bare toggles have no Home/End group. Button-group edges remain
+            // available through the existing native parent-kind contract.
+            .{ .id = 30, .kind = .toggle_button, .frame = geometry.RectF.init(350, 0, 60, 32) },
+            .{ .id = 40, .kind = .button_group, .frame = geometry.RectF.init(350, 60, 140, 32), .children = &.{
+                .{ .id = 41, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 60, 32) },
+                .{ .id = 42, .kind = .toggle_button, .frame = geometry.RectF.init(70, 0, 60, 32) },
+            } },
+        };
+        var nodes: [32]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 600, 240), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            if (node.widget.kind == .toggle_button or node.widget.kind == .toggle_group) node.widget.interaction_policy = core.nativeTogglePolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        for ([_]struct { start: canvas.ObjectId, key: []const u8, target: canvas.ObjectId }{
+            .{ .start = 11, .key = "arrowright", .target = 13 },
+            .{ .start = 13, .key = "arrowright", .target = 13 },
+            .{ .start = 13, .key = "home", .target = 11 },
+            .{ .start = 11, .key = "end", .target = 13 },
+            .{ .start = 11, .key = "arrowleft", .target = 11 },
+            .{ .start = 21, .key = "arrowright", .target = 25 },
+            .{ .start = 25, .key = "home", .target = 21 },
+            .{ .start = 23, .key = "end", .target = 24 },
+            .{ .start = 24, .key = "arrowright", .target = 24 },
+            .{ .start = 24, .key = "home", .target = 23 },
+            .{ .start = 30, .key = "end", .target = 30 },
+            .{ .start = 41, .key = "end", .target = 42 },
+            .{ .start = 42, .key = "home", .target = 41 },
+        }) |move| {
+            view.canvas_widget_focused_id = move.start;
+            view.canvas_widget_focus_visible_id = move.start;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = move.key } });
+            try std.testing.expectEqual(move.target, view.canvas_widget_focused_id);
+            const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expect(retained.findById(11).?.widget.state.selected);
+            try std.testing.expect(!retained.findById(13).?.widget.state.selected);
+        }
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try view.toggleCanvasWidgetBooleanControl(12));
+        const valued_index = view.canvasWidgetNodeIndexById(30).?;
+        view.widget_layout_nodes[valued_index].widget.value = 0.75;
+        _ = try view.toggleCanvasWidgetBooleanControl(30);
+        try std.testing.expect(!view.widget_layout_nodes[valued_index].widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 0), view.widget_layout_nodes[valued_index].widget.value);
+        _ = try view.toggleCanvasWidgetBooleanControl(30);
+        try std.testing.expect(view.widget_layout_nodes[valued_index].widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 1), view.widget_layout_nodes[valued_index].widget.value);
+    }
+}
+
+test "compiled toggle reconciliation preserves controlled chips and uncontrolled formatting" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-toggle-reconcile", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const Fixture = struct {
+        fn layout(selected: ?usize, compiled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            var chips = [_]canvas.Widget{
+                .{ .id = 11, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 60, 32) },
+                .{ .id = 12, .kind = .toggle_button, .frame = geometry.RectF.init(70, 0, 60, 32) },
+                .{ .id = 13, .kind = .toggle_button, .frame = geometry.RectF.init(140, 0, 60, 32) },
+            };
+            // Numeric source selection must use the same canonical register
+            // as selected=true, while the retained value is also recognized.
+            if (selected) |index| chips[index].value = 0.75;
+            const children = [_]canvas.Widget{
+                .{ .id = 10, .kind = .toggle_group, .frame = geometry.RectF.init(0, 0, 210, 32), .children = &chips },
+                .{ .id = 20, .kind = .toggle_group, .frame = geometry.RectF.init(0, 60, 140, 32), .children = &.{
+                    .{ .id = 21, .kind = .toggle_button, .frame = geometry.RectF.init(0, 0, 60, 32) },
+                    .{ .id = 22, .kind = .toggle_button, .frame = geometry.RectF.init(70, 0, 60, 32) },
+                } },
+            };
+            const tree = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 300, 160), nodes);
+            if (compiled) for (nodes[0..tree.nodes.len]) |*node| {
+                if (node.widget.kind == .toggle_button or node.widget.kind == .toggle_group) node.widget.interaction_policy = core.nativeTogglePolicy;
+            };
+            return tree;
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 300, 160) });
+        var nodes: [16]canvas.WidgetLayoutNode = undefined;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(0, compiled, &nodes));
+        const view = &harness.runtime.views[0];
+        for ([_]canvas.ObjectId{ 13, 21, 22 }) |id| _ = try view.toggleCanvasWidgetBooleanControl(id);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(2, compiled, &nodes));
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(11).?.widget.state.selected);
+        try std.testing.expect(retained.findById(13).?.widget.state.selected);
+        for ([_]canvas.ObjectId{ 21, 22 }) |id| try std.testing.expect(retained.findById(id).?.widget.state.selected);
+        _ = try view.toggleCanvasWidgetBooleanControl(13);
+        _ = try view.toggleCanvasWidgetBooleanControl(22);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(2, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(retained.findById(13).?.widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 1), retained.findById(13).?.widget.value);
+        try std.testing.expect(retained.findById(21).?.widget.state.selected);
+        try std.testing.expect(!retained.findById(22).?.widget.state.selected);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(null, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        for ([_]canvas.ObjectId{ 11, 12, 13 }) |id| {
+            try std.testing.expect(!retained.findById(id).?.widget.state.selected);
+            try std.testing.expectEqual(@as(f32, 0), retained.findById(id).?.widget.value);
+        }
+        try std.testing.expect(retained.findById(21).?.widget.state.selected);
+        try std.testing.expect(!retained.findById(22).?.widget.state.selected);
     }
 }

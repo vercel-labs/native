@@ -327,9 +327,9 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             const widget = self.widget_layout_nodes[index].widget;
             if ((widget.kind != .accordion and widget.kind != .checkbox and widget.kind != .toggle_button and widget.kind != .toggle and !canvasWidgetSwitchControlKind(widget.kind)) or widget.state.disabled) return null;
 
-            const selected = canvasWidgetBooleanSelected(widget);
-            self.widget_layout_nodes[index].widget.state.selected = !selected;
-            self.widget_layout_nodes[index].widget.value = if (!selected) 1 else 0;
+            const selected = canvas_widget_runtime.canvasWidgetCompiledToggleSelected(widget, 8, false, false) orelse !canvasWidgetBooleanSelected(widget);
+            self.widget_layout_nodes[index].widget.state.selected = selected;
+            self.widget_layout_nodes[index].widget.value = if (selected) 1 else 0;
             // Disclosure widgets note the toggle for the NEXT rebuild:
             // this optimistic echo already flipped the retained state,
             // so the rebuild-time flip detection that arms the

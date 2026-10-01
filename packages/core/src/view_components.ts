@@ -332,6 +332,51 @@ export function native_menu_policy(request: Uint8Array): Uint8Array {
   return result;
 }
 
+/** Toggle state requests: operation 8 (activate) or 9 (reconcile), then
+ * flags (1 current/source selected, 2 previous source selected, 4 retained
+ * selected). A source asserted now or previously wins; otherwise retain
+ * the uncontrolled state. Results are one selected byte.
+ * Focus requests: operation 4/5 (Left/Right), 6/7 (Home/End), subject/count
+ * u16LE, then parent u16LE, kind (0 other/1 toggle/2 toggle group/3 button
+ * group), flags (2 visible focus). Arrows stay on visible direct children
+ * without wrapping; Home/End preserve native same-parent edges.
+ */
+export function native_toggle_policy(request: Uint8Array): Uint8Array {
+  if (request.length === 0) throw new Error("invalid toggle policy request");
+  const operation = request[0]!;
+  if (operation === 8 || operation === 9) {
+    if (request.length !== 2 || request[1]! > 7) throw new Error("invalid toggle state request");
+    const flags = request[1]!, source = (flags & 1) !== 0;
+    let selected = !source;
+    if (operation === 9) selected = (source || (flags & 2) !== 0) ? source : (flags & 4) !== 0;
+    const result = new Uint8Array(1);
+    result[0] = selected ? 1 : 0;
+    return result;
+  }
+  const read = (at: number): number => request[at]! + request[at + 1]! * 256;
+  if (request.length < 5) throw new Error("invalid toggle focus request");
+  const subject = read(1), count = read(3);
+  if (count > 1024 || subject >= count || request.length !== 5 + count * 4 ||
+      ![4, 5, 6, 7].includes(operation)) throw new Error("invalid toggle focus request");
+  const parent = (i: number): number => read(5 + i * 4);
+  const kind = (i: number): number => request[7 + i * 4]!;
+  const flags = (i: number): number => request[8 + i * 4]!;
+  const group = parent(subject);
+  let target = 65535;
+  if (group < count && (kind(group) === 2 || kind(group) === 3)) {
+    for (let i = 0; i < count; i++) {
+      if (kind(i) !== 1 || parent(i) !== group || (flags(i) & 2) === 0) continue;
+      if (operation === 6) { target = i; break; }
+      if (operation === 7 || operation === 4 && i < subject) target = i;
+      if (operation === 5 && i > subject) { target = i; break; }
+    }
+    if (target === 65535 && (operation === 4 || operation === 5)) target = subject;
+  }
+  const result = new Uint8Array(2);
+  result[0] = target % 256; result[1] = Math.floor(target / 256);
+  return result;
+}
+
 /** Retained tree wire: operation u8, subject/count u16LE, then parent
  * u16LE, kind bits (1 treeitem/2 tree scope), flags (1 logical focus,
  * 4 selected/8 expanded), and tree-level u16LE per node. Operations:

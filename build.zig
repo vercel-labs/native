@@ -927,6 +927,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&menu_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&menu_policy_driver_run.step);
         test_step.dependOn(&menu_policy_driver_run.step);
+        const toggle_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        toggle_policy_reference_run.setCwd(b.path("examples/toggle-policy"));
+        toggle_policy_reference_run.has_side_effects = true;
+        toggle_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        toggle_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/toggle-policy-view-reference"));
+        _ = toggle_policy_reference_run.captureStdOut(.{});
+        _ = toggle_policy_reference_run.captureStdErr(.{});
+        const toggle_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        toggle_policy_driver_run.setCwd(b.path("examples/toggle-policy"));
+        toggle_policy_driver_run.has_side_effects = true;
+        toggle_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        toggle_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/toggle-policy-view-reference"));
+        _ = toggle_policy_driver_run.captureStdOut(.{});
+        _ = toggle_policy_driver_run.captureStdErr(.{});
+        toggle_policy_driver_run.step.dependOn(&toggle_policy_reference_run.step);
+        native_driver_step.dependOn(&toggle_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&toggle_policy_driver_run.step);
+        test_step.dependOn(&toggle_policy_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -2093,6 +2111,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-tree-policy", "Run portable tree policy example tests", "examples/tree-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-list-policy", "Run portable list policy example tests", "examples/list-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-policy", "Run portable menu policy example tests", "examples/menu-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-toggle-policy", "Run portable toggle policy example tests", "examples/toggle-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

@@ -1,0 +1,32 @@
+<column padding="24" gap="16">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Toggle settings</text>
+    <button on-press="reverse">Reverse</button>
+    <button on-press="hide">Hide light</button>
+    <button on-press="empty">Empty</button>
+    <button on-press="refresh">Refresh</button>
+    <button on-press="reset">Reset</button>
+  </row>
+  <text>Theme {theme} | changes {changes} | refreshes {refreshes}</text>
+  <text foreground="text_muted">Arrows move focus. Enter or Space toggles the focused button.</text>
+  <text>Theme</text>
+  <toggle-group gap="8" label="Theme choices">
+    <for each="choices" key="id" as="choice">
+      <toggle-button selected="{choice.selected}" disabled="{choice.disabled}" on-toggle="choose:{choice.id}">{choice.title}</toggle-button>
+    </for>
+    <if test="{empty}"><text>No themes available</text></if>
+  </toggle-group>
+  <text>Formatting</text>
+  <toggle-group gap="8" label="Formatting">
+    <toggle-button on-toggle="format_changed">Bold</toggle-button>
+    <toggle-button on-toggle="format_changed">Italic</toggle-button>
+    <toggle-button disabled="true" on-toggle="format_changed">Unavailable format</toggle-button>
+    <toggle-button on-toggle="format_changed">Underline</toggle-button>
+    <toggle-group gap="8" label="Extras">
+      <toggle-button on-toggle="format_changed">Monospace</toggle-button>
+      <toggle-button on-toggle="format_changed">Strike</toggle-button>
+    </toggle-group>
+  </toggle-group>
+  <text foreground="text_muted">Theme choices stay exclusive. Formatting buttons toggle independently.</text>
+  <text foreground="text_muted">Refresh keeps formatting choices. Hide or empty the themes, then restore them.</text>
+</column>

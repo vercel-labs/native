@@ -369,3 +369,22 @@ test("menu views preserve anchored picker composition and canonical dismissal", 
   assert.throws(() => compileView('<menu-item>Mixed<text>child</text></menu-item>', contract), /mixed content/);
   assert.throws(() => compileView('<menu-item role="treeitem"/>', contract), /compiled treeitem requires/);
 });
+
+
+test("toggle groups preserve independent toggles, model selection and toggle envelopes", () => {
+  const { view } = evaluate('<toggle-group gap="6" label="Theme"><toggle-button selected="true" icon="sun" on-toggle="reset">Light</toggle-button><toggle-button disabled="true" on-toggle="increment">Unavailable</toggle-button><toggle-button>Bold</toggle-button></toggle-group>');
+  const nodes = view().nodes;
+  assert.equal(nodes[0].kind, "toggle_group");
+  assert.equal(nodes[0].label, "Theme");
+  assert.equal(nodes[1].kind, "toggle_button");
+  assert.equal(nodes[1].selected, true);
+  assert.equal(nodes[1].icon, "sun");
+  assert.deepEqual(nodes[1].toggle, [1, 5]);
+  assert.equal(nodes[2].disabled, true);
+  assert.deepEqual(nodes[2].toggle, [1, 3]);
+  assert.equal(nodes[3].toggle, undefined);
+  assert.throws(() => compileView('<toggle-group on-toggle="reset"/>', contract), /unsupported on toggle-group/);
+  assert.throws(() => compileView('<toggle-button on-change="reset"/>', contract), /unsupported on toggle-button/);
+  assert.throws(() => compileView('<toggle-button>Mixed<text>child</text></toggle-button>', contract), /mixed content/);
+  assert.throws(() => compileView('<toggle-button role="treeitem"/>', contract), /compiled treeitem requires/);
+});

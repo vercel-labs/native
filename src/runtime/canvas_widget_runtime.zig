@@ -832,10 +832,8 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                     source_entry.selected
                 else
                     false;
-                const selected = if (source_selected or previously_selected)
-                    source_selected
-                else
-                    entry.state.selected or entry.value >= 0.5;
+                const selected = canvasWidgetCompiledToggleSelected(copy.widget, 9, previously_selected, entry.state.selected or entry.value >= 0.5) orelse
+                    if (source_selected or previously_selected) source_selected else entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
             },
@@ -1609,6 +1607,8 @@ pub fn canvasWidgetGroupDirectionalFocusTarget(layout: canvas.WidgetLayoutTree, 
         return compiledListFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
     if ((parent_kind == .menu_surface or parent_kind == .dropdown_menu) and focused.kind == .menu_item and layout.nodes[focused.index].widget.interaction_policy != null)
         return canvasWidgetCompiledMenuFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    if (parent_kind == .toggle_group and focused.kind == .toggle_button and layout.nodes[focused.index].widget.interaction_policy != null)
+        return canvasWidgetCompiledToggleFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
     return canvasWidgetAdjacentGroupFocusTarget(layout, parent_index, focused, group_direction) orelse focused;
 }
 
@@ -1762,6 +1762,51 @@ pub fn canvasWidgetMenuPolicy(layout: canvas.WidgetLayoutTree, subject: usize, o
             @as(u8, if (node.widget.state.selected) 8 else 0);
     }
     return policy(request[0 .. 5 + layout.nodes.len * 4], output);
+}
+
+/// Toggle transitions and source/retained reconciliation run without a tree
+/// scan. The native caller applies the returned selected state and value.
+pub fn canvasWidgetCompiledToggleSelected(widget: canvas.Widget, operation: u8, previously_selected: bool, retained_selected: bool) ?bool {
+    if (widget.kind != .toggle_button) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const request = [_]u8{
+        operation,
+        @as(u8, if (canvasWidgetBooleanSelected(widget)) 1 else 0) |
+            @as(u8, if (previously_selected) 2 else 0) |
+            @as(u8, if (retained_selected) 4 else 0),
+    };
+    var output: [1]u8 = undefined;
+    const len = policy(&request, &output);
+    if (len != 1 or output[0] > 1) @panic("invalid toggle state policy result");
+    return output[0] == 1;
+}
+
+pub fn canvasWidgetCompiledToggleFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("toggle policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = switch (node.widget.kind) {
+            .toggle_button => 1,
+            .toggle_group => 2,
+            .button_group => 3,
+            else => 0,
+        };
+        request[at + 3] = if (node.widget.kind == .toggle_button and layout.focusTargetById(node.widget.id) != null) 2 else 0;
+    }
+    var output: [2]u8 = undefined;
+    const len = policy(request[0 .. 5 + layout.nodes.len * 4], &output);
+    if (len != 2) @panic("invalid toggle focus policy result");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("toggle policy target outside tree");
+    return layout.focusTargetById(layout.nodes[index].widget.id);
 }
 
 pub fn canvasWidgetCompiledMenuFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
@@ -2236,6 +2281,8 @@ pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused
         return compiledListFocus(layout, focused.index, if (edge == .first) 6 else 7);
     if (focused.kind == .menu_item and layout.nodes[focused.index].widget.interaction_policy != null)
         return canvasWidgetCompiledMenuFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    if (focused.kind == .toggle_button and layout.nodes[focused.index].widget.interaction_policy != null)
+        return canvasWidgetCompiledToggleFocus(layout, focused.index, if (edge == .first) 6 else 7);
     switch (edge) {
         .first => {
             for (layout.nodes) |node| {
