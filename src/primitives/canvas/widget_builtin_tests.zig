@@ -2932,6 +2932,36 @@ test "built-in accordion disclosure state controls child layout and semantics" {
     try std.testing.expect(expanded_builder.displayList().findCommandById(widgetPartId(46, 1)) != null);
 }
 
+test "a closed nested accordion does not keep its open parent from settling" {
+    // A closed accordion still lays its content out at full size below
+    // its header, ready to reveal. That concealed geometry must not count
+    // as the OUTER accordion's content, or the outer never settles open
+    // and everything inside it, the inner header included, stays inert.
+    var tall = Widget{ .id = 53, .kind = .stack };
+    tall.layout.min_size = geometry.SizeF.init(0, 400);
+    const inner_content = [_]Widget{tall};
+    const inner = builtinComponentWidget(.accordion, .{ .id = 52, .text = "Inner", .children = &inner_content });
+    const outer_content = [_]Widget{inner};
+    var outer = builtinComponentWidget(.accordion, .{
+        .id = 51,
+        .frame = geometry.RectF.init(0, 0, 240, 160),
+        .text = "Outer",
+        .children = &outer_content,
+    });
+    outer.state.selected = true;
+    outer.value = 1;
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(outer, outer.frame, &nodes);
+    const inner_frame = layout.findById(52).?.frame;
+    try std.testing.expect(inner_frame.maxY() <= outer.frame.maxY());
+    try std.testing.expect(layout.findById(53).?.frame.maxY() > outer.frame.maxY());
+
+    try std.testing.expect(canvas.disclosureSettledOpen(layout, 0));
+    const hit = layout.hitTest(inner_frame.center()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 52), hit.id);
+}
+
 test "built-in alert renders house surface chrome and text" {
     const alert = builtinComponentWidget(.alert, .{
         .id = 40,

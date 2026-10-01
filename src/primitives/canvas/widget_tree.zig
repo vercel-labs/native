@@ -275,7 +275,8 @@ const disclosure_settle_slack: f32 = 0.5;
 
 /// The bottom edge the disclosure widget's content REACHES: the deepest
 /// maxY among its in-flow children's subtrees. Window-level surfaces float
-/// outside the flow and never count.
+/// outside the flow and never count, and a nested disclosure counts its
+/// own frame rather than the content it conceals.
 pub fn disclosureContentBottom(layout: anytype, node_index: usize) f32 {
     const node = layout.nodes[node_index];
     var bottom = -std.math.inf(f32);
@@ -283,6 +284,17 @@ pub fn disclosureContentBottom(layout: anytype, node_index: usize) f32 {
     while (index < layout.nodes.len and layout.nodes[index].depth > node.depth) {
         const child = layout.nodes[index];
         if (widgetEscapesAncestorClips(child.widget)) {
+            const subtree_depth = child.depth;
+            index += 1;
+            while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}
+            continue;
+        }
+        // A nested disclosure owns its own animated extent. A closed one
+        // still lays its content out past its frame, ready to reveal, but
+        // that concealed geometry must not keep this disclosure from ever
+        // reaching its settled-open pose: count the nested frame only.
+        if (widgetKindDisclosureAnimated(child.widget.kind)) {
+            bottom = @max(bottom, child.frame.normalized().maxY());
             const subtree_depth = child.depth;
             index += 1;
             while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}

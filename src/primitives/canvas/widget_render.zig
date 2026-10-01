@@ -948,28 +948,58 @@ fn emitLayoutContainerBackground(builder: *Builder, widget: Widget, tokens: Desi
     const actions = widget.semantics.actions;
     const actionable = widget.id != 0 and !widget.state.disabled and
         (actions.press or actions.toggle or actions.drag);
+    const radius = Radius.all(nonNegative(widget.style.radius orelse 0));
     if (!actionable) {
-        const background = widget.style.background orelse return;
-        if (background.a <= 0) return;
-        try builder.fillRoundedRect(.{
-            .id = widgetPartId(widget.id, 1),
-            .rect = widget.frame,
-            .radius = Radius.all(nonNegative(widget.style.radius orelse 0)),
-            .fill = colorFill(background),
-        });
+        if (widget.style.background) |background| {
+            if (background.a > 0) try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, 1),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = colorFill(background),
+            });
+        }
+        try emitLayoutContainerBorder(builder, widget, radius);
         return;
     }
     // The common rest-state actionable container with no authored fill
     // emits nothing. Avoid the token ladder on every structural row in a
     // full rebuild; only live feedback or authored chrome needs it.
-    if (widget.style.background == null and !widget.state.selected and !widget.state.pressed and !widget_render_style.washHovered(widget)) return;
+    if (widget.style.background == null and !widget.state.selected and !widget.state.pressed and !widget_render_style.washHovered(widget)) {
+        return emitLayoutContainerBorder(builder, widget, radius);
+    }
     const background = listItemFillColor(widget, tokens, widget.state);
-    if (background.a <= 0) return;
-    try builder.fillRoundedRect(.{
+    if (background.a > 0) try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
-        .radius = Radius.all(nonNegative(widget.style.radius orelse 0)),
+        .radius = radius,
         .fill = colorFill(background),
+    });
+    try emitLayoutContainerBorder(builder, widget, radius);
+}
+
+/// An AUTHORED border on a plain container paints, the way it already does
+/// on controls and surfaces. Layout containers used to fill and nothing
+/// else, so `style.border` on a row or column was silently dropped — a card
+/// outline, a badge ring or a panel hairline simply never appeared.
+fn containerBorderId(id: ObjectId) ObjectId {
+    if (id == 0) return 0;
+    return 0x4000_0000_0000_0000 ^ id;
+}
+
+fn emitLayoutContainerBorder(builder: *Builder, widget: Widget, radius: Radius) Error!void {
+    const border = widget.style.border orelse return;
+    if (border.a <= 0) return;
+    const width = nonNegative(widget.style.stroke_width orelse 1);
+    if (width <= 0) return;
+    // A container's sixteen part slots are already spoken for across the
+    // fill, clip and decoration paths, so the border takes a disjoint id
+    // space rather than competing for one — a duplicate command id fails
+    // the whole frame.
+    try builder.strokeRect(.{
+        .id = containerBorderId(widget.id),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{ .fill = colorFill(border), .width = width },
     });
 }
 

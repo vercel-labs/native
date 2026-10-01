@@ -3029,6 +3029,24 @@ test "canvas frame plan leaves unchanged retained frame clean" {
     try std.testing.expectEqual(@as(usize, 0), profile.work_units);
 }
 
+test "render overrides compose in view space over a command's local transform" {
+    // A vector icon emits its paths under its viewBox scale, and a slide
+    // animation hands those paths a VIEW-space translation: the override
+    // must apply after the local map rather than be scaled by it.
+    const commands = [_]CanvasCommand{
+        .{ .transform = Affine.scale(2, 2) },
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 10, 10), .fill = .{ .color = Color.rgb8(255, 0, 0) } } },
+    };
+    var render_commands: [1]RenderCommand = undefined;
+    const plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    const overrides = [_]CanvasRenderOverride{.{ .id = 1, .transform = Affine.translate(10, 0) }};
+
+    try expectRect(geometry.RectF.init(0, 0, 30, 20), renderOverrideDirtyBounds(plan.commands, &.{}, &overrides));
+    const bounds = applyRenderOverrides(render_commands[0..plan.commandCount()], &overrides);
+    try std.testing.expectEqualDeep(Affine{ .a = 2, .d = 2, .tx = 10 }, render_commands[0].transform);
+    try expectRect(geometry.RectF.init(10, 0, 20, 20), bounds);
+}
+
 test "canvas frame plan applies render overrides without display list changes" {
     const commands = [_]CanvasCommand{.{ .fill_rect = .{
         .id = 1,

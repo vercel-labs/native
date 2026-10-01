@@ -1196,9 +1196,23 @@ fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
         widgetTextSpanLayoutOptions(
             widget,
             tokens,
-            @max(0, width - widgetCodeLineNumberGutterWidth(widget, tokens)),
+            @max(0, spanParagraphWrapWidth(widget, width) - widgetCodeLineNumberGutterWidth(widget, tokens)),
         ),
     );
+}
+
+/// The width a span paragraph will ACTUALLY wrap at: the offered width
+/// bounded by the paragraph's own author sizing. Measuring the wrap at the
+/// container's inner width while the paragraph then lays out inside a
+/// narrower `max_width` reports fewer lines than get painted, so the
+/// paragraph's box under-reports its height and the next sibling is placed
+/// over its tail — invisible chrome that also swallows pointer input.
+fn spanParagraphWrapWidth(widget: Widget, width: f32) f32 {
+    var bounded = width;
+    if (widget.frame.width > 0) bounded = @min(bounded, widget.frame.width);
+    if (widget.layout.max_size.width > 0) bounded = @min(bounded, widget.layout.max_size.width);
+    if (widget.layout.min_size.width > 0) bounded = @max(bounded, widget.layout.min_size.width);
+    return @max(0, bounded);
 }
 
 /// Position a span paragraph's link hit-area children. By convention the
@@ -2170,7 +2184,23 @@ fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usi
         if (!widgetTakesFlowSlot(child)) continue;
         const size = intrinsicChildSize(child, tokens, depth + 1);
         width_max = @max(width_max, size.width);
-        height_max = @max(height_max, size.height);
+        // Overlay surfaces commonly have a definite width and an automatic
+        // height. Their paragraph children must therefore reserve the height
+        // they occupy at that width, including any child padding. Measuring
+        // only the paragraph's one-line intrinsic height makes the surface
+        // clip the final wrapped line and turns the intended bottom inset
+        // into one or two pixels of leftover space.
+        const child_width = if (child.frame.width > 0)
+            child.frame.width
+        else if (widget.frame.width > 0)
+            @max(0, widget.frame.width - widget.layout.padding.left - widget.layout.padding.right)
+        else
+            size.width;
+        const child_height = if (widgetSubtreeHasTextSpans(child, depth + 1) and child_width > 0)
+            wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1)
+        else
+            size.height;
+        height_max = @max(height_max, child_height);
     }
     return paddedIntrinsicSize(widget, geometry.SizeF.init(width_max, height_max));
 }
@@ -2240,9 +2270,18 @@ fn paddedIntrinsicSizeWithPadding(widget: Widget, content: geometry.SizeF, paddi
 fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32) geometry.SizeF {
     if (widgetIsSpanParagraph(widget)) {
         const options = widgetTextSpanLayoutOptions(widget, tokens, 0);
+        const unwrapped_width = text_spans_model.textSpansIntrinsicWidth(widget.spans, options) +
+            widgetCodeLineNumberGutterWidth(widget, tokens);
+        // A paragraph that caps its own width wraps even when nothing else
+        // constrains it, so its intrinsic height is the wrapped height at
+        // that cap — not one line. Reporting one line makes the paragraph's
+        // box shorter than its ink.
+        const cap = spanParagraphWrapWidth(widget, unwrapped_width);
+        if (!widget.text_no_wrap and cap > 0 and cap < unwrapped_width) {
+            return geometry.SizeF.init(cap, spanParagraphHeight(widget, cap, tokens));
+        }
         return geometry.SizeF.init(
-            text_spans_model.textSpansIntrinsicWidth(widget.spans, options) +
-                widgetCodeLineNumberGutterWidth(widget, tokens),
+            unwrapped_width,
             widgetLineHeight(text_size * text_spans_model.textSpansMaxScale(widget.spans)),
         );
     }
