@@ -224,7 +224,7 @@ pub const Sidecar = struct {
 /// init, collect, result reset), then the program's entry-point map
 /// (core_abi.zig binds the matching extern signatures). The five
 /// conditional channel-entry suffixes follow, present exactly when the
-/// matching channel is wired.
+/// matching channel is wired, then the optional native_view extension.
 pub const unconditional_exports = [_][]const u8{
     "abi_version",
     "build_id",
@@ -256,6 +256,8 @@ pub const conditional_exports = [_][]const u8{
     "key_msg",
     "pinch_msg",
     "drop_msg",
+    // Native SDK's opt-in compiled-view extension, after function channels.
+    "native_view",
 };
 
 // ------------------------------------------------------------ reading
@@ -1412,7 +1414,7 @@ fn exportListed(sidecar: Sidecar, suffix: []const u8) bool {
     return abiHasExport(sidecar.abi, suffix);
 }
 
-fn abiHasExport(abi: Abi, suffix: []const u8) bool {
+pub fn abiHasExport(abi: Abi, suffix: []const u8) bool {
     for (abi.exports) |entry| {
         if (std.mem.eql(u8, entry, suffix)) return true;
     }
@@ -2397,6 +2399,19 @@ test "V11: an unknown export suffix refuses" {
     defer arena_state.deinit();
     const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"mystery_entry\"]");
     try expectRefusal(source, "abi.exports[22]", "not an export suffix of ABI version 2");
+}
+
+test "V11: the optional native view extension is unique and follows channels" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try replaced(arena, minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"native_view\"]");
+    const valid = try readValid(arena, source);
+    try testing.expect(abiHasExport(valid.abi, "native_view"));
+    const duplicate = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_view\"]");
+    try expectRefusal(duplicate, "abi.exports[23]", "out of canonical order");
+    const reordered = try replaced(arena, source, "\"helper_call\", \"native_view\"", "\"native_view\", \"helper_call\"");
+    try expectRefusal(reordered, "abi.exports[21]", "expected the unconditional export");
 }
 
 test "V11: a missing unconditional export refuses with the expected suffix" {

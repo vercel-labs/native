@@ -150,6 +150,7 @@ const signatures: Signature[] = [
   { suffix: "key_msg", name: "abi_key_msg", params: ["bytes", "u8", "u8", "u8", "u8"] },
   { suffix: "pinch_msg", name: "abi_pinch_msg", params: ["f64", "bytes", "u32", "f64", "f64", "f64"] },
   { suffix: "drop_msg", name: "abi_drop_msg", params: ["bytes"] },
+  { suffix: "native_view", name: "native_view", params: [] },
 ];
 
 const randomness_teaching = "randomness is an effect: the core requests it through a command and the value arrives as a Msg, so a recorded session replays it exactly.";

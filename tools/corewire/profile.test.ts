@@ -131,3 +131,18 @@ test("policy text obeys compiler limits and conditional channel signatures are c
     assert.doesNotMatch(text, /[\x00-\x09\x0b-\x1f]/);
   }
 });
+
+test("compiled profiles preserve the optional Native view signature", () => withWork(dir => {
+  const input = currentContract("wide_msg");
+  input.abi.exports.push("native_view");
+  const result = invoke(dir, input, ["--profile", "profile.json", "--out", "mirror.zig"]);
+  assert.equal(result.status, 0, result.stderr);
+  const output = fs.readFileSync(path.join(dir, "profile.json"), "utf8");
+  assert.equal(output, emitProfile(input, "core_facade.ts", "").output);
+  const profile = JSON.parse(output);
+  assert.deepEqual(profile.exports.at(-1), { export: "native_view", symbol: input.abi.prefix + "native_view", params: [], returns: "bytes" });
+  const mirror = fs.readFileSync(path.join(dir, "mirror.zig"), "utf8");
+  assert.match(mirror, /pub fn nativeView\(arena:/);
+  assert.match(mirror, /pub fn nativeViewEvent\(tag: u8\)/);
+  assert.ok(!mirror.includes('const nscfCommitted'));
+}));

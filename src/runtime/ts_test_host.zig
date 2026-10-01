@@ -82,6 +82,8 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
             const snapshot_value = self.harness.runtime.automationSnapshot("Native test");
             var json: std.json.Stringify = .{ .writer = writer };
             try json.beginObject();
+            try json.objectField("viewBackend");
+            try json.write(Adapter.view_backend);
             try json.objectField("model");
             // Byte arrays stay lossless, including non-UTF8 and embedded NUL.
             json.options.emit_strings_as_arrays = true;

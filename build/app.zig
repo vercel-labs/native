@@ -976,10 +976,12 @@ fn tsCoreStage(
     service_pool_workers: ?u8,
     build_trace: bool,
     scriptc_optimization: ?[]const u8,
+    typescript_view: bool,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const window_views = collectTsWindowViews(b, app_root);
     const app_markup_sources = collectAppMarkupSources(b, app_root, window_views);
+    if (typescript_view and window_views.views.len != 0) @panic("compiled TypeScript views currently support one root canvas; secondary window views are unsupported");
     const has_services = appHasServiceFiles(b, app_root);
     if (!scriptcCompileSupported(b.graph.host.result, target)) {
         panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
@@ -1233,6 +1235,13 @@ fn tsCoreStage(
     stage_run.addFileArg(facade);
     stage_run.addArg("--profile");
     stage_run.addFileArg(profile);
+    stage_run.addFileInput(dep.path("packages/core/src/view_frontend.ts"));
+    if (typescript_view) {
+        stage_run.addArg("--view-markup");
+        stage_run.addFileArg(b.path(appPath(b, app_root, "src/app.native")));
+        stage_run.addArg("--view-contract");
+        stage_run.addFileArg(contract);
+    }
     if (service_client) |client| {
         stage_run.addArg("--services-client");
         stage_run.addFileArg(client);
@@ -1303,6 +1312,7 @@ fn tsCoreStage(
     _ = staged.addCopyFile(shim, "core.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/core_abi.zig"), "core_abi.zig");
+    _ = staged.addCopyFile(dep.path("src/app_runner/ts_compiled_view.zig"), "compiled_view.zig");
     _ = staged.addCopyFile(service_registry, "services.zig");
     // The carrier selection, as one staged constant module: the generated
     // wiring comptime-switches its service transport on it.
@@ -1754,6 +1764,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         detectCoreTree(b, app_options.app_root)
     else
         .zig;
+    const typescript_view = b.option(bool, "typescript-view", "Compile the counter markup surface beside the TypeScript model (no runtime markup hot reload)") orelse false;
+    if (typescript_view and core_tree != .ts) @panic("-Dtypescript-view requires src/core.ts");
     if (core_tree == .both) {
         @panic("\nthis app declares two cores: src/core.ts (TypeScript) and src/main.zig (Zig)." ++
             "\nAn app has exactly one core - the tree is the truth. Keep src/core.ts and delete" ++
@@ -1808,6 +1820,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             service_pool_workers,
             build_trace,
             scriptc_optimization,
+            typescript_view,
         )
     else
         null;

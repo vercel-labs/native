@@ -125,10 +125,12 @@ test "root TypeScript markup discovery classification and resolver budgets" {
 
 test "generated TypeScript runners install the compiled root markup view" {
     const desktop = @embedFile("src/app_runner/ts_core_main.zig");
-    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled })") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, "if (dev) void else @import(\"app_markup_root\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, ".view = CompiledAppView.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "if (comptime ts_view.enabled) options.view = ts_view.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, ".markup = if (dev and !ts_view.enabled)") != null);
 
     const mobile = @embedFile("src/app_runner/ts_core_mobile.zig");
     try std.testing.expect(std.mem.indexOf(u8, mobile, "pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false }") != null);
@@ -744,16 +746,28 @@ pub fn build(b: *std.Build) void {
     const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run both TypeScript service carriers end to end: the out-of-process child (crash recovery, timeout, replay) and the in-process pool (parallel keys, FIFO, trap isolation, replay)");
     if (ts_core_e2e_tests) |ts_core_artifacts| {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
-        const native_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        const native_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
         native_driver_run.setCwd(b.path("tests/native-driver"));
         native_driver_run.has_side_effects = true;
         _ = native_driver_run.captureStdOut(.{});
         _ = native_driver_run.captureStdErr(.{});
         native_driver_run.setName("TypeScript native test driver");
+        native_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        const legacy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        legacy_driver_run.setCwd(b.path("tests/native-driver"));
+        legacy_driver_run.has_side_effects = true;
+        legacy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        _ = legacy_driver_run.captureStdOut(.{});
+        _ = legacy_driver_run.captureStdErr(.{});
+        legacy_driver_run.setName("Native test driver reference view");
+        // Both builds share the app scratch graph. Run the reference first,
+        // then require the new backend explicitly in the same test battery.
+        native_driver_run.step.dependOn(&legacy_driver_run.step);
         const native_driver_step = b.step("test-ts-native-driver", "Drive a compiled app from authored TypeScript tests");
         native_driver_step.dependOn(&native_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
         _ = native_api_tests.captureStdOut(.{});
         _ = native_api_tests.captureStdErr(.{});
@@ -4233,6 +4247,7 @@ fn externalCoreFixtureModule(
     // generated entry/profile, one scratch tree.
     const stage_run = b.addSystemCommand(&.{node});
     stage_run.addFileArg(b.path("packages/core/scripts/stage_external_core.mjs"));
+    stage_run.addFileInput(b.path("packages/core/src/view_frontend.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);
     stage_run.addArg("--sdk");

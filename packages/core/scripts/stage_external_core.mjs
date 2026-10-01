@@ -27,6 +27,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { compileView } from "../src/view_frontend.ts";
 
 function parseArgs(argv) {
   const args = {};
@@ -150,6 +151,15 @@ fs.writeFileSync(path.join(args.out, "sdk", "core.ts"), dedupeAliases(fs.readFil
 // the profile's entry spelling expects.
 fs.copyFileSync(args.facade, path.join(args.out, "core_facade.ts"));
 fs.copyFileSync(args.profile, path.join(args.out, "profile.json"));
+if (args["view-markup"]) {
+  if (!args["view-contract"]) throw new Error("compiled views require --view-contract");
+  const contract = JSON.parse(fs.readFileSync(args["view-contract"], "utf8"));
+  const view = compileView(fs.readFileSync(args["view-markup"], "utf8"), contract);
+  fs.appendFileSync(path.join(args.out, "core_facade.ts"), view);
+  const profile = JSON.parse(fs.readFileSync(args.profile, "utf8"));
+  profile.exports.push({ export: "native_view", symbol: `${profile.abi.prefix}native_view`, params: [], returns: "bytes" });
+  fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
+}
 if (args["services-client"]) {
   const client = resolveSpecifiers(fs.readFileSync(args["services-client"], "utf8"), "services.gen.ts");
   fs.writeFileSync(path.join(args.out, "services.gen.ts"), client);

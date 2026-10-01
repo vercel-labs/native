@@ -291,6 +291,9 @@ const Emitter = struct {
         if (!std.mem.eql(u8, self.sidecar.model, "Model")) try reserved.append(self.arena, "Model");
         if (!std.mem.eql(u8, self.sidecar.msg.name, "Msg")) try reserved.append(self.arena, "Msg");
         // Optional glue reserves its name only when it is emitted.
+        if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_view")) {
+            try reserved.appendSlice(self.arena, &.{ "nativeView", "nativeViewEvent", "ptr", "len", "arena" });
+        }
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
         if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg) {
@@ -1144,6 +1147,28 @@ const Emitter = struct {
     fn channels(self: *Emitter) Error!void {
         const chan = self.sidecar.channels;
         const any_fn_channel = chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg;
+        const has_view = sidecar_mod.abiHasExport(self.sidecar.abi, "native_view");
+        if (has_view) {
+            try self.raw(
+                \\
+                \\/// Copy view data into the native tree arena before resetting the
+                \\/// compiler result arena. No model mirror is passed to this entry.
+                \\pub fn nativeView(arena: std.mem.Allocator) []const u8 {
+                \\    var ptr: [*]const u8 = undefined;
+                \\    var len: usize = 0;
+                \\    abi.native_view(&ptr, &len);
+                \\    defer abi.frame_reset();
+                \\    if (len > 1024 * 1024) @panic("compiled view exceeds 1 MiB");
+                \\    return arena.dupe(u8, ptr[0..len]) catch @panic("compiled view allocation failed");
+                \\}
+                \\
+            );
+            try self.print("pub fn nativeViewEvent(tag: u8) {f} {{\n    switch (tag) {{\n", .{ident(self.sidecar.msg.name)});
+            for (self.sidecar.msg.arms, 0..) |arm, tag| {
+                if (arm.payload == .void) try self.print("        {d} => return .{f},\n", .{ tag, ident(arm.name) });
+            }
+            try self.raw("        else => @panic(\"compiled view event must name a void Msg arm\"),\n    }\n}\n");
+        }
 
         if (chan.command_msg) {
             try self.print(

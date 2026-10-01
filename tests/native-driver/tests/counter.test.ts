@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NativeApp, findWidget } from "@native-sdk/core/testing";
+const expectedBackend = process.env.NATIVE_SDK_TEST_VIEW_BACKEND;
 
 test("compiled counter: input, committed state, widgets, effects and replay", async () => {
   const app = await NativeApp.start({ wallMs: 77000 });
   try {
     let snapshot = await app.snapshot();
+    if (expectedBackend) assert.equal(snapshot.viewBackend, expectedBackend);
     assert.equal(snapshot.model.count, 0);
     snapshot = await app.click(findWidget(snapshot, { role: "button", name: "+" }));
     assert.equal(snapshot.model.count, 1);
@@ -21,6 +23,30 @@ test("compiled counter: input, committed state, widgets, effects and replay", as
     assert.deepEqual(replay.snapshot.model, snapshot.model);
     assert.equal(replay.snapshot.fingerprint, snapshot.fingerprint);
     assert.deepEqual(replay.snapshot.widgets, snapshot.widgets);
+  } finally {
+    await app.close();
+  }
+});
+
+test("counter view preserves native identities and layout across rebuilds", async () => {
+  const app = await NativeApp.start({ width: 480, height: 320 });
+  try {
+    let snapshot = await app.snapshot();
+    if (expectedBackend) assert.equal(snapshot.viewBackend, expectedBackend);
+    assert.equal(snapshot.widgets.length, 14);
+    const plus = findWidget(snapshot, { role: "button", name: "+" });
+    assert.equal(plus.id, "4995393829508032300");
+    assert.equal(findWidget(snapshot, { role: "switch", name: "Tick every second" }).id, "8424760395709847335");
+    const ids = snapshot.widgets.map(widget => widget.id);
+    const bounds = snapshot.widgets.map(widget => widget.bounds);
+    snapshot = await app.click(plus);
+    snapshot = await app.click(findWidget(snapshot, { role: "button", name: "Stamp" }));
+    assert.deepEqual(snapshot.widgets.map(widget => widget.id), ids);
+    for (let i = 0; i < 100; i++) snapshot = await app.frame();
+    assert.equal(snapshot.model.count, 1);
+    assert.ok(snapshot.widgets.some(widget => widget.name.includes("total: 1 | stamped: 0ms")));
+    snapshot = await app.click(findWidget(snapshot, { role: "button", name: "Reset" }));
+    assert.deepEqual(snapshot.widgets.map(widget => widget.bounds), bounds);
   } finally {
     await app.close();
   }

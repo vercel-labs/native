@@ -109,6 +109,9 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// lifetime: valid until the next frame_reset, dispatch entry,
         /// or init.
         pub const boot_cmd = Symbol(fn (cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "boot_cmd");
+        /// Optional Native SDK view extension. Versioned tree data evaluated
+        /// against the committed TS model; borrowed until frame_reset.
+        pub const native_view = Symbol(fn (out: *[*]const u8, len: *usize) callconv(.c) void, "native_view");
 
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");

@@ -69,6 +69,7 @@ const service_carrier = @import("service_carrier.zig");
 const relational_migrations = @import("migrations.zig");
 const app_sources = @import("app_sources.zig");
 const window_views = @import("window_views.zig");
+const ts_view = @import("compiled_view.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -78,7 +79,7 @@ pub const Model = core.Model;
 pub const Msg = core.Msg;
 
 const dev = builtin.mode == .Debug;
-const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev });
+const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled });
 const App = Adapter.App;
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
@@ -99,7 +100,7 @@ const app_markup_root = if (dev) void else @import("app_markup_root");
 const app_markup_sources = if (dev) void else [_]native_sdk.canvas.ui_markup.SourceFile{
     .{ .path = "app.native", .source = app_markup_root.source },
 } ++ app_sources.sources;
-const CompiledAppView = if (dev)
+const CompiledAppView = if (dev or ts_view.enabled)
     void
 else
     native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
@@ -113,7 +114,7 @@ fn appOptions(io: ?std.Io) Adapter.Options {
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .markup = if (dev) .{ .source = appMarkup(), .sources = &app_sources.sources, .watch_path = if (io != null) "src/app.native" else null, .io = io } else null,
+        .markup = if (dev and !ts_view.enabled) .{ .source = appMarkup(), .sources = &app_sources.sources, .watch_path = if (io != null) "src/app.native" else null, .io = io } else null,
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no
@@ -123,7 +124,7 @@ fn appOptions(io: ?std.Io) Adapter.Options {
         .theme = comptime runner.manifestThemePack(),
         .theme_accent = comptime runner.manifestThemeAccent(),
     };
-    if (comptime !dev) options.view = CompiledAppView.build;
+    if (comptime ts_view.enabled) options.view = ts_view.build else if (comptime !dev) options.view = CompiledAppView.build;
     if (comptime @hasDecl(core.Model, "windows")) {
         options.window_view = window_views.build;
         if (io) |watch_io| options.fragment_watch = .{ .fragments = &window_views.fragments, .io = watch_io };

@@ -121,6 +121,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         pub const Host = ts_core_host.TsCoreHost(core);
         pub const Model = core.Model;
         pub const Msg = core.Msg;
+        pub const view_backend = if (@hasDecl(core, "nativeView")) "typescript" else "zig";
         pub const App = ui_app.UiAppWithFeatures(Model, Msg, features);
         pub const Options = App.Options;
         pub const Effects = App.Effects;

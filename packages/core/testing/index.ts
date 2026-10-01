@@ -19,6 +19,7 @@ export interface NativeWidget {
   readonly actions: Readonly<Record<string, boolean>>;
 }
 export interface NativeSnapshot {
+  readonly viewBackend: "zig" | "typescript";
   /** Committed native model projection. Bytes are number arrays; tagged unions
    * use the generated mirror's {arm: payload} representation. */
   readonly model: Readonly<Record<string, JsonValue>>;

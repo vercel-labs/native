@@ -55,7 +55,8 @@ pub const Msg = core.Msg;
 const app_markup_sources = [_]native_sdk.canvas.ui_markup.SourceFile{
     .{ .path = "app.native", .source = app_markup_root.source },
 } ++ app_sources.sources;
-const CompiledAppView = native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
+const ts_view = @import("compiled_view.zig");
+const CompiledAppView = if (ts_view.enabled) ts_view else native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
 
 comptime {
     // The build graph resolves the carrier before staging this file; a
