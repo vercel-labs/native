@@ -2488,6 +2488,13 @@ pub const WidgetAccessibilityNode = struct {
     text_selection: ?WidgetAccessibilityTextRange = null,
     text_composition: ?WidgetAccessibilityTextRange = null,
     value: ?f32 = null,
+    /// Source-space slider metadata reaches the host accessibility bridge
+    /// alongside the already-normalized announced value.
+    minimum: ?f32 = null,
+    maximum: ?f32 = null,
+    step: ?f32 = null,
+    orientation: ?canvas.SliderOrientation = null,
+    reversed: bool = false,
     bounds: geometry.RectF = .{},
     grid_row_index: ?usize = null,
     grid_column_index: ?usize = null,

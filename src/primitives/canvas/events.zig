@@ -496,6 +496,11 @@ pub const WidgetSemanticsNode = struct {
     role: WidgetRole,
     label: []const u8,
     value: ?f32 = null,
+    minimum: ?f32 = null,
+    maximum: ?f32 = null,
+    step: ?f32 = null,
+    orientation: ?widget_model.SliderOrientation = null,
+    reversed: bool = false,
     text_value: []const u8 = "",
     placeholder: []const u8 = "",
     grid_row_index: ?usize = null,
@@ -662,14 +667,14 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             }
         else
             null,
-        .slider => if (widgetSliderKeyboardValue(widget.value, keyboard)) |next_value|
+        .slider => if (widgetSliderKeyboardValue(widget, keyboard)) |next_value|
             .{
                 .kind = .set_value,
                 .actions = .{
                     .increment = next_value > widget.value,
                     .decrement = next_value < widget.value,
                 },
-                .value = std.math.clamp(next_value, 0, 1),
+                .value = next_value,
             }
         else
             null,
@@ -813,18 +818,74 @@ pub fn isWidgetMenuOpenArrowKey(key: []const u8) bool {
     return std.ascii.eqlIgnoreCase(key, "arrowdown") or std.ascii.eqlIgnoreCase(key, "arrowup");
 }
 
-pub fn widgetSliderKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f32 {
+fn sliderRangeMin(widget: Widget) f32 {
+    return if (std.math.isFinite(widget.sliderMin())) widget.sliderMin() else 0;
+}
+
+fn sliderRangeMax(widget: Widget) f32 {
+    const minimum = sliderRangeMin(widget);
+    const maximum = if (std.math.isFinite(widget.sliderMax())) widget.sliderMax() else minimum;
+    return @max(minimum, maximum);
+}
+
+fn sliderHasSourceMetadata(widget: Widget) bool {
+    return widget.sliderHasSourceMetadata();
+}
+
+fn sliderRangeStep(widget: Widget) f32 {
+    return if (std.math.isFinite(widget.sliderStep()) and widget.sliderStep() > 0) widget.sliderStep() else if (sliderHasSourceMetadata(widget)) 1 else 0;
+}
+
+pub fn sliderSourceValue(widget: Widget, fraction: f32) f32 {
+    const minimum = sliderRangeMin(widget);
+    const maximum = sliderRangeMax(widget);
+    const safe_fraction = if (std.math.isFinite(fraction)) fraction else 0;
+    const directed = std.math.clamp(if (widget.sliderReversed()) 1 - safe_fraction else safe_fraction, 0, 1);
+    const raw = minimum + directed * (maximum - minimum);
+    const step = sliderRangeStep(widget);
+    const snapped = if (step > 0) minimum + @round((raw - minimum) / step) * step else raw;
+    return std.math.clamp(snapped, minimum, maximum);
+}
+
+pub fn sliderNormalizedFraction(widget: Widget, source: f32) f32 {
+    const minimum = sliderRangeMin(widget);
+    const maximum = sliderRangeMax(widget);
+    const safe_source = if (std.math.isFinite(source)) source else minimum;
+    const step = sliderRangeStep(widget);
+    const snapped = if (step > 0) minimum + @round((safe_source - minimum) / step) * step else safe_source;
+    const progress = if (maximum > minimum) std.math.clamp((std.math.clamp(snapped, minimum, maximum) - minimum) / (maximum - minimum), 0, 1) else 0;
+    return std.math.clamp(if (widget.sliderReversed()) 1 - progress else progress, 0, 1);
+}
+
+pub fn widgetSliderPointerFraction(widget: Widget, point: geometry.PointF) f32 {
+    const frame = widget.frame.normalized();
+    const raw = switch (widget.sliderOrientation()) {
+        .horizontal => if (frame.width > 0) (point.x - frame.x) / frame.width else 0,
+        .vertical => if (frame.height > 0) 1 - (point.y - frame.y) / frame.height else 0,
+    };
+    return std.math.clamp(raw, 0, 1);
+}
+
+pub fn widgetSliderKeyboardValue(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
-    const step: f32 = if (keyboard.modifiers.shift) 0.1 else 0.05;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
-        return current - step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
-        return current + step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
-    return null;
+    const minimum = sliderRangeMin(widget);
+    const maximum = sliderRangeMax(widget);
+    const step = sliderRangeStep(widget);
+    const current = sliderSourceValue(widget, widget.value);
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return sliderNormalizedFraction(widget, minimum);
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return sliderNormalizedFraction(widget, maximum);
+    const horizontal = widget.sliderOrientation() == .horizontal;
+    const increase_physical = if (horizontal and std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) true else if (!horizontal and std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) true else false;
+    const decrease_physical = if (horizontal and std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) true else if (!horizontal and std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) true else false;
+    if (!increase_physical and !decrease_physical) return null;
+    // Sliders without a source range use the historical continuous
+    // keyboard increment; an explicit positive step remains source-space.
+    const source_increase = if (widget.sliderReversed()) decrease_physical else increase_physical;
+    const amount: f32 = if (step > 0)
+        (if (keyboard.modifiers.shift) step * 10 else step)
+    else if (keyboard.modifiers.shift) @as(f32, 0.1) else @as(f32, 0.05);
+    const next = std.math.clamp(current + if (source_increase) amount else -amount, minimum, maximum);
+    return sliderNormalizedFraction(widget, next);
 }
 
 /// Fraction steps for the split divider: the slider's step sizes, on the
@@ -994,10 +1055,16 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
         .decrement = !increment,
     };
     return switch (widget.kind) {
-        .slider => .{
-            .kind = .set_value,
-            .actions = intent_actions,
-            .value = std.math.clamp(widget.value + if (increment) @as(f32, 0.05) else @as(f32, -0.05), 0, 1),
+        .slider => blk: {
+            const current = sliderSourceValue(widget, widget.value);
+            const step = sliderRangeStep(widget);
+            const interaction_step = if (step > 0) step else 0.05;
+            const next_source = std.math.clamp(current + if (increment) interaction_step else -interaction_step, sliderRangeMin(widget), sliderRangeMax(widget));
+            break :blk .{
+                .kind = .set_value,
+                .actions = intent_actions,
+                .value = sliderNormalizedFraction(widget, next_source),
+            };
         },
         .grid, .scroll_view, .list, .data_grid, .table => .{
             .kind = .scroll_by,

@@ -257,6 +257,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
                 .window_id = input_event.window_id,
                 .view_label = self.views[index].label,
+                .point = point,
                 .press_target = pointer_event.press_target,
             } });
         }

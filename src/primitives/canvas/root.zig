@@ -426,6 +426,8 @@ pub const DesignTokens = token_model.DesignTokens;
 // Canvas widget model and built-in factories live in `widgets.zig`; root keeps the public API stable.
 pub const WidgetKind = widget_model.WidgetKind;
 pub const WidgetCursor = widget_model.WidgetCursor;
+pub const SliderOrientation = widget_model.SliderOrientation;
+pub const SliderRange = widget_model.SliderRange;
 pub const WidgetState = widget_model.WidgetState;
 pub const WidgetRuntimeFlags = widget_model.WidgetRuntimeFlags;
 pub const WidgetLayoutMotion = widget_model.WidgetLayoutMotion;
@@ -657,6 +659,9 @@ pub const isWidgetActivationKey = event_model.isWidgetActivationKey;
 pub const isWidgetTextEntry = event_model.isWidgetTextEntry;
 pub const isWidgetMenuOpenArrowKey = event_model.isWidgetMenuOpenArrowKey;
 pub const widgetSliderKeyboardValue = event_model.widgetSliderKeyboardValue;
+pub const sliderSourceValue = event_model.sliderSourceValue;
+pub const sliderNormalizedFraction = event_model.sliderNormalizedFraction;
+pub const widgetSliderPointerFraction = event_model.widgetSliderPointerFraction;
 pub const widgetScrollKeyboardIntent = event_model.widgetScrollKeyboardIntent;
 pub const widgetScrollKeyboardDelta = event_model.widgetScrollKeyboardDelta;
 

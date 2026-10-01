@@ -76,6 +76,11 @@ pub fn collectWidgetSemantics(layout: anytype, output: []WidgetSemanticsNode, sc
             .role = role,
             .label = semanticLabel(node.widget),
             .value = scroll.value orelse semanticValue(node.widget),
+            .minimum = if (node.widget.kind == .slider) node.widget.sliderMin() else null,
+            .maximum = if (node.widget.kind == .slider) node.widget.sliderMax() else null,
+            .step = if (node.widget.kind == .slider) node.widget.sliderStep() else null,
+            .orientation = if (node.widget.kind == .slider) node.widget.sliderOrientation() else null,
+            .reversed = if (node.widget.kind == .slider) node.widget.sliderReversed() else false,
             .text_value = semanticTextValue(node.widget),
             .placeholder = semanticPlaceholder(node.widget),
             .grid_row_index = grid.row_index,
@@ -166,11 +171,15 @@ pub fn semanticLabel(widget: Widget) []const u8 {
 }
 
 fn semanticValue(widget: Widget) ?f32 {
+    // A retained slider value changes during an optimistic pointer or
+    // keyboard update, so its announced value must never be pinned to the
+    // source-time semantics.value snapshot.
+    if (widget.kind == .slider) return event_model.sliderSourceValue(widget, widget.value);
     if (widget.semantics.value) |value| return value;
     return switch (widget.kind) {
         .radio, .list_item, .menu_item, .data_cell, .segmented_control => if (widget.state.selected or widget.value >= 0.5) 1 else 0,
         .accordion, .checkbox, .switch_control, .toggle, .toggle_button => if (widget_access.booleanControlSelected(widget)) 1 else 0,
-        .slider, .progress => std.math.clamp(widget.value, 0, 1),
+        .progress => std.math.clamp(widget.value, 0, 1),
         // The separator's aria-valuenow: the parent split's effective
         // fraction (the layout pass mirrors it onto the handle).
         .split_divider => std.math.clamp(widget.value, 0, 1),

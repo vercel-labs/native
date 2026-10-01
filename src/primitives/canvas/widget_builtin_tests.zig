@@ -438,6 +438,41 @@ test "icon widgets render built-in vector icons as tinted path commands" {
     }
 }
 
+test "a slider source range maps, snaps, reverses, and steps in source space" {
+    var slider = Widget{
+        .id = 80,
+        .kind = WidgetKind.slider,
+        .frame = geometry.RectF.init(0, 0, 20, 100),
+        .value = 0.5,
+    };
+    // Without a range the slider stays the historical continuous 0...1.
+    try std.testing.expectEqual(@as(f32, 0.5), canvas.sliderSourceValue(slider, 0.5));
+
+    slider.setSliderMetadata(0, 100, 5, .vertical, false, 50);
+    try std.testing.expectEqual(@as(f32, 50), canvas.sliderSourceValue(slider, 0.5));
+    // Source values snap to the step.
+    try std.testing.expectEqual(@as(f32, 35), canvas.sliderSourceValue(slider, 0.36));
+    try std.testing.expectEqual(@as(f32, 0.25), canvas.sliderNormalizedFraction(slider, 24));
+    try std.testing.expectEqual(@as(?f32, 50), slider.sliderResetValue());
+    // A vertical slider grows upward: the top edge is the maximum.
+    try std.testing.expectEqual(@as(f32, 1), canvas.widgetSliderPointerFraction(slider, geometry.PointF.init(10, 0)));
+    try std.testing.expectEqual(@as(f32, 0), canvas.widgetSliderPointerFraction(slider, geometry.PointF.init(10, 100)));
+    // Arrow keys follow the orientation and move one source step; Shift
+    // moves ten; Home and End reach the ends.
+    const up = widgetSliderKeyboardValue(slider, .{ .phase = .key_down, .key = "ArrowUp" }).?;
+    try std.testing.expectEqual(@as(f32, 55), canvas.sliderSourceValue(slider, up));
+    const shifted = widgetSliderKeyboardValue(slider, .{ .phase = .key_down, .key = "ArrowDown", .modifiers = .{ .shift = true } }).?;
+    try std.testing.expectEqual(@as(f32, 0), canvas.sliderSourceValue(slider, shifted));
+    try std.testing.expectEqual(@as(?f32, null), widgetSliderKeyboardValue(slider, .{ .phase = .key_down, .key = "ArrowRight" }));
+    try std.testing.expectEqual(@as(f32, 1), widgetSliderKeyboardValue(slider, .{ .phase = .key_down, .key = "End" }).?);
+
+    // Reversed: the minimum sits at the top, and ArrowUp decreases.
+    slider.setSliderMetadata(0, 100, 5, .vertical, true, null);
+    try std.testing.expectEqual(@as(f32, 0.75), canvas.sliderNormalizedFraction(slider, 25));
+    const reversed_up = widgetSliderKeyboardValue(slider, .{ .phase = .key_down, .key = "ArrowUp" }).?;
+    try std.testing.expectEqual(@as(f32, 45), canvas.sliderSourceValue(slider, reversed_up));
+}
+
 test "checkbox check mark and label render through their pinned part slots" {
     const checkbox = Widget{
         .id = 63,
@@ -1226,6 +1261,60 @@ test "flush button groups collapse corners and interior seams in both render wal
     }
     try std.testing.expect(spaced_list.findCommandById(widgetPartId(3, 0)) == null);
     try std.testing.expect(spaced_list.findCommandById(widgetPartId(4, 0)) == null);
+}
+
+test "a vertical flush group caps top and bottom corners and drops the top seam" {
+    const tokens = DesignTokens{};
+    const segments = [_]Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 32, 28), .text = "+", .variant = .outline },
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 28, 32, 28), .text = "-", .variant = .outline },
+    };
+    var group = Widget{
+        .id = 1,
+        .kind = .button_group,
+        .frame = geometry.RectF.init(0, 0, 32, 56),
+        .children = &segments,
+    };
+    group.layout.vertical = true;
+
+    // The stepper is one capsule: the top segment keeps only its top
+    // corners, the bottom only its bottom ones, and the seam between
+    // them is painted once — by the upper segment's bottom edge.
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, group, tokens);
+    const list = builder.displayList();
+    switch (list.findCommandById(widgetPartId(2, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius{ .top_left = 10, .top_right = 10 }, fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (list.findCommandById(widgetPartId(3, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius{ .bottom_left = 10, .bottom_right = 10 }, fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    // The seam clip is the vertical twin of the horizontal bar's: it
+    // opens below the shared edge, not to the right of it.
+    switch (list.findCommandById(widgetPartId(3, 0)).?.command) {
+        .push_clip => |clip| try std.testing.expect(clip.rect.y > segments[1].frame.y),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(list.findCommandById(widgetPartId(2, 0)) == null);
+
+    // The layout walk has to agree, or a live app and a docs scene
+    // would render different steppers.
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(group, group.frame, &nodes);
+    var layout_commands: [16]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, tokens);
+    switch (layout_builder.displayList().findCommandById(widgetPartId(3, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius{ .bottom_left = 10, .bottom_right = 10 }, fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    // Stacked, not packed side by side.
+    try std.testing.expectEqual(@as(f32, 0), layout.nodes[1].frame.x);
+    try std.testing.expectEqual(@as(f32, 0), layout.nodes[2].frame.x);
+    try std.testing.expect(layout.nodes[2].frame.y >= layout.nodes[1].frame.maxY());
 }
 
 test "detached button groups render chip members with the group table and the metric gap" {

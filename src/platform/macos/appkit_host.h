@@ -224,6 +224,15 @@ typedef struct {
     size_t text_composition_end;
     int has_value;
     double value;
+    int has_minimum;
+    double minimum;
+    int has_maximum;
+    double maximum;
+    int has_step;
+    double step;
+    int has_orientation;
+    int orientation;
+    int reversed;
     int has_grid_row_index;
     size_t grid_row_index;
     int has_grid_column_index;

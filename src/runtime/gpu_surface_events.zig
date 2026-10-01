@@ -339,13 +339,23 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // input.
                 CanvasWidgetEventMethods().updateCanvasWidgetClickCountFromPointer(self, input_event, pointer_event);
                 dismissed_surface_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event.*);
-                // A down consumed by a window-drag region skips the whole
+                // Focus departure is part of pointer-down routing, including
+                // canvas-owned titlebar drag regions. Stamp the old id onto
+                // the event so UiApp can dispatch a non-consuming blur before
+                // the same click continues to its ordinary target.
+                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |focus_index| {
+                    const previous_focus_id = self.views[focus_index].canvas_widget_focused_id;
+                    try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event.*);
+                    if (previous_focus_id != 0 and self.views[focus_index].canvas_widget_focused_id != previous_focus_id) {
+                        pointer_event.blurred_id = previous_focus_id;
+                    }
+                }
+                // A down consumed by a window-drag region skips the remaining
                 // widget press pipeline: the OS owns the pointer from here
                 // (the matching move/up may never reach the view), so no
-                // widget may be left pressed, no text selection may start,
-                // and keyboard focus stays where it was — exactly like a
-                // click on the native titlebar. Dismissal above still ran:
-                // clicking the header closes an open surface first.
+                // widget may be left pressed and no text selection may start.
+                // Focus departure and dismissal above still ran before the
+                // header hands the gesture to AppKit.
                 window_drag_started = try CanvasWidgetEventMethods().startCanvasWidgetWindowDragFromPointer(self, input_event, pointer_event.*);
                 if (window_drag_started) {
                     // The drag consumed the down, but "pointer-down
@@ -370,7 +380,6 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         try CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
                     }
                     try CanvasWidgetEventMethods().updateCanvasWidgetScrollFromPointer(self, pointer_event.*);
-                    try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event.*);
                 }
             }
             // A live target-less composition owns its surface's
@@ -706,10 +715,42 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 }
             }
             if (widget_pointer_event) |pointer_event| {
-                if (!window_drag_started) {
-                    try CanvasWidgetEventMethods().dispatchCanvasWidgetCommandFromPointer(self, app, pointer_event);
+                const dispatch_pointer_event = pointer_event;
+                if (widget_drag_terminal and pointer_event.pointer.phase == .up) {
+                    // A promoted slider drag retires its click target before
+                    // this point, but the release coordinate still belongs
+                    // to the native control. Apply that final sample before
+                    // the drag terminal commit is dispatched. Other drag
+                    // sources safely no-op with the cleared target.
+                    if (widget_drag_event) |drag_event| {
+                        if (drag_event.drag.phase == .end) {
+                            if (drag_event.source) |source| {
+                                if (source.kind == .slider) {
+                                    const index = runtimeFindViewIndex(self, dispatch_pointer_event.window_id, dispatch_pointer_event.view_label) orelse return;
+                                    _ = try self.views[index].applyCanvasWidgetSliderValue(
+                                        source.id,
+                                        dispatch_pointer_event.pointer.point,
+                                        dispatch_pointer_event.pointer.click_count,
+                                        dispatch_pointer_event.pointer.phase,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
-                try self.dispatchEvent(app, .{ .canvas_widget_pointer = pointer_event });
+                // Slider changes are the model's source-range edge and must
+                // be observed before the release commit. Drain after the
+                // native control applies this pointer sample, so click and
+                // promoted-drag releases both deliver on_change first.
+                if (dispatch_pointer_event.pointer.phase == .up) {
+                    if (runtimeFindViewIndex(self, dispatch_pointer_event.window_id, dispatch_pointer_event.view_label)) |index| {
+                        try dispatchPendingCanvasWidgetChangeEvents(self, app, index);
+                    }
+                }
+                if (!window_drag_started) {
+                    try CanvasWidgetEventMethods().dispatchCanvasWidgetCommandFromPointer(self, app, dispatch_pointer_event);
+                }
+                try self.dispatchEvent(app, .{ .canvas_widget_pointer = dispatch_pointer_event });
             }
             if (widget_drag_event) |drag_event| {
                 try self.dispatchEvent(app, .{ .canvas_widget_drag = drag_event });

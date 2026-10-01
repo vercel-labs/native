@@ -75,6 +75,10 @@ pub const CanvasWidgetPointerEvent = struct {
     /// `UiApp` maps it through the tree's handler table to the field's
     /// `on_input` Msg so a model-owned buffer stays in lockstep too.
     edit: ?canvas.TextInputEvent = null,
+    /// The widget that lost keyboard focus on this pointer-down, if any.
+    /// UiApp resolves this through the old tree's `on_blur` handler before
+    /// continuing ordinary pointer dispatch.
+    blurred_id: canvas.ObjectId = 0,
 };
 
 pub const CanvasWidgetKeyboardEvent = struct {
@@ -217,6 +221,8 @@ pub const CanvasWidgetChangeEvent = struct {
 pub const CanvasWidgetContextPressEvent = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8,
+    /// Surface-local location of the secondary press, for point-anchored menus.
+    point: geometry.PointF = .{},
     /// The deepest press-claiming widget on the hit route (the same
     /// resolution primary presses use).
     press_target: ?canvas.WidgetHit = null,

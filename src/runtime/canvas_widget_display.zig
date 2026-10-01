@@ -233,6 +233,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     .text_selection = platformWidgetAccessibilityTextRange(node.text_selection),
                     .text_composition = platformWidgetAccessibilityTextRange(node.text_composition),
                     .value = node.value,
+                    .minimum = node.minimum,
+                    .maximum = node.maximum,
+                    .step = node.step,
+                    .orientation = node.orientation,
+                    .reversed = node.reversed,
                     .bounds = node.bounds,
                     .grid_row_index = node.grid_row_index,
                     .grid_column_index = node.grid_column_index,
@@ -584,6 +589,11 @@ fn hashWidgetAccessibilityNodes(nodes: []const platform.WidgetAccessibilityNode)
         hashAccessibilityTextRange(&hasher, node.text_selection);
         hashAccessibilityTextRange(&hasher, node.text_composition);
         hashAccessibilityOptional(&hasher, node.value);
+        hashAccessibilityOptional(&hasher, node.minimum);
+        hashAccessibilityOptional(&hasher, node.maximum);
+        hashAccessibilityOptional(&hasher, node.step);
+        hashAccessibilityOptional(&hasher, node.orientation);
+        hashAccessibilityValue(&hasher, node.reversed);
         hashAccessibilityValue(&hasher, node.bounds.x);
         hashAccessibilityValue(&hasher, node.bounds.y);
         hashAccessibilityValue(&hasher, node.bounds.width);

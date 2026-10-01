@@ -434,6 +434,116 @@ fn dragOptions() DragApp.Options {
     };
 }
 
+const HookModel = struct {
+    presses: u32 = 0,
+    blurs: u32 = 0,
+    claimed: u32 = 0,
+    observed: u32 = 0,
+    claim: bool = false,
+};
+
+const HookMsg = union(enum) {
+    pressed,
+    blurred,
+    claimed,
+    observed,
+    set_claim: bool,
+};
+
+const HookApp = ui_app_model.UiApp(HookModel, HookMsg);
+
+fn hookUpdate(model: *HookModel, msg: HookMsg) void {
+    switch (msg) {
+        .pressed => model.presses += 1,
+        .blurred => model.blurs += 1,
+        .claimed => model.claimed += 1,
+        .observed => model.observed += 1,
+        .set_claim => |value| model.claim = value,
+    }
+}
+
+fn hookView(ui: *HookApp.Ui, _: *const HookModel) HookApp.Ui.Node {
+    const field = ui.el(.text_field, .{ .height = 30, .text = "Draft", .on_blur = .blurred }, .{});
+    var target = ui.row(.{ .height = 40, .on_press = .pressed }, .{ui.text(.{}, "Press target")});
+    target.widget.text = "Press target";
+    return ui.column(.{ .padding = 12, .gap = 8 }, .{ field, target });
+}
+
+fn hookClaim(model: *const HookModel, _: core.CanvasWidgetPointerEvent) ?HookMsg {
+    return if (model.claim) .claimed else null;
+}
+
+fn hookObserve(_: *const HookModel, event: core.CanvasWidgetPointerEvent) ?HookMsg {
+    return if (event.pointer.phase == .down) .observed else null;
+}
+
+fn hookOptions() HookApp.Options {
+    return .{
+        .name = "ui-app-pointer-hooks",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = hookUpdate,
+        .view = hookView,
+        .on_widget_pointer = hookClaim,
+        .on_widget_pointer_observe = hookObserve,
+    };
+}
+
+fn hookClick(harness: anytype, app: anytype, point: geometry.PointF) !void {
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_down, .x = point.x, .y = point.y } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_up, .x = point.x, .y = point.y } });
+}
+
+test "ui app delivers blur before the click that moves focus, and pointer hooks observe or claim" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HookApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HookApp.init(std.heap.page_allocator, .{}, hookOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var field_point: ?geometry.PointF = null;
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .text_field) field_point = node.frame.normalized().center();
+    }
+    const target_id = findWidgetIdByText(app_state.tree.?, .row, "Press target").?;
+    const target_point = layout.findById(target_id).?.frame.normalized().center();
+
+    // Focusing the field blurs nothing; the observer sees the press.
+    try hookClick(harness, app, field_point.?);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.blurs);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.observed);
+
+    // A click elsewhere blurs the field first, and the same click still
+    // presses its target: blur does not consume the pointer.
+    try hookClick(harness, app, target_point);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.blurs);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.presses);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.observed);
+
+    // A claiming hook consumes each event it claims: claiming the whole
+    // click leaves no press, and the observer, which only sees unclaimed
+    // events, sees neither half.
+    app_state.model.claim = true;
+    try hookClick(harness, app, target_point);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.claimed);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.presses);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.observed);
+}
+
 test "ui app keeps clicks below drag slop and suppresses press after a live drag" {
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);

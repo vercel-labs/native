@@ -60,15 +60,15 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
 
         pub fn applyCanvasWidgetControlPointer(self: *RuntimeView, pointer: canvas.WidgetPointerEvent, target: ?canvas.WidgetHit, pressed_id: canvas.ObjectId) anyerror!?geometry.RectF {
             return switch (pointer.phase) {
-                .down => if (target) |hit| try self.applyCanvasWidgetSliderValue(hit.id, pointer.point) else null,
+                .down => if (target) |hit| try self.applyCanvasWidgetSliderValue(hit.id, pointer.point, pointer.click_count, pointer.phase) else null,
                 .move => if (pressed_id != 0) blk: {
-                    if (try self.applyCanvasWidgetSliderValue(pressed_id, pointer.point)) |dirty| break :blk dirty;
+                    if (try self.applyCanvasWidgetSliderValue(pressed_id, pointer.point, pointer.click_count, pointer.phase)) |dirty| break :blk dirty;
                     if (try self.applyCanvasWidgetSplitPointer(pressed_id, pointer.point)) |dirty| break :blk dirty;
                     break :blk try self.applyCanvasWidgetResizableDelta(pressed_id, pointer.delta.dx);
                 } else null,
                 .up => blk: {
                     if (pressed_id == 0) break :blk null;
-                    if (try self.applyCanvasWidgetSliderValue(pressed_id, pointer.point)) |dirty| break :blk dirty;
+                    if (try self.applyCanvasWidgetSliderValue(pressed_id, pointer.point, pointer.click_count, pointer.phase)) |dirty| break :blk dirty;
                     const hit = target orelse break :blk null;
                     if (!hit.bounds.normalized().containsPoint(pointer.point)) break :blk null;
                     if (hit.id != pressed_id) break :blk null;
@@ -311,12 +311,21 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         /// without the note a rail click would move the thumb visually
         /// while the model never heard `on_change` — a seek bar that
         /// snapped back on the next position tick.
-        pub fn applyCanvasWidgetSliderValue(self: *RuntimeView, id: canvas.ObjectId, point: geometry.PointF) anyerror!?geometry.RectF {
+        pub fn applyCanvasWidgetSliderValue(self: *RuntimeView, id: canvas.ObjectId, point: geometry.PointF, click_count: u8, phase: canvas.WidgetPointerPhase) anyerror!?geometry.RectF {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
             const widget = self.widget_layout_nodes[index].widget;
-            if (widget.kind != .slider or widget.state.disabled or widget.frame.width <= 0) return null;
+            if (widget.kind != .slider or widget.state.disabled) return null;
+            const frame = widget.frame.normalized();
+            const axis_extent = if (widget.sliderOrientation() == .vertical) frame.height else frame.width;
+            if (!(axis_extent > 0)) return null;
 
-            const next_value = std.math.clamp((point.x - widget.frame.x) / widget.frame.width, 0, 1);
+            // A second click is the native slider reset gesture. Resolve the
+            // reset at release, after pointer hit testing, so the pending
+            // source-range change drains before the one static commit.
+            const next_value = if (phase == .up and click_count >= 2 and widget.sliderResetValue() != null)
+                canvas.sliderNormalizedFraction(widget, widget.sliderResetValue().?)
+            else
+                canvas.sliderNormalizedFraction(widget, canvas.sliderSourceValue(widget, canvas.widgetSliderPointerFraction(widget, point)));
             const dirty = try self.setCanvasWidgetValue(index, next_value) orelse return null;
             self.noteCanvasWidgetChangeEvent(id);
             return dirty;
@@ -440,7 +449,10 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         pub fn setCanvasWidgetValue(self: *RuntimeView, index: usize, value: f32) anyerror!?geometry.RectF {
             if (index >= self.widget_layout_node_count) return null;
             const widget = self.widget_layout_nodes[index].widget;
-            const next_value = std.math.clamp(value, 0, 1);
+            const next_value = if (widget.kind == .slider)
+                canvas.sliderNormalizedFraction(widget, canvas.sliderSourceValue(widget, value))
+            else
+                std.math.clamp(value, 0, 1);
             if (next_value == widget.value) return null;
             self.widget_layout_nodes[index].widget.value = next_value;
             try self.refreshCanvasWidgetSemantics();

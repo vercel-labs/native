@@ -440,6 +440,12 @@ pub const WidgetLayoutStyle = struct {
     main_alignment: WidgetMainAlignment = .start,
     cross_alignment: WidgetCrossAlignment = .stretch,
     clip_content: bool = false,
+    /// A FLUSH button group that stacks DOWN instead of across: children
+    /// flow on the vertical axis and the segment stamp caps the top and
+    /// bottom corners rather than the leading and trailing ones. Only
+    /// `button_group` reads it; every other kind picks its axis from its
+    /// own kind (`row` vs `column`).
+    vertical: bool = false,
     columns: usize = 0,
     virtualized: bool = false,
     virtual_item_extent: f32 = 0,
@@ -892,6 +898,27 @@ pub const VideoControlVerb = enum(u8) {
 /// by exactly ONE stroke (two overlapping translucent hairlines — the
 /// dark scheme's border register — would composite into a brighter
 /// seam than the group's outer edge).
+pub const SliderOrientation = enum {
+    horizontal,
+    vertical,
+};
+
+/// A slider's source-space range. The retained `Widget.value` stays the
+/// normalized fraction every input path already speaks; the range lets
+/// pointer, keyboard, accessibility, and change messages reconstruct the
+/// caller-owned value.
+pub const SliderRange = struct {
+    min: f32 = 0,
+    max: f32 = 1,
+    /// 0 is continuous.
+    step: f32 = 0,
+    orientation: SliderOrientation = .horizontal,
+    /// Minimum at the top (vertical) or right (horizontal).
+    reversed: bool = false,
+    /// The source value a double-click restores, if any.
+    reset_value: ?f32 = null,
+};
+
 pub const WidgetGroupSegment = enum {
     /// Not a flush-group segment (the default everywhere else).
     none,
@@ -1144,7 +1171,72 @@ pub const Widget = struct {
     /// authored state lives, so it never participates in retention,
     /// serialization, or equality decisions.
     group_segment: WidgetGroupSegment = .none,
+    /// Source-space range metadata for `.slider` widgets; null keeps the
+    /// historical continuous 0...1 slider.
+    slider_range: ?SliderRange = null,
+    /// The axis its flush group stacks on, stamped beside
+    /// `group_segment` by both render walks from the group's
+    /// `WidgetLayoutStyle.vertical`. A segment paints the same way on
+    /// either axis; only WHICH pair of corners it keeps (and which
+    /// border band it drops into its neighbor) changes.
+    group_vertical: bool = false,
     children: []const Widget = &.{},
+
+    pub fn sliderHasSourceMetadata(self: Widget) bool {
+        return self.kind == .slider and self.slider_range != null;
+    }
+
+    fn sliderRangeOrDefault(self: Widget) SliderRange {
+        if (self.kind != .slider) return .{};
+        return self.slider_range orelse .{};
+    }
+
+    pub fn sliderMin(self: Widget) f32 {
+        const minimum = self.sliderRangeOrDefault().min;
+        return if (std.math.isFinite(minimum)) minimum else 0;
+    }
+
+    pub fn sliderMax(self: Widget) f32 {
+        const minimum = self.sliderMin();
+        const maximum = self.sliderRangeOrDefault().max;
+        return @max(minimum, if (std.math.isFinite(maximum)) maximum else minimum);
+    }
+
+    pub fn sliderStep(self: Widget) f32 {
+        const step = self.sliderRangeOrDefault().step;
+        return if (std.math.isFinite(step) and step > 0) step else 0;
+    }
+
+    pub fn sliderOrientation(self: Widget) SliderOrientation {
+        return self.sliderRangeOrDefault().orientation;
+    }
+
+    pub fn sliderReversed(self: Widget) bool {
+        return self.sliderRangeOrDefault().reversed;
+    }
+
+    pub fn sliderResetValue(self: Widget) ?f32 {
+        return self.sliderRangeOrDefault().reset_value;
+    }
+
+    pub fn setSliderMetadata(
+        self: *Widget,
+        minimum: f32,
+        maximum: f32,
+        step: f32,
+        orientation: SliderOrientation,
+        reversed: bool,
+        reset_value: ?f32,
+    ) void {
+        self.slider_range = .{
+            .min = minimum,
+            .max = maximum,
+            .step = step,
+            .orientation = orientation,
+            .reversed = reversed,
+            .reset_value = reset_value,
+        };
+    }
 
     pub fn codeLineNumberDigits(self: Widget) u8 {
         return self.code_line_number_digits & 0x7f;
@@ -1649,9 +1741,12 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
 
 test "Widget keeps the retained hot-path footprint after textarea policy flags" {
     // One layout tree holds thousands of Widgets by value. On the 64-bit
-    // targets that run the renderer, 776 bytes is the reviewed footprint;
-    // packing engine-only markers keeps the new textarea policy within it.
+    // targets that run the renderer, 808 bytes is the reviewed footprint;
+    // packing engine-only markers keeps the new textarea policy within it,
+    // the optional slider source range (`slider_range`) adds 32 bytes, and
+    // the flush group axis stamp (`group_vertical`) fits in padding that
+    // range left.
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 776), @sizeOf(Widget));
+        try std.testing.expectEqual(@as(usize, 808), @sizeOf(Widget));
     }
 }

@@ -1182,6 +1182,20 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     .increment => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowright" else "pagedown",
                     .decrement => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowleft" else "pageup",
                 },
+                .slider => blk: {
+                    const widget = self.widget_layout_nodes[index].widget;
+                    const physical_increase = if (widget.sliderOrientation() == .vertical) "arrowup" else "arrowright";
+                    const physical_decrease = if (widget.sliderOrientation() == .vertical) "arrowdown" else "arrowleft";
+                    break :blk if (widget.sliderReversed())
+                        switch (direction) {
+                            .increment => physical_decrease,
+                            .decrement => physical_increase,
+                        }
+                    else switch (direction) {
+                        .increment => physical_increase,
+                        .decrement => physical_decrease,
+                    };
+                },
                 else => switch (direction) {
                     .increment => "arrowright",
                     .decrement => "arrowleft",

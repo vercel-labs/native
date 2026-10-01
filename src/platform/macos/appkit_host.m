@@ -5841,6 +5841,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         } else if (textValue.length > 0) {
             element.accessibilityValue = textValue;
         }
+        if (node.role == NATIVE_SDK_APPKIT_WIDGET_ROLE_SLIDER) {
+            if (node.has_minimum) element.accessibilityMinValue = @(node.minimum);
+            if (node.has_maximum) element.accessibilityMaxValue = @(node.maximum);
+            if (node.has_orientation) {
+                element.accessibilityOrientation = node.orientation == 1 ? NSAccessibilityOrientationVertical : NSAccessibilityOrientationHorizontal;
+            }
+        }
         if (placeholder.length > 0 && [element respondsToSelector:@selector(setAccessibilityPlaceholderValue:)]) {
             element.accessibilityPlaceholderValue = placeholder;
         }
