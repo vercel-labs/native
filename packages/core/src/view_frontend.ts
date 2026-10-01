@@ -1,6 +1,8 @@
 /** Native markup compiled beside the committed TypeScript core. Unsupported
  * constructs fail at build time; no bindings are evaluated by the native host.
  */
+import { readFileSync } from "node:fs";
+
 interface Ref { kind: string; name?: string; elem?: Ref; inner?: Ref; class?: string; type?: Ref }
 interface Arm { name: string; member?: string; payload: Ref }
 export interface ViewContract {
@@ -51,7 +53,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewNode", "native_view", "native_window_view", "JSON", "TextEncoder", "TextDecoder", "String", "Number", "Array"];
+  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "JSON", "TextEncoder", "TextDecoder", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -340,6 +342,65 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       emitChildren(node.children, inner, slot, stack, depth + 1);
       output.push(`nscvLoopKeys(nscvNodes, nscvFirst${id}, ${base.code});`, "}"); return;
     }
+    const stringAttr = (name: string, fallback = ""): string => {
+      const raw = node.attrs.get(name);
+      if (raw === undefined) return JSON.stringify(fallback);
+      const value = raw.startsWith("{") ? binding(raw, node, scope) : { code: JSON.stringify(raw), type: { kind: "string" } };
+      if (!["bytes", "string", "enum"].includes(value.type.kind)) fail(node, `${name} requires text`);
+      return textValue(value, node);
+    };
+    const componentRoot = (allowed: string[]): string[] => {
+      if (node.text.trim()) fail(node, "component accepts only child elements");
+      for (const name of node.attrs.keys()) if (!allowed.includes(name)) fail(node, `unsupported ${node.name} attribute ${name}`);
+      const props = ['end: 0', 'kind: "row"', 'text: ""'];
+      for (const name of ["key", "global-key"]) {
+        const raw = node.attrs.get(name);
+        if (raw !== undefined) {
+          const expr = key(raw, node, scope);
+          props.push(`${name === "key" ? "key" : "globalKey"}${expr.type.kind === "i64" ? "Int" : ""}: ${expr.code}`);
+        }
+      }
+      if (node.attrs.has("label")) props.push(`label: ${stringAttr("label")}`);
+      return props;
+    };
+    if (node.name === "stepper") {
+      const props = componentRoot(["active", "key", "global-key", "label"]);
+      const raw = node.attrs.get("active");
+      if (raw === undefined) fail(node, "stepper requires active");
+      const active = raw.startsWith("{") ? binding(raw, node, scope) : expression(raw, node, scope);
+      if (active.type.kind !== "i64") fail(node, "stepper active requires an integer");
+      let steps = node.children, stepScope = scope;
+      if (steps.length === 1 && steps[0]!.name === "slot") {
+        if (!slot || steps[0]!.attrs.size || steps[0]!.children.length || steps[0]!.text.trim()) fail(node, "stepper slot requires a template use");
+        steps = slot.children; stepScope = slot.scope;
+      }
+      const labels = steps.map(step => {
+        if (step.name !== "step" || step.attrs.size || step.children.length) fail(step, "stepper takes only step text leaves");
+        return text(step.text.trim(), step, stepScope);
+      });
+      output.push(`nscvStepper(nscvNodes, { ${props.join(", ")} }, ${active.code}, [${labels.join(", ")}]);`);
+      return;
+    }
+    if (node.name === "timeline") {
+      const props = componentRoot(["gap", "grow", "key", "global-key", "label"]);
+      props[1] = 'kind: "column"'; props.push('role: "list"');
+      for (const name of ["gap", "grow"]) if (node.attrs.has(name)) props.push(`${name}: ${bound(node.attrs.get(name)!, "number", node, scope)}`);
+      const id = next++;
+      output.push(`const nscvNode${id}: NscViewNode = { ${props.join(", ")} };`, `nscvPush(nscvNodes, nscvNode${id});`);
+      emitChildren(node.children, scope, slot, stack, depth + 1);
+      output.push(`nscvNode${id}.end = nscvNodes.length;`);
+      return;
+    }
+    if (node.name === "timeline-item") {
+      const props = componentRoot(["title", "description", "meta", "indicator", "icon", "variant", "connector", "selected", "on-press", "key", "global-key"]);
+      if (!node.attrs.has("title") || node.children.length) fail(node, "timeline-item requires title and no children");
+      if (node.attrs.has("on-press")) props.push(`press: ${event(node.attrs.get("on-press")!, "press", node, scope)}`);
+      if (node.attrs.has("selected")) props.push(`selected: ${bound(node.attrs.get("selected")!, "boolean", node, scope)}`);
+      const variant = stringAttr("variant", "outline");
+      const connector = node.attrs.has("connector") ? bound(node.attrs.get("connector")!, "boolean", node, scope) : "true";
+      output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${stringAttr("title")}, description: ${stringAttr("description")}, meta: ${stringAttr("meta")}, indicator: ${stringAttr("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
+      return;
+    }
     const kinds: Record<string, string> = { column: "column", row: "row", panel: "panel", badge: "badge", input: "input", "search-field": "search_field", text: "text", button: "button", switch: "switch_control", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     const container = ["column", "row", "scroll", "panel"].includes(node.name);
@@ -383,7 +444,5 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
   return `${exported ? "export " : ""}function ${functionName}(): Uint8Array {\nconst nscvNodes: NscViewNode[] = [];\n${output.join("\n")}\nif (nscvNodes.length === 0 || nscvNodes[0]!.end !== nscvNodes.length) throw new Error("compiled view requires one rendered root");\nreturn new TextEncoder().encode(JSON.stringify({ format: 2, nodes: nscvNodes }));\n}\n`;
 }
 
-const viewPrelude = `\n// Generated Native markup; reads the actual committed TypeScript model.\n` +
-    `type NscViewNode = { end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number; gap?: number; padding?: number; grow?: number; width?: number; height?: number; value?: number; image?: number; icon?: string; label?: string; role?: string; background?: string; foreground?: string; radius?: string; windowDrag?: boolean; main?: string; cross?: string; size?: string; variant?: string; checked?: boolean; disabled?: boolean; press?: number[]; toggle?: number[]; drag?: number[]; scroll?: number; input?: number; submit?: number[] };\n` +
-    `function nscvInteger(value: number): number { if (!Number.isSafeInteger(value)) throw new Error("compiled view key is not an exact integer"); return value; }\n` +
-    `function nscvLoopKeys(nodes: NscViewNode[], first: number, base: string | number): void { let slot = 0; for (let i = first; i < nodes.length; i = nodes[i]!.end) { const node = nodes[i]!; if (node.key === undefined && node.keyInt === undefined && node.globalKey === undefined && node.globalKeyInt === undefined) { if (typeof base === "number") node.keyInt = base; else node.key = base; node.keySlot = slot; } slot++; } }\n`;
+const viewPrelude = "\n// Portable Native components compiled beside the committed model.\n" +
+  readFileSync(new URL("./view_components.ts", import.meta.url), "utf8");

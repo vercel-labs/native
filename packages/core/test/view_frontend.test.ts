@@ -26,9 +26,10 @@ const evaluate = (markup: string) => {
   return { model, view: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
 };
 
-test("the counter frontend typechecks", () => {
-  const program = ts.createProgram([new URL("../src/view_frontend.ts", import.meta.url).pathname], {
+test("the view frontend and portable components typecheck", () => {
+  const program = ts.createProgram(["view_frontend.ts", "view_components.ts"].map(name => new URL(`../src/${name}`, import.meta.url).pathname), {
     noEmit: true, strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.NodeNext,
+    types: ["node"], typeRoots: [new URL("../node_modules/@types", import.meta.url).pathname],
   });
   assert.deepEqual(ts.getPreEmitDiagnostics(program).map(d => ts.flattenDiagnosticMessageText(d.messageText, "\n")), []);
 });
@@ -223,4 +224,58 @@ test("window bundle shares helpers, routes exact labels, and preserves independe
   assert.throws(() => compileViewBundle('<text/>', contract, {}, [{ ...window, label: "../bad" }]), /invalid/);
   assert.throws(() => compileViewBundle('<text/>', contract, {}, [{ ...window, source: '<import src="../app.native"/><text/>' }]), /escapes/);
   assert.throws(() => compileViewBundle('<text/>', contract, {}, [{ ...window, source: '<unsupported/>' }]), /feed.native:1:1/);
+});
+
+const pipelinePath = new URL("../../../examples/pipeline/src/core.ts", import.meta.url).pathname;
+const pipelineChecked = checkFile(pipelinePath, { contractEntry: "core_facade.ts" });
+assert.equal(pipelineChecked.ok, true, JSON.stringify(pipelineChecked.diagnostics) + pipelineChecked.typeErrors.join("\n"));
+const pipelineContract: ViewContract = JSON.parse(pipelineChecked.contract!);
+
+test("portable pipeline components reject malformed structure and noninteger stages", () => {
+  const cases = [
+    ['<stepper/>', /requires active/],
+    ['<stepper active="1.5"/>', /requires an integer/],
+    ['<stepper active="0"><text>wrong</text></stepper>', /step text leaves/],
+    ['<stepper active="0"><step key="x">wrong</step></stepper>', /step text leaves/],
+    ['<stepper active="0"><step><text>wrong</text></step></stepper>', /step text leaves/],
+    ['<stepper active="0" gap="1"/>', /unsupported stepper attribute/],
+    ['<stepper active="0"><slot/></stepper>', /slot requires/],
+    ['<timeline-item/>', /requires title/],
+    ['<timeline-item title="x"><text/></timeline-item>', /requires title/],
+    ['<timeline-item title="x" on-toggle="reset"/>', /unsupported timeline-item attribute/],
+    ['<timeline-item title="{active}"/>', /requires text/],
+  ] as const;
+  for (const [markup, pattern] of cases) assert.throws(() => compileView(markup, pipelineContract), pattern);
+});
+
+test("portable stepper owns state, primitive composition and accessible positions", () => {
+  const generated = compileView('<stepper active="{active}" label="Stages"><step>Plan</step><step>Review café</step><step>Ship</step></stepper>', pipelineContract);
+  assert.ok(generated.includes("function nscvStepper"));
+  const model = { active: 1 };
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, nscfCommitted: model });
+  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes as any[];
+  const nodes = view();
+  assert.equal(nodes.length, 12);
+  assert.equal(nodes[0].role, "list");
+  assert.deepEqual(nodes.filter(n => n.role === "listitem").map(n => [n.label, n.selected, n.listItemIndex, n.listItemCount]), [
+    ["Plan (completed)", false, 0, 3], ["Review café (active)", true, 1, 3], ["Ship (pending)", false, 2, 3],
+  ]);
+  assert.equal(nodes[2].icon, "check");
+  assert.equal(nodes[7].spanWeight, "bold");
+  assert.equal(nodes[11].foreground, "text_muted");
+  model.active = 5;
+  assert.ok(view().filter(n => n.kind === "badge").every(n => n.icon === "check"));
+  model.active = -1;
+  assert.equal(view()[1].label, "Plan (active)");
+  model.active = 0.5;
+  assert.throws(view, /exact integer/);
+});
+
+test("portable component expansion enforces the shared native node budget", () => {
+  const markup = '<column>' + '<stepper active="0"><step>a</step><step>b</step><step>c</step></stepper>'.repeat(90) + '</column>';
+  const generated = compileView(markup, pipelineContract);
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  assert.throws(() => exports.native_view!(), /1024 nodes/);
 });

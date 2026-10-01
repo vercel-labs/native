@@ -1,0 +1,23 @@
+<import src="components/stages.native" />
+<column gap="12" padding="20">
+  <text size="heading">Pipeline</text>
+  <use template="stages" active="{active}">
+    <step>Plan</step><step>{title}</step><step>Ship</step>
+  </use>
+  <row gap="8">
+    <button on-press="previous">Previous</button>
+    <button variant="primary" on-press="next">Next</button>
+    <button variant="ghost" on-press="reset">Reset</button>
+    <button on-press="reverse">Reverse timeline</button>
+    <button on-press="toggle_empty">Toggle empty</button>
+  </row>
+  <timeline gap="4" label="Run history">
+    <for each="entries" as="entry" key="id">
+      <timeline-item title="{entry.title}" description="{entry.description}" meta="{entry.meta}"
+        indicator="{entry.indicator}" variant="{entry.tone}" connector="{entry.connector}"
+        selected="{selected == entry.id}" on-press="open:{entry.id}" />
+    </for>
+    <timeline-item key="passive" title="Read-only checkpoint" icon="check" variant="secondary" connector="false" />
+  </timeline>
+  <status-bar>stage: {active} | selected: {selected}</status-bar>
+</column>

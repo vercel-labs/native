@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -39,6 +39,13 @@ const Record = struct {
     variant: @FieldType(Ui.ElementOptions, "variant") = .default,
     checked: bool = false,
     disabled: bool = false,
+    selected: bool = false,
+    focusable: bool = false,
+    listItemIndex: ?u32 = null,
+    listItemCount: ?u32 = null,
+    spanWeight: ?sdk.canvas.TextSpanWeight = null,
+    spanColor: ?sdk.canvas.TextSpanColor = null,
+    spanScale: ?f32 = null,
     press: ?[]const u8 = null,
     toggle: ?[]const u8 = null,
     drag: ?[]const u8 = null,
@@ -78,14 +85,18 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .scroll or value.kind == .panel;
+    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel;
     if (!container and value.end != index + 1) return error.InvalidView;
-    if (value.press != null and value.kind != .button) return error.InvalidView;
+    if (value.press != null and value.kind != .button and value.kind != .stack) return error.InvalidView;
     if (value.toggle != null and value.kind != .switch_control) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
     const text_entry = value.kind == .input or value.kind == .search_field;
     if ((value.input != null or value.submit != null or value.placeholder.len != 0) and !text_entry) return error.InvalidView;
     if (value.wrap != null and value.kind != .text) return error.InvalidView;
+    const paragraph = value.spanWeight != null or value.spanColor != null or value.spanScale != null;
+    if (paragraph and value.kind != .text) return error.InvalidView;
+    if (value.spanScale) |scale| if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidView;
+    if (value.listItemIndex) |item| if (value.listItemCount == null or item >= value.listItemCount.?) return error.InvalidView;
     var children: std.ArrayList(Ui.Node) = .empty;
     var child_index = index + 1;
     while (child_index < value.end) {
@@ -97,7 +108,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .scroll => .scroll_view,
         inline else => |tag| @field(sdk.canvas.WidgetKind, @tagName(tag)),
     };
-    return ui.el(kind, .{
+    var result = ui.el(kind, .{
         .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
         .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
         .text = value.text,
@@ -112,7 +123,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .image = value.image,
         .icon = value.icon,
         .window_drag = value.windowDrag,
-        .semantics = .{ .role = value.role, .label = value.label },
+        .semantics = .{ .role = value.role, .label = value.label, .focusable = value.focusable, .list_item_index = value.listItemIndex, .list_item_count = value.listItemCount },
         .style_tokens = .{ .background = value.background, .foreground = value.foreground, .radius = value.radius },
         .main = value.main,
         .cross = value.cross,
@@ -120,6 +131,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .variant = value.variant,
         .checked = value.checked,
         .disabled = value.disabled,
+        .selected = value.selected,
         .on_press = if (value.press) |bytes| try event(ui, bytes) else null,
         .on_toggle = if (value.toggle) |bytes| try event(ui, bytes) else null,
         .on_drag = if (value.drag) |bytes| try dragEvent(ui, bytes) else null,
@@ -127,6 +139,12 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .on_input = if (value.input) |tag| try inputEvent(tag) else null,
         .on_submit = if (value.submit) |bytes| try event(ui, bytes) else null,
     }, children.items);
+    if (paragraph) {
+        const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
+        spans[0] = .{ .text = result.widget.text, .weight = value.spanWeight orelse .regular, .color = value.spanColor, .scale = value.spanScale orelse 0 };
+        result.widget.spans = spans;
+    }
+    return result;
 }
 
 fn event(ui: *Ui, bytes: []const u8) !core.Msg {
@@ -174,6 +192,26 @@ test "compiled view strings belong to the native tree arena" {
         @memset(bytes, 0);
         try std.testing.expectEqualStrings("café", result.widget.text);
         try std.testing.expectEqualStrings("label", result.key.?.str);
+    } else return error.SkipZigTest;
+}
+
+test "compiled paragraph spans share owned text and validate primitive fields" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const source = "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"café\",\"spanWeight\":\"bold\",\"spanColor\":\"text_muted\",\"spanScale\":0.9}]}";
+        const bytes = try std.testing.allocator.dupe(u8, source);
+        defer std.testing.allocator.free(bytes);
+        const result = try decode(&ui, bytes);
+        @memset(bytes, 0);
+        try std.testing.expectEqualStrings("café", result.widget.spans[0].text);
+        try std.testing.expect(result.widget.spans[0].text.ptr == result.widget.text.ptr);
+        try std.testing.expectEqual(.bold, result.widget.spans[0].weight);
+        try std.testing.expectEqual(.text_muted, result.widget.spans[0].color.?);
+        try std.testing.expectError(error.InvalidView, decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"badge\",\"text\":\"\",\"spanWeight\":\"bold\"}]}"));
+        try std.testing.expectError(error.InvalidView, decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"spanScale\":-1}]}"));
+        try std.testing.expectError(error.InvalidView, decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"row\",\"text\":\"\",\"listItemIndex\":1,\"listItemCount\":1}]}"));
     } else return error.SkipZigTest;
 }
 

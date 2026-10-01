@@ -690,7 +690,13 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             null,
         .grid => if (widget.layout.virtualized) widgetScrollKeyboardIntent(widget, keyboard) else null,
         .scroll_view, .list, .data_grid, .table => widgetScrollKeyboardIntent(widget, keyboard),
-        else => null,
+        // Composed controls can bind a press on an ordinary container
+        // (timeline items use a focusable stack). Its declared semantic
+        // action must answer the same activation keys as a button.
+        else => if (widget.semantics.focusable and widget.semantics.actions.press and isWidgetActivationKey(keyboard.key))
+            .{ .kind = .press, .actions = .{ .press = true } }
+        else
+            null,
     };
 }
 
