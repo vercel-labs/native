@@ -2010,6 +2010,13 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         );
         const host_mod = b.createModule(.{ .root_source_file = host_root, .target = target, .optimize = optimize });
         host_mod.addImport("app", test_app_mod);
+        // The headless host bypasses linkPlatform, but the compiled core's
+        // runtime still references the Windows networking and crypto APIs.
+        if (target.result.os.tag == .windows) {
+            host_mod.linkSystemLibrary("ws2_32", .{});
+            host_mod.linkSystemLibrary("iphlpapi", .{});
+            host_mod.linkSystemLibrary("advapi32", .{});
+        }
         const host = b.addExecutable(.{
             .name = b.fmt("{s}-test-host", .{app_options.name}),
             .root_module = host_mod,
