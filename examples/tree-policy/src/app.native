@@ -1,0 +1,33 @@
+<column padding="20" gap="12">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Folders</text>
+    <button on-press="reverse">Reverse</button>
+    <button on-press="hide">Hide core</button>
+    <button on-press="reset">Reset</button>
+  </row>
+  <text>Selected {selected} | activations {presses}</text>
+  <tree label="Project" gap="4">
+    <panel role="treeitem" label="Source" padding="8" tree-level="1" expanded="{expanded}" selected="{selected == 1}" on-press="choose:{sourceId}" on-toggle="expand"><text>Source</text></panel>
+    <if test="{expanded}">
+      <for each="children" key="id" as="f">
+        <panel role="treeitem" label="{f.title}" padding="8" tree-level="{f.level}" selected="{f.chosen}" disabled="{f.disabled}" on-press="choose:{f.id}"><text>{f.title}</text></panel>
+      </for>
+    </if>
+    <panel role="treeitem" label="README.md" padding="8" tree-level="1" selected="{selected == 2}" on-press="choose:{readmeId}"><text>README.md</text></panel>
+  </tree>
+  <tree label="Nested folders" gap="4">
+    <panel role="treeitem" label="Assets" padding="8" expanded="{nestedExpanded}" selected="{selected == 3}" on-press="choose:{assetsId}" on-toggle="expand_nested">
+      <column gap="4">
+        <text>Assets</text>
+        <if test="{nestedExpanded}">
+          <panel role="treeitem" label="Icon.png" padding="8" selected="{selected == 31}" on-press="choose:{iconId}"><text>Icon.png</text></panel>
+          <panel role="treeitem" label="Font.woff2" padding="8" selected="{selected == 32}" on-press="choose:{fontId}"><text>Font.woff2</text></panel>
+        </if>
+      </column>
+    </panel>
+  </tree>
+  <tree label="Saved folders" gap="4">
+    <panel role="treeitem" label="Archive" padding="8" selected="{secondary == 101}" on-press="archive"><text>Archive</text></panel>
+    <panel role="treeitem" label="Drafts" padding="8" selected="{secondary == 102}" on-press="drafts"><text>Drafts</text></panel>
+  </tree>
+</column>

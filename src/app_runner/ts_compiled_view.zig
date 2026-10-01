@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group, tabs, segmented_control },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group, tabs, segmented_control, tree },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -41,6 +41,8 @@ const Record = struct {
     disabled: bool = false,
     selected: bool = false,
     focusable: bool = false,
+    expanded: ?bool = null,
+    treeLevel: u16 = 0,
     listItemIndex: ?u32 = null,
     listItemCount: ?u32 = null,
     spanWeight: ?sdk.canvas.TextSpanWeight = null,
@@ -86,10 +88,14 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .tabs;
+    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .tabs or value.kind == .tree;
+    const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel) and value.role == .treeitem;
+    if (value.role == .treeitem and !tree_row) return error.InvalidView;
+    if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
     if (!container and value.end != index + 1) return error.InvalidView;
-    if (value.press != null and value.kind != .button and value.kind != .stack and value.kind != .radio and value.kind != .segmented_control) return error.InvalidView;
-    if (value.toggle != null and value.kind != .switch_control and value.kind != .radio) return error.InvalidView;
+    if (value.press != null and !tree_row and value.kind != .button and value.kind != .stack and value.kind != .radio and value.kind != .segmented_control) return error.InvalidView;
+    if (value.toggle != null and !tree_row and value.kind != .switch_control and value.kind != .radio) return error.InvalidView;
+    if ((value.expanded != null or value.treeLevel != 0) and value.role != .treeitem) return error.InvalidView;
     if (value.change != null and value.kind != .radio) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
     const text_entry = value.kind == .input or value.kind == .search_field;
@@ -134,6 +140,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .checked = value.checked,
         .disabled = value.disabled,
         .selected = value.selected,
+        .expanded = value.expanded,
+        .tree_level = value.treeLevel,
         .on_press = if (value.press) |bytes| try event(ui, bytes) else null,
         .on_change = if (value.change) |bytes| try event(ui, bytes) else null,
         .on_toggle = if (value.toggle) |bytes| try event(ui, bytes) else null,
@@ -147,6 +155,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     }
     if (comptime @hasDecl(core, "nativeTabsPolicy")) {
         if (value.kind == .tabs or value.kind == .segmented_control) result.widget.interaction_policy = core.nativeTabsPolicy;
+    }
+    if (comptime @hasDecl(core, "nativeTreePolicy")) {
+        if (value.kind == .tree or value.role == .tree or value.role == .treeitem) result.widget.interaction_policy = core.nativeTreePolicy;
     }
     if (paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);

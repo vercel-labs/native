@@ -1933,6 +1933,9 @@ pub fn canvasWidgetAdjacentGroupFocusTarget(
 /// the node sits outside any tree.
 pub fn canvasWidgetTreeScopeIndex(layout: canvas.WidgetLayoutTree, node_index: usize) ?usize {
     if (node_index >= layout.nodes.len) return null;
+    const widget = layout.nodes[node_index].widget;
+    if ((widget.kind == .tree or widget.semantics.role == .tree or widget.semantics.role == .treeitem) and widget.interaction_policy != null)
+        return compiledTreeIndex(layout, node_index, 0);
     var current = layout.nodes[node_index].parent_index;
     while (current) |index| {
         if (index >= layout.nodes.len) return null;
@@ -1945,6 +1948,46 @@ pub fn canvasWidgetTreeScopeIndex(layout: canvas.WidgetLayoutTree, node_index: u
         current = layout.nodes[index].parent_index;
     }
     return null;
+}
+
+/// Geometry stays native; the compiled policy receives retained topology,
+/// logical focus eligibility, selection, expansion, and flat row levels.
+pub fn canvasWidgetTreePolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const widget = layout.nodes[subject].widget;
+    if (widget.kind != .tree and widget.semantics.role != .tree and widget.semantics.role != .treeitem) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("tree policy exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 6]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 6;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = @as(u8, if (node.widget.semantics.role == .treeitem) 1 else 0) |
+            @as(u8, if (node.widget.kind == .tree or node.widget.semantics.role == .tree) 2 else 0);
+        request[at + 3] = @as(u8, if (operation != 0 and operation != 8 and node.widget.semantics.role == .treeitem and layout.logicalFocusTargetAtIndex(index) != null) 1 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0) |
+            @as(u8, if (node.widget.state.expanded orelse false) 8 else 0);
+        std.mem.writeInt(u16, request[at + 4 ..][0..2], node.widget.tree_level, .little);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 6], output);
+}
+
+fn compiledTreeIndex(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?usize {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetTreePolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid tree policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("tree policy target outside tree");
+    return index;
+}
+
+fn compiledTreeFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    const index = compiledTreeIndex(layout, subject, operation) orelse return null;
+    return layout.logicalFocusTargetAtIndex(index);
 }
 
 fn canvasWidgetTreeRowFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
@@ -1979,6 +2022,16 @@ pub fn canvasWidgetTreeDirectionalFocusTarget(
     if (focused.index >= layout.nodes.len) return null;
     if (layout.nodes[focused.index].widget.semantics.role != .treeitem) return null;
     const tree_index = canvasWidgetTreeScopeIndex(layout, focused.index) orelse return null;
+    if (layout.nodes[focused.index].widget.interaction_policy != null) {
+        const operation: u8 = switch (direction) {
+            .up => 4,
+            .down => 5,
+            .left => 9,
+            .right => 10,
+            .forward, .backward => return null,
+        };
+        return compiledTreeFocus(layout, focused.index, operation);
+    }
     return switch (direction) {
         .up => canvasWidgetTreeAdjacentRow(layout, tree_index, focused.index, .previous) orelse focused,
         .down => canvasWidgetTreeAdjacentRow(layout, tree_index, focused.index, .next) orelse focused,
@@ -2005,6 +2058,8 @@ pub fn canvasWidgetTreeFocusEdgeTarget(
     if (focused.index >= layout.nodes.len) return null;
     if (layout.nodes[focused.index].widget.semantics.role != .treeitem) return null;
     const tree_index = canvasWidgetTreeScopeIndex(layout, focused.index) orelse return null;
+    if (layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledTreeFocus(layout, focused.index, if (edge == .first) 6 else 7);
     switch (edge) {
         .first => {
             var index = tree_index + 1;

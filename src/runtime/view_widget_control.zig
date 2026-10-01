@@ -368,11 +368,16 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                 // Tree selection is single-select across the WHOLE tree
                 // scope (rows nest at any depth, so parent-scoped
                 // clearing would leave one selection per level).
-                const scope = canvas_widget_runtime.canvasWidgetTreeScopeIndex(self.widgetLayoutTree(), index);
+                var clear: [1024]u8 = undefined;
+                const policy_len = canvas_widget_runtime.canvasWidgetTreePolicy(self.widgetLayoutTree(), index, 8, &clear);
+                if (policy_len) |len| if (len != self.widget_layout_node_count) @panic("invalid tree selection policy result");
+                const scope = if (policy_len == null) canvas_widget_runtime.canvasWidgetTreeScopeIndex(self.widgetLayoutTree(), index) else null;
                 for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, row_index| {
                     if (row_index == index) continue;
                     if (node.widget.semantics.role != .treeitem) continue;
-                    if (canvas_widget_runtime.canvasWidgetTreeScopeIndex(self.widgetLayoutTree(), row_index) != scope) continue;
+                    if (policy_len != null) {
+                        if (clear[row_index] == 0) continue;
+                    } else if (canvas_widget_runtime.canvasWidgetTreeScopeIndex(self.widgetLayoutTree(), row_index) != scope) continue;
                     if (!canvasWidgetSelectableSelected(node.widget)) continue;
                     node.widget.state.selected = false;
                     node.widget.value = 0;

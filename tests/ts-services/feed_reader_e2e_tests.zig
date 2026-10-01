@@ -596,10 +596,13 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     const policy_request = [_]u8{ 1, 0, 0, 2, 0, 255, 255, 2, 0, 0, 0, 1, 7 };
     var policy_output: [2]u8 = undefined;
     const tabs_request = [_]u8{ 7, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 6, 0, 0, 1, 2 };
+    const tree_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 0, 0, 1, 5, 1, 0, 0, 0, 1, 1, 2, 0 };
     for (0..16) |_| {
         try std.testing.expectEqual(@as(usize, 2), core.nativeRadioPolicy(&policy_request, &policy_output));
         try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, &policy_output);
         try std.testing.expectEqual(@as(usize, 2), core.nativeTabsPolicy(&tabs_request, &policy_output));
+        try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
+        try std.testing.expectEqual(@as(usize, 2), core.nativeTreePolicy(&tree_request, &policy_output));
         try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
         try std.testing.expectEqualStrings(primary, core.nativeView(allocator));
         try std.testing.expectEqualStrings(secondary, core.nativeWindowView("feed", allocator));
@@ -882,5 +885,116 @@ test "compiled tabs skip clipped triggers preserve boundary focus and isolate se
         try std.testing.expect(retained.findById(21).?.widget.state.selected);
         try std.testing.expect(retained.findById(31).?.widget.state.selected);
         try std.testing.expectEqual(@as(?geometry.RectF, null), try view.setCanvasWidgetSelected(14, true));
+    }
+}
+
+test "compiled tree policy preserves logical scroll reveal hierarchy and independent selection" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-tree-policy", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 400, 250) });
+        const children = [_]canvas.Widget{
+            .{ .id = 20, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 180, 70), .layout = .{ .clip_content = true }, .semantics = .{ .role = .tree }, .children = &.{
+                .{ .id = 31, .kind = .panel, .frame = geometry.RectF.init(0, 0, 150, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 1, .state = .{ .selected = true, .expanded = true } },
+                .{ .id = 32, .kind = .panel, .frame = geometry.RectF.init(0, 30, 150, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 2 },
+                .{ .id = 33, .kind = .panel, .frame = geometry.RectF.init(0, 60, 150, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 2, .state = .{ .disabled = true } },
+                .{ .id = 34, .kind = .panel, .frame = geometry.RectF.init(0, 150, 150, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 1 },
+            } },
+            .{ .id = 40, .kind = .tree, .frame = geometry.RectF.init(200, 100, 150, 100), .children = &.{
+                .{ .id = 41, .kind = .panel, .frame = geometry.RectF.init(0, 0, 150, 60), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .state = .{ .selected = true, .expanded = true }, .children = &.{
+                    .{ .id = 42, .kind = .panel, .frame = geometry.RectF.init(0, 30, 150, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } } },
+                } },
+            } },
+        };
+        var nodes: [9]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 400, 250), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            if (node.widget.kind == .tree or node.widget.semantics.role == .tree or node.widget.semantics.role == .treeitem) node.widget.interaction_policy = core.nativeTreePolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        view.canvas_widget_focused_id = 31;
+        for ([_]struct { key: []const u8, id: canvas.ObjectId }{
+            .{ .key = "arrowright", .id = 32 },
+            .{ .key = "arrowleft", .id = 31 },
+            .{ .key = "end", .id = 34 },
+            .{ .key = "arrowdown", .id = 34 },
+            .{ .key = "arrowup", .id = 32 },
+            .{ .key = "home", .id = 31 },
+        }) |move| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = move.key } });
+            try std.testing.expectEqual(move.id, view.canvas_widget_focused_id);
+        }
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "end" } });
+        const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(scrolled.findById(20).?.widget.value > 0);
+        const viewport = scrolled.findById(20).?.frame.normalized();
+        const focused = scrolled.findById(34).?.frame.normalized();
+        try std.testing.expect(focused.y >= viewport.y and focused.maxY() <= viewport.maxY());
+        try std.testing.expect(scrolled.findById(34).?.widget.state.selected);
+        try std.testing.expect(!scrolled.findById(31).?.widget.state.selected);
+        try std.testing.expect(scrolled.findById(41).?.widget.state.selected);
+        view.canvas_widget_focused_id = 41;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 42), view.canvas_widget_focused_id);
+        const nested = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(nested.findById(42).?.widget.state.selected);
+        try std.testing.expect(!nested.findById(41).?.widget.state.selected);
+        try std.testing.expect(nested.findById(34).?.widget.state.selected);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowleft" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 41), view.canvas_widget_focused_id);
+    }
+}
+
+test "compiled tree flat hierarchy preserves disabled child boundaries and maximum levels" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-tree-boundaries", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const rows = [_]canvas.Widget{
+            .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 100, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 1, .state = .{ .expanded = true } },
+            .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(0, 30, 100, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 2, .state = .{ .disabled = true } },
+            .{ .id = 4, .kind = .panel, .frame = geometry.RectF.init(0, 60, 100, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 2 },
+            .{ .id = 5, .kind = .panel, .frame = geometry.RectF.init(0, 90, 100, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 65535, .state = .{ .expanded = true } },
+            .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(0, 120, 100, 24), .semantics = .{ .role = .treeitem, .actions = .{ .press = true } }, .tree_level = 65535 },
+        };
+        var nodes: [6]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .tree, .children = &rows }, geometry.RectF.init(0, 0, 200, 160), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            node.widget.interaction_policy = core.nativeTreePolicy;
+        };
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 200, 160) });
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        // Right names the first logical child; a disabled first child does
+        // not make a later sibling its replacement. Down skips disabled rows.
+        for ([_]struct { from: canvas.ObjectId, key: []const u8, to: canvas.ObjectId }{
+            .{ .from = 2, .key = "arrowright", .to = 2 },
+            .{ .from = 2, .key = "arrowdown", .to = 4 },
+            .{ .from = 4, .key = "arrowleft", .to = 2 },
+            .{ .from = 5, .key = "arrowright", .to = 5 },
+            .{ .from = 6, .key = "arrowleft", .to = 6 },
+        }) |move| {
+            view.canvas_widget_focused_id = move.from;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = move.key } });
+            try std.testing.expectEqual(move.to, view.canvas_widget_focused_id);
+        }
     }
 }

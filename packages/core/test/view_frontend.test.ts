@@ -303,3 +303,23 @@ test("tabs lower only direct button triggers after structural expansion", () => 
   assert.equal(nodes[5].kind, "button");
   assert.equal(nodes[6].kind, "button");
 });
+
+test("tree rows preserve disclosure, logical levels and canonical row handlers", () => {
+  const { model, view } = evaluate('<tree label="Folders"><panel role="treeitem" label="Source" expanded="{ticking}" tree-level="{count}" selected="true" on-press="reset" on-toggle="reset"><text>Source</text></panel><panel role="treeitem" label="Leaf" tree-level="65535" on-press="reset"><text>Leaf</text></panel></tree>');
+  const nodes = view().nodes;
+  assert.equal(nodes[0].kind, "tree");
+  assert.equal(nodes[1].role, "treeitem");
+  assert.equal(nodes[1].expanded, true);
+  assert.equal(nodes[1].treeLevel, 7);
+  assert.deepEqual(nodes[1].press, [1, 5]);
+  assert.deepEqual(nodes[1].toggle, [1, 5]);
+  assert.equal(nodes[3].expanded, undefined);
+  assert.equal(nodes[3].treeLevel, 65535);
+  model.ticking = false; assert.equal(view().nodes[1].expanded, false);
+  for (const invalid of [-1, 65536, 0.5]) { model.count = invalid; assert.throws(view, /tree-level requires an integer/); }
+  assert.throws(() => compileView('<panel expanded="true"/>', contract), /requires role=treeitem/);
+  assert.throws(() => compileView('<panel tree-level="1"/>', contract), /requires role=treeitem/);
+  assert.throws(() => compileView('<radio role="treeitem"/>', contract), /treeitem requires column, row or panel/);
+  assert.throws(() => compileView('<button role="tree"/>', contract), /tree role requires a generic container/);
+  assert.throws(() => compileView('<radio-group role="tree" label="Invalid"/>', contract), /tree role requires a generic container/);
+});

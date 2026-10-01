@@ -10,6 +10,7 @@ type NscViewNode = {
   background?: string; foreground?: string; radius?: string; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
   disabled?: boolean; selected?: boolean; focusable?: boolean;
+  expanded?: boolean; treeLevel?: number;
   listItemIndex?: number; listItemCount?: number;
   spanWeight?: string; spanColor?: string; spanScale?: number;
   press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
@@ -212,4 +213,89 @@ function nscvTabs(nodes: NscViewNode[], first: number): void {
   for (let i = first + 1; i < nodes[first]!.end; i = nodes[i]!.end) {
     if (nodes[i]!.kind === "button") nodes[i]!.kind = "segmented_control";
   }
+}
+
+function nscvTreeLevel(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65535) throw new Error("tree-level requires an integer from 0 to 65535");
+  return value;
+}
+
+/** Retained tree wire: operation u8, subject/count u16LE, then parent
+ * u16LE, kind bits (1 treeitem/2 tree scope), flags (1 logical focus,
+ * 4 selected/8 expanded), and tree-level u16LE per node. Operations:
+ * 0 nearest scope, 4 previous, 5 next, 6 first, 7 last, 8 selection clear
+ * mask, 9 Left, 10 Right. Index 65535 means no target/disclosure intent.
+ * Traversal preserves native preorder and flat-level/nested hierarchy;
+ * geometry eligibility and applied state remain native. Expansion and
+ * the presence of child rows remain model-owned.
+ */
+export function native_tree_policy(request: Uint8Array): Uint8Array {
+  const read = (at: number): number => request[at]! + request[at + 1]! * 256;
+  if (request.length < 5) throw new Error("invalid tree policy request");
+  const operation = request[0]!, subject = read(1), count = read(3);
+  if (count > 1024 || subject >= count || request.length !== 5 + count * 6 ||
+      ![0, 4, 5, 6, 7, 8, 9, 10].includes(operation)) throw new Error("invalid tree policy request");
+  const parent = (i: number): number => read(5 + i * 6);
+  const kind = (i: number): number => request[7 + i * 6]!;
+  const flags = (i: number): number => request[8 + i * 6]!;
+  const level = (i: number): number => read(9 + i * 6);
+  for (let i = 0; i < count; i++) if (parent(i) !== 65535 && parent(i) >= i) throw new Error("invalid tree policy parent");
+  const scope = (i: number): number => {
+    for (let p = parent(i); p !== 65535; p = parent(p)) if ((kind(p) & 2) !== 0) return p;
+    return 65535;
+  };
+  const descendant = (i: number, ancestor: number): boolean => {
+    for (let p = parent(i); p !== 65535; p = parent(p)) if (p === ancestor) return true;
+    return false;
+  };
+  const row = (i: number): boolean => (kind(i) & 1) !== 0;
+  const focus = (i: number): boolean => row(i) && (flags(i) & 1) !== 0;
+  const group = scope(subject);
+  if (operation === 8) {
+    const result = new Uint8Array(count);
+    for (let i = 0; i < count; i++) if (i !== subject && row(i) && (flags(i) & 4) !== 0 && scope(i) === group) result[i] = 1;
+    return result;
+  }
+  let target = 65535;
+  if (operation === 0) target = group;
+  else if (group !== 65535 && row(subject)) {
+    if (operation >= 4 && operation <= 7) {
+      for (let i = group + 1; i < count && descendant(i, group); i++) {
+        if (!focus(i)) continue;
+        if (operation === 6) { target = i; break; }
+        if (operation === 7 || operation === 4 && i < subject) target = i;
+        if (operation === 5 && i > subject) { target = i; break; }
+      }
+      if (target === 65535 && (operation === 4 || operation === 5)) target = subject;
+    } else if (operation === 9 && (flags(subject) & 8) === 0) {
+      target = subject;
+      if (level(subject) > 1) {
+        for (let i = subject - 1; i > group; i--) {
+          if (!row(i)) continue;
+          if (level(i) === level(subject) - 1) { if (focus(i)) target = i; break; }
+          if (level(i) !== 0 && level(i) < level(subject) - 1) break;
+        }
+      } else {
+        for (let p = parent(subject); p !== 65535 && p !== group; p = parent(p)) {
+          if (focus(p)) { target = p; break; }
+        }
+      }
+    } else if (operation === 10 && (flags(subject) & 8) !== 0) {
+      target = subject;
+      if (level(subject) > 0) {
+        for (let i = subject + 1; i < count && descendant(i, group); i++) {
+          if (!row(i)) continue;
+          if (level(i) === level(subject) + 1 && focus(i)) target = i;
+          break;
+        }
+      } else {
+        for (let i = subject + 1; i < count && descendant(i, subject); i++) {
+          if (focus(i)) { target = i; break; }
+        }
+      }
+    }
+  }
+  const result = new Uint8Array(2);
+  result[0] = target % 256; result[1] = Math.floor(target / 256);
+  return result;
 }

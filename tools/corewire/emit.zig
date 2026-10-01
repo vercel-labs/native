@@ -304,6 +304,9 @@ const Emitter = struct {
         if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_tabs_policy")) {
             try reserved.appendSlice(self.arena, &.{ "nativeTabsPolicy", "request", "output", "ptr", "len" });
         }
+        if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_tree_policy")) {
+            try reserved.appendSlice(self.arena, &.{ "nativeTreePolicy", "request", "output", "ptr", "len" });
+        }
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
         if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg or sidecar_mod.abiHasExport(self.sidecar.abi, "native_view")) {
@@ -1219,6 +1222,23 @@ const Emitter = struct {
                 \\    abi.native_tabs_policy(request.ptr, request.len, &ptr, &len);
                 \\    defer abi.frame_reset();
                 \\    if (len > output.len) @panic("invalid compiled tabs policy result");
+                \\    @memcpy(output[0..len], ptr[0..len]);
+                \\    return len;
+                \\}
+                \\
+            );
+        }
+
+        if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_tree_policy")) {
+            try self.raw(
+                \\
+                \\/// Pure retained policy: copy the result before resetting the arena.
+                \\pub fn nativeTreePolicy(request: []const u8, output: []u8) usize {
+                \\    var ptr: [*]const u8 = undefined;
+                \\    var len: usize = 0;
+                \\    abi.native_tree_policy(request.ptr, request.len, &ptr, &len);
+                \\    defer abi.frame_reset();
+                \\    if (len > output.len) @panic("invalid compiled tree policy result");
                 \\    @memcpy(output[0..len], ptr[0..len]);
                 \\    return len;
                 \\}
