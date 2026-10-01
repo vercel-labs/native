@@ -605,7 +605,13 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     var toggle_state: [1]u8 = undefined;
     var accordion_state: [1]u8 = undefined;
     var checkable_state: [1]u8 = undefined;
+    var slider_request = [_]u8{ 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    std.mem.writeInt(u32, slider_request[2..6], @bitCast(@as(f32, 0.3)), .little);
+    std.mem.writeInt(u32, slider_request[6..10], @bitCast(@as(f32, 0.3)), .little);
+    std.mem.writeInt(u32, slider_request[10..14], @bitCast(@as(f32, 0.8)), .little);
+    var slider_state: [4]u8 = undefined;
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(usize, 4), core.nativeSliderPolicy(&slider_request, &slider_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 10, 5 }, &checkable_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeAccordionPolicy(&.{ 9, 13 }, &accordion_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 9, 4 }, &toggle_state));
@@ -628,9 +634,88 @@ test "compiled primary and window view copies survive alternating scriptc arena 
         try std.testing.expectEqualSlices(u8, &.{1}, &toggle_state);
         try std.testing.expectEqualSlices(u8, &.{1}, &accordion_state);
         try std.testing.expectEqualSlices(u8, &.{1}, &checkable_state);
+        try std.testing.expectEqual(@as(f32, 0.8), @as(f32, @bitCast(std.mem.readInt(u32, &slider_state, .little))));
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
+}
+
+test "compiled slider keyboard and accessibility steps preserve native f32 intents" {
+    for ([_]f32{ -0.1, 0, 0.02, 0.3, 0.4999, 0.95, 1, 1.2 }) |value| {
+        const reference = canvas.Widget{ .kind = .slider, .value = value };
+        var compiled = reference;
+        compiled.interaction_policy = core.nativeSliderPolicy;
+        for ([_][]const u8{ "arrowleft", "arrowright", "arrowup", "arrowdown", "home", "end", "space", "pageup" }) |key| {
+            for ([_]canvas.WidgetKeyboardModifiers{ .{}, .{ .shift = true }, .{ .control = true }, .{ .alt = true }, .{ .super = true } }) |modifiers| {
+                for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up }) |phase| {
+                    const keyboard = canvas.WidgetKeyboardEvent{ .key = key, .modifiers = modifiers, .phase = phase };
+                    try std.testing.expectEqualDeep(canvas.widgetKeyboardControlIntent(reference, keyboard), canvas.widgetKeyboardControlIntent(compiled, keyboard));
+                }
+            }
+        }
+        for ([_]canvas.WidgetSemanticAction{ .increment, .decrement }) |action| {
+            try std.testing.expectEqualDeep(canvas.widgetSemanticControlIntent(reference, action), canvas.widgetSemanticControlIntent(compiled, action));
+        }
+        try std.testing.expectEqual(std.math.clamp(value, 0, 1), canvas.widgetCompiledSliderValue(compiled, 0, null, 0, false).?);
+        compiled.state.disabled = true;
+        try std.testing.expect(canvas.widgetKeyboardControlIntent(compiled, .{ .phase = .key_down, .key = "end" }) == null);
+        try std.testing.expect(canvas.widgetSemanticControlIntent(compiled, .increment) == null);
+    }
+}
+
+test "compiled slider reconcile keeps live capture and clamps pointer updates" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-slider-reconcile", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const Fixture = struct {
+        fn layout(source: f32, compiled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            const tree = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{
+                .{ .id = 41, .kind = .slider, .frame = geometry.RectF.init(10, 10, 200, 32), .value = source },
+                .{ .id = 42, .kind = .slider, .frame = geometry.RectF.init(10, 60, 200, 32), .value = 0.4, .state = .{ .disabled = true } },
+            } }, geometry.RectF.init(0, 0, 240, 120), nodes);
+            if (compiled) for (nodes[0..tree.nodes.len]) |*node| {
+                if (node.widget.kind == .slider) node.widget.interaction_policy = core.nativeSliderPolicy;
+            };
+            return tree;
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 240, 120) });
+        var nodes: [8]canvas.WidgetLayoutNode = undefined;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(0.2, compiled, &nodes));
+        const view = &harness.runtime.views[0];
+        _ = try view.applyCanvasWidgetSliderValue(41, .{ .x = 170, .y = 26 });
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(0.2, compiled, &nodes));
+        try std.testing.expectEqual(@as(f32, 0.8), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(41).?.widget.value);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(0.5, compiled, &nodes));
+        try std.testing.expectEqual(@as(f32, 0.5), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(41).?.widget.value);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 50, .y = 26 } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 41), view.canvas_widget_pressed_id);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(0.7, compiled, &nodes));
+        try std.testing.expectEqual(@as(f32, 0.2), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(41).?.widget.value);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 50, .y = 26 } });
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(0.75, compiled, &nodes));
+        try std.testing.expectEqual(@as(f32, 0.75), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(41).?.widget.value);
+        _ = try view.applyCanvasWidgetSliderValue(41, .{ .x = -40, .y = 26 });
+        try std.testing.expectEqual(@as(f32, 0), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(41).?.widget.value);
+        _ = try view.applyCanvasWidgetSliderValue(41, .{ .x = 270, .y = 26 });
+        try std.testing.expectEqual(@as(f32, 1), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(41).?.widget.value);
+        try std.testing.expect((try view.applyCanvasWidgetSliderValue(42, .{ .x = 170, .y = 76 })) == null);
+        try std.testing.expectEqual(@as(f32, 0.4), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(42).?.widget.value);
+        try std.testing.expect((try view.applyCanvasWidgetSliderValue(41, .{ .x = std.math.nan(f32), .y = 26 })) == null);
+        try std.testing.expectEqual(@as(f32, 1), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(41).?.widget.value);
+    }
+    const widget = canvas.Widget{ .kind = .slider, .value = 0.3, .interaction_policy = core.nativeSliderPolicy };
+    try std.testing.expectEqual(@as(f32, 0.8), canvas.widgetCompiledSliderValue(widget, 1, null, 0.8, false).?);
+    try std.testing.expectEqual(@as(f32, 1), canvas.widgetCompiledSliderValue(widget, 1, 0.3, 1.2, false).?);
 }
 
 test "compiled radio group Tab entry falls back when its selection is fixed-clipped" {

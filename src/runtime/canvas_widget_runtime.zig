@@ -875,8 +875,8 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                     copy.widget.value != source_entry.value
                 else
                     false;
-                if (!source_moved or entry.state.pressed) copy.widget.value = entry.value;
-                copy.widget.value = std.math.clamp(copy.widget.value, 0, 1);
+                copy.widget.value = canvas.widgetCompiledSliderValue(copy.widget, 1, if (previous_source) |source_entry| source_entry.value else null, entry.value, entry.state.pressed) orelse
+                    std.math.clamp(if (!source_moved or entry.state.pressed) entry.value else copy.widget.value, 0, 1);
             },
             .resizable => {
                 const width = @max(canvasWidgetResizableMinWidth(copy.widget), entry.value);

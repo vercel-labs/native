@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -54,6 +54,7 @@ const Record = struct {
     drag: ?[]const u8 = null,
     scroll: ?u8 = null,
     input: ?u8 = null,
+    valueChange: ?u8 = null,
     submit: ?[]const u8 = null,
     dismiss: ?[]const u8 = null,
     anchor: ?sdk.canvas.WidgetAnchorPlacement = null,
@@ -105,7 +106,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.anchor == null and (value.anchorAlignment != .start or value.anchorOffset != 4)) return error.InvalidView;
     if (value.toggle != null and !tree_row and value.kind != .checkbox and value.kind != .switch_control and value.kind != .toggle and value.kind != .radio and value.kind != .toggle_button and value.kind != .accordion) return error.InvalidView;
     if ((value.expanded != null or value.treeLevel != 0) and value.role != .treeitem) return error.InvalidView;
-    if (value.change != null and value.kind != .radio) return error.InvalidView;
+    if (value.change != null and value.kind != .radio and value.kind != .slider) return error.InvalidView;
+    if (value.valueChange != null and (value.kind != .slider or value.change != null)) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
     const text_entry = value.kind == .input or value.kind == .search_field;
     if ((value.input != null or value.submit != null) and !text_entry) return error.InvalidView;
@@ -158,6 +160,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .on_drag = if (value.drag) |bytes| try dragEvent(ui, bytes) else null,
         .on_scroll = if (value.scroll) |tag| try scrollEvent(tag) else null,
         .on_input = if (value.input) |tag| try inputEvent(tag) else null,
+        .on_value = if (value.valueChange) |tag| try valueEvent(tag) else null,
         .on_submit = if (value.submit) |bytes| try event(ui, bytes) else null,
         .on_dismiss = if (value.dismiss) |bytes| try event(ui, bytes) else null,
         .anchor = value.anchor,
@@ -184,6 +187,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     }
     if (comptime @hasDecl(core, "nativeAccordionPolicy")) {
         if (value.kind == .accordion) result.widget.interaction_policy = core.nativeAccordionPolicy;
+    }
+    if (comptime @hasDecl(core, "nativeSliderPolicy")) {
+        if (value.kind == .slider) result.widget.interaction_policy = core.nativeSliderPolicy;
     }
     if (paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
@@ -224,6 +230,32 @@ fn inputEvent(tag: u8) !Ui.InputMsgFn {
         }
     }
     return error.InvalidView;
+}
+
+fn valueEvent(tag: u8) !Ui.ValueMsgFn {
+    inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
+        if (comptime @typeInfo(field.type) == .float) {
+            if (tag == index) return Ui.translatedValueMsg(@field(std.meta.Tag(core.Msg), field.name), field.type);
+        }
+    }
+    return error.InvalidView;
+}
+
+test "compiled sliders reject incompatible value channels" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"button\",\"text\":\"\",\"valueChange\":0}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"slider\",\"text\":\"\",\"valueChange\":255}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"slider\",\"text\":\"\",\"valueChange\":0,\"change\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"slider\",\"text\":\"\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
+        }) |source| try std.testing.expectError(error.InvalidView, decode(&ui, source));
+        inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, tag| {
+            if (comptime @typeInfo(field.type) != .float) try std.testing.expectError(error.InvalidView, valueEvent(tag));
+        }
+    } else return error.SkipZigTest;
 }
 
 test "compiled view strings belong to the native tree arena" {

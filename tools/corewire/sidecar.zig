@@ -266,6 +266,7 @@ pub const conditional_exports = [_][]const u8{
     "native_menu_policy",
     "native_toggle_policy",
     "native_accordion_policy",
+    "native_slider_policy",
 };
 
 // ------------------------------------------------------------ reading
@@ -2440,6 +2441,11 @@ test "V11: the optional native view extension is unique and follows channels" {
     const accordion = try replaced(arena, toggle, "\"native_toggle_policy\"]", "\"native_toggle_policy\", \"native_accordion_policy\"]");
     const accordion_valid = try readValid(arena, accordion);
     try testing.expect(abiHasExport(accordion_valid.abi, "native_accordion_policy"));
+    const slider = try replaced(arena, accordion, "\"native_accordion_policy\"]", "\"native_accordion_policy\", \"native_slider_policy\"]");
+    const slider_valid = try readValid(arena, slider);
+    try testing.expect(abiHasExport(slider_valid.abi, "native_slider_policy"));
+    const slider_duplicate = try replaced(arena, slider, "\"native_slider_policy\"]", "\"native_slider_policy\", \"native_slider_policy\"]");
+    try expectRefusal(slider_duplicate, "abi.exports[32]", "out of canonical order");
     const accordion_duplicate = try replaced(arena, accordion, "\"native_accordion_policy\"]", "\"native_accordion_policy\", \"native_accordion_policy\"]");
     try expectRefusal(accordion_duplicate, "abi.exports[31]", "out of canonical order");
     const toggle_duplicate = try replaced(arena, toggle, "\"native_toggle_policy\"]", "\"native_toggle_policy\", \"native_toggle_policy\"]");

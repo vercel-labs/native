@@ -316,7 +316,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             const widget = self.widget_layout_nodes[index].widget;
             if (widget.kind != .slider or widget.state.disabled or widget.frame.width <= 0) return null;
 
-            const next_value = std.math.clamp((point.x - widget.frame.x) / widget.frame.width, 0, 1);
+            const next_value = (point.x - widget.frame.x) / widget.frame.width;
             const dirty = try self.setCanvasWidgetValue(index, next_value) orelse return null;
             self.noteCanvasWidgetChangeEvent(id);
             return dirty;
@@ -473,7 +473,10 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         pub fn setCanvasWidgetValue(self: *RuntimeView, index: usize, value: f32) anyerror!?geometry.RectF {
             if (index >= self.widget_layout_node_count) return null;
             const widget = self.widget_layout_nodes[index].widget;
-            const next_value = std.math.clamp(value, 0, 1);
+            if (!std.math.isFinite(value)) return null;
+            var candidate = widget;
+            candidate.value = value;
+            const next_value = canvas.widgetCompiledSliderValue(candidate, 0, null, 0, false) orelse std.math.clamp(value, 0, 1);
             if (next_value == widget.value) return null;
             self.widget_layout_nodes[index].widget.value = next_value;
             try self.refreshCanvasWidgetSemantics();

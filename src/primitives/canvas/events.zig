@@ -662,7 +662,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             }
         else
             null,
-        .slider => if (widgetSliderKeyboardValue(widget.value, keyboard)) |next_value|
+        .slider => if (widgetSliderControlKeyboardValue(widget, keyboard)) |next_value|
             .{
                 .kind = .set_value,
                 .actions = .{
@@ -831,6 +831,40 @@ pub fn widgetSliderKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
     return null;
+}
+
+/// The compiled slider policy exchanges canonical f32 values. The callback
+/// copies its result before resetting the scriptc arena; no tree bytes escape.
+pub fn widgetCompiledSliderValue(widget: Widget, operation: u8, previous_source: ?f32, retained: f32, pressed: bool) ?f32 {
+    if (widget.kind != .slider) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [14]u8 = undefined;
+    request[0] = operation;
+    request[1] = @as(u8, if (previous_source != null) 1 else 0) | @as(u8, if (pressed) 2 else 0);
+    std.mem.writeInt(u32, request[2..6], @bitCast(widget.value), .little);
+    std.mem.writeInt(u32, request[6..10], @bitCast(previous_source orelse @as(f32, 0)), .little);
+    std.mem.writeInt(u32, request[10..14], @bitCast(retained), .little);
+    var output: [4]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled slider policy result");
+    const value: f32 = @bitCast(std.mem.readInt(u32, &output, .little));
+    if (!std.math.isFinite(value) or (operation < 2 and (value < 0 or value > 1))) @panic("invalid compiled slider policy value");
+    return value;
+}
+
+fn widgetSliderControlKeyboardValue(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
+    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier() or widget.state.disabled) return null;
+    if (widget.interaction_policy == null) return widgetSliderKeyboardValue(widget.value, keyboard);
+    const operation: u8 = if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown"))
+        (if (keyboard.modifiers.shift) @as(u8, 4) else 2)
+    else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup"))
+        (if (keyboard.modifiers.shift) @as(u8, 5) else 3)
+    else if (std.ascii.eqlIgnoreCase(keyboard.key, "home"))
+        6
+    else if (std.ascii.eqlIgnoreCase(keyboard.key, "end"))
+        7
+    else
+        return null;
+    return widgetCompiledSliderValue(widget, operation, null, 0, false);
 }
 
 /// Fraction steps for the split divider: the slider's step sizes, on the
@@ -1003,7 +1037,8 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
         .slider => .{
             .kind = .set_value,
             .actions = intent_actions,
-            .value = std.math.clamp(widget.value + if (increment) @as(f32, 0.05) else @as(f32, -0.05), 0, 1),
+            .value = std.math.clamp(widgetCompiledSliderValue(widget, if (increment) 3 else 2, null, 0, false) orelse
+                (widget.value + if (increment) @as(f32, 0.05) else @as(f32, -0.05)), 0, 1),
         },
         .grid, .scroll_view, .list, .data_grid, .table => .{
             .kind = .scroll_by,

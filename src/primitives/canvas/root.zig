@@ -659,6 +659,7 @@ pub const isWidgetActivationKey = event_model.isWidgetActivationKey;
 pub const isWidgetTextEntry = event_model.isWidgetTextEntry;
 pub const isWidgetMenuOpenArrowKey = event_model.isWidgetMenuOpenArrowKey;
 pub const widgetSliderKeyboardValue = event_model.widgetSliderKeyboardValue;
+pub const widgetCompiledSliderValue = event_model.widgetCompiledSliderValue;
 pub const widgetScrollKeyboardIntent = event_model.widgetScrollKeyboardIntent;
 pub const widgetScrollKeyboardDelta = event_model.widgetScrollKeyboardDelta;
 

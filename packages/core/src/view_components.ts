@@ -14,7 +14,7 @@ type NscViewNode = {
   listItemIndex?: number; listItemCount?: number;
   spanWeight?: string; spanColor?: string; spanScale?: number;
   press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
-  input?: number; submit?: number[]; dismiss?: number[];
+  input?: number; valueChange?: number; submit?: number[]; dismiss?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number;
 };
 
@@ -395,6 +395,38 @@ export function native_accordion_policy(request: Uint8Array): Uint8Array {
   const selected = request[0] === 8 ? !source : moved ? source : (flags & 4) !== 0;
   const result = new Uint8Array(1);
   result[0] = selected ? 1 : 0;
+  return result;
+}
+
+/** Slider wire: operation u8, flags (1 previous source present, 2 pressed),
+ * then current/source, previous source, and retained value as f32LE.
+ * Operations: 0 clamp an applied value, 1 reconcile, 2/3 small decrement/
+ * increment, 4/5 coarse decrement/increment, 6 Home, 7 End. Keyboard step
+ * results are unclamped so native action flags retain their edge behavior.
+ * Source changes win unless a drag is pressed; unchanged or absent history
+ * preserves retained state. Native owns geometry and input eligibility.
+ */
+export function native_slider_policy(request: Uint8Array): Uint8Array {
+  if (request.length !== 14 || request[0]! > 7 || request[1]! > 3) {
+    throw new Error("invalid slider policy request");
+  }
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const operation = request[0]!, flags = request[1]!;
+  const current = wire.getFloat32(2, true), previous = wire.getFloat32(6, true), retained = wire.getFloat32(10, true);
+  if (!Number.isFinite(current) || !Number.isFinite(previous) || !Number.isFinite(retained)) {
+    throw new Error("non-finite slider policy value");
+  }
+  let value = current;
+  if (operation === 1 && ((flags & 1) === 0 || current === previous || (flags & 2) !== 0)) value = retained;
+  if (operation === 2 || operation === 3 || operation === 4 || operation === 5) {
+    const step = Math.fround(operation < 4 ? 0.05 : 0.1);
+    value = Math.fround(current + (operation === 2 || operation === 4 ? -step : step));
+  }
+  if (operation === 6) value = 0;
+  if (operation === 7) value = 1;
+  if (operation < 2) value = Math.max(0, Math.min(1, value));
+  const result = new Uint8Array(4);
+  new DataView(result.buffer).setFloat32(0, value, true);
   return result;
 }
 

@@ -1,0 +1,44 @@
+<column key="{profile}" gap="16" padding="24">
+  <row gap="8" cross="center">
+    <column grow="1" gap="4">
+      <text size="heading">Studio mixer</text>
+      <text foreground="text_muted">Adjust master output, preview, and individual track trims.</text>
+    </column>
+    <button size="sm" on-press="refresh">Refresh</button>
+    <button size="sm" on-press="lock">Lock mixer</button>
+    <button size="sm" on-press="new_mixer">New mixer</button>
+  </row>
+  <row gap="24">
+    <panel grow="1" padding="16">
+      <column gap="12">
+        <text>Master output · {masterPercent}%</text>
+        <slider label="Master output" value="{master}" disabled="{locked}" on-change="master_changed"/>
+        <text>Preview level · {previewPercent}%</text>
+        <slider label="Preview level" value="{preview}" disabled="{locked}" on-change="preview_changed"/>
+        <button size="sm" on-press="preset">Studio preset</button>
+        <text foreground="text_muted">Arrow keys: 5% · Shift + arrows: 10% · Home / End</text>
+      </column>
+    </panel>
+    <panel grow="1" padding="16">
+      <column gap="12">
+        <row gap="8" cross="center">
+          <text grow="1">Track trims</text>
+          <button size="sm" on-press="reverse">Reverse</button>
+          <button size="sm" on-press="hide">Hide acoustic</button>
+          <button size="sm" on-press="empty">Empty</button>
+        </row>
+        <if test="{empty}"><text foreground="text_muted">No tracks</text></if>
+        <for each="tracks" as="track" key="id">
+          <column gap="4">
+            <text>{track.title}</text>
+            <slider label="{track.title}" value="{track.value}" disabled="{track.disabled}" on-change="trim_changed"/>
+          </column>
+        </for>
+        <text foreground="text_muted">Acoustic preset: {trimSourcePercent}% · Refresh keeps your trims.</text>
+      </column>
+    </panel>
+  </row>
+  <spacer grow="1"/>
+  <if test="{locked}"><status-bar>Mixer locked · changes {changes} · trims {trimChanges} · refreshes {refreshes}</status-bar></if>
+  <else><status-bar>Mixer ready · changes {changes} · trims {trimChanges} · refreshes {refreshes}</status-bar></else>
+</column>

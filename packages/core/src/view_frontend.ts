@@ -53,7 +53,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "JSON", "TextEncoder", "TextDecoder", "String", "Number", "Array"];
+  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -285,6 +285,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     const arm = contract.msg.arms.find(item => item.name === match?.[1]);
     if (!arm || !match) fail(node, `unknown or unsupported event ${raw}`);
     const payload = match[2] ? path(match[2], node, scope) : null;
+    if (channel === "value") {
+      if (payload || arm.payload.kind !== "number" || (arm.payload.class ?? "f64") !== "f64") fail(node, "slider on-change requires a bare one-number float or void Msg arm");
+      return String(contract.msg.arms.indexOf(arm));
+    }
     if (channel === "input") {
       if (payload || !textInputUnion(arm.payload)) fail(node, "on-input requires a bare TextInputEvent Msg arm");
       return String(contract.msg.arms.indexOf(arm));
@@ -401,7 +405,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${stringAttr("title")}, description: ${stringAttr("description")}, meta: ${stringAttr("meta")}, indicator: ${stringAttr("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
       return;
     }
-    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", panel: "panel", badge: "badge", input: "input", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator" };
+    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", panel: "panel", badge: "badge", input: "input", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
     const container = ["column", "row", "stack", "scroll", "panel", "radio-group", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu"].includes(node.name);
@@ -453,9 +457,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       } else if (["on-press", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
-        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && node.name !== "radio" || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && node.name !== "dropdown-menu") fail(node, `${name} is unsupported on ${node.name}`);
+        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && node.name !== "dropdown-menu") fail(node, `${name} is unsupported on ${node.name}`);
         if (["input", "submit"].includes(channel) && !["input", "search-field"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
-        props.push(`${channel}: ${event(value, channel, node, scope)}`);
+        if (channel === "change" && node.name === "slider" && contract.msg.arms.find(arm => arm.name === value)?.payload.kind !== "void") {
+          props.push(`valueChange: ${event(value, "value", node, scope)}`);
+        } else props.push(`${channel}: ${event(value, channel, node, scope)}`);
       } else fail(node, `unsupported attribute ${name}`);
     }
     const id = next++;

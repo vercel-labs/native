@@ -150,6 +150,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     .role = widget.role,
                     .name = widget.name,
                     .text = widget.text_value,
+                    .value = if (widget.value) |value| @as(?f64, @floatCast(value)) else null,
                     .enabled = widget.enabled,
                     .focused = widget.focused,
                     .selected = widget.selected,

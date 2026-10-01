@@ -123,6 +123,7 @@ pub fn Bindings(comptime prefix: []const u8) type {
         pub const native_menu_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_menu_policy");
         pub const native_toggle_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_toggle_policy");
         pub const native_accordion_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_accordion_policy");
+        pub const native_slider_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_slider_policy");
 
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");

@@ -34,6 +34,38 @@ test("the view frontend and portable components typecheck", () => {
   assert.deepEqual(ts.getPreEmitDiagnostics(program).map(d => ts.flattenDiagnosticMessageText(d.messageText, "\n")), []);
 });
 
+test("mixer sliders route applied float values separately from static change messages", () => {
+  const file = new URL("../../../examples/slider-policy/src/core.ts", import.meta.url).pathname;
+  const checked = checkFile(file, { contractEntry: "core_facade.ts" });
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics) + checked.typeErrors.join("\n"));
+  const mixerContract: ViewContract = JSON.parse(checked.contract!);
+  const markup = readFileSync(new URL("../../../examples/slider-policy/src/app.native", import.meta.url), "utf8");
+  const generated = compileView(markup, mixerContract);
+  const exports: { native_view?: () => Uint8Array } = {};
+  const model = { profile: 0, master: 0.35, preview: 0.5, locked: false, empty: false, changes: 0, trimChanges: 0, refreshes: 0 };
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+    exports, TextEncoder, TextDecoder, nscfCommitted: model,
+    masterPercent: () => 35, previewPercent: () => 50, trimSourcePercent: () => 25,
+    tracks: () => [{ id: 1, title: new TextEncoder().encode("Acoustic café"), value: 0.25, disabled: false }],
+    nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, mixerContract.msg.arms.findIndex(arm => arm.name === msg.kind)),
+  });
+  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const sliders = nodes.filter((node: { kind: string }) => node.kind === "slider");
+  assert.equal(sliders.length, 3);
+  assert.equal(sliders[0].valueChange, mixerContract.msg.arms.findIndex(arm => arm.name === "master_changed"));
+  assert.equal(sliders[1].valueChange, mixerContract.msg.arms.findIndex(arm => arm.name === "preview_changed"));
+  assert.deepEqual(sliders[2].change, [1, mixerContract.msg.arms.findIndex(arm => arm.name === "trim_changed")]);
+  assert.equal(sliders[0].change, undefined); assert.equal(sliders[2].valueChange, undefined);
+  assert.equal(sliders[2].label, "Acoustic café");
+  const invalid: ViewContract = { ...mixerContract, msg: { ...mixerContract.msg, arms: [...mixerContract.msg.arms,
+    { name: "integer_gain", member: "count", payload: { kind: "number", class: "i64" } }] } };
+  for (const source of ['<slider on-change="integer_gain"/>', '<slider on-change="master_changed:{master}"/>',
+    '<slider on-press="refresh"/>', '<slider on-toggle="refresh"/>', '<slider on-input="refresh"/>',
+    '<slider placeholder="Level"/>', '<slider checked="true"/>', '<slider role="treeitem"/>', '<slider><text>Child</text></slider>']) {
+    assert.throws(() => compileView(source, invalid), /compiled TypeScript view:/, source);
+  }
+});
+
 test("counter view reads the committed TypeScript model, helpers and canonical event tags", () => {
   const { model, view } = evaluate(source);
   const initial = view();

@@ -12,6 +12,8 @@ export interface NativeWidget {
   readonly role: string;
   readonly name: string;
   readonly text: string;
+  /** Applied numeric accessibility value; null for controls without one. */
+  readonly value: number | null;
   readonly enabled: boolean;
   readonly focused: boolean;
   readonly selected: boolean;
