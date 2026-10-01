@@ -46,6 +46,7 @@ pub const CanvasImageEntry = struct {
     width: usize = 0,
     height: usize = 0,
     byte_len: usize = 0,
+    content_fingerprint: u64 = 0,
 };
 
 /// Dimensions of a successfully registered image (the decode-and-register
@@ -130,11 +131,16 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
                 self.canvas_image_pixels[index] = try self.owned_allocator.alloc(u8, self.max_image_pixel_bytes);
             }
             @memcpy(self.canvas_image_pixels[index][0..byte_len], rgba8);
+            // The owned pixels stay immutable until re-registration.
+            // Hash once here so frame planning never re-hashes them;
+            // zero is reserved for resources that still need byte hashing.
+            const fingerprint = std.hash.Wyhash.hash(0, self.canvas_image_pixels[index][0..byte_len]);
             self.canvas_image_entries[index] = .{
                 .id = id,
                 .width = width,
                 .height = height,
                 .byte_len = byte_len,
+                .content_fingerprint = if (fingerprint == 0) 1 else fingerprint,
             };
             if (index == self.canvas_image_count) self.canvas_image_count += 1;
             // No pixel push here: GPU packet hosts receive the bytes
@@ -239,6 +245,7 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
                     .width = entry.width,
                     .height = entry.height,
                     .pixels = self.canvas_image_pixels[index][0..entry.byte_len],
+                    .content_fingerprint = entry.content_fingerprint,
                 };
             }
             const media = runtime_media_surface.RuntimeMediaSurfaces(Runtime).adoptedMediaSurfaceTextures(

@@ -2393,6 +2393,164 @@ pub const GpuSurfaceImagePixels = struct {
     }
 };
 
+/// One vertex of a GPU scene mesh: object-space position, normal, and
+/// texture coordinate. Line meshes drawn with `scene_draw_vertex_colors`
+/// carry each vertex's linear color in `normal`.
+pub const SceneVertex = extern struct {
+    position: [3]f32,
+    normal: [3]f32,
+    uv: [2]f32 = .{ 0, 0 },
+};
+
+/// Triangles (or, for `scene_draw_lines` draws, segments: index pairs)
+/// uploaded once under an app-chosen id and drawn by any number of
+/// `SceneDraw`s (`scene_mesh_upload_fn`). Re-uploading an id replaces its
+/// geometry. Counter-clockwise faces are front faces.
+pub const SceneMesh = struct {
+    id: u64,
+    vertices: []const SceneVertex,
+    indices: []const u32,
+};
+
+/// Straight-alpha RGBA8 pixels a scene draw can map over its surface
+/// (`scene_texture_upload_fn`), keyed by an app-chosen id in a namespace of
+/// their own (not registered images). Colors are sRGB-encoded and sample
+/// as linear light; alpha is linear. Sampled with mipmaps, repeating.
+pub const SceneTexture = struct {
+    id: u64,
+    width: usize,
+    height: usize,
+    rgba8: []const u8,
+};
+
+/// One frame's camera and lighting for a GPU scene render. Matrices are
+/// column-major, clip space is OpenGL's (z in -1...1, y up). Colors are
+/// linear unless noted; the renderer tone maps (ACES filmic), encodes
+/// sRGB, then blends sRGB fog, so an app's CPU fallback can match it.
+pub const SceneFrame = extern struct {
+    view_projection: [16]f32 = identity_matrix,
+    view: [16]f32 = identity_matrix,
+    /// The sun's orthographic view-projection for the shadow map.
+    shadow_matrix: [16]f32 = identity_matrix,
+    /// Camera position xyz; w is the exposure.
+    eye: [4]f32 = .{ 0, 0, 0, 1 },
+    /// Unit direction toward the sun xyz; w is its intensity.
+    sun_direction: [4]f32 = .{ 0, 1, 0, 1 },
+    sun_color: [4]f32 = .{ 1, 1, 1, 1 },
+    /// Hemisphere sky color; w is the hemisphere intensity.
+    sky: [4]f32 = .{ 0.6, 0.7, 0.8, 1 },
+    ground: [4]f32 = .{ 0.3, 0.3, 0.3, 1 },
+    /// sRGB fog color; w is 1 when fog is on.
+    fog: [4]f32 = .{ 0, 0, 0, 0 },
+    /// View-space fog start and end distances.
+    fog_range: [4]f32 = .{ 0, 1, 0, 0 },
+    /// sRGB clear color and alpha.
+    background: [4]f32 = .{ 0, 0, 0, 1 },
+    /// The color grid lines blend toward (linear).
+    grid_color: [4]f32 = .{ 0.5, 0.5, 0.5, 1 },
+    /// Changes whenever a shadow caster moved; the shadow map redraws
+    /// only then.
+    shadow_version: u64 = 0,
+    /// `scene_flag_*` bits.
+    flags: u32 = 0,
+    /// Shadow map edge in texels; 0 disables shadows.
+    shadow_size: u32 = 2048,
+
+    pub const identity_matrix = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+};
+
+pub const scene_flag_wireframe: u32 = 1;
+
+/// A line of text rasterized once into a scene texture (white glyphs,
+/// straight alpha, so a draw's material color tints it) for labels that
+/// pan, zoom, and turn with a scene instead of re-rasterizing each frame
+/// (`scene_text_upload_fn`). `size` and `tracking` are in pixels.
+pub const SceneText = struct {
+    id: u64,
+    text: []const u8,
+    font_id: u64 = 1,
+    size: f32,
+    tracking: f32 = 0,
+};
+
+/// The rasterized text's texture size and its baseline from the top, in
+/// pixels.
+pub const SceneTextMetrics = struct {
+    width: f32,
+    height: f32,
+    baseline: f32,
+};
+
+/// One mesh instance: its transform and physically based material. The
+/// host draws in list order, so apps put transparent and overlay draws
+/// after the opaque ones.
+pub const SceneDraw = extern struct {
+    model: [16]f32 = SceneFrame.identity_matrix,
+    /// The inverse transpose of `model`'s upper 3x3, as a 4x4.
+    normal_matrix: [16]f32 = SceneFrame.identity_matrix,
+    /// Linear base color; w is the opacity (below 1 blends, without
+    /// writing depth).
+    color: [4]f32 = .{ 0.8, 0.8, 0.8, 1 },
+    /// Linear emitted color; w is the opacity of a 1-unit world grid
+    /// blended over the surface.
+    emissive: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Roughness, metalness, unlit (1), double-sided (1).
+    material: [4]f32 = .{ 0.65, 0.25, 0, 0 },
+    mesh: u64 = 0,
+    /// A `SceneTexture` id multiplied over the base color, or 0.
+    texture: u64 = 0,
+    /// `scene_draw_*` bits.
+    flags: u32 = scene_draw_casts_shadow,
+    /// A registered `SceneShader` id shading this draw, or 0 for the
+    /// standard shading.
+    shader: u32 = 0,
+    reserved: [2]u32 = .{ 0, 0 },
+};
+
+/// The draw casts a shadow (it always receives one unless unlit).
+pub const scene_draw_casts_shadow: u32 = 1;
+/// The mesh's indices are segment pairs, drawn as one-pixel lines.
+pub const scene_draw_lines: u32 = 2;
+/// Drawn over everything already drawn, ignoring depth (gizmos, selection
+/// outlines), blended by its opacity.
+pub const scene_draw_overlay: u32 = 4;
+/// Unlit vertex colors: each vertex's `normal` is its linear color.
+pub const scene_draw_vertex_colors: u32 = 8;
+/// Blended, yet depth-tested and depth-writing: a 2D drawing lays each
+/// shape at its own depth so the shapes keep their painter's order, and
+/// overlapping pieces of one shape (a track's joints) blend only once.
+pub const scene_draw_depth_write: u32 = 16;
+/// With vertex colors: each vertex's `uv[0]` is its opacity.
+pub const scene_draw_vertex_alpha: u32 = 32;
+/// Blended additively (glows, atmospheres), without writing depth.
+pub const scene_draw_additive: u32 = 64;
+/// Only back faces are drawn (a halo seen from inside its shell).
+pub const scene_draw_back_faces: u32 = 128;
+/// The mesh's indices are points, `material[0]` pixels across.
+pub const scene_draw_points: u32 = 256;
+
+/// An app's fragment shading for scene draws (`scene_shader_register_fn`):
+/// Metal Shading Language defining `float4 custom_fragment(SceneOut in,
+/// constant SceneFrame &frame, constant SceneDraw &draw, texture2d<float>
+/// map, sampler map_sampler, bool front)`. The prelude it compiles against
+/// declares those types (`in` has `world`, `local`, `normal`, `uv`, and
+/// `view_depth`) and the helpers `native_sdk_scene_finish(rgb, alpha,
+/// view_depth, frame)` (tone map, encode, fog) and
+/// `native_sdk_scene_linear(srgb)`. macOS hosts only.
+pub const SceneShader = struct {
+    id: u32,
+    source: []const u8,
+};
+
+/// A scene to draw into a registered image's pixels on the GPU
+/// (`scene_render_fn`). The host renders at the image's on-screen pixel
+/// size with multisampling whenever it composites the image.
+pub const SceneRender = struct {
+    image_id: u64,
+    frame: SceneFrame,
+    draws: []const SceneDraw,
+};
+
 /// One runtime-registered font face for the gpu-surface font
 /// side-channel (`register_gpu_surface_font_fn`): raw TrueType bytes
 /// keyed by the canvas font id host-wide. The engine validates the bytes
@@ -2980,6 +3138,20 @@ pub const PlatformServices = struct {
     /// Drop the host texture for a previously uploaded image id (the
     /// unregister path). Removing an unknown id is a no-op, not an error.
     remove_gpu_surface_image_fn: ?*const fn (context: ?*anyopaque, id: u64) anyerror!void = null,
+    /// Upload (or replace) a GPU scene mesh's triangles host-wide. The
+    /// host copies the data before returning.
+    scene_mesh_upload_fn: ?*const fn (context: ?*anyopaque, mesh: SceneMesh) anyerror!void = null,
+    /// Queue a scene for a registered image: the host keeps the latest
+    /// request per image id (copied) and renders it on the GPU the next
+    /// time it composites that image.
+    scene_render_fn: ?*const fn (context: ?*anyopaque, render: SceneRender) anyerror!void = null,
+    /// Upload (or replace) a texture scene draws can map, host-wide. The
+    /// host copies the pixels before returning.
+    scene_texture_upload_fn: ?*const fn (context: ?*anyopaque, texture: SceneTexture) anyerror!void = null,
+    /// Rasterize a line of text into a scene texture host-wide.
+    scene_text_upload_fn: ?*const fn (context: ?*anyopaque, text: SceneText) anyerror!SceneTextMetrics = null,
+    /// Register (or replace) a custom scene shader host-wide.
+    scene_shader_register_fn: ?*const fn (context: ?*anyopaque, shader: SceneShader) anyerror!void = null,
     /// Register a runtime-registered font face with the host so the
     /// host-side text pipeline (measurement AND packet text drawing)
     /// resolves the font id to this exact face. Required on platforms
@@ -3674,6 +3846,40 @@ pub const PlatformServices = struct {
         if (image.rgba8.len > bound) return error.InvalidGpuSurfaceImage;
         const upload_fn = self.upload_gpu_surface_image_fn orelse return error.UnsupportedService;
         return upload_fn(self.context, image);
+    }
+
+    pub fn sceneMeshUpload(self: PlatformServices, mesh: SceneMesh) anyerror!void {
+        if (mesh.id == 0 or mesh.indices.len == 0) return error.InvalidSceneMesh;
+        for (mesh.indices) |index| {
+            if (index >= mesh.vertices.len) return error.InvalidSceneMesh;
+        }
+        const upload_fn = self.scene_mesh_upload_fn orelse return error.UnsupportedService;
+        return upload_fn(self.context, mesh);
+    }
+
+    pub fn sceneTextureUpload(self: PlatformServices, texture: SceneTexture) anyerror!void {
+        if (texture.id == 0 or texture.width == 0 or texture.height == 0 or texture.width > 8192 or texture.height > 8192) return error.InvalidSceneTexture;
+        if (texture.rgba8.len != texture.width * texture.height * 4) return error.InvalidSceneTexture;
+        const upload_fn = self.scene_texture_upload_fn orelse return error.UnsupportedService;
+        return upload_fn(self.context, texture);
+    }
+
+    pub fn sceneTextUpload(self: PlatformServices, text: SceneText) anyerror!SceneTextMetrics {
+        if (text.id == 0 or text.text.len == 0 or !(text.size > 0) or text.size > 512) return error.InvalidSceneTexture;
+        const upload_fn = self.scene_text_upload_fn orelse return error.UnsupportedService;
+        return upload_fn(self.context, text);
+    }
+
+    pub fn sceneShaderRegister(self: PlatformServices, shader: SceneShader) anyerror!void {
+        if (shader.id == 0 or shader.source.len == 0) return error.InvalidSceneShader;
+        const register_fn = self.scene_shader_register_fn orelse return error.UnsupportedService;
+        return register_fn(self.context, shader);
+    }
+
+    pub fn sceneRender(self: PlatformServices, render: SceneRender) anyerror!void {
+        if (render.image_id == 0) return error.InvalidSceneRender;
+        const render_fn = self.scene_render_fn orelse return error.UnsupportedService;
+        return render_fn(self.context, render);
     }
 
     pub fn removeGpuSurfaceImage(self: PlatformServices, id: u64) anyerror!void {

@@ -4736,6 +4736,9 @@ pub fn Effects(comptime Msg: type) type {
         /// is fed instead, so replay delivers exactly what the recorded
         /// session delivered, in the same order.
         replay: bool = false,
+        /// Bumped by every `renderScene`, and written into the scene
+        /// image's placeholder pixel so its content fingerprint changes.
+        scene_generation: u32 = 0,
         /// Journaled wall-clock values queued for replay-mode `wallMs`
         /// reads (FIFO; fed from `.clock` records before the consuming
         /// event dispatches).
@@ -7776,6 +7779,69 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             capture.platform_started = true;
+        }
+
+        /// Upload (or replace) a mesh for GPU scenes under an app-chosen
+        /// id. The host copies the triangles, so the caller's slices may
+        /// be freed on return. Synchronous; presentation-only like
+        /// media-surface textures, so replay and the fake executor accept
+        /// and drop it.
+        /// Errors: `error.UnsupportedService` on hosts without GPU
+        /// scenes, `error.InvalidSceneMesh`.
+        pub fn uploadSceneMesh(self: *Self, mesh: platform.SceneMesh) anyerror!void {
+            if (self.executor == .fake or self.replay) return;
+            const services = self.services orelse return error.UnsupportedService;
+            return services.sceneMeshUpload(mesh);
+        }
+
+        /// Upload (or replace) a texture GPU scene draws can map by id
+        /// (`SceneDraw.texture`). The host copies the pixels. Errors:
+        /// `error.UnsupportedService`, `error.InvalidSceneTexture`.
+        pub fn uploadSceneTexture(self: *Self, texture: platform.SceneTexture) anyerror!void {
+            if (self.executor == .fake or self.replay) return;
+            const services = self.services orelse return error.UnsupportedService;
+            return services.sceneTextureUpload(texture);
+        }
+
+        /// Rasterize a line of text into scene texture `text.id` (white,
+        /// straight alpha) and answer its pixel size and baseline, for
+        /// labels drawn as textured quads in a GPU scene. Errors:
+        /// `error.UnsupportedService`, `error.InvalidSceneTexture`.
+        pub fn uploadSceneText(self: *Self, text: platform.SceneText) anyerror!platform.SceneTextMetrics {
+            if (self.executor == .fake or self.replay) return .{ .width = text.size * 0.6 * @as(f32, @floatFromInt(text.text.len)), .height = text.size * 1.3, .baseline = text.size };
+            const services = self.services orelse return error.UnsupportedService;
+            return services.sceneTextUpload(text);
+        }
+
+        /// Register (or replace) a custom fragment shader scene draws can
+        /// name (`SceneDraw.shader`); see `platform.SceneShader` for the
+        /// contract. Errors: `error.UnsupportedService`,
+        /// `error.InvalidSceneShader`.
+        pub fn registerSceneShader(self: *Self, shader: platform.SceneShader) anyerror!void {
+            if (self.executor == .fake or self.replay) return;
+            const services = self.services orelse return error.UnsupportedService;
+            return services.sceneShaderRegister(shader);
+        }
+
+        /// Draw a 3D scene into registered image `image_id` on the GPU.
+        /// The host keeps the latest request and renders it, multisampled
+        /// at the image's on-screen pixel size, whenever it composites the
+        /// image, so image widgets bound to the id show the scene with no
+        /// pixel readback. The id is registered here with a one-pixel
+        /// placeholder (what CPU presentation and goldens draw) whose
+        /// content changes with every call, so widgets showing it repaint.
+        /// Image widgets should stretch the image over their frame; the
+        /// camera's aspect is the app's. Errors: the registry's, and
+        /// `error.UnsupportedService` on hosts without GPU scenes (the
+        /// placeholder is still registered, so apps can fall back).
+        pub fn renderScene(self: *Self, image_id: u64, frame: platform.SceneFrame, draws: []const platform.SceneDraw) anyerror!void {
+            self.scene_generation +%= 1;
+            const g = self.scene_generation;
+            const pixel = [4]u8{ @truncate(g), @truncate(g >> 8), @truncate(g >> 16), 255 };
+            try self.registerImage(image_id, 1, 1, &pixel);
+            if (self.executor == .fake or self.replay) return;
+            const services = self.services orelse return error.UnsupportedService;
+            return services.sceneRender(.{ .image_id = image_id, .frame = frame, .draws = draws });
         }
 
         /// Stop a keyed capture. Accepted PCM already staged drains first,

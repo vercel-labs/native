@@ -540,6 +540,50 @@ int native_sdk_appkit_upload_gpu_surface_image(native_sdk_appkit_host_t *host, u
 /* Drop the host-wide image for `image_id` (the unregister path). Removing
  * an unknown id is a no-op. Returns 1 on success, 0 on invalid arguments. */
 int native_sdk_appkit_remove_gpu_surface_image(native_sdk_appkit_host_t *host, uint64_t image_id);
+/* GPU scenes (platform `SceneMesh` / `SceneFrame` / `SceneDraw`; the
+ * layouts match the Zig extern structs field for field). Meshes are
+ * uploaded host-wide under app ids; a render request is stored per image
+ * id and drawn with multisampling into that image's texture whenever a
+ * view composites the image. Both copy their inputs. Return 1 on success. */
+typedef struct native_sdk_scene_vertex {
+    float position[3];
+    float normal[3];
+    float uv[2];
+} native_sdk_scene_vertex_t;
+typedef struct native_sdk_scene_frame {
+    float view_projection[16];
+    float view[16];
+    float shadow_matrix[16];
+    float eye[4];
+    float sun_direction[4];
+    float sun_color[4];
+    float sky[4];
+    float ground[4];
+    float fog[4];
+    float fog_range[4];
+    float background[4];
+    float grid_color[4];
+    uint64_t shadow_version;
+    uint32_t flags;
+    uint32_t shadow_size;
+} native_sdk_scene_frame_t;
+typedef struct native_sdk_scene_draw {
+    float model[16];
+    float normal_matrix[16];
+    float color[4];
+    float emissive[4];
+    float material[4];
+    uint64_t mesh;
+    uint64_t texture;
+    uint32_t flags;
+    uint32_t shader;
+    uint32_t reserved[2];
+} native_sdk_scene_draw_t;
+int native_sdk_appkit_upload_scene_mesh(native_sdk_appkit_host_t *host, uint64_t mesh_id, const native_sdk_scene_vertex_t *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count);
+int native_sdk_appkit_upload_scene_texture(native_sdk_appkit_host_t *host, uint64_t texture_id, size_t width, size_t height, const uint8_t *rgba8, size_t rgba8_len);
+int native_sdk_appkit_upload_scene_text(native_sdk_appkit_host_t *host, uint64_t texture_id, uint64_t font_id, double size, double tracking, const char *text, size_t text_len, double *width, double *height, double *baseline);
+int native_sdk_appkit_register_scene_shader(native_sdk_appkit_host_t *host, uint32_t shader_id, const char *source, size_t source_len);
+int native_sdk_appkit_render_scene(native_sdk_appkit_host_t *host, uint64_t image_id, const native_sdk_scene_frame_t *frame, const native_sdk_scene_draw_t *draws, size_t draw_count);
 void native_sdk_appkit_start_timer(native_sdk_appkit_host_t *host, uint64_t timer_id, uint64_t interval_ns, int repeats);
 void native_sdk_appkit_cancel_timer(native_sdk_appkit_host_t *host, uint64_t timer_id);
 

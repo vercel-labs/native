@@ -54,10 +54,9 @@ pub fn renderImageFingerprintForResource(image_id: ImageId, image: ?ReferenceIma
     hash = resourceHashUsize(hash, value.width);
     hash = resourceHashUsize(hash, value.height);
     // A precomputed content fingerprint stands in for the pixel bytes:
-    // media-surface textures stamp one at adoption so the planner never
-    // re-hashes a full video frame per plan. Any content change changes
-    // the stamp, so upload/retain/evict keying is untouched; resources
-    // without one (every registered canvas image) hash bytes as always.
+    // registered images and media-surface textures stamp one when their
+    // owned pixels change, so repeated plans never re-hash the buffer.
+    // Resources without a precomputed stamp hash bytes as always.
     if (value.content_fingerprint != 0) {
         return resourceHashU64(hash, value.content_fingerprint);
     }

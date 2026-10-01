@@ -3174,6 +3174,57 @@ int native_sdk_appkit_remove_gpu_surface_image(native_sdk_appkit_host_t *host, u
     return 0;
 }
 
+int native_sdk_appkit_upload_scene_mesh(native_sdk_appkit_host_t *host, uint64_t mesh_id, const native_sdk_scene_vertex_t *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count) {
+    (void)host;
+    (void)mesh_id;
+    (void)vertices;
+    (void)vertex_count;
+    (void)indices;
+    (void)index_count;
+    return 0;
+}
+
+int native_sdk_appkit_upload_scene_texture(native_sdk_appkit_host_t *host, uint64_t texture_id, size_t width, size_t height, const uint8_t *rgba8, size_t rgba8_len) {
+    (void)host;
+    (void)texture_id;
+    (void)width;
+    (void)height;
+    (void)rgba8;
+    (void)rgba8_len;
+    return 0;
+}
+
+int native_sdk_appkit_upload_scene_text(native_sdk_appkit_host_t *host, uint64_t texture_id, uint64_t font_id, double size, double tracking, const char *text, size_t text_len, double *width, double *height, double *baseline) {
+    (void)host;
+    (void)texture_id;
+    (void)font_id;
+    (void)size;
+    (void)tracking;
+    (void)text;
+    (void)text_len;
+    (void)width;
+    (void)height;
+    (void)baseline;
+    return 0;
+}
+
+int native_sdk_appkit_register_scene_shader(native_sdk_appkit_host_t *host, uint32_t shader_id, const char *source, size_t source_len) {
+    (void)host;
+    (void)shader_id;
+    (void)source;
+    (void)source_len;
+    return 0;
+}
+
+int native_sdk_appkit_render_scene(native_sdk_appkit_host_t *host, uint64_t image_id, const native_sdk_scene_frame_t *frame, const native_sdk_scene_draw_t *draws, size_t draw_count) {
+    (void)host;
+    (void)image_id;
+    (void)frame;
+    (void)draws;
+    (void)draw_count;
+    return 0;
+}
+
 int native_sdk_appkit_update_widget_accessibility(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_widget_accessibility_node_t *nodes, size_t node_count) {
     (void)host;
     (void)window_id;

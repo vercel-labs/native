@@ -93,6 +93,76 @@ test "canvas image registry validates ids, dimensions, and capacity" {
     try std.testing.expectEqual(canvas_limits.max_registered_canvas_images, harness.runtime.registeredCanvasImageCount());
 }
 
+test "registered images keep a cached content fingerprint through registry compaction" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+
+    const red = [_]u8{ 255, 0, 0, 255 };
+    var blue = [_]u8{ 0, 0, 255, 255 };
+    try harness.runtime.registerCanvasImage(7, 1, 1, &red);
+    try harness.runtime.registerCanvasImage(8, 1, 1, &blue);
+    const fingerprint = harness.runtime.registeredCanvasImages()[1].content_fingerprint;
+    // A nonzero stamp selects the planner's constant-time path. The
+    // caller can reuse its buffer without changing the registered copy.
+    try std.testing.expect(fingerprint != 0);
+    @memset(&blue, 0);
+    try std.testing.expectEqual(fingerprint, harness.runtime.registeredCanvasImages()[1].content_fingerprint);
+
+    // Removing an earlier slot moves the image and its stamp together.
+    try std.testing.expect(harness.runtime.unregisterCanvasImage(7));
+    const moved = harness.runtime.registeredCanvasImages()[0];
+    try std.testing.expectEqual(@as(canvas.ImageId, 8), moved.id);
+    try std.testing.expectEqual(fingerprint, moved.content_fingerprint);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, moved.pixels);
+}
+
+test "registered image cache retains identical content and uploads pixel or dimension changes" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+
+    const red = [_]u8{ 255, 0, 0, 255, 255, 0, 0, 255 };
+    const blue = [_]u8{ 0, 0, 255, 255, 0, 0, 255, 255 };
+    const cases = [_]struct {
+        pixels: []const u8,
+        width: usize,
+        height: usize,
+        uploads: usize,
+        retains: usize,
+        evicts: usize,
+    }{
+        .{ .pixels = &red, .width = 2, .height = 1, .uploads = 1, .retains = 0, .evicts = 0 },
+        .{ .pixels = &red, .width = 2, .height = 1, .uploads = 0, .retains = 1, .evicts = 0 },
+        .{ .pixels = &blue, .width = 2, .height = 1, .uploads = 1, .retains = 0, .evicts = 1 },
+        .{ .pixels = &blue, .width = 1, .height = 2, .uploads = 1, .retains = 0, .evicts = 1 },
+    };
+    const commands = [_]canvas.CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 7,
+        .dst = geometry.RectF.init(0, 0, 20, 20),
+    } }};
+    var render_commands: [1]canvas.RenderCommand = undefined;
+    const render_plan = try (canvas.DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    var previous_entries: [1]canvas.RenderImageCacheEntry = undefined;
+    var previous_count: usize = 0;
+    for (cases, 0..) |case, frame_index| {
+        try harness.runtime.registerCanvasImage(7, case.width, case.height, case.pixels);
+        var images: [1]canvas.RenderImage = undefined;
+        const image_plan = try render_plan.imagePlanWithResources(harness.runtime.registeredCanvasImages(), &images);
+        var entries: [1]canvas.RenderImageCacheEntry = undefined;
+        var actions: [2]canvas.RenderImageCacheAction = undefined;
+        const cache = try image_plan.cachePlan(previous_entries[0..previous_count], frame_index, &entries, &actions);
+        try std.testing.expectEqual(case.uploads, cache.uploadCount());
+        try std.testing.expectEqual(case.retains, cache.retainCount());
+        try std.testing.expectEqual(case.evicts, cache.evictCount());
+        @memcpy(previous_entries[0..cache.entries.len], cache.entries);
+        previous_count = cache.entries.len;
+    }
+}
+
 test "registered images draw through the reference renderer screenshot" {
     const harness = try startedGpuHarness(std.testing.allocator);
     defer harness.destroy(std.testing.allocator);
