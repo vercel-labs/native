@@ -57,7 +57,8 @@ jobs:
 
   macos-webview:
     name: macOS WebView
-    runs-on: macos-14
+    # ScriptC 0.2.0's native codegen helper requires macOS 15 or newer.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: vercel-labs/setup-zig@v1
@@ -73,7 +74,7 @@ jobs:
       # store-capable cross-target here against the real iPhone simulator SDK.
       - run: zig build test-example-mobile-canvas-lib-ios-store
       # The default TypeScript scaffold must link a signed UIKit dev bundle
-      # with its Debug sanitizer runtime. No simulator device is required.
+      # with any required sanitizer runtime. No simulator device is required.
       - run: bash .github/scripts/macos-ios-dev-link-smoke.sh
       - run: zig build test-webview-system-link
       - run: zig build test-webview-smoke
@@ -84,7 +85,7 @@ jobs:
       # codesign --verify --strict (macOS runners are the only tier with
       # codesign; the step skips loudly anywhere else).
       - run: zig build test-package-signing
-      # Shared macos-14 runners are far noisier than a dev box (the second
+      # Shared hosted macOS runners are far noisier than a dev box (the second
       # CI run measured a 576 ms automation-ready against the 500 ms local
       # ceiling), so widen the smoke budgets here instead of weakening the
       # local defaults. NATIVE_SDK_SMOKE_BUDGET_MS raises the first-frame latency

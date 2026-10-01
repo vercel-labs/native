@@ -14,6 +14,7 @@ app_dir="$work_dir/$app_name"
 log="$work_dir/dev.log"
 invalid_device="native-ios-link-smoke-invalid"
 bundle="$app_dir/.native/ios/$app_name.app"
+archive="$app_dir/.native/embed/aarch64-ios-simulator/lib/lib$app_name.a"
 runtime="libclang_rt.ubsan_iossim_dynamic.dylib"
 
 fail() {
@@ -31,9 +32,15 @@ fi
 grep -Fq "native dev (ios): booting simulator \"$invalid_device\"" "$log" \
   || fail "native dev stopped before the iOS host linked and signed"
 [ -s "$bundle/$app_name" ] || fail "linked iOS executable is missing"
-[ -s "$bundle/$runtime" ] || fail "simulator UBSan runtime is missing"
-otool -L "$bundle/$app_name" | grep -Fq "@rpath/$runtime" \
-  || fail "linked executable does not load the bundled UBSan runtime"
+# ScriptC's packaged runtime objects do not require Clang UBSan. Keep the
+# bundle checks for toolchain paths whose archives reference its handlers.
+xcrun nm -u -j "$archive" >"$work_dir/undefined-symbols.txt" \
+  || fail "could not inspect the embed archive for sanitizer references"
+if grep -Fq "___ubsan_handle_" "$work_dir/undefined-symbols.txt"; then
+  [ -s "$bundle/$runtime" ] || fail "simulator UBSan runtime is missing"
+  otool -L "$bundle/$app_name" | grep -Fq "@rpath/$runtime" \
+    || fail "linked executable does not load the bundled UBSan runtime"
+fi
 codesign --verify --deep --strict "$bundle" || fail "signed iOS bundle failed verification"
 
 echo "PASS: fresh TypeScript iOS dev app linked and signed"
