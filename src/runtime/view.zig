@@ -649,6 +649,12 @@ pub const RuntimeView = struct {
     /// only by the proven pointer's own events; meaningful while
     /// `canvas_widget_hover_pointer_live` holds.
     canvas_widget_hover_pointer_position: geometry.PointF = .{},
+    /// The open menu surface a hover-triangle grace is currently
+    /// protecting, and the point the pointer left its trigger at (see
+    /// the safe-triangle note in `widget_tree.zig`). Zero when no grace
+    /// is armed, which is every frame outside a multi-level menu.
+    canvas_widget_menu_safe_surface_id: canvas.ObjectId = 0,
+    canvas_widget_menu_safe_apex: geometry.PointF = .{},
     /// Count of widget-layout ADOPTIONS: incremented the moment
     /// `copyWidgetLayoutTree` replaces the retained tree inside
     /// `setCanvasWidgetLayout`, BEFORE the pipeline's later fallible
@@ -959,6 +965,8 @@ pub const RuntimeView = struct {
     pub const canvasWidgetRenderState = CanvasWidgetTreeMethods.canvasWidgetRenderState;
     pub const reconcileCanvasWidgetRenderStateAfterScroll = CanvasWidgetTreeMethods.reconcileCanvasWidgetRenderStateAfterScroll;
     pub const setCanvasWidgetHoverMsgChainForHit = CanvasWidgetTreeMethods.setCanvasWidgetHoverMsgChainForHit;
+    pub const canvasWidgetMenuSafeAreaHolds = CanvasWidgetTreeMethods.canvasWidgetMenuSafeAreaHolds;
+    pub const armCanvasWidgetMenuSafeArea = CanvasWidgetTreeMethods.armCanvasWidgetMenuSafeArea;
     pub const pruneCanvasWidgetHoverMsgChain = CanvasWidgetTreeMethods.pruneCanvasWidgetHoverMsgChain;
     pub const dismissCanvasWidgetSurfaceFromEscape = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceFromEscape;
     pub const dismissCanvasWidgetMenuSurfaceForFocusDeparture = CanvasWidgetTreeMethods.dismissCanvasWidgetMenuSurfaceForFocusDeparture;

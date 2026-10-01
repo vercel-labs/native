@@ -308,6 +308,7 @@ const AppKitContextMenuItem = extern struct {
     item_id: u32,
     label: [*]const u8,
     label_len: usize,
+    checked: c_int,
     enabled: c_int,
     separator: c_int,
 };
@@ -2006,6 +2007,7 @@ fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuReques
             .item_id = item.id,
             .label = item.label.ptr,
             .label_len = item.label.len,
+            .checked = if (item.checked) 1 else 0,
             .enabled = if (item.enabled) 1 else 0,
             .separator = if (item.separator) 1 else 0,
         };

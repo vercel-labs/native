@@ -8950,6 +8950,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         NSString *title = item.label ? [[NSString alloc] initWithBytes:item.label length:item.label_len encoding:NSUTF8StringEncoding] : @"";
         NSMenuItem *menuItem = [[NSMenuItem alloc] initWithTitle:title ?: @"" action:@selector(contextMenuItemClicked:) keyEquivalent:@""];
         menuItem.target = target;
+        menuItem.state = item.checked ? NSControlStateValueOn : NSControlStateValueOff;
         menuItem.enabled = item.enabled != 0;
         menuItem.representedObject = @(item.item_id);
         [menu addItem:menuItem];

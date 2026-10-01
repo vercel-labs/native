@@ -1001,3 +1001,155 @@ test "tooltip coexistence: escape peels the tooltip first, then the menu, one pe
     try std.testing.expectEqual(@as(u32, 99), fixture.app_state.model.picked);
     try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
 }
+
+const DialogModel = struct {
+    open: bool = true,
+    dismissals: u32 = 0,
+};
+
+const DialogMsg = union(enum) {
+    close,
+};
+
+const DialogApp = ui_app_model.UiApp(DialogModel, DialogMsg);
+
+fn dialogUpdate(model: *DialogModel, msg: DialogMsg) void {
+    switch (msg) {
+        .close => {
+            model.open = false;
+            model.dismissals += 1;
+        },
+    }
+}
+
+fn dialogView(ui: *DialogApp.Ui, model: *const DialogModel) DialogApp.Ui.Node {
+    const page = ui.text(.{}, "Page");
+    if (!model.open) return ui.column(.{ .padding = 12 }, .{page});
+    return ui.column(.{ .padding = 12 }, .{
+        page,
+        ui.el(.dialog, .{ .width = 200, .height = 120, .on_dismiss = .close }, .{
+            ui.text(.{}, "Dialog body"),
+        }),
+    });
+}
+
+fn dialogOptions() DialogApp.Options {
+    return .{
+        .name = "ui-app-dialog-dismissal",
+        .scene = picker_scene,
+        .canvas_label = canvas_label,
+        .update = dialogUpdate,
+        .view = dialogView,
+    };
+}
+
+const DialogFixture = AppFixture(DialogApp, dialogOptions);
+
+test "escape dismisses a root-relative dialog through on_dismiss" {
+    const fixture = try DialogFixture.create();
+    defer fixture.destroy();
+
+    // Dialogs carry no anchor, yet they are dismissible surfaces: Escape
+    // reaches them through the same on_dismiss contract as a menu.
+    try fixture.key("escape");
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expect(!fixture.app_state.model.open);
+}
+
+test "an outside click dismisses a root-relative dialog and an inside click does not" {
+    const fixture = try DialogFixture.create();
+    defer fixture.destroy();
+
+    const body_id = fixture.widgetIdByText(.text, "Dialog body").?;
+    try fixture.clickWidget(body_id);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.dismissals);
+    try fixture.click(geometry.PointF.init(4, 296));
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+}
+
+// A wide trigger whose open menu hangs off its END: reaching the menu
+// from the trigger's leading side is a diagonal across the row below.
+const SafeMenuModel = struct {};
+const SafeMenuMsg = union(enum) { share, sibling, close };
+const SafeMenuApp = ui_app_model.UiApp(SafeMenuModel, SafeMenuMsg);
+
+fn safeMenuUpdate(_: *SafeMenuModel, _: SafeMenuMsg) void {}
+
+fn safeMenuView(ui: *SafeMenuApp.Ui, _: *const SafeMenuModel) SafeMenuApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.stack(.{ .height = 28 }, .{
+            ui.el(.button, .{ .text = "Share", .width = 200, .on_press = .share }, .{}),
+            ui.el(.dropdown_menu, .{
+                .anchor = .below,
+                .anchor_alignment = .end,
+                .width = 80,
+                .height = 90,
+                .on_dismiss = .close,
+            }, .{
+                ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "Mail", .height = 26, .on_press = .share }, .{}),
+            }),
+        }),
+        ui.el(.button, .{ .text = "Sibling", .width = 200, .on_press = .sibling }, .{}),
+    });
+}
+
+fn safeMenuOptions() SafeMenuApp.Options {
+    return .{
+        .name = "ui-app-safe-menu",
+        .scene = picker_scene,
+        .canvas_label = canvas_label,
+        .update = safeMenuUpdate,
+        .view = safeMenuView,
+    };
+}
+
+const SafeMenuFixture = AppFixture(SafeMenuApp, safeMenuOptions);
+
+test "menu safe triangle keeps hover on the trigger while the pointer heads for its menu" {
+    const fixture = try SafeMenuFixture.create();
+    defer fixture.destroy();
+    const view = &fixture.harness.runtime.views[0];
+
+    const trigger_id = fixture.widgetIdByText(.button, "Share").?;
+    const sibling_id = fixture.widgetIdByText(.button, "Sibling").?;
+    const trigger = (try fixture.retainedFrame(trigger_id)).?;
+    const sibling = (try fixture.retainedFrame(sibling_id)).?;
+    const surface = (try fixture.retainedFrame(fixture.widgetIdByText(.dropdown_menu, "").?)).?;
+
+    const apex = geometry.PointF.init(trigger.x + 20, trigger.center().y);
+    try fixture.pointer(.pointer_move, apex);
+    try std.testing.expectEqual(trigger_id, view.canvas_widget_hovered_id);
+
+    // Halfway down the diagonal the pointer is over the sibling row, but
+    // inside the triangle to the menu's near edge: hover holds.
+    const cut = geometry.PointF.init((apex.x + surface.x) / 2, (apex.y + surface.center().y) / 2);
+    try std.testing.expect(sibling.containsPoint(cut));
+    try std.testing.expect(!surface.containsPoint(cut));
+    try fixture.pointer(.pointer_move, cut);
+    try std.testing.expectEqual(trigger_id, view.canvas_widget_hovered_id);
+
+    // Stepping out of the triangle is a deliberate move: ordinary hover
+    // resumes at once, and the grace disarms.
+    try fixture.pointer(.pointer_move, geometry.PointF.init(sibling.x + 4, sibling.center().y));
+    try std.testing.expectEqual(sibling_id, view.canvas_widget_hovered_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_menu_safe_surface_id);
+}
+
+test "the menu safe triangle holds only while the pointer travels toward the surface" {
+    const surface = geometry.RectF.init(200, 100, 160, 120);
+    const apex = geometry.PointF.init(120, 110);
+
+    // Straight down the diagonal toward the submenu's near edge: held,
+    // even though the pointer is well below the row it started on.
+    try std.testing.expect(canvas.menuSafeTriangleContains(surface, apex, geometry.PointF.init(180, 160)));
+    // Back up above the triangle, or down past it: ordinary hover.
+    try std.testing.expect(!canvas.menuSafeTriangleContains(surface, apex, geometry.PointF.init(180, 40)));
+    try std.testing.expect(!canvas.menuSafeTriangleContains(surface, apex, geometry.PointF.init(180, 300)));
+    // Away from the surface entirely.
+    try std.testing.expect(!canvas.menuSafeTriangleContains(surface, apex, geometry.PointF.init(60, 110)));
+    // Arrived: the surface itself needs no grace.
+    try std.testing.expect(!canvas.menuSafeTriangleContains(surface, apex, geometry.PointF.init(240, 160)));
+    // A surface to the LEFT of the apex uses its trailing edge as the base.
+    const left_surface = geometry.RectF.init(20, 100, 160, 120);
+    try std.testing.expect(canvas.menuSafeTriangleContains(left_surface, geometry.PointF.init(260, 110), geometry.PointF.init(200, 160)));
+}

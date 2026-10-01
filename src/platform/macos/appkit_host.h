@@ -814,6 +814,7 @@ typedef struct {
     uint32_t item_id;
     const char *label;
     size_t label_len;
+    int checked;
     int enabled;
     int separator;
 } native_sdk_appkit_context_menu_item_t;

@@ -513,7 +513,10 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         else
             try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field, .combobox => try widget_render_controls.emitSearchFieldWidget(builder, paint_widget, tokens),
-        .tooltip => try widget_render_controls.emitTooltipWidget(builder, paint_widget, tokens),
+        .tooltip => {
+            try widget_render_controls.emitTooltipWidget(builder, paint_widget, tokens);
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
         .menu_item => try widget_render_controls.emitMenuItemWidget(builder, paint_widget, tokens),
         .list_item => {
             try widget_render_controls.emitListItemWidget(builder, paint_widget, tokens);
@@ -903,7 +906,10 @@ fn emitWidgetLayoutNodeContent(
         else
             try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
         .search_field, .combobox => try widget_render_controls.emitSearchFieldWidget(builder, paint_widget, tokens),
-        .tooltip => try widget_render_controls.emitTooltipWidget(builder, paint_widget, tokens),
+        .tooltip => {
+            try widget_render_controls.emitTooltipWidget(builder, paint_widget, tokens);
+            try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
+        },
         .menu_item => try widget_render_controls.emitMenuItemWidget(builder, paint_widget, tokens),
         .list_item => try widget_render_controls.emitListItemWidget(builder, paint_widget, tokens),
         .data_cell => try emitDataCellContent(builder, paint_widget, tokens),

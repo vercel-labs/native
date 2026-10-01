@@ -1,4 +1,5 @@
 const std = @import("std");
+const geometry = @import("geometry");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const drawing_model = @import("drawing.zig");
@@ -353,4 +354,87 @@ pub fn gridRowCount(child_count: usize, columns: usize) usize {
 
 pub fn saturatingU32(value: usize) u32 {
     return if (value > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(value);
+}
+
+// -- Menu safe triangle ------------------------------------------------
+//
+// Moving the pointer from "Share ▸" to the submenu it opened is a
+// DIAGONAL journey, and the rows between the trigger and the submenu sit
+// directly under that diagonal. Hovering them would close the submenu
+// the pointer is on its way to, so the trip has to be protected: while
+// the pointer stays inside the triangle spanned by where it left the
+// trigger and the two near corners of the open submenu, hover keeps
+// reporting the trigger and the submenu stays put. Step outside the
+// triangle — a deliberate move to another row — and ordinary hover
+// resumes immediately, with no timer to wait out.
+//
+// See https://mayank.co/blog/hover-triangles/ for the shape. The runtime
+// arms the apex when hover resolves onto a row that owns an open
+// anchored menu, and clears it the moment this predicate goes false.
+
+/// A menu surface that hangs off `node_index` as an anchored child: the
+/// submenu a row opens, or the menu a bar title opens. Both get the same
+/// protection — a bar title's menu is just as easy to cut a corner off.
+pub fn widgetLayoutAnchoredMenuChildIndex(layout: anytype, node_index: usize) ?usize {
+    for (layout.nodes, 0..) |node, index| {
+        if (node.parent_index != node_index) continue;
+        if (!widgetIsAnchored(node.widget)) continue;
+        if (!widgetKindIsMenuSurface(node.widget.kind)) continue;
+        if (node.frame.normalized().isEmpty()) continue;
+        return index;
+    }
+    return null;
+}
+
+fn widgetKindIsMenuSurface(kind: widget_model.WidgetKind) bool {
+    return kind == .dropdown_menu or kind == .menu_surface;
+}
+
+/// The corner of `surface` the pointer is heading for, paired with the
+/// far one on the same edge: the vertical edge facing `apex`. A surface
+/// the apex sits inside horizontally (a menu directly below its bar
+/// title) uses the nearer of the two edges, which keeps the triangle
+/// pointing the way the pointer must actually travel.
+fn menuSafeBaseEdge(surface: geometry.RectF, apex: geometry.PointF) [2]geometry.PointF {
+    const rect = surface.normalized();
+    const use_left = if (apex.x <= rect.x)
+        true
+    else if (apex.x >= rect.maxX())
+        false
+    else
+        (apex.x - rect.x) <= (rect.maxX() - apex.x);
+    const x = if (use_left) rect.x else rect.maxX();
+    return .{ geometry.PointF.init(x, rect.y), geometry.PointF.init(x, rect.maxY()) };
+}
+
+fn triangleSide(a: geometry.PointF, b: geometry.PointF, point: geometry.PointF) f32 {
+    return (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
+}
+
+/// Slack in points added to the base edge at both ends, so the pointer
+/// may clip the very corner of the submenu without losing the grace.
+const menu_safe_base_slack: f32 = 4;
+
+/// True while `point` is inside the safe triangle from `apex` to the
+/// near edge of `surface`. A point already over the surface is past the
+/// journey and needs no grace, so it answers false and lets ordinary
+/// hover take over.
+pub fn menuSafeTriangleContains(surface: geometry.RectF, apex: geometry.PointF, point: geometry.PointF) bool {
+    const rect = surface.normalized();
+    if (rect.isEmpty()) return false;
+    if (rect.containsPoint(point)) return false;
+    const base = menuSafeBaseEdge(rect, apex);
+    const top = geometry.PointF.init(base[0].x, base[0].y - menu_safe_base_slack);
+    const bottom = geometry.PointF.init(base[1].x, base[1].y + menu_safe_base_slack);
+    // A degenerate triangle (the apex sitting on the base line) protects
+    // nothing; treat it as outside rather than letting the sign test
+    // answer arbitrarily.
+    const area = triangleSide(apex, top, bottom);
+    if (@abs(area) < 0.001) return false;
+    const s0 = triangleSide(apex, top, point);
+    const s1 = triangleSide(top, bottom, point);
+    const s2 = triangleSide(bottom, apex, point);
+    const negative = s0 < 0 or s1 < 0 or s2 < 0;
+    const positive = s0 > 0 or s1 > 0 or s2 > 0;
+    return !(negative and positive);
 }

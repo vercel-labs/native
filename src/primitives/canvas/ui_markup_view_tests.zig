@@ -888,6 +888,23 @@ test "anchor and tooltip-delay on tooltip stamp the hover-intent declaration" {
     try testing.expectEqual(@as(?canvas.WidgetAnchor, null), static.layout.anchor);
 }
 
+test "a tooltip composes child elements over its chrome" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<stack>\n  <text>Bold</text>\n  <tooltip anchor=\"above\" padding=\"6\">\n    <row gap=\"8\">\n      <text>Bold</text>\n      <text>Cmd+B</text>\n    </row>\n  </tooltip>\n</stack>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const tooltip = findByKind(tree.root, .tooltip).?;
+    try testing.expectEqualStrings("", tooltip.text);
+    try testing.expectEqual(@as(usize, 1), tooltip.children.len);
+    try testing.expectEqual(canvas.WidgetKind.row, tooltip.children[0].kind);
+    try testing.expectEqual(canvas.WidgetAnchorPlacement.above, tooltip.layout.anchor.?.placement);
+}
+
 test "tooltip-delay past i32 max fails the build instead of trapping" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

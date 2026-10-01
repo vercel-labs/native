@@ -149,7 +149,7 @@ pub fn layoutWidgetDepth(
                 _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, tokens), index, depth + 1, output, len, tokens);
             }
         },
-        .stack, .bubble, .card, .resizable, .panel, .popover => {
+        .stack, .bubble, .card, .resizable, .panel, .popover, .tooltip => {
             for (widget.children) |child| {
                 if (!widgetTakesFlowSlot(child)) continue;
                 _ = try layoutWidgetDepth(child, stackChildFrame(content, child, tokens), index, depth + 1, output, len, tokens);
@@ -173,7 +173,7 @@ pub fn layoutWidgetDepth(
             try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens)
         else
             try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
-        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface, .terminal => {},
+        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface, .terminal => {},
     }
 
     // Root-relative modals and anchored floating children are excluded from
@@ -207,10 +207,31 @@ fn rootRelativeModalFrame(widget: Widget, proposed: geometry.RectF, root: geomet
         clampIntrinsicAxis(if (widget.frame.width > 0) widget.frame.width else intrinsic.width, widget.layout.min_size.width, widget.layout.max_size.width),
         clampIntrinsicAxis(if (widget.frame.height > 0) widget.frame.height else intrinsic.height, widget.layout.min_size.height, widget.layout.max_size.height),
     );
-    return widget_model.builtinSurfaceFrame(kind, .{
+    if (widget.layout.modal_edge != .automatic) {
+        const panel_height = if (widget.layout.modal_height_fraction > 0)
+            root.height * std.math.clamp(widget.layout.modal_height_fraction, 0, 1)
+        else
+            preferred.height;
+        return switch (widget.layout.modal_edge) {
+            .top => geometry.RectF.init(root.x, root.y, root.width, @min(root.height, panel_height)),
+            .right => geometry.RectF.init(root.maxX() - @min(root.width, preferred.width), root.y, @min(root.width, preferred.width), root.height),
+            .bottom => geometry.RectF.init(root.x, root.maxY() - @min(root.height, panel_height), root.width, @min(root.height, panel_height)),
+            .left => geometry.RectF.init(root.x, root.y, @min(root.width, preferred.width), root.height),
+            .automatic => unreachable,
+        };
+    }
+    const centered = widget_model.builtinSurfaceFrame(kind, .{
         .bounds = root,
         .preferred_size = preferred,
     }) orelse proposed;
+    // A palette pins its TOP and grows downward (see
+    // `WidgetLayoutStyle.modal_top_fraction`): centering would walk the
+    // whole surface up the window every time a result is filtered out.
+    if (kind == .dialog and widget.layout.modal_top_fraction > 0) {
+        const top = root.y + root.height * std.math.clamp(widget.layout.modal_top_fraction, 0, 1);
+        return geometry.RectF.init(centered.x, @min(top, @max(root.y, root.maxY() - centered.height)), centered.width, centered.height);
+    }
+    return centered;
 }
 
 fn widgetTakesFlowSlot(widget: Widget) bool {
@@ -533,14 +554,25 @@ pub fn anchoredWidgetFrame(
     const offset = nonNegative(anchor.offset);
     const space_below = window.maxY() - anchor_frame.maxY() - offset;
     const space_above = anchor_frame.y - window.y - offset;
-    const preferred_space = switch (anchor.placement) {
-        .below => space_below,
-        .above => space_above,
-    };
-    const other_space = switch (anchor.placement) {
-        .below => space_above,
-        .above => space_below,
-    };
+    if (anchor.placement == .left or anchor.placement == .right) {
+        const space_left = anchor_frame.x - window.x - offset;
+        const space_right = window.maxX() - anchor_frame.maxX() - offset;
+        const prefer_right = anchor.placement == .right;
+        const preferred_space = if (prefer_right) space_right else space_left;
+        const other_space = if (prefer_right) space_left else space_right;
+        const right = prefer_right != (width > preferred_space and other_space > preferred_space);
+        width = @min(width, @max(0, if (right) space_right else space_left));
+        const x = if (right) anchor_frame.maxX() + offset else anchor_frame.x - offset - width;
+        var y = switch (anchor.alignment) {
+            .start, .stretch => anchor_frame.y,
+            .center => anchor_frame.y + (anchor_frame.height - height) / 2,
+            .end => anchor_frame.maxY() - height,
+        };
+        y = std.math.clamp(y, window.y, @max(window.y, window.maxY() - height));
+        return geometry.RectF.init(std.math.clamp(x, window.x, @max(window.x, window.maxX() - width)), y, width, height);
+    }
+    const preferred_space = if (anchor.placement == .below) space_below else space_above;
+    const other_space = if (anchor.placement == .below) space_above else space_below;
     const flipped = height > preferred_space and other_space > preferred_space;
     const below = (anchor.placement == .below) != flipped;
     const side_space = @max(0, if (below) space_below else space_above);
@@ -549,6 +581,7 @@ pub fn anchoredWidgetFrame(
     const y = if (below) anchor_frame.maxY() + offset else anchor_frame.y - offset - height;
     var x = switch (anchor.alignment) {
         .start, .stretch => anchor_frame.x,
+        .center => anchor_frame.x + (anchor_frame.width - width) / 2,
         .end => anchor_frame.maxX() - width,
     };
     x = std.math.clamp(x, window.x, @max(window.x, window.maxX() - width));
@@ -1053,7 +1086,8 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
             }
             break :blk sum;
         },
-        .stack, .panel, .card, .bubble, .resizable, .popover => blk: {
+        .stack, .panel, .card, .bubble, .resizable, .popover, .tooltip => blk: {
+            if (widget.kind == .tooltip and widget.children.len == 0) return preferredMainExtent(widget, .vertical, tokens);
             var max_height: f32 = 0;
             for (widget.children) |child| {
                 if (!widgetTakesFlowSlot(child)) continue;
@@ -1878,7 +1912,7 @@ pub fn slideSplitChildren(
 /// excluded on purpose.
 pub fn widgetKindStacksChildren(kind: widget_model.WidgetKind) bool {
     return switch (kind) {
-        .stack, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => true,
+        .stack, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .tooltip => true,
         else => false,
     };
 }
@@ -2004,7 +2038,10 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         .input, .text_field => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 160), widgetControlHeight(widget, tokens)),
         .search_field, .combobox => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetControlHeight(widget, tokens)),
         .textarea => geometry.SizeF.init(widgetSizedDensityValue(widget, tokens, 200), widgetSizedDensityValue(widget, tokens, 80)),
-        .tooltip => intrinsicPaddedTextWidgetSize(widget, tokens, widgetLabelTextSize(widget, tokens), widgetControlInset(widget, tokens, tokens.spacing.sm)),
+        .tooltip => if (widget.children.len > 0)
+            intrinsicOverlayChildrenSize(widget, tokens, depth)
+        else
+            intrinsicPaddedTextWidgetSize(widget, tokens, widgetLabelTextSize(widget, tokens), widgetControlInset(widget, tokens, tokens.spacing.sm)),
         // Menu rows measure like list rows PLUS the trailing checkmark
         // slot every option reserves (committed or not, so commit moves
         // never reflow labels), on the menu's comfortable row band.

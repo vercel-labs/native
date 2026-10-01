@@ -139,6 +139,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                         items[item_index] = .{
                             .id = @intCast(item_index + 1),
                             .label = item.label,
+                            .checked = item.checked,
                             .enabled = item.enabled,
                             .separator = item.separator,
                         };

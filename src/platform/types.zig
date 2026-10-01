@@ -2329,6 +2329,7 @@ pub const ContextMenuItem = struct {
     /// Non-zero selection id reported back in `ContextMenuActionEvent`.
     id: u32 = 0,
     label: []const u8 = "",
+    checked: bool = false,
     enabled: bool = true,
     separator: bool = false,
 };

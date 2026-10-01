@@ -840,6 +840,9 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
         a.virtual_anchor_index == b.virtual_anchor_index and
         a.virtual_anchor_extent == b.virtual_anchor_extent and
         a.virtual_total_extent == b.virtual_total_extent and
+        a.modal_edge == b.modal_edge and
+        a.modal_top_fraction == b.modal_top_fraction and
+        a.modal_height_fraction == b.modal_height_fraction and
         sizesEqual(a.min_size, b.min_size) and
         sizesEqual(a.max_size, b.max_size);
 }

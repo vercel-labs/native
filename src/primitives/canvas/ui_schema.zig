@@ -257,9 +257,10 @@ pub const elements = [_]ElementInfo{
     // its PARENT's frame (the trigger, or the stack wrapping trigger +
     // tooltip), and the RUNTIME owns its visibility — hidden until the
     // hover-intent delay on the trigger fires (see `tooltip-delay`).
-    // Without `anchor` it stays the classic static text leaf that
-    // paints whenever the view renders it.
-    .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false, .anchorable = true },
+    // Without `anchor` it stays the classic static text surface that
+    // paints whenever the view renders it. Content can be a text label
+    // or composed children laid over the same tooltip chrome.
+    .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .takes_children = true, .stacks_children = true, .hit_target = false, .anchorable = true },
     // Value controls and text entry.
     .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox", .takes_text = true, .a11y_name = .control },
     .{ .code = 41, .name = "radio", .widget_kind = "radio", .takes_text = true, .a11y_name = .control },

@@ -2932,6 +2932,43 @@ test "built-in accordion disclosure state controls child layout and semantics" {
     try std.testing.expect(expanded_builder.displayList().findCommandById(widgetPartId(46, 1)) != null);
 }
 
+test "a tooltip with children sizes to them and paints them over its chrome" {
+    const label = [_]Widget{.{ .id = 72, .kind = .text, .text = "Bold" }};
+    var tooltip = builtinComponentWidget(.tooltip, .{ .id = 71, .children = &label });
+    tooltip.layout.padding = geometry.InsetsF.all(6);
+    const tokens = DesignTokens{};
+
+    // Children, not a text label, size the surface: the child's own
+    // intrinsic size plus the tooltip's padding.
+    const child_size = intrinsicWidgetSize(label[0], tokens);
+    const size = intrinsicWidgetSize(tooltip, tokens);
+    try std.testing.expectApproxEqAbs(child_size.width + 12, size.width, 0.01);
+    try std.testing.expectApproxEqAbs(child_size.height + 12, size.height, 0.01);
+
+    const frame = geometry.RectF.init(10, 10, size.width, size.height);
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(tooltip, frame, &nodes);
+    const child = layout.findById(72).?;
+    try std.testing.expectEqual(@as(f32, 16), child.frame.x);
+    try std.testing.expectEqual(@as(f32, 16), child.frame.y);
+
+    // Both render walks paint the chrome first, then the children.
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, tokens);
+    const list = builder.displayList();
+    const chrome = list.findCommandById(widgetPartId(71, 2)) orelse return error.TestUnexpectedResult;
+    const text = list.findCommandById(widgetPartId(72, 1)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(chrome.index < text.index);
+
+    var tree_commands: [8]CanvasCommand = undefined;
+    var tree_builder = Builder.init(&tree_commands);
+    var placed = tooltip;
+    placed.frame = frame;
+    try emitWidgetTree(&tree_builder, placed, tokens);
+    try std.testing.expect(tree_builder.displayList().findCommandById(widgetPartId(72, 1)) != null);
+}
+
 test "built-in alert renders house surface chrome and text" {
     const alert = builtinComponentWidget(.alert, .{
         .id = 40,

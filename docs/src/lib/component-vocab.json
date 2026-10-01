@@ -194,7 +194,7 @@
     },
     {
       "name": "tooltip",
-      "doc": "Tooltip text leaf; content supports {} interpolation. anchor=\"above|below\" floats it against its parent (put it beside its trigger in a stack) and hands visibility to the RUNTIME: it shows after the trigger has been hovered tooltip-delay milliseconds (default 600; a shared 400ms warm window after a pointer-hovered tooltip hides on leave shows the next one instantly), shows immediately when the trigger gains keyboard focus, and hides on pointer leave, focus departure, Escape, or a press of the trigger (only the pointer-leave hide warms) - the model never hears hover. Without anchor it stays a static leaf that paints whenever the view renders it."
+      "doc": "Tooltip surface: its text content (with {} interpolation) is the label, or child elements compose richer content (a label beside a shortcut) over the same chrome; give composed content padding, as with popover. anchor=\"above|below\" floats it against its parent (put it beside its trigger in a stack) and hands visibility to the RUNTIME: it shows after the trigger has been hovered tooltip-delay milliseconds (default 600; a shared 400ms warm window after a pointer-hovered tooltip hides on leave shows the next one instantly), shows immediately when the trigger gains keyboard focus, and hides on pointer leave, focus departure, Escape, or a press of the trigger (only the pointer-leave hide warms) - the model never hears hover. Without anchor it stays a static surface that paints whenever the view renders it."
     },
     {
       "name": "input",
