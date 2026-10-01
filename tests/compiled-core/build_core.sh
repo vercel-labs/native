@@ -8,8 +8,8 @@
 #   <fixture>: ai-chat | soundboard | system-monitor | host-fixture | markup
 #   <workdir>: scratch directory (created; contents replaced)
 #
-# The compiler resolves from the SDK's own exact-pinned dependency
-# (packages/core/node_modules — `npm ci` there installs it);
+# The compiler resolves from the SDK's own exact-pinned dependencies
+# (packages/core/node_modules — `npm ci` there installs them);
 # NATIVE_SDK_CORE_COMPILER overrides with any toolchain command, still
 # held to the pin.
 #
@@ -179,12 +179,20 @@ cp "$staged/core_profile.json" "$work/profile.json"
 
 name="$(printf '%s' "$fixture" | tr '-' '_')_core"
 
+build_core() {
+  if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
+    $compiler build --lib --profile profile.json -o "$name"
+  else
+    node "$repo/packages/core/scripts/run_library_compiler.mjs" --profile profile.json --out "$name" --version "$pin"
+  fi
+}
+
 cd "$work"
 cold_start=$(date +%s)
-$compiler build --lib --profile profile.json -o "$name"
+build_core
 cold_end=$(date +%s)
 warm_start=$(date +%s)
-$compiler build --lib --profile profile.json -o "$name"
+build_core
 warm_end=$(date +%s)
 
 # The toolchain writes the ar archive at the bare -o name (some

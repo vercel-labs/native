@@ -85,4 +85,6 @@ test("the one runtime dependency is the exact-pinned external core compiler", ()
   assert.match(pin, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(manifest.dependencies, { scriptc: pin });
   assert.equal(cliManifest.dependencies?.scriptc, pin, "the published CLI and @native-sdk/core must ship one compiler release");
+  assert.equal(manifest.devDependencies?.["@scriptc/compiler"], pin, "the checkout's sidecar compiler must match scriptc");
+  assert.equal(cliManifest.dependencies?.["@scriptc/compiler"], pin, "the published CLI's sidecar compiler must match scriptc");
 });

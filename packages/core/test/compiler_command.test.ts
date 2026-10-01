@@ -28,6 +28,28 @@ test("Windows npm scriptc shims execute the package's published bin through Node
   }
 });
 
+test("Windows npm scriptc shims execute a native package bin directly", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-command-"));
+  try {
+    const nodeModules = path.join(root, "node_modules");
+    const shim = path.join(nodeModules, ".bin", "scriptc.cmd");
+    const packageRoot = path.join(nodeModules, "scriptc");
+    const publishedBin = path.join(packageRoot, "bin", "scriptc.exe");
+    fs.mkdirSync(path.dirname(shim), { recursive: true });
+    fs.mkdirSync(path.dirname(publishedBin), { recursive: true });
+    fs.writeFileSync(shim, "@echo off\r\n");
+    fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ bin: { scriptc: "bin/scriptc.exe" } }));
+    fs.writeFileSync(publishedBin, "native compiler bin");
+
+    assert.deepEqual(
+      compilerArgv(shim, { platform: "win32", node: "C:\\Node\\node.exe", env: {} }),
+      [publishedBin],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Windows batch-file compiler overrides use cmd.exe while other commands stay direct", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-command-"));
   try {
@@ -44,9 +66,9 @@ test("Windows batch-file compiler overrides use cmd.exe while other commands sta
   }
 });
 
-test("published scriptc command follows the package bin bootstrap", () => {
+test("published scriptc command follows the native package bin", () => {
   const coreRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   const argv = publishedScriptcArgv(path.join(coreRoot, "package.json"), { node: "node24" });
-  assert.equal(argv[0], "node24");
-  assert.match(argv[1], /scriptc[/\\]dist[/\\]bootstrap\.js$/);
+  assert.equal(argv.length, 1);
+  assert.match(argv[0], /scriptc[/\\]bin[/\\]scriptc\.exe$/);
 });

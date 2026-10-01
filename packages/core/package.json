@@ -36,9 +36,10 @@
     "build:declarations": "node scripts/gen_declarations.mjs"
   },
   "devDependencies": {
+    "@scriptc/compiler": "0.2.0",
     "@typescript/old": "npm:typescript@6.0.3"
   },
   "dependencies": {
-    "scriptc": "0.0.35"
+    "scriptc": "0.2.0"
   }
 }

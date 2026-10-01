@@ -957,6 +957,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/app_runner/ts_core_main.zig", .pattern = "extern const native_sdk_app_markup: u8;" },
         .{ .path = "packages/core/scripts/embed_markup_c.mjs", .pattern = "const unsigned char native_sdk_app_markup[]" },
         .{ .path = "build/app.zig", .pattern = "node_modules\", \"scriptc\", \"dist\", \"bootstrap.js\"" },
+        .{ .path = "build/app.zig", .pattern = "node_modules\", \"scriptc\", \"bin\", \"scriptc.exe\"" },
         .{ .path = "build/app.zig", .pattern = "setEnvironmentVariable(\"SCRIPTC_TIMING\", \"1\")" },
         .{ .path = "build/app.zig", .pattern = "service_compile.addArg(\"--compiler-package-origin\")" },
         .{ .path = "build/app.zig", .pattern = "compile.addArg(\"--compiler-package-origin\")" },
@@ -968,7 +969,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/core/scripts/compiler_command.mjs", .pattern = "npmTarget !== null" },
         .{ .path = "build.zig", .pattern = "fn repositoryScriptcBin" },
         .{ .path = "build.zig", .pattern = "packages/core/node_modules/.bin/scriptc.cmd" },
-        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--compiler\", repositoryScriptcBin(b) });" },
+        .{ .path = "build.zig", .pattern = "compile.addArg(\"--compiler-package-origin\");" },
+        .{ .path = "build/app.zig", .pattern = "compile.addFileInput(dep.path(\"packages/core/scripts/run_library_compiler.mjs\"))" },
         .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
         .{ .path = "src/tooling/verbs.zig", .pattern = "fn rebuildPathIgnored" },
         .{ .path = "src/tooling/verbs.zig", .pattern = "var walker = try root.walkSelectively(allocator);" },
@@ -3978,7 +3980,8 @@ fn externalServiceFixture(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
+        compile.addArg("--compiler-package-origin");
+        compile.addFileArg(b.path("packages/core/package.json"));
     }
 
     return .{
@@ -4204,6 +4207,7 @@ fn externalCoreFixtureModule(
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_core_compiler.mjs"));
     compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/run_library_compiler.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArgs(&.{ "--name", spec.name });
@@ -4230,7 +4234,8 @@ fn externalCoreFixtureModule(
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
+        compile.addArg("--compiler-package-origin");
+        compile.addFileArg(b.path("packages/core/package.json"));
     }
 
     // The mirror, generated from the archive's OWN co-emitted contract,

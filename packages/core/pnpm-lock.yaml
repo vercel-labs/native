@@ -9,20 +9,136 @@ importers:
   .:
     dependencies:
       scriptc:
-        specifier: 0.0.35
-        version: 0.0.35
+        specifier: 0.2.0
+        version: 0.2.0
     devDependencies:
+      '@scriptc/compiler':
+        specifier: 0.2.0
+        version: 0.2.0
       '@typescript/old':
         specifier: npm:typescript@6.0.3
         version: typescript@6.0.3
 
 packages:
 
-  '@scriptc/compiler@0.0.35':
-    resolution: {integrity: sha512-OLTmyGpFPJAAVn0RfRBoXuCjpaTfpBC1wt6XdO/SzqMab/DaRjCIJY9vv5b1VspP6zLZP2WEYWZPgP8vHKAJPg==}
+  '@scriptc/cli-darwin-arm64@0.2.0':
+    resolution: {integrity: sha512-Wxn6H0AqRFyZPzAkSNsfn5i1CC5PerR+gKKEPF+N3i4w+OHfw/OoBzkSSV5gjCBTT5SrS4x0xKGg65vLmdIvTg==}
+    cpu: [arm64]
+    os: [darwin]
 
-  '@scriptc/runtime@0.0.35':
-    resolution: {integrity: sha512-kjtKfneGr9YGxx631jOPJ1XVh0X6h5LM+rwQmhF6loI9oA+zW7rlYmoF+VkTXLdkre+bu9LptIIgdxKPdAquPA==}
+  '@scriptc/cli-darwin-x64@0.2.0':
+    resolution: {integrity: sha512-5EZ24Ib2Z/R7XyVqRJyMMQCfE/PQRcNvPGnvUl3aLdHkZT9k66jHyAAZkNl2u/V6OSM04uiPvyFdYsFCIa6+Sw==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@scriptc/cli-linux-arm64-gnu@0.2.0':
+    resolution: {integrity: sha512-939Vos/mf+PPjl+YrhJNpqFdwU0XPGwNmi2xewUzoKJBY1g+zv6AvS3tifY51SfEreHKEFTIHDsEiQBT3+lKGA==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@scriptc/cli-linux-arm64-musl@0.2.0':
+    resolution: {integrity: sha512-meMT4uUlG9rt/+pzbJ/B4rcvEFT1NCCdD0AeVz5ZA+WaeIAiaxsbffGvtHTwPHmLC6NPsNnX0+Ps5EJH9dCnJQ==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@scriptc/cli-linux-x64-gnu@0.2.0':
+    resolution: {integrity: sha512-pkBjLGDE1OQ75do4U2HokT1pXhS4JqQMk7dkEwi2XLbCf5yDBywpFZIX9tQJX4CRtjs28LWr+h2/vDAPDg/L4g==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@scriptc/cli-linux-x64-musl@0.2.0':
+    resolution: {integrity: sha512-Y0NpFBn2yrXvHK1ly8qLl5RVl+Y7aA40142fWKcIscFORFS1ldlcWyhZt6WbM64kIhHtv739BJmeK4E1dL1lIw==}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@scriptc/cli-win32-x64-msvc@0.2.0':
+    resolution: {integrity: sha512-rDorY4YVLwgrl/5sj+VhnBHMKKaVHMRlrWfbCgjHOEWxirxkYCeqoPhOiaXm9HjkNfcl9CqZeCiNnd+E04FZ3g==}
+    cpu: [x64]
+    os: [win32]
+
+  '@scriptc/compiler@0.2.0':
+    resolution: {integrity: sha512-xQp9XC3Qgs/nQMg8M3zZ1W+GNRX9wRrszqzsBpDbLjuV3GjuqA+Nm3jxehal0S7DE5dgdaHPM0CCMru6RdB1ww==}
+
+  '@scriptc/llvm-darwin-arm64@0.2.0':
+    resolution: {integrity: sha512-Y/nrfAGLADgA3kBhYmJBupE7rrGU5o1zEFUKVpZ/pU6iWHNhRFzWmbg4lsXsbPfFKqZl/MvfNUF4dSTAkw725w==}
+    cpu: [arm64]
+    os: [darwin]
+    hasBin: true
+
+  '@scriptc/llvm-darwin-x64@0.2.0':
+    resolution: {integrity: sha512-1Tj5Z9uV7HFvmmR52OGDWfEIXofgon1e/KhiBnFaJN25zg9uVLvT+priABIpGzEoxgPVsI8U5+1z8A7b2p60Hw==}
+    cpu: [x64]
+    os: [darwin]
+    hasBin: true
+
+  '@scriptc/llvm-linux-arm64-gnu@0.2.0':
+    resolution: {integrity: sha512-A3Xf8sS2oVEIBFC0IKaXYCeCG4M0NCY3MsNUXHN6mEXgZae+japgKo3OPpFlLKMf1oWpl0sgZHtvmZclqrH2vA==}
+    cpu: [arm64]
+    os: [linux]
+    hasBin: true
+
+  '@scriptc/llvm-linux-arm64-musl@0.2.0':
+    resolution: {integrity: sha512-OK0y0uqzpDh+sLm+zfWMYjuSmMMhofNkq6xtI93j9bhPo2uUYhRvuD0GHfH7L+6196qemE/Ryx6Sq6X89hQ9XA==}
+    cpu: [arm64]
+    os: [linux]
+    hasBin: true
+
+  '@scriptc/llvm-linux-x64-gnu@0.2.0':
+    resolution: {integrity: sha512-sT98a1dlBtM/TmD5WPZn4q/QSiTKi+YAu3mkAzD88MuUsRJEUKjhmV3IYwSB2FtJ/Vf1NPiMyzvR+o92PZlcvQ==}
+    cpu: [x64]
+    os: [linux]
+    hasBin: true
+
+  '@scriptc/llvm-linux-x64-musl@0.2.0':
+    resolution: {integrity: sha512-ODc+0i8XC/TQtWN0DVGliakDUDq85ivASby5LoVSSUprG6w7+5Jz+SeskOOAjJMsm0YIll4re97yTS3SR8ynaA==}
+    cpu: [x64]
+    os: [linux]
+    hasBin: true
+
+  '@scriptc/llvm-win32-x64-msvc@0.2.0':
+    resolution: {integrity: sha512-CgQYJTB1Wq8oboZ6x3bJiPYmWfpmg29YNcUo91LjE/rTrx52fzz7JSSDPyL6p+zTAsTLADoN2nK+xt9YbK0fow==}
+    cpu: [x64]
+    os: [win32]
+
+  '@scriptc/runtime-android-arm64@0.2.0':
+    resolution: {integrity: sha512-nN0DZUh6h1KtW1dftXqpyg4o+rObNUrazSWFWHuozmknL5k3CXJTPBWGxi0uoMGBefqEWEtbDmBHjWFWOd3xQQ==}
+
+  '@scriptc/runtime-darwin-arm64@0.2.0':
+    resolution: {integrity: sha512-rydc5AvPjO7YNwJKqNDIh1Xn0XYu2v0YsEgYkdV8V9L0vqqlx7zqxyUtIk6qXHfQ7n7grig1PLiktL6ElHgc/A==}
+
+  '@scriptc/runtime-darwin-x64@0.2.0':
+    resolution: {integrity: sha512-puOH3sGzTXvT+q6niAdYpKheiY+vDW/7VX8fOGxfWUdiawJfkJEoX2KEcVs44ZuGn5s6c0GyXafSne3jSShJMA==}
+
+  '@scriptc/runtime-ios-arm64@0.2.0':
+    resolution: {integrity: sha512-Mo3Z3ye71kURjH89Wg40D/wYsoHXS7cckeb8U7hkemrMIvArniUX1k7Bbq0zVWRMsroOtp85ZpwLQWu++0kTTw==}
+
+  '@scriptc/runtime-ios-simulator-arm64@0.2.0':
+    resolution: {integrity: sha512-sxINHyIcig9O0PvCXJmjNuricylFn3BBUjTv+eqeNGpaLuwwvIrxgl30B81i6BGnEsmVmfRVc33ce1gOfriuGA==}
+
+  '@scriptc/runtime-linux-arm64-gnu@0.2.0':
+    resolution: {integrity: sha512-2RdXw2GaVQuHHtfgmeiMd2Lu52ng81lynYsC/2Hnki5AgCg5keyhzGnz2uIZv1wksbLF5raoX9CJSELilvt/sg==}
+
+  '@scriptc/runtime-linux-arm64-musl@0.2.0':
+    resolution: {integrity: sha512-OMW2+9l2HojNaKlHvnv1bvKIf7QTPIa741ZPfgIQqLoiYTzzYKyS1YClLc3R6Q/koI+loVk1NOJTIfDaMPExlQ==}
+
+  '@scriptc/runtime-linux-x64-gnu@0.2.0':
+    resolution: {integrity: sha512-0fNb1A6Za0vWpsBdq0mHz80xIVxvrJIvgRZQT189FC/XPP5/LlAV0+fSm62+xUREDjlAHu83eKsJTBmnEFqQpQ==}
+
+  '@scriptc/runtime-linux-x64-musl@0.2.0':
+    resolution: {integrity: sha512-BdyOpCuSQCeNa7WEljfVG0XhoSpMk4bNE1ckT64sCEZ1xNeLJ+8oTnn1wnJmenTsnwHC13N75MaErhG9CAZcHA==}
+
+  '@scriptc/runtime-wasm32-wasi@0.2.0':
+    resolution: {integrity: sha512-nwDCpmLxEBgH8P8nu1A6KVSrKzOePrdyZJanmUz7TLaJ7tPgtsEPf4sL2vnIImb/robB94wdWrYStAepm6af9Q==}
+
+  '@scriptc/runtime-win32-x64-msvc@0.2.0':
+    resolution: {integrity: sha512-PHKoSqvBxywE61Z7Ifv1u7bck8ebesLkqgZwj86wBTHlNguCvhbeUwHaw+S3XQaps83eeCMFRTKpPLz2pfE4oA==}
+
+  '@scriptc/runtime@0.2.0':
+    resolution: {integrity: sha512-h384BIvHX2c5UcmX8qf7u2l9lWtV2qp95lnIPRXGQ3PHOYlccjlfGWlFzzGir5k63QP7zP2m8q0+5jGXoiv4hQ==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -144,8 +260,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  scriptc@0.0.35:
-    resolution: {integrity: sha512-46Td/02HJZNLuosdYDiUSQ+auKwGmQ03+odD6Pg+J7D+eAV7sOYQvjZu9M+3ePyYfL3hFQa6wWiGexV/Bd0r+w==}
+  scriptc@0.2.0:
+    resolution: {integrity: sha512-neoXvMwRdsDeIiluveS8iVVTIxj4lNBVJmN6p7UodbY+Z5BiBSQRGRKD60xnprdQ9ly/pCTQXOjKpq6qDOeriw==}
     engines: {node: '>=24'}
     hasBin: true
 
@@ -166,13 +282,107 @@ packages:
 
 snapshots:
 
-  '@scriptc/compiler@0.0.35':
+  '@scriptc/cli-darwin-arm64@0.2.0':
+    optional: true
+
+  '@scriptc/cli-darwin-x64@0.2.0':
+    optional: true
+
+  '@scriptc/cli-linux-arm64-gnu@0.2.0':
+    optional: true
+
+  '@scriptc/cli-linux-arm64-musl@0.2.0':
+    optional: true
+
+  '@scriptc/cli-linux-x64-gnu@0.2.0':
+    optional: true
+
+  '@scriptc/cli-linux-x64-musl@0.2.0':
+    optional: true
+
+  '@scriptc/cli-win32-x64-msvc@0.2.0':
+    optional: true
+
+  '@scriptc/compiler@0.2.0':
     dependencies:
-      '@scriptc/runtime': 0.0.35
+      '@scriptc/runtime': 0.2.0
       typescript: 7.0.2
       typescript5: typescript@5.9.3
+    optionalDependencies:
+      '@scriptc/llvm-darwin-arm64': 0.2.0
+      '@scriptc/llvm-darwin-x64': 0.2.0
+      '@scriptc/llvm-linux-arm64-gnu': 0.2.0
+      '@scriptc/llvm-linux-arm64-musl': 0.2.0
+      '@scriptc/llvm-linux-x64-gnu': 0.2.0
+      '@scriptc/llvm-linux-x64-musl': 0.2.0
+      '@scriptc/llvm-win32-x64-msvc': 0.2.0
+      '@scriptc/runtime-android-arm64': 0.2.0
+      '@scriptc/runtime-darwin-arm64': 0.2.0
+      '@scriptc/runtime-darwin-x64': 0.2.0
+      '@scriptc/runtime-ios-arm64': 0.2.0
+      '@scriptc/runtime-ios-simulator-arm64': 0.2.0
+      '@scriptc/runtime-linux-arm64-gnu': 0.2.0
+      '@scriptc/runtime-linux-arm64-musl': 0.2.0
+      '@scriptc/runtime-linux-x64-gnu': 0.2.0
+      '@scriptc/runtime-linux-x64-musl': 0.2.0
+      '@scriptc/runtime-wasm32-wasi': 0.2.0
+      '@scriptc/runtime-win32-x64-msvc': 0.2.0
 
-  '@scriptc/runtime@0.0.35': {}
+  '@scriptc/llvm-darwin-arm64@0.2.0':
+    optional: true
+
+  '@scriptc/llvm-darwin-x64@0.2.0':
+    optional: true
+
+  '@scriptc/llvm-linux-arm64-gnu@0.2.0':
+    optional: true
+
+  '@scriptc/llvm-linux-arm64-musl@0.2.0':
+    optional: true
+
+  '@scriptc/llvm-linux-x64-gnu@0.2.0':
+    optional: true
+
+  '@scriptc/llvm-linux-x64-musl@0.2.0':
+    optional: true
+
+  '@scriptc/llvm-win32-x64-msvc@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-android-arm64@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-darwin-arm64@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-darwin-x64@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-ios-arm64@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-ios-simulator-arm64@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-linux-arm64-gnu@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-linux-arm64-musl@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-linux-x64-gnu@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-linux-x64-musl@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-wasm32-wasi@0.2.0':
+    optional: true
+
+  '@scriptc/runtime-win32-x64-msvc@0.2.0':
+    optional: true
+
+  '@scriptc/runtime@0.2.0': {}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -234,9 +444,26 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  scriptc@0.0.35:
-    dependencies:
-      '@scriptc/compiler': 0.0.35
+  scriptc@0.2.0:
+    optionalDependencies:
+      '@scriptc/cli-darwin-arm64': 0.2.0
+      '@scriptc/cli-darwin-x64': 0.2.0
+      '@scriptc/cli-linux-arm64-gnu': 0.2.0
+      '@scriptc/cli-linux-arm64-musl': 0.2.0
+      '@scriptc/cli-linux-x64-gnu': 0.2.0
+      '@scriptc/cli-linux-x64-musl': 0.2.0
+      '@scriptc/cli-win32-x64-msvc': 0.2.0
+      '@scriptc/runtime-android-arm64': 0.2.0
+      '@scriptc/runtime-darwin-arm64': 0.2.0
+      '@scriptc/runtime-darwin-x64': 0.2.0
+      '@scriptc/runtime-ios-arm64': 0.2.0
+      '@scriptc/runtime-ios-simulator-arm64': 0.2.0
+      '@scriptc/runtime-linux-arm64-gnu': 0.2.0
+      '@scriptc/runtime-linux-arm64-musl': 0.2.0
+      '@scriptc/runtime-linux-x64-gnu': 0.2.0
+      '@scriptc/runtime-linux-x64-musl': 0.2.0
+      '@scriptc/runtime-wasm32-wasi': 0.2.0
+      '@scriptc/runtime-win32-x64-msvc': 0.2.0
 
   typescript@5.9.3: {}
 

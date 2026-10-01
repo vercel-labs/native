@@ -2563,9 +2563,7 @@ const FacadeEmitter = struct {
                 \\// and the wire format's long-bytes field).
                 \\function nscfWBytes(sink: nscfSink, bytes: Uint8Array): void {
                 \\  nscfWU32(sink, bytes.length);
-                \\  for (let i = 0; i < bytes.length; i++) {
-                \\    sink.push(bytes[i]!);
-                \\  }
+                \\  for (const byte of bytes) sink.push(byte);
                 \\}
                 \\
             );
@@ -2588,9 +2586,7 @@ const FacadeEmitter = struct {
                 \\    nscfTrap("a command name or key is over 255 bytes — the wire's short-text fields cannot carry it");
                 \\  }
                 \\  sink.push(bytes.length);
-                \\  for (let i = 0; i < bytes.length; i++) {
-                \\    sink.push(bytes[i]!);
-                \\  }
+                \\  for (const byte of bytes) sink.push(byte);
                 \\}
                 \\
             );

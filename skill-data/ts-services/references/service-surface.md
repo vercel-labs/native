@@ -6,11 +6,11 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.0.35
+# Service compile surface — scriptc 0.2.0
 
 What TypeScript under `src/services/` can use, as stated by the pinned
-compiler itself (surface manifest schema 1, 527 entries:
-334 static, 36 dynamic-only, 157 unsupported).
+compiler itself (surface manifest schema 1, 585 entries:
+425 static, 14 dynamic-only, 146 unsupported).
 
 How to read the tables:
 
@@ -32,7 +32,9 @@ How to read the tables:
 
 | Entry id | Surface | Status | Refusal code | Notes |
 |---|---|---|---|---|
-| `syntax.class-declarations-inside-functions` | class declarations inside functions | unsupported | `SC1090` |  |
+| `syntax.async-generators` | typed async generator functions and methods | static |  | lazy bodies with queued next/return/throw requests, await, direct yield, and Node-compatible completion promises |
+| `syntax.await-using-declarations` | block- and function-scoped await using declarations | static |  | LIFO asynchronous disposal through [Symbol.asyncDispose], with synchronous fallback |
+| `syntax.bigint-literals` | bigint literals | static |  | arbitrary-precision values in decimal, binary, octal, and hexadecimal spelling |
 | `syntax.class-expressions` | class expressions | unsupported | `SC1020` |  |
 | `syntax.compound-assignment.bitwise-and` | compound assignment operator '&amp;=' | static |  | compiles over the operand types the '&amp;' operator supports |
 | `syntax.compound-assignment.bitwise-or` | compound assignment operator '\|=' | static |  | compiles over the operand types the '\|' operator supports |
@@ -48,9 +50,15 @@ How to read the tables:
 | `syntax.compound-assignment.times` | compound assignment operator '*=' | static |  | compiles over the operand types the '*' operator supports |
 | `syntax.debugger-statements` | debugger statements | unsupported | `SC1090` |  |
 | `syntax.delete-expressions` | delete expressions | unsupported | `SC1090` |  |
+| `syntax.finally-abrupt-completions` | abrupt completions through finally | static |  | return, throw, break, continue, and labeled jumps run crossed finally blocks; a finally completion replaces the pending one |
+| `syntax.for-await-async-generators` | for await over typed async generators | static |  | awaits each IteratorResult and closes the generator on early break |
+| `syntax.for-await-class-async-iterators` | for await over statically represented class async iterators | static |  | drives zero-parameter next methods returning Promise&lt;{ value, done? }&gt; and awaits an optional zero-parameter return method on abrupt completion |
+| `syntax.for-await-readable-streams` | for await over Node Readable and Web ReadableStream values | static |  | closes on every abrupt completion, with destroyOnReturn and preventCancel literal options |
+| `syntax.for-using-of` | for (using ... of ...) over arrays | static |  | each array element is disposed at the end of its iteration, including break and continue paths |
 | `syntax.namespaces` | namespaces | unsupported | `SC1090` |  |
-| `syntax.spread-arguments` | spread arguments | unsupported | `SC1090` |  |
+| `syntax.spread-arguments` | spread arguments | static |  | non-empty fixed tuples flatten into fixed signatures with evaluate-once ordering; arrays, Sets, and statically represented class iterables spread into typed rest parameters |
 | `syntax.typeof-expressions` | typeof expressions | unsupported | `SC1090` |  |
+| `syntax.using-declarations` | block- and function-scoped using declarations | static |  | LIFO disposal on normal and abrupt scope exit through [Symbol.dispose] |
 | `syntax.with-statements` | 'with' statements (runtime scope injection has no static resolution — bind the object to a variable and read members through it) | unsupported | `SC1090` |  |
 
 ## Diagnostic fences
@@ -60,7 +68,7 @@ each one refuses.
 
 | Entry id | Surface | Status | Refusal code | Notes |
 |---|---|---|---|---|
-| `diagnostic.sc1010` | package imports | unsupported | `SC1010` | relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and module modules (bare or node:-prefixed) and node:test (node:-prefixed only, like in Node) are supported |
+| `diagnostic.sc1010` | package imports | unsupported | `SC1010` | relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, module, and console modules (bare or node:-prefixed) and node:test (node:-prefixed only, like in Node) are supported |
 | `diagnostic.sc1012` | default exports/imports | unsupported | `SC1012` | use named exports: export function f() {} / import { f } from "./m" |
 | `diagnostic.sc1013` | namespace imports (* as ns) | unsupported | `SC1013` |  |
 | `diagnostic.sc1014` | re-exports and export lists | unsupported | `SC1014` | export declarations directly: export function f() {} |
@@ -69,7 +77,7 @@ each one refuses.
 | `diagnostic.sc1020` | class expressions | unsupported | `SC1020` |  |
 | `diagnostic.sc1030` | var declarations | unsupported | `SC1030` |  |
 | `diagnostic.sc1031` | destructuring | unsupported | `SC1031` |  |
-| `diagnostic.sc1040` | loose equality (== and !=) | unsupported | `SC1040` | use === / !== ('x == null' / 'x != null' — the null-or-undefined test — is supported; other loose comparisons need dynamic coercion semantics) |
+| `diagnostic.sc1040` | loose equality (== and !=) | unsupported | `SC1040` | primitive and primitive-union coercions plus the x == null / x != null idiom compile statically; object-to-primitive comparisons can execute valueOf/toString — convert the object explicitly first |
 | `diagnostic.sc1042` | logical operators on mixed operand types | unsupported | `SC1042` | give both operands the same type (number, string, or boolean) |
 | `diagnostic.sc1043` | comparing non-number, non-string values | unsupported | `SC1043` |  |
 | `diagnostic.sc1045` | increment/decrement in expression position | unsupported | `SC1045` | use ++/-- as a standalone statement, or write x = x + 1 |
@@ -82,10 +90,10 @@ each one refuses.
 | `diagnostic.sc1080` | 'this' outside a class method | unsupported | `SC1080` |  |
 | `diagnostic.sc1090` | this syntax | unsupported | `SC1090` |  |
 | `diagnostic.sc1100` | operations on 'unknown' values | unsupported | `SC1100` | validate with 'as &lt;type&gt;' first — the cast checks the dynamic value at runtime and throws on mismatch |
-| `diagnostic.sc1101` | converting typed values to 'unknown' | unsupported | `SC1101` | numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet |
+| `diagnostic.sc1101` | converting typed values to 'unknown' | unsupported | `SC1101` | numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy), functions, program class instances, and supported native handles convert into 'unknown' slots; functions, exact-class round trips, and handles preserve identity, while this value's type has no dynamic representation yet |
 | `diagnostic.sc1120` | this regex feature | unsupported | `SC1120` | supported: literal regexes with the g/i/m/s/u/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $&lt;name&gt; templates, \k&lt;name&gt;), .source/.flags, and string replace/replaceAll/split with string replacement templates |
 | `diagnostic.sc1121` | '.test()' on a regex with the 'g' or 'y' flag | unsupported | `SC1121` | g/y regexes carry mutable lastIndex state between calls, which is not modeled; drop the flag for a plain match test, or use replace/replaceAll/split (their iteration is internal) |
-| `diagnostic.sc2001` | values of types outside the compilable set (bigint and symbol primitives, constructor objects, and library-derived or unresolved generic shapes) | unsupported | `SC2001` |  |
+| `diagnostic.sc2001` | values of types outside the compilable set (constructor objects and library-derived or unresolved generic shapes) | unsupported | `SC2001` |  |
 | `diagnostic.sc2002` | record shape flows outside the width-copy rules (shapes must match exactly or width-coerce) | unsupported | `SC2002` |  |
 | `diagnostic.sc2003` | union-to-union conversions outside the re-tagging rule | unsupported | `SC2003` |  |
 | `diagnostic.sc2004` | uses of a binding whose declaration did not compile (cascade marker) | unsupported | `SC2004` |  |
@@ -114,6 +122,7 @@ manifest row in the Notes column:
 | `node-builtin.buffer` | buffer | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.child_process` | child_process | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.cluster` | cluster | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.console` | console | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.crypto` | crypto | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.dgram` | dgram | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.diagnostics_channel` | diagnostics_channel | static | recognized module (bare and node:-prefixed specifiers) |
@@ -153,34 +162,34 @@ manifest row in the Notes column:
 | Entry id | Surface | Status | Refusal code | Notes |
 |---|---|---|---|---|
 | `node-builtin.assert.AssertionError` | assert.AssertionError | unsupported | `SC2020` | the class itself has no lowering — catch and test err.name === "AssertionError" or err.code === "ERR_ASSERTION" |
-| `node-builtin.assert.deepEqual` | assert.deepEqual | unsupported | `SC2020` | loose == equality has no lowering — the strict forms compare with Object.is/structural equality like Node's assert/strict module, where equal IS strictEqual |
+| `node-builtin.assert.deepEqual` | assert.deepEqual | unsupported | `SC2020` | legacy deep equality has no lowering yet — deepStrictEqual and notDeepStrictEqual compare structures with Node's modern semantics |
 | `node-builtin.assert.doesNotReject` | assert.doesNotReject | unsupported | `SC2020` | await the promise directly — an unexpected rejection already fails the test |
 | `node-builtin.assert.doesNotThrow` | assert.doesNotThrow | unsupported | `SC2020` | call the function directly — an unexpected throw already fails the test |
-| `node-builtin.assert.equal` | assert.equal | unsupported | `SC2020` | loose == equality has no lowering — the strict forms compare with Object.is/structural equality like Node's assert/strict module, where equal IS strictEqual |
 | `node-builtin.assert.ifError` | assert.ifError | unsupported | `SC2020` | test explicitly instead: assert.strictEqual(err, null) / assert.strictEqual(err, undefined) |
-| `node-builtin.assert.notDeepEqual` | assert.notDeepEqual | unsupported | `SC2020` | loose == equality has no lowering — the strict forms compare with Object.is/structural equality like Node's assert/strict module, where equal IS strictEqual |
-| `node-builtin.assert.notEqual` | assert.notEqual | unsupported | `SC2020` | loose == equality has no lowering — the strict forms compare with Object.is/structural equality like Node's assert/strict module, where equal IS strictEqual |
+| `node-builtin.assert.notDeepEqual` | assert.notDeepEqual | unsupported | `SC2020` | legacy deep equality has no lowering yet — deepStrictEqual and notDeepStrictEqual compare structures with Node's modern semantics |
 | `node-builtin.assert.rejects` | assert.rejects | unsupported | `SC2020` | await the promise inside assert.throws's callback story instead: try { await p; assert.fail("expected rejection") } catch { ... } |
 | `node-builtin.assert.strict.AssertionError` | assert/strict.AssertionError | unsupported | `SC2020` | the class itself has no lowering — catch and test err.name === "AssertionError" or err.code === "ERR_ASSERTION" |
 | `node-builtin.assert.strict.doesNotReject` | assert/strict.doesNotReject | unsupported | `SC2020` | await the promise directly — an unexpected rejection already fails the test |
 | `node-builtin.assert.strict.doesNotThrow` | assert/strict.doesNotThrow | unsupported | `SC2020` | call the function directly — an unexpected throw already fails the test |
 | `node-builtin.assert.strict.ifError` | assert/strict.ifError | unsupported | `SC2020` | test explicitly instead: assert.strictEqual(err, null) / assert.strictEqual(err, undefined) |
 | `node-builtin.assert.strict.rejects` | assert/strict.rejects | unsupported | `SC2020` | await the promise inside assert.throws's callback story instead: try { await p; assert.fail("expected rejection") } catch { ... } |
-| `node-builtin.child_process.execFile` | child_process.execFile | unsupported | `SC2020` | the callback form has no lowering — promisify it: const execFileAsync = promisify(execFile) (from node:util), or use execFileSync |
+| `node-builtin.child_process.execFile` | child_process.execFile | unsupported | `SC2020` | the callback forms execFile(file, callback), execFile(file, args, callback), and execFile(file, args, { encoding: 'utf8', maxBuffer: N }, callback) lower; maxBuffer is not enforced by the growing native capture; other options and reached no-callback calls remain fenced, while util.promisify(execFile) retains its wider options slice |
 | `node-builtin.child_process.execFileSync` | child_process.execFileSync | static |  |  |
 | `node-builtin.child_process.execSync` | child_process.execSync | static |  |  |
+| `node-builtin.child_process.fork` | child_process.fork | static |  |  |
 | `node-builtin.child_process.spawn` | child_process.spawn | static |  |  |
 | `node-builtin.child_process.spawnSync` | child_process.spawnSync | static |  |  |
 | `node-builtin.cluster.isMaster` | cluster.isMaster | static |  | constant value read |
 | `node-builtin.cluster.isPrimary` | cluster.isPrimary | static |  | constant value read |
 | `node-builtin.cluster.isWorker` | cluster.isWorker | static |  | constant value read |
+| `node-builtin.console.Console` | console.Console | unsupported | `SC2020` | custom Console instances are not supported yet; direct node:console log/info/debug/error/warn calls use the process output streams |
 | `node-builtin.crypto.createCipheriv` | crypto.createCipheriv | unsupported | `SC2020` | symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createDecipheriv` | crypto.createDecipheriv | unsupported | `SC2020` | symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createDiffieHellman` | crypto.createDiffieHellman | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createDiffieHellmanGroup` | crypto.createDiffieHellmanGroup | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createECDH` | crypto.createECDH | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
-| `node-builtin.crypto.createHash` | crypto.createHash | unsupported | `SC2020` | the one lowered shape is the composed chain createHash("sha256").update(data).digest("hex") — the Hash handle itself has no lowering |
-| `node-builtin.crypto.createHmac` | crypto.createHmac | unsupported | `SC2020` | HMAC has no lowering yet — the lowered crypto surface is randomUUID, randomBytes, the createHash("sha256"\|"sha1") chain, and the introspection statics |
+| `node-builtin.crypto.createHash` | crypto.createHash | static |  |  |
+| `node-builtin.crypto.createHmac` | crypto.createHmac | static |  |  |
 | `node-builtin.crypto.createPrivateKey` | crypto.createPrivateKey | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createPublicKey` | crypto.createPublicKey | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createSecretKey` | crypto.createSecretKey | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
@@ -193,21 +202,24 @@ manifest row in the Notes column:
 | `node-builtin.crypto.generateKeySync` | crypto.generateKeySync | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.getCipherInfo` | crypto.getCipherInfo | unsupported | `SC2020` | symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.getDiffieHellman` | crypto.getDiffieHellman | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
-| `node-builtin.crypto.hash` | crypto.hash | unsupported | `SC2020` | the one-shot digest has no lowering — the composed chain createHash("sha256").update(data).digest("hex") is the lowered hashing surface |
+| `node-builtin.crypto.hash` | crypto.hash | static |  |  |
 | `node-builtin.crypto.hkdf` | crypto.hkdf | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.hkdfSync` | crypto.hkdfSync | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
-| `node-builtin.crypto.pbkdf2` | crypto.pbkdf2 | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
-| `node-builtin.crypto.pbkdf2Sync` | crypto.pbkdf2Sync | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
+| `node-builtin.crypto.pbkdf2` | crypto.pbkdf2 | static |  |  |
+| `node-builtin.crypto.pbkdf2Sync` | crypto.pbkdf2Sync | static |  |  |
 | `node-builtin.crypto.privateDecrypt` | crypto.privateDecrypt | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.privateEncrypt` | crypto.privateEncrypt | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.publicDecrypt` | crypto.publicDecrypt | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.publicEncrypt` | crypto.publicEncrypt | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.randomBytes` | crypto.randomBytes | static |  |  |
+| `node-builtin.crypto.randomFillSync` | crypto.randomFillSync | static |  |  |
+| `node-builtin.crypto.randomInt` | crypto.randomInt | static |  |  |
 | `node-builtin.crypto.randomUUID` | crypto.randomUUID | static |  |  |
 | `node-builtin.crypto.scrypt` | crypto.scrypt | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.scryptSync` | crypto.scryptSync | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.setFips` | crypto.setFips | unsupported | `SC2020` | a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) in a non-FIPS build — getFips() answers 0 here |
 | `node-builtin.crypto.sign` | crypto.sign | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
+| `node-builtin.crypto.timingSafeEqual` | crypto.timingSafeEqual | static |  |  |
 | `node-builtin.crypto.verify` | crypto.verify | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.webcrypto` | crypto.webcrypto | unsupported | `SC2020` | the WebCrypto object has no lowering — the lowered crypto surface is randomUUID, randomBytes, and the createHash chain |
 | `node-builtin.diagnostics_channel.channel` | diagnostics_channel.channel | static |  |  |
@@ -222,15 +234,21 @@ manifest row in the Notes column:
 | `node-builtin.fs.closeSync` | fs.closeSync | static |  |  |
 | `node-builtin.fs.copyFileSync` | fs.copyFileSync | static |  |  |
 | `node-builtin.fs.existsSync` | fs.existsSync | static |  |  |
+| `node-builtin.fs.fchmodSync` | fs.fchmodSync | static |  |  |
+| `node-builtin.fs.fstatSync` | fs.fstatSync | static |  |  |
+| `node-builtin.fs.fsyncSync` | fs.fsyncSync | static |  |  |
+| `node-builtin.fs.linkSync` | fs.linkSync | static |  |  |
 | `node-builtin.fs.lstatSync` | fs.lstatSync | static |  |  |
 | `node-builtin.fs.mkdirSync` | fs.mkdirSync | static |  |  |
 | `node-builtin.fs.mkdtempSync` | fs.mkdtempSync | static |  |  |
 | `node-builtin.fs.openSync` | fs.openSync | static |  |  |
 | `node-builtin.fs.promises.chmod` | fs/promises.chmod | static |  |  |
+| `node-builtin.fs.promises.lstat` | fs/promises.lstat | static |  |  |
 | `node-builtin.fs.promises.mkdir` | fs/promises.mkdir | static |  |  |
 | `node-builtin.fs.promises.open` | fs/promises.open | static |  |  |
 | `node-builtin.fs.promises.readFile` | fs/promises.readFile | static |  |  |
 | `node-builtin.fs.promises.readdir` | fs/promises.readdir | static |  |  |
+| `node-builtin.fs.promises.realpath` | fs/promises.realpath | static |  |  |
 | `node-builtin.fs.promises.rename` | fs/promises.rename | static |  |  |
 | `node-builtin.fs.promises.rm` | fs/promises.rm | static |  |  |
 | `node-builtin.fs.promises.stat` | fs/promises.stat | static |  |  |
@@ -240,6 +258,7 @@ manifest row in the Notes column:
 | `node-builtin.fs.readSync` | fs.readSync | static |  |  |
 | `node-builtin.fs.readdirSync` | fs.readdirSync | static |  |  |
 | `node-builtin.fs.realpathSync` | fs.realpathSync | static |  |  |
+| `node-builtin.fs.realpathSync.native` | fs.realpathSync.native | static |  |  |
 | `node-builtin.fs.rename` | fs.rename | static |  |  |
 | `node-builtin.fs.renameSync` | fs.renameSync | static |  |  |
 | `node-builtin.fs.rmSync` | fs.rmSync | static |  |  |
@@ -249,11 +268,12 @@ manifest row in the Notes column:
 | `node-builtin.fs.watch` | fs.watch | static |  |  |
 | `node-builtin.fs.writeFileSync` | fs.writeFileSync | static |  |  |
 | `node-builtin.fs.writeSync` | fs.writeSync | static |  |  |
+| `node-builtin.http.maxHeaderSize` | http.maxHeaderSize | static |  | constant value read |
 | `node-builtin.http2.connect` | http2.connect | unsupported | `SC2020` | HTTP/2 client sessions have no lowering — the lowered http2 surface is the SERVER side: createSecureServer({ allowHTTP1: true, cert, key }), which serves HTTP/1.1 only (ALPN never offers h2 — h2-capable clients negotiate down); an HTTP/1.1 client is https.request |
 | `node-builtin.http2.createServer` | http2.createServer | unsupported | `SC2020` | cleartext (h2c) servers have no lowering — the lowered http2 surface is createSecureServer({ allowHTTP1: true, cert, key }), which serves HTTP/1.1 over TLS (plain HTTP/1.1 is http.createServer) |
-| `node-builtin.module.createRequire` | module.createRequire | unsupported | `SC2020` | the lowered shape is a const binding over createRequire(import.meta.url) (or __filename) whose require calls take STATIC string literals — builtins, relative .json documents, and installed npm packages (under --dynamic) resolve at build time; dynamic specifiers cannot exist in a compiled binary's fixed module graph |
-| `node-builtin.module.isBuiltin` | module.isBuiltin | unsupported | `SC2020` | builtinModules.includes(name) answers the same question over the baked list (strip a node: prefix first; the prefix-only builtins appear with it, as node:test) |
-| `node-builtin.module.syncBuiltinESMExports` | module.syncBuiltinESMExports | unsupported | `SC2020` | a compiled program has no live builtin ESM namespace bindings to synchronize — nothing a compiled surface can mutate makes the call observable; remove it |
+| `node-builtin.module.createRequire` | module.createRequire | unsupported | `SC2020` | the lowered shape is a const binding (or a proven stable top-level let/var) over createRequire(import.meta.url) (or __filename) whose require calls take STATIC string literals — builtins, project modules (including #imports), relative .json documents, --npm-static packages, and installed npm packages under --dynamic resolve at build time; dynamic specifiers cannot exist in a compiled binary's fixed module graph |
+| `node-builtin.module.isBuiltin` | module.isBuiltin | unsupported | `SC2020` | the lowered call checks a string against the baked Node v24 list, including bare/node: aliases and prefix-only builtins |
+| `node-builtin.module.syncBuiltinESMExports` | module.syncBuiltinESMExports | unsupported | `SC2020` | the direct zero-argument call is a no-op because compiled builtin exports are immutable and cannot become stale |
 | `node-builtin.net.getDefaultAutoSelectFamilyAttemptTimeout` | net.getDefaultAutoSelectFamilyAttemptTimeout | static |  |  |
 | `node-builtin.net.setDefaultAutoSelectFamilyAttemptTimeout` | net.setDefaultAutoSelectFamilyAttemptTimeout | static |  |  |
 | `node-builtin.os.EOL` | os.EOL | static |  | constant value read |
@@ -309,15 +329,20 @@ manifest row in the Notes column:
 | `node-builtin.process.env` | process.env | static |  | reads, writes, deletes, and enumeration of the process environment (the process global) |
 | `node-builtin.process.execPath` | process.execPath | static |  |  |
 | `node-builtin.process.exit` | process.exit | static |  | process.exit and the process._exiting flag read are one surface |
+| `node-builtin.process.exitCode` | process.exitCode | static |  | numeric writes in statement position set the implicit exit status; process.exit() reads it |
+| `node-builtin.process.getBuiltinModule` | process.getBuiltinModule | static |  | native path and os export subsets plus main-thread worker_threads metadata; other modules and exports throw SC2020 |
 | `node-builtin.process.getgid` | process.getgid | static |  |  |
 | `node-builtin.process.getuid` | process.getuid | static |  |  |
+| `node-builtin.process.hrtime` | process.hrtime | static |  | native monotonic tuple clock and bigint member; direct calls and stored JavaScript callable values |
 | `node-builtin.process.isTTY` | process.isTTY | static |  | the isTTY read on process.stdin/stdout/stderr — one surface across the three streams |
 | `node-builtin.process.kill` | process.kill | static |  | the signal-name and signal-number forms are one surface |
 | `node-builtin.process.pid` | process.pid | static |  |  |
 | `node-builtin.process.resourceUsage` | process.resourceUsage | static |  | getrusage's 16 fields — every field read samples live machine state |
+| `node-builtin.process.rows` | process.rows | static |  | the rows read on process.stdout/stderr (terminal geometry) |
 | `node-builtin.process.threadCpuUsage` | process.threadCpuUsage | static |  | the plain-sample and previous-value diff forms are one surface |
 | `node-builtin.process.umask` | process.umask | static |  |  |
 | `node-builtin.process.uptime` | process.uptime | static |  |  |
+| `node-builtin.process.versions` | process.versions | static |  | shared version dictionary containing node and openssl; other components are absent unless defined by the program |
 | `node-builtin.querystring.decode` | querystring.decode | static |  |  |
 | `node-builtin.querystring.encode` | querystring.encode | static |  |  |
 | `node-builtin.querystring.escape` | querystring.escape | static |  |  |
@@ -325,7 +350,7 @@ manifest row in the Notes column:
 | `node-builtin.querystring.stringify` | querystring.stringify | static |  |  |
 | `node-builtin.querystring.unescape` | querystring.unescape | static |  |  |
 | `node-builtin.readline.createInterface` | readline.createInterface | static |  |  |
-| `node-builtin.stream.consumers.arrayBuffer` | stream/consumers.arrayBuffer | unsupported | `SC2020` | no free-standing ArrayBuffer value exists here (typed arrays own their storage) — buffer(stream) collects the same bytes as a Buffer |
+| `node-builtin.stream.consumers.arrayBuffer` | stream/consumers.arrayBuffer | unsupported | `SC2020` | collecting a stream directly into an ArrayBuffer has no native lowering yet; buffer(stream) collects the same bytes as a Buffer |
 | `node-builtin.stream.consumers.blob` | stream/consumers.blob | unsupported | `SC2020` | Blob values have no representation in a compiled binary — buffer(stream) collects the same bytes as a Buffer, text(stream) the decoded text |
 | `node-builtin.timers.promises.setImmediate` | timers/promises.setImmediate | static |  |  |
 | `node-builtin.timers.promises.setTimeout` | timers/promises.setTimeout | static |  |  |
@@ -337,16 +362,26 @@ manifest row in the Notes column:
 | `node-builtin.url.fileURLToPath` | url.fileURLToPath | static |  |  |
 | `node-builtin.url.pathToFileURL` | url.pathToFileURL | static |  |  |
 | `node-builtin.util.parseArgs` | util.parseArgs | static |  |  |
-| `node-builtin.util.promisify` | util.promisify | unsupported | `SC2020` | the one lowered shape is a const binding over child_process.execFile: const execFileAsync = promisify(execFile), then call execFileAsync directly |
+| `node-builtin.util.promisify` | util.promisify | unsupported | `SC2020` | the lowered shapes are const bindings over child_process.execFile and fs.readFile; call the bound function directly |
 | `node-builtin.worker_threads.isMainThread` | worker_threads.isMainThread | static |  | constant value read |
 | `node-builtin.worker_threads.threadId` | worker_threads.threadId | static |  | constant value read |
-| `node-builtin.zlib.brotliCompressSync` | zlib.brotliCompressSync | unsupported | `SC2020` | deflateSync and inflateSync are the lowered zlib surface |
-| `node-builtin.zlib.brotliDecompressSync` | zlib.brotliDecompressSync | unsupported | `SC2020` | deflateSync and inflateSync are the lowered zlib surface |
+| `node-builtin.zlib.brotliCompressSync` | zlib.brotliCompressSync | unsupported | `SC2020` | the default-options deflate/inflate, raw, gzip/gunzip, and unzip sync/callback forms plus crc32 are the lowered zlib surface |
+| `node-builtin.zlib.brotliDecompressSync` | zlib.brotliDecompressSync | unsupported | `SC2020` | the default-options deflate/inflate, raw, gzip/gunzip, and unzip sync/callback forms plus crc32 are the lowered zlib surface |
+| `node-builtin.zlib.crc32` | zlib.crc32 | static |  |  |
+| `node-builtin.zlib.deflate` | zlib.deflate | static |  |  |
+| `node-builtin.zlib.deflateRaw` | zlib.deflateRaw | static |  |  |
+| `node-builtin.zlib.deflateRawSync` | zlib.deflateRawSync | static |  |  |
 | `node-builtin.zlib.deflateSync` | zlib.deflateSync | static |  |  |
-| `node-builtin.zlib.gunzipSync` | zlib.gunzipSync | unsupported | `SC2020` | deflateSync and inflateSync are the lowered zlib surface |
-| `node-builtin.zlib.gzipSync` | zlib.gzipSync | unsupported | `SC2020` | deflateSync and inflateSync are the lowered zlib surface |
+| `node-builtin.zlib.gunzip` | zlib.gunzip | static |  |  |
+| `node-builtin.zlib.gunzipSync` | zlib.gunzipSync | static |  |  |
+| `node-builtin.zlib.gzip` | zlib.gzip | static |  |  |
+| `node-builtin.zlib.gzipSync` | zlib.gzipSync | static |  |  |
+| `node-builtin.zlib.inflate` | zlib.inflate | static |  |  |
+| `node-builtin.zlib.inflateRaw` | zlib.inflateRaw | static |  |  |
+| `node-builtin.zlib.inflateRawSync` | zlib.inflateRawSync | static |  |  |
 | `node-builtin.zlib.inflateSync` | zlib.inflateSync | static |  |  |
-| `node-builtin.zlib.unzipSync` | zlib.unzipSync | unsupported | `SC2020` | deflateSync and inflateSync are the lowered zlib surface |
+| `node-builtin.zlib.unzip` | zlib.unzip | static |  |  |
+| `node-builtin.zlib.unzipSync` | zlib.unzipSync | static |  |  |
 
 ## Standard library
 
@@ -368,17 +403,21 @@ manifest row in the Notes column:
 | `stdlib.abort-signal.timeout` | AbortSignal.timeout | static |  | Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, missing-arguments, surplus-arguments, error-shape; differential evidence: generated:webidl-operations, fixture:static-stream-this |
 | `stdlib.array.at` | Array.prototype.at | static |  |  |
 | `stdlib.array.concat` | Array.prototype.concat | static |  |  |
+| `stdlib.array.copyWithin` | Array.prototype.copyWithin | static |  |  |
 | `stdlib.array.every` | Array.prototype.every | static |  |  |
+| `stdlib.array.fill` | Array.prototype.fill | static |  |  |
 | `stdlib.array.filter` | Array.prototype.filter | static |  |  |
 | `stdlib.array.find` | Array.prototype.find | static |  |  |
 | `stdlib.array.findIndex` | Array.prototype.findIndex | static |  |  |
 | `stdlib.array.findLast` | Array.prototype.findLast | static |  |  |
 | `stdlib.array.findLastIndex` | Array.prototype.findLastIndex | static |  |  |
+| `stdlib.array.flat` | Array.prototype.flat | static |  |  |
 | `stdlib.array.flatMap` | Array.prototype.flatMap | static |  |  |
 | `stdlib.array.forEach` | Array.prototype.forEach | static |  |  |
 | `stdlib.array.includes` | Array.prototype.includes | static |  |  |
 | `stdlib.array.indexOf` | Array.prototype.indexOf | static |  |  |
 | `stdlib.array.join` | Array.prototype.join | static |  |  |
+| `stdlib.array.lastIndexOf` | Array.prototype.lastIndexOf | static |  |  |
 | `stdlib.array.map` | Array.prototype.map | static |  |  |
 | `stdlib.array.pop` | Array.prototype.pop | static |  |  |
 | `stdlib.array.push` | Array.prototype.push | static |  |  |
@@ -413,6 +452,7 @@ manifest row in the Notes column:
 | `stdlib.date.getUTCMonth` | Date.prototype.getUTCMonth | static |  |  |
 | `stdlib.date.getUTCSeconds` | Date.prototype.getUTCSeconds | static |  |  |
 | `stdlib.date.now` | Date.now | static |  | the live clock |
+| `stdlib.date.parse` | Date.parse | static |  | one date string, using the bounded parser shared with new Date(dateString).getTime() |
 | `stdlib.date.toISOString` | Date.prototype.toISOString | static |  | UTC ISO formatting over constructed and stored Date values |
 | `stdlib.date.valueOf` | Date.prototype.valueOf | static |  | the same millisecond read as getTime() |
 | `stdlib.fetch` | fetch | static |  | Node 24.15.0 / Undici 7.24.4; facets: argument-evaluation, webidl-conversion, surplus-arguments, promise-settlement, transport, error-shape; differential evidence: fixture:static, fixture:static-coercion, fixture:static-network-error |
@@ -450,31 +490,48 @@ manifest row in the Notes column:
 | `stdlib.map.get` | Map.prototype.get | static |  |  |
 | `stdlib.map.has` | Map.prototype.has | static |  |  |
 | `stdlib.map.set` | Map.prototype.set | static |  |  |
-| `stdlib.math.E` | Math.E | dynamic-only | `SC2012` |  |
-| `stdlib.math.PI` | Math.PI | dynamic-only | `SC2012` |  |
+| `stdlib.math.E` | Math.E | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.LN10` | Math.LN10 | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.LN2` | Math.LN2 | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.LOG10E` | Math.LOG10E | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.LOG2E` | Math.LOG2E | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.PI` | Math.PI | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.SQRT1_2` | Math.SQRT1_2 | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.SQRT2` | Math.SQRT2 | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
 | `stdlib.math.abs` | Math.abs | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
-| `stdlib.math.acos` | Math.acos | dynamic-only | `SC2012` |  |
-| `stdlib.math.asin` | Math.asin | dynamic-only | `SC2012` |  |
-| `stdlib.math.atan` | Math.atan | dynamic-only | `SC2012` |  |
-| `stdlib.math.atan2` | Math.atan2 | dynamic-only | `SC2012` |  |
-| `stdlib.math.cbrt` | Math.cbrt | dynamic-only | `SC2012` |  |
+| `stdlib.math.acos` | Math.acos | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.acosh` | Math.acosh | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.asin` | Math.asin | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.asinh` | Math.asinh | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.atan` | Math.atan | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.atan2` | Math.atan2 | static |  | compiles statically at arity 2; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.atanh` | Math.atanh | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.cbrt` | Math.cbrt | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
 | `stdlib.math.ceil` | Math.ceil | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
-| `stdlib.math.cos` | Math.cos | dynamic-only | `SC2012` |  |
-| `stdlib.math.exp` | Math.exp | dynamic-only | `SC2012` |  |
+| `stdlib.math.clz32` | Math.clz32 | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.cos` | Math.cos | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.cosh` | Math.cosh | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.exp` | Math.exp | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.expm1` | Math.expm1 | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
 | `stdlib.math.floor` | Math.floor | static |  | compiles statically at arity 1 |
-| `stdlib.math.hypot` | Math.hypot | dynamic-only | `SC2012` |  |
-| `stdlib.math.log` | Math.log | dynamic-only | `SC2012` |  |
-| `stdlib.math.log10` | Math.log10 | dynamic-only | `SC2012` |  |
-| `stdlib.math.log2` | Math.log2 | dynamic-only | `SC2012` |  |
+| `stdlib.math.fround` | Math.fround | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.hypot` | Math.hypot | static |  | compiles statically at any arity, including number[] spreads |
+| `stdlib.math.imul` | Math.imul | static |  | compiles statically at arity 2; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.log` | Math.log | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.log10` | Math.log10 | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.log1p` | Math.log1p | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.log2` | Math.log2 | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
 | `stdlib.math.max` | Math.max | static |  | compiles statically at arity 2 |
 | `stdlib.math.min` | Math.min | static |  | compiles statically at arity 2 |
-| `stdlib.math.pow` | Math.pow | dynamic-only | `SC2012` |  |
+| `stdlib.math.pow` | Math.pow | static |  | compiles statically at arity 2; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
 | `stdlib.math.random` | Math.random | static |  | compiles statically at arity 0 |
 | `stdlib.math.round` | Math.round | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
-| `stdlib.math.sign` | Math.sign | dynamic-only | `SC2012` |  |
-| `stdlib.math.sin` | Math.sin | dynamic-only | `SC2012` |  |
-| `stdlib.math.sqrt` | Math.sqrt | dynamic-only | `SC2012` |  |
-| `stdlib.math.tan` | Math.tan | dynamic-only | `SC2012` |  |
+| `stdlib.math.sign` | Math.sign | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.sin` | Math.sin | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.sinh` | Math.sinh | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.sqrt` | Math.sqrt | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.tan` | Math.tan | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
+| `stdlib.math.tanh` | Math.tanh | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
 | `stdlib.math.trunc` | Math.trunc | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
 | `stdlib.number.toFixed` | number.prototype.toFixed | static |  | the lowered call form takes 0 to 1 arguments |
 | `stdlib.number.toPrecision` | number.prototype.toPrecision | dynamic-only | `SC2012` |  |
@@ -496,9 +553,9 @@ manifest row in the Notes column:
 | `stdlib.readable-stream.locked` | ReadableStream.locked | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; differential evidence: generated:stream-traces |
 | `stdlib.readable-stream.pipeThrough` | ReadableStream.pipeThrough | dynamic-only | `SC2020` | Node 24.15.0 / Undici 7.24.4; the wider Web Streams graph is outside the native readable-stream slice |
 | `stdlib.readable-stream.pipeTo` | ReadableStream.pipeTo | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation |
-| `stdlib.readable-stream.symbol.asyncIterator` | ReadableStream.[Symbol.asyncIterator] | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; symbol-keyed async iterator handles have no compiler lowering in either tier; use values() with --dynamic |
+| `stdlib.readable-stream.symbol.asyncIterator` | ReadableStream.[Symbol.asyncIterator] | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; explicit symbol access and stored iterator handles have no compiler lowering in either tier |
 | `stdlib.readable-stream.tee` | ReadableStream.tee | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation |
-| `stdlib.readable-stream.values` | ReadableStream.values | dynamic-only | `SC2020` | Node 24.15.0 / Undici 7.24.4; the wider Web Streams graph is outside the native readable-stream slice |
+| `stdlib.readable-stream.values` | ReadableStream.values | dynamic-only | `SC2020` | Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; storing or driving the first-class iterator handle requires --dynamic |
 | `stdlib.request.arrayBuffer` | Request.arrayBuffer | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
 | `stdlib.request.attribute` | Request.attribute | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
 | `stdlib.request.blob` | Request.blob | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
@@ -529,7 +586,7 @@ manifest row in the Notes column:
 | `stdlib.response-init.headers` | ResponseInit.headers | static |  | Node 24.15.0 / Undici 7.24.4; conversion: Headers, record, or sequence-of-pairs snapshot; differential evidence: fixture:static |
 | `stdlib.response-init.status` | ResponseInit.status | static |  | Node 24.15.0 / Undici 7.24.4; conversion: WebIDL unsigned-short conversion followed by the 200–599 range check; differential evidence: fixture:static |
 | `stdlib.response-init.statusText` | ResponseInit.statusText | static |  | Node 24.15.0 / Undici 7.24.4; conversion: WebIDL ByteString with HTTP reason-phrase validation; differential evidence: fixture:static |
-| `stdlib.response.arrayBuffer` | Response.arrayBuffer | dynamic-only | `SC2020` | Node 24.15.0 / Undici 7.24.4; free-standing ArrayBuffer values have no static representation; use Response.bytes() |
+| `stdlib.response.arrayBuffer` | Response.arrayBuffer | static |  | Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static |
 | `stdlib.response.blob` | Response.blob | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation |
 | `stdlib.response.body` | Response.body | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static |
 | `stdlib.response.bodyUsed` | Response.bodyUsed | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static |
@@ -561,22 +618,23 @@ manifest row in the Notes column:
 | `stdlib.set.isSupersetOf` | Set.prototype.isSupersetOf | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.symmetricDifference` | Set.prototype.symmetricDifference | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.union` | Set.prototype.union | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
-| `stdlib.string.at` | string.prototype.at | dynamic-only | `SC2012` |  |
-| `stdlib.string.charAt` | string.prototype.charAt | static |  | the lowered call form takes exactly 1 argument |
-| `stdlib.string.charCodeAt` | string.prototype.charCodeAt | static |  | the lowered call form takes exactly 1 argument |
-| `stdlib.string.endsWith` | string.prototype.endsWith | static |  | the lowered call form takes exactly 1 argument |
-| `stdlib.string.includes` | string.prototype.includes | static |  | the lowered call form takes 1 to 2 arguments |
-| `stdlib.string.indexOf` | string.prototype.indexOf | static |  | the lowered call form takes 1 to 2 arguments |
+| `stdlib.string.at` | string.prototype.at | static |  | the lowered call form takes 0 to 1 arguments |
+| `stdlib.string.charAt` | string.prototype.charAt | static |  | the lowered call form takes 0 to 1 arguments |
+| `stdlib.string.charCodeAt` | string.prototype.charCodeAt | static |  | the lowered call form takes 0 to 1 arguments |
+| `stdlib.string.codePointAt` | string.prototype.codePointAt | static |  | the lowered call form takes 0 to 1 arguments |
+| `stdlib.string.endsWith` | string.prototype.endsWith | static |  | the lowered call form takes 0 to 2 arguments |
+| `stdlib.string.includes` | string.prototype.includes | static |  | the lowered call form takes 0 to 2 arguments |
+| `stdlib.string.indexOf` | string.prototype.indexOf | static |  | the lowered call form takes 0 to 2 arguments |
 | `stdlib.string.isWellFormed` | string.prototype.isWellFormed | static |  | the lowered call form takes no arguments |
-| `stdlib.string.padEnd` | string.prototype.padEnd | static |  | the lowered call form takes 1 to 2 arguments |
-| `stdlib.string.padStart` | string.prototype.padStart | static |  | the lowered call form takes 1 to 2 arguments |
+| `stdlib.string.padEnd` | string.prototype.padEnd | static |  | the lowered call form takes 0 to 2 arguments |
+| `stdlib.string.padStart` | string.prototype.padStart | static |  | the lowered call form takes 0 to 2 arguments |
 | `stdlib.string.repeat` | string.prototype.repeat | static |  | the lowered call form takes exactly 1 argument |
-| `stdlib.string.replace` | string.prototype.replace | dynamic-only | `SC2012` |  |
-| `stdlib.string.replaceAll` | string.prototype.replaceAll | dynamic-only | `SC2012` |  |
+| `stdlib.string.replace` | string.prototype.replace | static |  | string patterns with primitive replacements or typed callbacks; regex forms have separate lowering |
+| `stdlib.string.replaceAll` | string.prototype.replaceAll | static |  | string patterns with primitive replacements or typed callbacks; regex forms have separate lowering |
 | `stdlib.string.slice` | string.prototype.slice | static |  | the lowered call form takes 0 to 2 arguments |
-| `stdlib.string.split` | string.prototype.split | static |  | the lowered call form takes 1 to 2 arguments |
-| `stdlib.string.startsWith` | string.prototype.startsWith | static |  | the lowered call form takes exactly 1 argument |
-| `stdlib.string.substring` | string.prototype.substring | static |  | the lowered call form takes 1 to 2 arguments |
+| `stdlib.string.split` | string.prototype.split | static |  | the lowered call form takes 0 to 2 arguments |
+| `stdlib.string.startsWith` | string.prototype.startsWith | static |  | the lowered call form takes 0 to 2 arguments |
+| `stdlib.string.substring` | string.prototype.substring | static |  | the lowered call form takes 0 to 2 arguments |
 | `stdlib.string.toLowerCase` | string.prototype.toLowerCase | static |  | the lowered call form takes no arguments |
 | `stdlib.string.toUpperCase` | string.prototype.toUpperCase | static |  | the lowered call form takes no arguments |
 | `stdlib.string.toWellFormed` | string.prototype.toWellFormed | static |  | the lowered call form takes no arguments |

@@ -23,7 +23,7 @@
 //   - an SC diagnostic code (SC0000..SC9999) appears in docs/, skills/,
 //     or skill-data/ outside the generated reference — compiler
 //     capability claims live in the generated table, never in prose;
-//   - a scriptc version literal (0.0.N) in those same trees names a
+//   - a scriptc version literal (X.Y.Z) in those same trees names a
 //     version other than the pin — the calibration/spike sentences the
 //     docs carry must move with the pin.
 //

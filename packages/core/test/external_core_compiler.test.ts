@@ -13,10 +13,14 @@ test("the external core compile lane resolves a global-sibling scriptc package",
     const globalModules = path.join(root, "lib", "node_modules");
     const sdkCore = path.join(globalModules, "@native-sdk", "cli", "packages", "core");
     const scriptcRoot = path.join(globalModules, "scriptc");
-    const compiler = path.join(scriptcRoot, "dist", "bootstrap.js");
+    const compilerApiRoot = path.join(globalModules, "@scriptc", "compiler");
+    const nativeBin = process.platform !== "win32";
+    const bin = nativeBin ? "bin/scriptc.exe" : "dist/bootstrap.js";
+    const compiler = path.join(scriptcRoot, bin);
     const stage = path.join(root, "stage");
     fs.mkdirSync(sdkCore, { recursive: true });
     fs.mkdirSync(path.dirname(compiler), { recursive: true });
+    fs.mkdirSync(compilerApiRoot, { recursive: true });
     fs.mkdirSync(stage);
     fs.writeFileSync(path.join(stage, "profile.json"), "{}\n");
     const manifest = path.join(sdkCore, "package.json");
@@ -25,15 +29,38 @@ test("the external core compile lane resolves a global-sibling scriptc package",
       name: "scriptc",
       version: scriptcPin,
       type: "module",
-      bin: { scriptc: "dist/bootstrap.js" },
+      bin: { scriptc: bin },
     }));
-    fs.writeFileSync(compiler, `
+    fs.writeFileSync(path.join(compilerApiRoot, "package.json"), JSON.stringify({
+      name: "@scriptc/compiler", version: scriptcPin, type: "module", exports: "./index.js",
+    }));
+    fs.writeFileSync(path.join(compilerApiRoot, "index.js"), `
+import fs from "node:fs";
+import path from "node:path";
+export function compilerReleaseVersion() { return ${JSON.stringify(scriptcPin)}; }
+export async function compileLibrary({ outPath }) {
+  fs.writeFileSync(outPath, "global sibling archive");
+  const sidecarPath = path.join(path.dirname(outPath), "core.contract.json");
+  fs.writeFileSync(sidecarPath, JSON.stringify({ build_id: "global-sibling", model_unbound: [], msg: { unbound: [] } }));
+  return { ok: true, archivePath: outPath, sidecarPath };
+}
+export function renderDiagnostics() { return ""; }
+`);
+    const compilerSource = `
 import fs from "node:fs";
 if (process.argv.includes("-v")) { console.log(${JSON.stringify(scriptcPin)}); process.exit(0); }
 const output = process.argv[process.argv.indexOf("-o") + 1];
 fs.writeFileSync(output + ".lib.a", "global sibling archive");
 fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "global-sibling", model_unbound: [], msg: { unbound: [] } }));
-`);
+`;
+    if (nativeBin) {
+      const source = path.join(scriptcRoot, "fixture.mjs");
+      fs.writeFileSync(source, compilerSource);
+      fs.writeFileSync(compiler, `#!/bin/sh\nexec "${process.execPath}" "${source}" "$@"\n`);
+      fs.chmodSync(compiler, 0o755);
+    } else {
+      fs.writeFileSync(compiler, compilerSource);
+    }
     const frontendSidecar = path.join(root, "frontend.contract.json");
     fs.writeFileSync(frontendSidecar, JSON.stringify({
       model_fingerprint: "0123456789abcdef",
@@ -41,7 +68,13 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "global-siblin
       model_unbound: [],
       msg: { unbound: [] },
     }));
-    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "run_external_core_compiler.mjs");
+    const sourceScripts = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts");
+    const fixtureScripts = path.join(sdkCore, "scripts");
+    fs.mkdirSync(fixtureScripts);
+    for (const name of ["run_external_core_compiler.mjs", "run_library_compiler.mjs", "compiler_command.mjs"]) {
+      fs.copyFileSync(path.join(sourceScripts, name), path.join(fixtureScripts, name));
+    }
+    const script = path.join(fixtureScripts, "run_external_core_compiler.mjs");
     const archive = path.join(root, "libfixture_core.a");
     const result = spawnSync(process.execPath, [
       script,

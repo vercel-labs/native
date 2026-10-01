@@ -25,8 +25,6 @@ else
   echo "fence-check: skipped — run \`npm ci --prefix $repo/packages/core\` (or set NATIVE_SDK_CORE_COMPILER) to run the determinism-fence negative control"
   exit 0
 fi
-export NATIVE_SDK_CORE_COMPILER="$compiler"
-
 # Half 1: the pristine compile succeeds and attests deterministic.
 if ! "$repo/tests/compiled-core/build_core.sh" markup "$work"; then
   echo "fence-check: FAILED — the pristine markup fixture must compile cleanly under the profile" >&2
@@ -56,7 +54,12 @@ rm -f "$work/libmarkup_core.a" "$work/core.contract.json"
 
 cd "$work"
 status=0
-refusal="$($compiler build --lib --profile profile.json -o markup_core 2>&1)" || status=$?
+if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
+  refusal="$($compiler build --lib --profile profile.json -o markup_core 2>&1)" || status=$?
+else
+  pin="$(sed -n 's/.*"scriptc": *"\([0-9][0-9.]*\)".*/\1/p' "$repo/packages/core/package.json")"
+  refusal="$(node "$repo/packages/core/scripts/run_library_compiler.mjs" --profile profile.json --out markup_core --version "$pin" 2>&1)" || status=$?
+fi
 if [ "$status" -eq 0 ]; then
   echo "fence-check: FAILED — the compile accepted an injected Date.now() in update; the profile's determinism fences did not fire" >&2
   exit 1

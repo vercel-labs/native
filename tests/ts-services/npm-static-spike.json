@@ -1,9 +1,9 @@
 {
-  "date": "2026-08-22",
-  "compiler": "scriptc 0.0.35",
+  "date": "2026-10-01",
+  "compiler": "scriptc 0.2.0",
   "policy": "explicit --npm-static; no auto or dynamic fallback",
   "method": "packages/core/scripts/npm_static_spike.mjs against exact package bytes in the locked docs workspace",
-  "summary": "3 of 5 deliberately small candidates cleared 100% static coverage; nanoid and micromark were refused, so package support is selective",
+  "summary": "4 of 5 deliberately small candidates cleared 100% static coverage; micromark was refused, so package support is selective",
   "candidates": [
     {
       "package": "escape-string-regexp",
@@ -29,9 +29,9 @@
     {
       "package": "nanoid",
       "version": "3.3.15",
-      "verdict": "refused",
-      "static_percent": 76,
-      "reason": "only 76% of analyzed statements compile statically"
+      "verdict": "static",
+      "static_percent": 100,
+      "reason": "static coverage accepted"
     },
     {
       "package": "micromark",

@@ -606,7 +606,7 @@ export function serviceConcat(parts: readonly Uint8Array[]): Uint8Array {
   const out = new Uint8Array(length);
   let at = 0;
   for (const part of parts) {
-    for (let i = 0; i < part.length; i++) out[at + i] = part[i]!;
+    out.set(part, at);
     at += part.length;
   }
   return out;

@@ -135,6 +135,15 @@ if (cliCompilerPin !== coreCompilerPin) {
   console.error(`Pin mismatch: package.json carries external core compiler pin ${cliCompilerPin}, expected ${coreCompilerPin} from packages/core dependencies`);
   errors++;
 }
+// The 0.2.0 library-sidecar lane calls the matching compiler API from Node.
+// Keep that package in the CLI install and the checkout's dev install at the
+// same exact release as the native command and its surface manifest.
+const coreCompilerApiPin = coreJson.devDependencies?.['@scriptc/compiler'];
+const cliCompilerApiPin = packageJson.dependencies?.['@scriptc/compiler'];
+if (coreCompilerApiPin !== coreCompilerPin || cliCompilerApiPin !== coreCompilerPin) {
+  console.error(`Pin mismatch: @scriptc/compiler must be ${coreCompilerPin} in packages/core devDependencies and package.json dependencies (found ${coreCompilerApiPin}/${cliCompilerApiPin})`);
+  errors++;
+}
 const coreLock = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'package-lock.json'), 'utf-8'));
 if (coreLock.version !== expectedVersion || coreLock.packages?.['']?.version !== expectedVersion) {
   console.error(`Version mismatch: packages/core/package-lock.json=${coreLock.version}/${coreLock.packages?.['']?.version}, expected ${expectedVersion}`);

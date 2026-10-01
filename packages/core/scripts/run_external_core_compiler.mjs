@@ -21,6 +21,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { compilerArgv, publishedScriptcArgv } from "./compiler_command.mjs";
 
 function parseArgs(argv) {
@@ -182,7 +183,17 @@ if (reported !== pin) {
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-external-core-"));
 try {
   fs.cpSync(args.stage, work, { recursive: true });
-  const build = spawnSync(argv0[0], [...argv0.slice(1), "build", "--lib", "--profile", "profile.json", "-o", args.name], {
+  // Scriptc 0.2.0's installed native command trips its self-hosted union
+  // conversion while emitting a byte-bearing library sidecar. The exact
+  // matching compiler package's Node API co-emits the archive and sidecar
+  // correctly. The native binary still supplies the version probe above;
+  // explicit compiler overrides keep their requested command.
+  const libraryHelper = path.join(path.dirname(fileURLToPath(import.meta.url)), "run_library_compiler.mjs");
+  const buildCommand = args["compiler-package-origin"] ? process.execPath : argv0[0];
+  const buildArgs = args["compiler-package-origin"]
+    ? [libraryHelper, "--profile", "profile.json", "--out", args.name, "--version", pin]
+    : [...argv0.slice(1), "build", "--lib", "--profile", "profile.json", "-o", args.name];
+  const build = spawnSync(buildCommand, buildArgs, {
     cwd: work,
     stdio: "inherit",
     env: compileEnv,

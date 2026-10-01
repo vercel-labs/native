@@ -261,7 +261,7 @@ The command resolves the exact version once (lifecycle scripts disabled), copies
 
 > Run `native vendor . package@X.Y.Z`, check in `src/services/vendor/` and the generated app.zon `service_packages` facts, then import that exact package name; or vendor a local source module and import it relatively.
 
-npm support is selective. A vendored package compiles only if the pinned compiler reaches 100% static coverage of its bytes; anything less fails `native check` with the compiler's coverage note preserved verbatim and a remediation. The shipped compiler's calibration run over five deliberately small candidates passed three and refused two:
+npm support is selective. A vendored package compiles only if the pinned compiler reaches 100% static coverage of its bytes; anything less fails `native check` with the compiler's coverage note preserved verbatim and a remediation. The shipped compiler's calibration run over five deliberately small candidates passed four and refused one:
 
 <table>
   <thead>
@@ -289,8 +289,8 @@ npm support is selective. A vendored package compiles only if the pinned compile
     </tr>
     <tr>
       <td><code>nanoid@3.3.15</code></td>
-      <td>refused</td>
-      <td>76%</td>
+      <td>compiled</td>
+      <td>100%</td>
     </tr>
     <tr>
       <td><code>micromark@4.0.2</code></td>
