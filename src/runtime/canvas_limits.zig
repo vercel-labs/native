@@ -16,7 +16,11 @@ const canvas = @import("canvas");
 // in the Runtime (in-place constructed, large fields left uninitialized),
 // measured at 61.3 MiB -> 119.3 MiB (RuntimeView 1.12 MiB -> 2.65 MiB x 32
 // view slots); pages are only touched as views use their capacity.
-pub const max_canvas_commands_per_view: usize = 2048;
+// Native desktop targets double it for dense professional views (a
+// mixer's channel strips of meters, knobs, and scales). Wasm keeps 2048,
+// and so do test builds: the test harness builds its null platform by value
+// on the test runner's stack, which the doubled per-view arrays outgrow.
+pub const max_canvas_commands_per_view: usize = if (@import("builtin").target.cpu.arch.isWasm() or @import("builtin").is_test) 2048 else 4096;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
 // icons are path commands, and a curated stroke icon lowers to ~10-25
@@ -30,7 +34,13 @@ pub const max_canvas_gradient_stops_per_view: usize = 64;
 // each of the two per-view arrays (retained canvas + display-list
 // scratch), x 32 view slots ~ 3.6 MiB total, pages touched only as views
 // draw paths.
-pub const max_canvas_path_elements_per_view: usize = 2048;
+//
+// Native desktop targets carry denser views: a workstation's regions,
+// meters, and knobs, or a board's traces, spend tens of thousands of
+// elements a frame. Wasm keeps the smaller budget because its linear
+// memory never overcommits these arrays. The budget follows
+// `chart.max_chart_path_elements_per_frame`, which makes the same split.
+pub const max_canvas_path_elements_per_view: usize = canvas.max_chart_path_elements_per_frame;
 pub const max_canvas_glyphs_per_view: usize = 8192;
 pub const max_canvas_text_bytes_per_view: usize = 32768;
 // Retained packet commands per gpu-surface view: the host-side command
@@ -106,14 +116,14 @@ pub const max_canvas_text_layout_lines_per_view: usize = 8192;
 // refusing photo-scale sources. Apps may raise the frozen per-runtime
 // budget through app.zon; raw-pixel registration stays strict because
 // that caller already owns the decoded pixels.
-pub const max_registered_canvas_images: usize = 16;
+pub const max_registered_canvas_images: usize = 32;
 pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 /// Hard ceiling for an app-declared registered-image budget. Deliberately
 /// matches one media-surface channel: 8 MiB holds a 1080p RGBA8 image and
 /// refuses 4K until the toolkit has real zero-copy paths. This is a
 /// validation bound plus a per-USED-slot lazy allocation size, never a
-/// Runtime reservation. At the ceiling, filling all 16 registry slots is
-/// an app-declared 128 MiB high-water mark; an app using no slots allocates
+/// Runtime reservation. At the ceiling, filling all 32 registry slots is
+/// an app-declared 256 MiB high-water mark; an app using no slots allocates
 /// zero registered-image pixel bytes.
 pub const max_registered_canvas_image_pixel_bytes_ceiling: usize = 8 * 1024 * 1024;
 
@@ -179,8 +189,12 @@ pub const max_registered_canvas_font_bytes: usize = 24 * 1024 * 1024;
 // mirrors the node cap so snapshots never silently truncate widget
 // enumeration; a test in canvas_widget_layout_tests.zig keeps them in
 // lockstep.
-pub const max_canvas_widget_nodes_per_view: usize = 1024;
-pub const max_canvas_widget_semantics_per_view: usize = 1024;
+//
+// Native desktop targets double both for dense professional views: a
+// mixer's nine channel strips alone outgrow 1024 nodes. Wasm and test
+// builds keep 1024, as the command budget above keeps its smaller split.
+pub const max_canvas_widget_nodes_per_view: usize = if (@import("builtin").target.cpu.arch.isWasm() or @import("builtin").is_test) 1024 else 2048;
+pub const max_canvas_widget_semantics_per_view: usize = max_canvas_widget_nodes_per_view;
 // Raised from 2048 with the inline-span/markdown work, then from 64 KiB for
 // editable code surfaces: a simple editor must retain a practical source
 // file (roughly 10k ordinary code lines) plus the surrounding view chrome.

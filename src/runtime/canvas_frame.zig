@@ -141,6 +141,23 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             return self.views[index].canvasDisplayList();
         }
 
+        /// The newest timestamp that can safely anchor a render animation.
+        /// Input is recorded before its derived widget event rebuilds the
+        /// declarative tree, while the next presented frame may still be an
+        /// occluded/idle heartbeat hundreds of milliseconds behind. Starting
+        /// from only the last frame would make a short transition complete on
+        /// its first visible frame. A pending input is in the same monotonic
+        /// clock domain as frame timestamps, so the newer value is the honest
+        /// start of interaction-driven motion.
+        pub fn canvasAnimationTimestampNs(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!u64 {
+            try validateRuntimeViewParent(self, window_id);
+            try validateViewLabel(label);
+            const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
+            if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+            const view = &self.views[index];
+            return @max(view.gpu_timestamp_ns, view.gpu_pending_input_timestamp_ns);
+        }
+
         pub fn setCanvasRenderAnimations(self: *Runtime, window_id: platform.WindowId, label: []const u8, animations: []const canvas.CanvasRenderAnimation) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
             try validateViewLabel(label);
@@ -165,6 +182,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // here silently defeated incremental presentation.
             const dirty = canvasRenderAnimationScheduleDirtyBounds(&self.views[index], animations);
             try self.views[index].copyCanvasRenderAnimations(animations);
+            self.views[index].canvas_model_render_animation_id_count = 0;
             if (dirty) |local_dirty| {
                 if (canvasDirtyRegionForView(self.views[index].frame, local_dirty)) |region| {
                     self.invalidateFor(.state, region);
@@ -184,6 +202,70 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             return self.views[index].info();
         }
 
+        /// Replace only the animations declared by UiApp's model hook.
+        /// Runtime-owned control motion (switch thumbs, carets, spinners)
+        /// remains live across the rebuild that dispatched the model change.
+        pub fn setCanvasModelRenderAnimations(self: *Runtime, window_id: platform.WindowId, label: []const u8, animations: []const canvas.CanvasRenderAnimation) anyerror!platform.ViewInfo {
+            try validateRuntimeViewParent(self, window_id);
+            try validateViewLabel(label);
+            const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
+            if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+            try validateCanvasRenderAnimations(animations);
+
+            const view = &self.views[index];
+            if (animations.len == 0 and view.canvas_model_render_animation_id_count == 0) return view.info();
+
+            var survivor_count: usize = 0;
+            for (view.canvasRenderAnimations()) |existing| {
+                var model_owned = false;
+                for (view.canvas_model_render_animation_ids[0..view.canvas_model_render_animation_id_count]) |model_id| {
+                    if (existing.id == model_id) {
+                        model_owned = true;
+                        break;
+                    }
+                }
+                if (!model_owned) survivor_count += 1;
+            }
+            var required = survivor_count;
+            for (animations) |animation| {
+                var replaces_survivor = false;
+                for (view.canvasRenderAnimations()) |existing| {
+                    if (existing.id != animation.id) continue;
+                    var model_owned = false;
+                    for (view.canvas_model_render_animation_ids[0..view.canvas_model_render_animation_id_count]) |model_id| {
+                        if (existing.id == model_id) {
+                            model_owned = true;
+                            break;
+                        }
+                    }
+                    replaces_survivor = !model_owned;
+                    break;
+                }
+                if (!replaces_survivor) required += 1;
+            }
+            if (required > view.canvas_render_animations.len) return error.RenderAnimationListFull;
+
+            const dirty = canvasRenderAnimationScheduleDirtyBounds(view, animations);
+            for (view.canvas_model_render_animation_ids[0..view.canvas_model_render_animation_id_count]) |model_id| {
+                view.removeCanvasRenderAnimation(model_id);
+            }
+            for (animations) |animation| try view.replaceCanvasRenderAnimation(animation);
+            for (animations, 0..) |animation, animation_index| view.canvas_model_render_animation_ids[animation_index] = animation.id;
+            view.canvas_model_render_animation_id_count = animations.len;
+
+            if (dirty) |local_dirty| {
+                if (canvasDirtyRegionForView(view.frame, local_dirty)) |region| {
+                    self.invalidateFor(.state, region);
+                } else {
+                    self.invalidateFor(.state, view.frame);
+                }
+            } else {
+                self.invalidateFor(.state, view.frame);
+            }
+            try requestCanvasFrameForView(self, index);
+            return view.info();
+        }
+
         pub fn clearCanvasRenderAnimations(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
             try validateViewLabel(label);
@@ -191,6 +273,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (self.views[index].canvas_render_animation_count == 0 and self.views[index].canvas_frame_render_override_count == 0) return self.views[index].info();
             self.views[index].canvas_render_animation_count = 0;
+            self.views[index].canvas_model_render_animation_id_count = 0;
             self.invalidateFor(.state, self.views[index].frame);
             try requestCanvasFrameForView(self, index);
             return self.views[index].info();
@@ -1213,7 +1296,21 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // timestamps.
                 const tooltip_intent_armed = self.views[index].canvasTooltipIntentArmed();
                 if (render_animation_active or tooltip_intent_armed) {
-                    self.invalidateFor(.state, self.views[index].frame);
+                    // A looping spinner or skeleton changes only its own
+                    // commands. Repainting the whole catalog at display-link
+                    // cadence makes those otherwise retained animations
+                    // visibly stutter on large views.
+                    if (tooltip_intent_armed) {
+                        self.invalidateFor(.state, self.views[index].frame);
+                    } else if (canvasRenderAnimationScheduleDirtyBounds(&self.views[index], self.views[index].canvasRenderAnimations())) |local_dirty| {
+                        if (canvasDirtyRegionForView(self.views[index].frame, local_dirty)) |region| {
+                            self.invalidateFor(.state, region);
+                        } else {
+                            self.invalidateFor(.state, self.views[index].frame);
+                        }
+                    } else {
+                        self.invalidateFor(.state, self.views[index].frame);
+                    }
                     // Invalidation keeps snapshots/diagnostics honest but
                     // does not itself wake an idle retained surface. The
                     // current completion consumed its one-shot request, so

@@ -34,6 +34,11 @@ fn estimateExtent(context: ?*const anyopaque, logical: u64) f32 {
     return @max(50, @round(actualExtent(logical) / 50) * 50 - 25);
 }
 
+fn exactExtent(context: ?*const anyopaque, logical: u64) f32 {
+    _ = context;
+    return actualExtent(logical);
+}
+
 const prepend_batch: usize = 50;
 
 const TranscriptModel = struct {
@@ -43,6 +48,7 @@ const TranscriptModel = struct {
     count: usize = 200,
     /// Tail-anchored (the chat contract) or leading (the feed shape).
     trailing: bool = true,
+    exact: bool = false,
     /// Every reach-start dispatch, capped or not.
     start_fetches: u32 = 0,
 
@@ -76,7 +82,8 @@ fn transcriptOptions(model: *const TranscriptModel) TranscriptApp.Ui.VirtualList
         .item_count = model.count,
         .index_base = model.base,
         .item_extent = 0,
-        .extent_estimate = estimateExtent,
+        .extent_estimate = if (model.exact) exactExtent else estimateExtent,
+        .exact_extents = model.exact,
         .overscan = 2,
         .grow = 1,
         .anchor = if (model.trailing) .trailing else .leading,
@@ -269,6 +276,20 @@ test "variable rows mount a bounded window; measured corrections converge the sc
         try h.wheel(viewport_height);
     }
     try std.testing.expectEqual(row_id, findRow(h.root(), "Msg 299").?);
+}
+
+test "exact variable rows reuse their mounted window until coverage runs low" {
+    var h = try Harness.create(.{ .trailing = false, .base = 0, .count = 300, .exact = true });
+    defer h.destroy();
+    const initial_generation = h.app_state.build_generation;
+
+    try h.wheel(1);
+    try std.testing.expectEqual(initial_generation, h.app_state.build_generation);
+    try std.testing.expectEqual(@as(f32, 1), (try h.retainedList()).widget.value);
+
+    try h.wheel(10_000);
+    try std.testing.expect(h.app_state.build_generation > initial_generation);
+    try std.testing.expect(h.root().layout.virtual_first_index > 0);
 }
 
 test "scroll storm: corrections never move visible content (zero-jump invariant, both directions plus deep jumps)" {

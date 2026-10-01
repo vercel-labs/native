@@ -1162,6 +1162,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // planned frame.
             if (view.canvasTooltipIntentArmed()) {
                 self.invalidateFor(.state, view.frame);
+                // Retained GPU surfaces can be completely idle here.
+                // Invalidation records dirty state but does not wake the
+                // platform display link, so explicitly request the first
+                // frame; the per-frame pump takes over from there until the
+                // deadline resolves.
+                try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, view_index);
             }
         }
 

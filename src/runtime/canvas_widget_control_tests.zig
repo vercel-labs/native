@@ -898,6 +898,46 @@ test "model-driven exclusive toggle-button chips follow the source across rebuil
     try std.testing.expect(!retained.findById(23).?.widget.state.selected);
 }
 
+test "model-driven boolean controls follow source-side flips across rebuilds" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-boolean-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const Controls = struct {
+        fn layout(selected: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            const controls = [_]canvas.Widget{
+                .{ .id = 31, .kind = .checkbox, .frame = geometry.RectF.init(10, 10, 120, 28), .text = "Select all", .state = .{ .selected = selected }, .value = if (selected) 1 else 0 },
+                .{ .id = 32, .kind = .switch_control, .frame = geometry.RectF.init(10, 48, 120, 28), .text = "Live", .state = .{ .selected = selected }, .value = if (selected) 1 else 0 },
+            };
+            return canvas.layoutWidgetTree(.{ .kind = .stack, .children = &controls }, geometry.RectF.init(0, 0, 180, 90), nodes);
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 90),
+    });
+
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Controls.layout(false, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Controls.layout(true, &nodes));
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(31).?.widget.state.selected);
+    try std.testing.expect(retained.findById(32).?.widget.state.selected);
+}
+
 test "model-driven slider values follow the source across rebuilds" {
     // Sliders used to retain their runtime value unconditionally, so a
     // model-driven value binding (playback progress on a seek bar)

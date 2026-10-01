@@ -900,8 +900,14 @@ test "hover dwell past the delay shows the anchored tooltip on the frame clock" 
 
     // Hover arms the delay; frames keep painting while it runs (the
     // pump), but the tooltip stays hidden short of the deadline.
+    const frame_requests_before_hover = harness.null_platform.gpu_surface_frame_request_count;
     try tooltipHover(harness, app, toolbar.button_centers[0], tooltip_t0);
     try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_armed_id);
+    // Arming a time-delayed tooltip must wake the retained surface. A
+    // dirty flag alone does not schedule a platform frame once the
+    // surface is idle, so without this request a real app leaves the
+    // tooltip armed forever until unrelated input arrives.
+    try std.testing.expectEqual(frame_requests_before_hover + 1, harness.null_platform.gpu_surface_frame_request_count);
     try tooltipFrame(harness, app, tooltip_t0 + 100 * tooltip_ms);
     try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[0]));
 

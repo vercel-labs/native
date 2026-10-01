@@ -1515,8 +1515,8 @@ test "Cmd.imageUnregister frees a full registry's slot for a new image: the gall
     try fx.feedHostResult(status_request_key, true, "ready");
     try h.wake();
 
-    // Sixteen distinct dynamic ids (100..115) load to their `loaded`
-    // terminal one after another: every registry slot is occupied.
+    // One distinct dynamic id per registry slot (100, 101, ...) loads to
+    // its `loaded` terminal one after another: every slot is occupied.
     const slots = runtime_ns.max_registered_canvas_images;
     var loaded: usize = 0;
     while (loaded < slots) : (loaded += 1) {
@@ -1526,13 +1526,13 @@ test "Cmd.imageUnregister frees a full registry's slot for a new image: the gall
         try std.testing.expect(Bridge.model().imageState == .loaded);
     }
     try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
-    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 16), Bridge.model().imageResults);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), slots), Bridge.model().imageResults);
 
-    // The 17th distinct id decodes fine but finds no slot: the load's
+    // The next distinct id decodes fine but finds no slot: the load's
     // own terminal answers "registry_full" through the event arm — the
     // gallery's dead end without an unregister verb.
     try h.menu("core.covernext");
-    try feedTinyPng(fx, 116, 33);
+    try feedTinyPng(fx, 100 + slots, 33);
     try h.wake();
     try std.testing.expect(Bridge.model().imageState == .registry_full);
     try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
@@ -1544,16 +1544,16 @@ test "Cmd.imageUnregister frees a full registry's slot for a new image: the gall
     try h.wake();
     try std.testing.expect(h.harness.runtime.registeredCanvasImage(100) == null);
     try std.testing.expectEqual(slots - 1, h.harness.runtime.registeredCanvasImageCount());
-    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 17), Bridge.model().imageResults);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), slots + 1), Bridge.model().imageResults);
 
-    // ...and the freed slot accepts the next image: a 17th distinct id
-    // registers where id 116 was refused.
+    // ...and the freed slot accepts the next image: another distinct id
+    // registers where the overflowing one was refused.
     try h.menu("core.covernext");
-    try feedTinyPng(fx, 117, 47);
+    try feedTinyPng(fx, 100 + slots + 1, 47);
     try h.wake();
     try std.testing.expect(Bridge.model().imageState == .loaded);
-    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 117), Bridge.model().cover);
-    try std.testing.expect(h.harness.runtime.registeredCanvasImage(117) != null);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 100 + slots + 1), Bridge.model().cover);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(100 + slots + 1) != null);
     try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
 
     // Unregister aimed at an id with no registration is the documented
@@ -1561,7 +1561,7 @@ test "Cmd.imageUnregister frees a full registry's slot for a new image: the gall
     try h.menu("core.evictmissing");
     try h.wake();
     try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
-    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 18), Bridge.model().imageResults);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), slots + 2), Bridge.model().imageResults);
 }
 
 test "Cmd.imageUnregister never touches a load in flight: its terminal still registers" {

@@ -2127,6 +2127,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // panes, the status item — leaves a genuinely current pair,
             // so hover enters keep flowing even when an idle app
             // performs no further rebuild.
+            // Arm model-owned render motion against the freshly built tree
+            // before publishing its display list.  Publishing first exposes
+            // one settled frame before the animation's from-state is installed
+            // (modal flashes at full size, jumps back, then animates).  Runtime
+            // mutation is synchronous, so the pre-armed ids apply to the new
+            // list on its very first present.
+            try self.scheduleAnimationsForTree(runtime, window_id, &tree);
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
             } else {
@@ -2158,7 +2165,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (self.contextMenuFallbackTargetForLabel(self.options.canvas_label) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
             }
-            try self.scheduleAnimations(runtime, window_id);
             try self.scheduleLayoutTweens(runtime, window_id);
             self.applyWebPanes(runtime, window_id, layout);
             try self.applyTerminalLayout(runtime, window_id, layout, tokens);
@@ -2569,6 +2575,50 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (range.start_index < record.start_index or range.end_index > record.end_index) return true;
             }
             return false;
+        }
+
+        /// A native scroll driver already translates retained rows for
+        /// every offset it reports. Rebuilding the whole app for each
+        /// sub-row movement defeats that fast path; re-window only when
+        /// the visible span is about to exhaust the mounted rows. Keep
+        /// one row of lead room when the list requested overscan, so a
+        /// normal wheel step never exposes an unmounted edge.
+        fn virtualWindowNeedsScrollRebuild(self: *const Self, layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
+            for (self.virtual_windows[0..self.virtual_window_count]) |record| {
+                if (record.id != id) continue;
+                const node = layout.findById(id) orelse return true;
+                const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+                if (viewport.isEmpty() or record.item_count == 0) return false;
+                const lead: usize = @min(record.overscan, 1);
+                // Inexact extents converge only as mounted rows are
+                // measured. A wheel step can cross a very short row
+                // entirely; skipping its rebuild would leave that row
+                // forever estimated and drift the scrollbar's total.
+                if (record.variable and !record.exact_extents) return true;
+                if (record.variable) {
+                    const table = self.virtualExtentTableForId(id) orelse return true;
+                    const offset = @max(0, node.widget.value);
+                    const first = table.indexAtOffset(offset);
+                    const end = @min(record.item_count, table.indexAtOffset(offset + viewport.height) + 1);
+                    const start_needed = first -| lead;
+                    const end_needed = @min(record.item_count, end + lead);
+                    return start_needed < record.start_index or end_needed > record.end_index;
+                }
+                const item_extent = if (node.widget.layout.virtual_item_extent > 0)
+                    node.widget.layout.virtual_item_extent
+                else
+                    record.item_extent;
+                const range = canvas.virtualListRange(.{
+                    .item_count = record.item_count,
+                    .item_extent = item_extent,
+                    .item_gap = record.gap,
+                    .viewport_extent = viewport.height,
+                    .scroll_offset = node.widget.value,
+                    .overscan = lead,
+                });
+                return range.start_index < record.start_index or range.end_index > record.end_index;
+            }
+            return true;
         }
 
         /// The extent source backing `Ui.virtualWindow` for
@@ -3344,12 +3394,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Re-apply the model-derived render animations with the latest
         /// frame timestamp.
-        fn scheduleAnimations(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
+        fn scheduleAnimationsForTree(self: *Self, runtime: *Runtime, window_id: platform.WindowId, tree: *const Ui.Tree) anyerror!void {
             const animations_fn = self.options.animations orelse return;
-            const tree = &(self.tree orelse return);
             var animations: [canvas_limits.max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined;
-            const count = animations_fn(&self.model, tree, self.frame_timestamp_ns, &animations);
-            _ = try runtime.setCanvasRenderAnimations(window_id, self.options.canvas_label, animations[0..count]);
+            const timeline_ns = try runtime.canvasAnimationTimestampNs(window_id, self.options.canvas_label);
+            const count = animations_fn(&self.model, tree, timeline_ns, &animations);
+            _ = try runtime.setCanvasModelRenderAnimations(window_id, self.options.canvas_label, animations[0..count]);
         }
 
         /// Re-declare the model-derived layout tweens after a rebuild.
@@ -6268,7 +6318,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 std.mem.eql(u8, scroll_event.view_label, self.options.canvas_label) and
                 self.isVirtualWindowId(scroll_event.id))
             {
-                try self.rebuild(runtime, scroll_event.window_id);
+                const layout = try runtime.canvasWidgetLayout(scroll_event.window_id, scroll_event.view_label);
+                if (self.virtualWindowNeedsScrollRebuild(layout, scroll_event.id)) {
+                    try self.rebuild(runtime, scroll_event.window_id);
+                }
             }
         }
 

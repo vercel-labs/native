@@ -6386,6 +6386,42 @@ test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fi
     try std.testing.expect(mounted >= 25);
 }
 
+test "virtual list keeps mounted rows while scrolling inside their coverage" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(VirtualFeedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = VirtualFeedApp.init(std.heap.page_allocator, .{}, virtualFeedAppOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const list_id = canvas.globalWidgetId(.scroll_view, .{ .str = "vfeed" });
+    const initial_generation = app_state.build_generation;
+    var command_buffer: [96]u8 = undefined;
+    const small_wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 24", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, small_wheel);
+    try std.testing.expectEqual(initial_generation, app_state.build_generation);
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try std.testing.expectEqual(@as(f32, 24), layout.findById(list_id).?.widget.value);
+
+    const larger_wheel = try std.fmt.bufPrint(&command_buffer, "widget-wheel {s} {d} 96", .{ canvas_label, list_id });
+    try harness.runtime.dispatchAutomationCommand(app, larger_wheel);
+    try std.testing.expect(app_state.build_generation > initial_generation);
+    try std.testing.expect(app_state.tree.?.root.layout.virtual_first_index > 0);
+}
+
 // ------------------------------------------------------- pinch channel
 
 const ZoomModel = struct {

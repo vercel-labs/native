@@ -707,6 +707,7 @@ pub const spinnerWidgetSegmentCommandId = widget_runtime.spinnerWidgetSegmentCom
 pub const spinnerWidgetSegmentCount = widget_runtime.spinnerWidgetSegmentCount;
 pub const chartWidgetPlotRect = widget_runtime.chartWidgetPlotRect;
 pub const chartWidgetHoverIndex = widget_runtime.chartWidgetHoverIndex;
+pub const textSpanRunCommandId = widget_runtime.textSpanRunCommandId;
 pub const textSelectionCommandId = widget_runtime.textSelectionCommandId;
 pub const toggleWidgetKnobTravel = widget_runtime.toggleWidgetKnobTravel;
 pub const widgetControlAimPoint = widget_runtime.widgetControlAimPoint;

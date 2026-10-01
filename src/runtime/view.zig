@@ -323,6 +323,11 @@ pub const RuntimeView = struct {
     presented_canvas_has_unkeyed: bool = false,
     canvas_render_animations: [max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
     canvas_render_animation_count: usize = 0,
+    /// Animation ids owned by UiApp's declarative `animations` hook. The
+    /// runtime keeps these separate so rebuilding the model can replace its
+    /// modal motion without erasing transient control animations.
+    canvas_model_render_animation_ids: [max_canvas_render_animations_per_view]canvas.ObjectId = undefined,
+    canvas_model_render_animation_id_count: usize = 0,
     /// Runtime-driven layout tweens (split fractions easing toward
     /// declared targets). Advanced once per presented frame from the
     /// frame event's timestamp; each step mutates retained layout

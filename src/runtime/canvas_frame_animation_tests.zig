@@ -65,6 +65,85 @@ const builtinBridgeErrorMessage = support.builtinBridgeErrorMessage;
 const testViewByLabel = support.testViewByLabel;
 const testCanvasWidgetPartId = support.testCanvasWidgetPartId;
 
+test "canvas animation timeline starts from pending input instead of a stale frame" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "animation-timeline-input-anchor", .source = platform.WebViewSource.html("") };
+        }
+    } = .{};
+    try harness.start(app_state.app());
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 40, 20),
+    });
+
+    harness.runtime.views[0].gpu_timestamp_ns = 100;
+    try std.testing.expectEqual(@as(u64, 100), try harness.runtime.canvasAnimationTimestampNs(1, "canvas"));
+
+    harness.runtime.views[0].recordGpuSurfaceInputTimestamp(250);
+    try std.testing.expectEqual(@as(u64, 250), try harness.runtime.canvasAnimationTimestampNs(1, "canvas"));
+
+    harness.runtime.views[0].gpu_timestamp_ns = 300;
+    try std.testing.expectEqual(@as(u64, 300), try harness.runtime.canvasAnimationTimestampNs(1, "canvas"));
+}
+
+test "model render animation refresh preserves runtime-owned motion" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "model-animation-ownership", .source = platform.WebViewSource.html("") };
+        }
+    } = .{};
+    try harness.start(app_state.app());
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 40, 20),
+    });
+
+    const runtime_animation = canvas.CanvasRenderAnimation{
+        .id = 1,
+        .duration_ms = 100,
+        .from_transform = canvas.Affine.translate(-10, 0),
+        .to_transform = canvas.Affine.identity(),
+    };
+    _ = try harness.runtime.setCanvasRenderAnimations(1, "canvas", &.{runtime_animation});
+
+    const first_model_animation = canvas.CanvasRenderAnimation{
+        .id = 2,
+        .duration_ms = 100,
+        .from_opacity = 0,
+        .to_opacity = 1,
+    };
+    _ = try harness.runtime.setCanvasModelRenderAnimations(1, "canvas", &.{first_model_animation});
+    try std.testing.expectEqual(@as(usize, 2), (try harness.runtime.canvasRenderAnimations(1, "canvas")).len);
+
+    _ = try harness.runtime.setCanvasModelRenderAnimations(1, "canvas", &.{});
+    const remaining = try harness.runtime.canvasRenderAnimations(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1), remaining.len);
+    try std.testing.expectEqual(runtime_animation.id, remaining[0].id);
+
+    const second_model_animation = canvas.CanvasRenderAnimation{
+        .id = 3,
+        .duration_ms = 100,
+        .from_opacity = 1,
+        .to_opacity = 0,
+    };
+    _ = try harness.runtime.setCanvasModelRenderAnimations(1, "canvas", &.{second_model_animation});
+    const refreshed = try harness.runtime.canvasRenderAnimations(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 2), refreshed.len);
+    try std.testing.expectEqual(runtime_animation.id, refreshed[0].id);
+    try std.testing.expectEqual(second_model_animation.id, refreshed[1].id);
+}
+
 test "runtime next canvas frame applies render override dirty regions" {
     const TestApp = struct {
         fn app(self: *@This()) App {

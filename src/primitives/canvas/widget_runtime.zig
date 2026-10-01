@@ -211,6 +211,8 @@ pub fn layoutWidgetTree(widget: Widget, bounds: geometry.RectF, output: []Widget
 pub fn layoutWidgetTreeWithTokens(widget: Widget, bounds: geometry.RectF, tokens: DesignTokens, output: []WidgetLayoutNode) Error!WidgetLayoutTree {
     const root_bounds = bounds.normalized();
     var len: usize = 0;
+    widget_layout.beginLayoutMemoPass();
+    defer widget_layout.endLayoutMemoPass();
     _ = try widget_layout.layoutWidgetDepth(widget, root_bounds, null, 0, output, &len, tokens);
     return .{ .nodes = output[0..len], .root_bounds = root_bounds };
 }
@@ -319,6 +321,10 @@ pub fn staticTextSelectionFillColor(widget: Widget, tokens: DesignTokens) Color 
 /// rect on a `.text` widget (tests and retained diffing).
 pub fn textSelectionCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
     return widget_render.textSelectionCommandId(widget_id, ordinal);
+}
+
+pub fn textSpanRunCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
+    return widget_render.textSpanRunCommandId(widget_id, ordinal);
 }
 
 pub fn colorWithAlpha(color: Color, alpha: f32) Color {

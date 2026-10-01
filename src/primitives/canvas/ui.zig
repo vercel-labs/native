@@ -297,6 +297,10 @@ pub const VirtualWindowRecord = struct {
     /// mounted rows after layout and patches the retained offset table
     /// (anchored, so corrections never move visible content).
     variable: bool = false,
+    /// The estimate callback returns each row's exact laid-out height.
+    /// Such lists may retain their mounted window across small scroll
+    /// movements without leaving unvisited measurement debt behind.
+    exact_extents: bool = false,
     /// Logical index of physical item 0 at build time (prepend-stable
     /// identity for the measure step).
     index_base: u64 = 0,
@@ -1742,6 +1746,10 @@ pub fn Ui(comptime Msg: type) type {
             /// visible content.
             extent_estimate: ?canvas.VirtualExtentEstimateFn = null,
             extent_context: ?*const anyopaque = null,
+            /// Set only when `extent_estimate` matches every row's
+            /// laid-out height. This lets native scrolling reuse the
+            /// mounted window until its visible coverage runs low.
+            exact_extents: bool = false,
             /// Logical index of physical item 0. DECREASE it by the
             /// prepended count when loading older history (chat
             /// transcripts keyed by sequence number): logical item
@@ -1954,6 +1962,7 @@ pub fn Ui(comptime Msg: type) type {
                 .start_index = window.start_index,
                 .end_index = window.start_index + node.nodes.len,
                 .variable = variable,
+                .exact_extents = options.exact_extents,
                 .index_base = options.index_base,
             });
             return node;
