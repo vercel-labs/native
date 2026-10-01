@@ -36,6 +36,10 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// against whatever focus the session happened to hold.
         pub fn dispatchAutomationWidgetAction(self: *Runtime, app: runtime_api.App(Runtime), action: AutomationWidgetAction) anyerror!void {
             const view_index = try automationGpuSurfaceViewIndexByLabel(self, action.view_label);
+            if (action.action == .hover) {
+                try dispatchAutomationWidgetHover(self, app, .{ .view_label = action.view_label, .id = action.id });
+                return;
+            }
             _ = try self.dispatchCanvasWidgetAccessibilityAction(app, self.views[view_index].window_id, self.views[view_index].label, .{
                 .id = action.id,
                 .action = canvasWidgetActionKindFromAutomation(action.action),
@@ -47,6 +51,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         fn canvasWidgetActionKindFromAutomation(kind: automation_commands.AutomationWidgetActionKind) runtime_api.CanvasWidgetAccessibilityActionKind {
             return switch (kind) {
                 .focus => .focus,
+                .hover => unreachable,
                 .press => .press,
                 .toggle => .toggle,
                 .increment => .increment,
@@ -61,6 +66,51 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .drop_files => .drop_files,
                 .dismiss => .dismiss,
             };
+        }
+
+        /// Move the runtime pointer to a widget's actual control aim point.
+        /// This exercises the same hover, cursor, and delayed-tooltip path as
+        /// a platform pointer move while keeping visual automation headless.
+        pub fn dispatchAutomationWidgetHover(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, target);
+            const point = try automationWidgetHoverPoint(self, view_index, target.id);
+            // Headless screenshot runs may have no key desktop window. A
+            // hover command represents interaction with the target app, so
+            // establish the same active/key preconditions the platform would
+            // have delivered before a real in-window pointer move.
+            try self.dispatchPlatformEvent(app, .app_activated);
+            try self.dispatchPlatformEvent(app, .{ .window_focused = self.views[view_index].window_id });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .pointer_move,
+                .timestamp_ns = automationInputTimestampNs(),
+                .x = point.x,
+                .y = point.y,
+            } });
+            // A visual automation hover represents the settled state after
+            // the pointer has dwelled on the target. Native hosts normally
+            // advance an armed tooltip through display-link frame timestamps,
+            // but screenshots can run while the window is occluded and no
+            // display-link callback arrives. Promote exactly to the recorded
+            // deadline so delayed tooltips and hover cards remain visually
+            // testable without changing their production delay semantics.
+            const tooltip_deadline_ns = self.views[view_index].canvas_tooltip_deadline_ns;
+            if (tooltip_deadline_ns != 0) {
+                try self.advanceCanvasTooltipIntentForFrame(view_index, tooltip_deadline_ns);
+            }
+        }
+
+        /// Hover is meaningful for plain layout nodes too: chart bars and
+        /// other pointer-enter targets intentionally expose no press or focus
+        /// action. Requiring an accessibility interaction action here made
+        /// those real hover paths impossible to exercise in visual automation.
+        fn automationWidgetHoverPoint(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!geometry.PointF {
+            const layout = self.views[view_index].widgetLayoutTree();
+            const node = layout.findById(id) orelse return error.InvalidCommand;
+            const bounds = node.frame.normalized();
+            if (bounds.isEmpty()) return error.InvalidCommand;
+            return bounds.center();
         }
 
         pub fn dispatchAutomationWidgetClick(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {

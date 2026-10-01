@@ -2391,7 +2391,17 @@ fn intrinsicButtonWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Size
     // sized exactly to its measured label ("PID" in a sort-chip row)
     // must not lose a fraction of a pixel to render-time edge snapping
     // and elide its own label.
-    const width = pixelSnapCeil(tokens, @max(widgetSizedDensityValue(widget, tokens, 44), icon_width + text_width + widgetButtonInset(widget, tokens) * 2));
+    // Custom-painted controls may author their content insets directly. In
+    // that case the author owns the intrinsic width too: applying the house
+    // 44px floor and token inset on top makes compact third-party controls
+    // wider than their declared recipe. Unauthored buttons retain the exact
+    // house behavior.
+    const authored_padding = widget.paint != null and !widget.layout.padding_is_kind_default and
+        (widget.layout.padding.left > 0 or widget.layout.padding.right > 0);
+    const width = if (authored_padding)
+        pixelSnapCeil(tokens, icon_width + text_width + widget.layout.padding.left + widget.layout.padding.right)
+    else
+        pixelSnapCeil(tokens, @max(widgetSizedDensityValue(widget, tokens, 44), icon_width + text_width + widgetButtonInset(widget, tokens) * 2));
     return geometry.SizeF.init(width, height);
 }
 

@@ -310,6 +310,8 @@ fn widgetChange(
         !std.mem.eql(u8, previous.widget.icon, next.widget.icon) or
         previous.widget.value != next.widget.value or
         previous.widget.value_x != next.widget.value_x or
+        previous.widget.paint != next.widget.paint or
+        !std.mem.eql(f32, &previous.widget.paint_data, &next.widget.paint_data) or
         previous.widget.scroll_axes != next.widget.scroll_axes or
         previous.widget.image_id != next.widget.image_id or
         !optionalRectsEqual(previous.widget.image_src, next.widget.image_src) or

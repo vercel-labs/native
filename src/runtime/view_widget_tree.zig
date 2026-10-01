@@ -380,7 +380,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (node.widget.semantics.role == .link and !node.widget.state.disabled) {
                 return platformCursorFromCanvas(.pointing_hand);
             }
-            return platformCursorFromCanvas(canvas.cursorForWidgetTarget(node.widget.kind, node.widget.state));
+            return platformCursorFromCanvas(canvas.cursorForWidget(node.widget));
         }
 
         pub fn canvasWidgetRenderState(self: *const RuntimeView) canvas.WidgetRenderState {

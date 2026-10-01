@@ -1189,6 +1189,12 @@ pub const ControlTokens = struct {
     list_item: ControlVisualTokens = .{},
     menu_item: ControlVisualTokens = .{},
     data_cell: ControlVisualTokens = .{},
+    /// Whether actionable layout containers (rows, columns, and stacks that
+    /// press, toggle, or drag) wear the neutral list-row hover/pressed
+    /// ladder over their hit frame. A theme whose surfaces own their
+    /// feedback turns it off: its rows and tabs author any hover they
+    /// have, and an authored background then holds through every state.
+    container_feedback: bool = true,
     /// The tabs LIST container (the house tab-strip treatment): the muted rounded
     /// wash the `segmented_control` triggers sit on.
     tabs: ControlVisualTokens = .{},

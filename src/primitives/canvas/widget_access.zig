@@ -21,7 +21,9 @@ const snapTextRange = text_model.snapTextRange;
 /// the platform's own controls do.
 pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
     const target = hit orelse return .arrow;
-    if (target.role == .link and !target.state.disabled) return .pointing_hand;
+    if (target.state.disabled) return .arrow;
+    if (target.cursor) |cursor| return cursor;
+    if (target.role == .link) return .pointing_hand;
     return cursorForWidgetTarget(target.kind, target.state);
 }
 
@@ -31,6 +33,14 @@ pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
 /// arrow over everything else — including sliders, which keep the arrow
 /// at rest AND during a drag on every native platform. The pointing hand
 /// never comes from a kind; it is role-driven (`cursorForWidgetHit`).
+/// The cursor a widget advertises: its authored override first, then the
+/// cursor its kind implies.
+pub fn cursorForWidget(widget: Widget) WidgetCursor {
+    if (widget.state.disabled) return .arrow;
+    if (widget.style.cursor) |cursor| return cursor;
+    return cursorForWidgetTarget(widget.kind, widget.state);
+}
+
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
     if (state.disabled) return .arrow;
     return switch (kind) {

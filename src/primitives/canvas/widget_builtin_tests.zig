@@ -438,6 +438,90 @@ test "icon widgets render built-in vector icons as tinted path commands" {
     }
 }
 
+test "a widget painter replaces the built-in chrome and its children still render" {
+    const Painter = struct {
+        fn paint(builder: *Builder, widget: Widget, _: DesignTokens) canvas.Error!void {
+            try builder.fillRect(.{
+                .id = 900,
+                .rect = widget.frame,
+                .fill = .{ .color = canvas.Color.rgb8(10, 20, 30) },
+            });
+        }
+    };
+    const children = [_]Widget{.{
+        .id = 71,
+        .kind = WidgetKind.text,
+        .frame = geometry.RectF.init(4, 4, 60, 16),
+        .text = "Label",
+    }};
+    const button = Widget{
+        .id = 70,
+        .kind = WidgetKind.button,
+        .frame = geometry.RectF.init(0, 0, 80, 24),
+        .text = "Built-in",
+        .paint = Painter.paint,
+        .children = &children,
+    };
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, button, DesignTokens{});
+    const display_list = builder.displayList();
+    try std.testing.expect(display_list.findCommandById(900) != null);
+    try std.testing.expect(display_list.findCommandById(widgetPartId(70, 1)) == null);
+    var saw_child = false;
+    var saw_builtin_label = false;
+    for (display_list.commands) |command| switch (command) {
+        .draw_text => |text| {
+            if (std.mem.eql(u8, text.text, "Label")) saw_child = true;
+            if (std.mem.eql(u8, text.text, "Built-in")) saw_builtin_label = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_child);
+    try std.testing.expect(!saw_builtin_label);
+}
+
+test "a painter's nested widget tree leaves later modal scrims at the root" {
+    // A painter can re-enter emitWidgetTree for a nested widget (a
+    // field's editor, an icon inside a chip). The dialog emitted after
+    // it must still scrim the whole root, not the nested widget's frame.
+    const Painter = struct {
+        fn paint(builder: *Builder, widget: Widget, tokens: DesignTokens) canvas.Error!void {
+            try emitWidgetTree(builder, .{
+                .id = 81,
+                .kind = WidgetKind.icon,
+                .frame = geometry.RectF.init(widget.frame.x + 4, widget.frame.y + 4, 16, 16),
+                .text = "+",
+            }, tokens);
+        }
+    };
+    const children = [_]Widget{
+        .{
+            .id = 80,
+            .kind = WidgetKind.button,
+            .frame = geometry.RectF.init(8, 8, 80, 24),
+            .text = "Field",
+            .paint = Painter.paint,
+        },
+        builtinComponentWidget(.dialog, .{ .id = 82, .frame = geometry.RectF.init(200, 160, 240, 140) }),
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 640, 360),
+        .children = &children,
+    };
+    var commands: [24]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, root, .{});
+    const display_list = builder.displayList();
+    try std.testing.expect(display_list.findCommandById(widgetPartId(81, 1)) != null);
+    switch (display_list.findCommandById(widgetPartId(82, 14)).?.command) {
+        .fill_rect => |fill| try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 640, 360), fill.rect),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "checkbox check mark and label render through their pinned part slots" {
     const checkbox = Widget{
         .id = 63,

@@ -47,6 +47,7 @@ pub const Error = error{
     InvalidTransform,
     WidgetDepthExceeded,
     ChartPathElementListFull,
+    GradientStopListFull,
     ChartLabelBytesFull,
     WidgetEventRouteListFull,
     WidgetInvalidationListFull,
@@ -215,6 +216,7 @@ pub const DiffKind = command_model.DiffKind;
 pub const DiffChange = command_model.DiffChange;
 pub const Builder = command_model.Builder;
 pub const max_display_list_text_bytes = command_model.max_display_list_text_bytes;
+pub const max_display_list_gradient_stops = command_model.max_display_list_gradient_stops;
 
 // Canvas render data and cache plans live in `render.zig`; root keeps the public API stable.
 pub const max_render_state_stack = render_model.max_render_state_stack;
@@ -738,6 +740,7 @@ pub const textInputCaretVisibleScrollOffsetForWidget = widget_runtime.textInputC
 pub const intrinsicWidgetSize = widget_runtime.intrinsicWidgetSize;
 pub const cursorForWidgetHit = widget_runtime.cursorForWidgetHit;
 pub const cursorForWidgetTarget = widget_runtime.cursorForWidgetTarget;
+pub const cursorForWidget = widget_runtime.cursorForWidget;
 /// Whether the engine hit-tests widgets of this kind (widget_access.zig —
 /// the single source of truth the runtime, both markup engines, and the
 /// markup validator's element list all derive from). Kind-level only: the

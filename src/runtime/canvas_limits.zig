@@ -17,7 +17,10 @@ const canvas = @import("canvas");
 // measured at 61.3 MiB -> 119.3 MiB (RuntimeView 1.12 MiB -> 2.65 MiB x 32
 // view slots); pages are only touched as views use their capacity.
 pub const max_canvas_commands_per_view: usize = 2048;
-pub const max_canvas_gradient_stops_per_view: usize = 64;
+// Retain every gradient the display-list builder can emit. The old 64-stop
+// pool rejected ordinary views with more than 32 two-stop gradients when
+// scrolling brought their controls into view, leaving the previous frame.
+pub const max_canvas_gradient_stops_per_view: usize = canvas.max_display_list_gradient_stops;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
 // icons are path commands, and a curated stroke icon lowers to ~10-25
 // elements (folder 10, sun 21, settings 25). A realistic dense view — a

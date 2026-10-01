@@ -124,6 +124,7 @@ fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
         .index = index,
         .state = node.widget.state,
         .role = node.widget.semantics.role,
+        .cursor = node.widget.style.cursor,
     };
 }
 

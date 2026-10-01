@@ -13,6 +13,7 @@ const WidgetActions = widget_model.WidgetActions;
 const WidgetKind = widget_model.WidgetKind;
 const WidgetRole = widget_model.WidgetRole;
 const WidgetState = widget_model.WidgetState;
+const WidgetCursor = widget_model.WidgetCursor;
 
 pub const WidgetLayoutNode = struct {
     widget: Widget,
@@ -31,6 +32,9 @@ pub const WidgetHit = struct {
     /// Semantic role of the hit widget (kind alone cannot distinguish a
     /// link hotspot from plain text, and links want a pointer cursor).
     role: WidgetRole = .none,
+    /// The widget's authored cursor override (`WidgetStyle.cursor`), so
+    /// hover resolution can honor it without re-reading the tree.
+    cursor: ?WidgetCursor = null,
 };
 
 pub const WidgetPointerPhase = enum {

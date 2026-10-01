@@ -33,6 +33,7 @@ pub fn platformCursorFromCanvas(cursor: canvas.WidgetCursor) platform.Cursor {
         .pointing_hand => .pointing_hand,
         .text => .text,
         .resize_horizontal => .resize_horizontal,
+        .resize_vertical => .resize_vertical,
     };
 }
 

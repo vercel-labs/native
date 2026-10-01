@@ -337,16 +337,27 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             defer launch_timing.lapOnce("first_display_list_emitted");
 
             var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var chrome_storage = CanvasDisplayListScratch{};
             var builder = canvas.Builder.init(&commands);
             const current = self.views[view_index].canvasDisplayList();
             const prefix_count = self.views[view_index].canvas_widget_display_list_prefix_count;
             const suffix_count = self.views[view_index].canvas_widget_display_list_suffix_count;
             if (prefix_count > current.commands.len or suffix_count > current.commands.len - prefix_count) return error.InvalidCommand;
-            for (current.commands[0..prefix_count]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
+            // Chrome resources must survive the retained-list copy below.
+            // Keep the expanded resource buffers off the already deep emit
+            // stack; ordinary widget-only refreshes need no scratch at all.
+            const allocator = self.owned_allocator;
+            const chrome_storage = if (prefix_count + suffix_count > 0) try allocator.create(CanvasDisplayListScratch) else null;
+            defer if (chrome_storage) |storage| allocator.destroy(storage);
+            if (chrome_storage) |storage| {
+                storage.gradient_stop_count = 0;
+                storage.path_element_count = 0;
+                storage.glyph_count = 0;
+                storage.text_len = 0;
+            }
+            for (current.commands[0..prefix_count]) |command| try chrome_storage.?.appendCopiedCommand(&builder, command);
             try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[view_index].widget_tokens, self.views[view_index].canvasWidgetRenderState());
             const suffix_start = current.commands.len - suffix_count;
-            for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
+            for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.?.appendCopiedCommand(&builder, command);
 
             const display_list = builder.displayList();
             if (display_list.commands.len + self.views[view_index].canvas_widget_display_list_reserved_count > max_canvas_commands_per_view) {

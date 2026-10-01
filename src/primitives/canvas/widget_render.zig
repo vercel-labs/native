@@ -152,9 +152,20 @@ threadlocal var scrim_viewport: ?geometry.RectF = null;
 threadlocal var tree_visible_bounds: ?geometry.RectF = null;
 
 pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    // Widget painters re-enter this entry point to emit a nested widget (a
+    // field's native editor, an icon inside a chip), so the tree state must
+    // be saved and restored rather than assigned: a nested call that left
+    // its own little frame behind sized every later modal's scrim to that
+    // widget instead of the window, and cleared the visible bounds that
+    // cull the rest of the outer tree.
+    const parent_scrim_viewport = scrim_viewport;
+    const parent_visible_bounds = tree_visible_bounds;
+    defer {
+        scrim_viewport = parent_scrim_viewport;
+        tree_visible_bounds = parent_visible_bounds;
+    }
     scrim_viewport = widget.frame.normalized();
     tree_visible_bounds = widget.frame.normalized();
-    defer tree_visible_bounds = null;
     try emitWidgetDepth(builder, widget, tokens, 0);
 }
 
@@ -444,7 +455,18 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
 }
 
 fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
-    const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    var paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    if (paint_widget.kind == .input_group and !paint_widget.state.focused) {
+        paint_widget.state.focused = widgetSubtreeHasFocusedState(paint_widget);
+    }
+    if (paint_widget.paint) |paint| {
+        try paint(builder, paint_widget, tokens);
+        if (paint_widget.kind == .button_group)
+            try emitButtonGroupWidget(builder, paint_widget, tokens, depth)
+        else
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        return;
+    }
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
         .stack, .row, .column => {
@@ -785,7 +807,18 @@ fn emitWidgetLayoutNodeContent(
     state: WidgetRenderState,
     widget: Widget,
 ) Error!void {
-    const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    var paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    if (paint_widget.kind == .input_group and !paint_widget.state.focused) {
+        paint_widget.state.focused = if (state.focused_id != null or state.focus_visible_id != null)
+            layoutSubtreeHasFocusVisible(layout, node_index, state)
+        else
+            layoutSubtreeHasBakedFocus(layout, node_index);
+    }
+    if (paint_widget.paint) |paint| {
+        try paint(builder, paint_widget, tokens);
+        try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
+        return;
+    }
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
         .stack, .row, .column => try emitLayoutContainerBackground(builder, paint_widget, tokens),
@@ -943,10 +976,12 @@ fn emitWidgetLayoutNodeContent(
 /// Flow and stacking containers have no implicit surface treatment. An
 /// actionable container, however, wears the same neutral hover/pressed
 /// ladder as a list row over its full hit frame; an authored background is
-/// its rest fill. Non-actionable containers paint only that authored fill.
+/// its rest fill. Non-actionable containers paint only that authored fill,
+/// and so do actionable ones under a theme that turns
+/// `controls.container_feedback` off.
 fn emitLayoutContainerBackground(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const actions = widget.semantics.actions;
-    const actionable = widget.id != 0 and !widget.state.disabled and
+    const actionable = tokens.controls.container_feedback and widget.id != 0 and !widget.state.disabled and
         (actions.press or actions.toggle or actions.drag);
     if (!actionable) {
         const background = widget.style.background orelse return;

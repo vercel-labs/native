@@ -336,6 +336,10 @@ pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor 
     return widget_access.cursorForWidgetTarget(kind, state);
 }
 
+pub fn cursorForWidget(widget: Widget) WidgetCursor {
+    return widget_access.cursorForWidget(widget);
+}
+
 fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
     return widget_semantics.collectWidgetSemantics(layout, output, widgetScrollSemantics);
 }

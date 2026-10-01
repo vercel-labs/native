@@ -376,6 +376,9 @@ fn nonNegative(value: f32) f32 {
 /// keeps the two from drifting — so the store can only overflow on a
 /// frame the per-view display-list copy would refuse anyway.
 pub const max_display_list_text_bytes: usize = 32768;
+/// Emit-computed gradient stops a single display list can hold. Chrome
+/// gradients are two or three stops each, so this is generous for a view.
+pub const max_display_list_gradient_stops: usize = 4096;
 
 pub const Builder = struct {
     commands: []CanvasCommand,
@@ -412,6 +415,15 @@ pub const Builder = struct {
     /// its forced clip contains the fallback.
     text_bytes: [max_display_list_text_bytes]u8 = undefined,
     text_byte_len: usize = 0,
+    /// Builder-owned storage for gradient stops COMPUTED at emit time: the
+    /// `path_elements` lifetime rule applied to gradients. A comptime stop
+    /// table can live at module scope and be referenced zero-copy, but stops
+    /// whose colors depend on widget state have nowhere safe to live — a
+    /// local array dies with the painter's frame while the command that
+    /// references it outlives the call, leaving the gradient reading
+    /// whatever later reused that stack.
+    gradient_stops: [max_display_list_gradient_stops]drawing_model.GradientStop = undefined,
+    gradient_stop_len: usize = 0,
 
     pub fn init(commands: []CanvasCommand) Builder {
         return .{ .commands = commands };
@@ -422,6 +434,7 @@ pub const Builder = struct {
         self.path_element_len = 0;
         self.label_byte_len = 0;
         self.text_byte_len = 0;
+        self.gradient_stop_len = 0;
     }
 
     /// Reserve `count` path elements in the builder-owned store. The
@@ -433,6 +446,17 @@ pub const Builder = struct {
         const start = self.path_element_len;
         self.path_element_len += count;
         return self.path_elements[start..self.path_element_len];
+    }
+
+    /// Copy emit-computed gradient stops into the builder-owned store, so a
+    /// fill referencing them shares the builder's lifetime instead of a
+    /// painter's stack frame (same contract as `allocPathElements`).
+    pub fn allocGradientStops(self: *Builder, stops: []const drawing_model.GradientStop) error{GradientStopListFull}![]const drawing_model.GradientStop {
+        if (self.gradient_stop_len + stops.len > self.gradient_stops.len) return error.GradientStopListFull;
+        const start = self.gradient_stop_len;
+        self.gradient_stop_len += stops.len;
+        @memcpy(self.gradient_stops[start..self.gradient_stop_len], stops);
+        return self.gradient_stops[start..self.gradient_stop_len];
     }
 
     /// Persist a formatted chart label into the builder-owned label

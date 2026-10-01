@@ -168,6 +168,117 @@ test "runtime retains canvas display lists on GPU surface views" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_commands=3") != null);
 }
 
+test "retained gradient controls survive repeated native scroll reversals" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gradient-scroll", .source = platform.WebViewSource.html("<h1>Gradients</h1>") };
+        }
+
+        fn paint(builder: *canvas.Builder, widget: canvas.Widget, _: canvas.DesignTokens) canvas.Error!void {
+            for (0..40) |index| {
+                const stops = try builder.allocGradientStops(&.{
+                    .{ .offset = 0, .color = canvas.Color.rgb8(255, 255, 255) },
+                    .{ .offset = 1, .color = canvas.Color.rgb8(24, 24, 27) },
+                });
+                const y = widget.frame.y + @as(f32, @floatFromInt(index)) * 12;
+                try builder.fillRect(.{
+                    .id = 200 + index,
+                    .rect = geometry.RectF.init(widget.frame.x, y, 180, 10),
+                    .fill = .{ .linear_gradient = .{
+                        .start = geometry.PointF.init(0, y),
+                        .end = geometry.PointF.init(0, y + 10),
+                        .stops = stops,
+                    } },
+                });
+            }
+        }
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 180, 480),
+        .paint = TestApp.paint,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .scroll_view, .children = &children }, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    // More than 32 ordinary two-stop gradients exhausted the old retained
+    // pool even though the same display list fits the painter's builder.
+    // Reversing repeatedly also proves stops are reused every refresh.
+    for (0..80) |index| {
+        const offset: f32 = if (index % 2 == 0) 24 else 0;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+            .window_id = 1,
+            .label = "canvas",
+            .driver_id = 1,
+            .offset_y = offset,
+            .timestamp_ns = (index + 1) * 8_333_333,
+        } });
+        const display = try harness.runtime.canvasDisplayList(1, "canvas");
+        const first = display.findCommandById(200).?.command.fill_rect;
+        try std.testing.expectEqual(-offset, first.rect.y);
+        try std.testing.expectEqual(@as(f32, 1), first.fill.linear_gradient.stops[0].color.r);
+        try std.testing.expectEqual(@as(usize, 80), harness.runtime.views[0].canvas_gradient_stop_count);
+    }
+    try harness.runtime.dispatchPlatformEvent(app, .app_deactivated);
+}
+
+test "retained gradients support the builder budget and preserve the frame on overflow" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gradient-budget", .source = platform.WebViewSource.html("<h1>Gradients</h1>") };
+        }
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 180, 72),
+    });
+
+    const stop = canvas.GradientStop{ .offset = 0, .color = canvas.Color.rgb8(255, 255, 255) };
+    const stops = [_]canvas.GradientStop{stop} ** (canvas.max_display_list_gradient_stops + 1);
+    var commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 180, 72),
+        .fill = .{ .linear_gradient = .{
+            .start = geometry.PointF.zero(),
+            .end = geometry.PointF.init(0, 72),
+            .stops = stops[0..canvas.max_display_list_gradient_stops],
+        } },
+    } }};
+    const accepted = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+    commands[0].fill_rect.fill.linear_gradient.stops = &stops;
+    try std.testing.expectError(error.CanvasGradientStopLimitReached, harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands }));
+    const retained = try harness.runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expectEqual(canvas.max_display_list_gradient_stops, retained.commands[0].fill_rect.fill.linear_gradient.stops.len);
+    try std.testing.expectEqual(accepted.canvas_revision, harness.runtime.views[0].canvas_revision);
+
+    commands[0].fill_rect.fill.linear_gradient.stops = stops[0..2];
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+    try std.testing.expectEqual(@as(usize, 2), harness.runtime.views[0].canvas_gradient_stop_count);
+}
+
 test "runtime builds canvas frame plans from retained GPU canvas state" {
     const TestApp = struct {
         fn app(self: *@This()) App {

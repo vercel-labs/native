@@ -319,6 +319,7 @@ static NSCursor *NativeSdkCursorForKind(NSInteger kind) {
         case NATIVE_SDK_APPKIT_CURSOR_POINTING_HAND: return [NSCursor pointingHandCursor];
         case NATIVE_SDK_APPKIT_CURSOR_TEXT: return [NSCursor IBeamCursor];
         case NATIVE_SDK_APPKIT_CURSOR_RESIZE_HORIZONTAL: return [NSCursor resizeLeftRightCursor];
+        case NATIVE_SDK_APPKIT_CURSOR_RESIZE_VERTICAL: return [NSCursor resizeUpDownCursor];
         case NATIVE_SDK_APPKIT_CURSOR_ARROW:
         default:
             return [NSCursor arrowCursor];
