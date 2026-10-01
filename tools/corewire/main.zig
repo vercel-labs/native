@@ -10,7 +10,7 @@
 //! mirror module the app wiring imports (see emit.zig for what the
 //! mirror carries). `--facade` writes the TypeScript projection,
 //! `--profile` the library-mode compiler profile that builds it
-//! (emit_profile.zig). `--check` validates and stops — the checker-tier
+//! (scriptc-compiled emit_profile.ts). `--check` validates and stops — the checker-tier
 //! entry point.
 //!
 //! The build stages the output beside tools/corewire/shim_rt.zig and
@@ -21,7 +21,7 @@ const std = @import("std");
 const sidecar_mod = @import("sidecar.zig");
 const emit_mod = @import("emit.zig");
 const emit_facade_mod = @import("emit_facade.zig");
-const emit_profile_mod = @import("emit_profile.zig");
+const emit_profile_mod = @import("profile.zig");
 const service_contract_mod = @import("service_contract.zig");
 const emit_service_mod = @import("emit_service.zig");
 

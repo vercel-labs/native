@@ -1,0 +1,70 @@
+{
+  "profile_format": 1,
+  "name": "native-sdk-core",
+  "entry": "core_facade.ts",
+  "emission": "llvm",  "optimization": "release",
+  "abi": {
+    "prefix": "nsc_core_",
+    "init_symbol": "nsc_core_init",
+    "sink_register_symbol": "nsc_core_set_panic_sink",
+    "collect_symbol": "nsc_core_collect",
+    "result_reset_symbol": "nsc_core_frame_reset"
+  },
+  "exports": [
+    { "export": "boot_cmd", "symbol": "nsc_core_boot_cmd", "params": [], "returns": "bytes" },
+    { "export": "dispatch_void", "symbol": "nsc_core_dispatch_void", "params": ["u8"], "returns": "bytes" },
+    { "export": "dispatch_bytes", "symbol": "nsc_core_dispatch_bytes", "params": ["u8", "bytes"], "returns": "bytes" },
+    { "export": "dispatch_number", "symbol": "nsc_core_dispatch_number", "params": ["u8", "f64"], "returns": "bytes" },
+    { "export": "dispatch_number_bytes", "symbol": "nsc_core_dispatch_number_bytes", "params": ["u8", "f64", "bytes"], "returns": "bytes" },
+    { "export": "dispatch_bool", "symbol": "nsc_core_dispatch_bool", "params": ["u8", "u8"], "returns": "bytes" },
+    { "export": "dispatch_enum", "symbol": "nsc_core_dispatch_enum", "params": ["u8", "u32"], "returns": "bytes" },
+    { "export": "dispatch_record", "symbol": "nsc_core_dispatch_record", "params": ["u8", "bytes"], "returns": "bytes" },
+    { "export": "dispatch_text_input", "symbol": "nsc_core_dispatch_text_input", "params": ["u8", "bytes"], "returns": "bytes" },
+    { "export": "dispatch_scroll_state", "symbol": "nsc_core_dispatch_scroll_state", "params": ["u8", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "bytes" },
+    { "export": "abi_subscriptions", "symbol": "nsc_core_subscriptions", "params": [], "returns": "bytes" },
+    { "export": "model_snapshot", "symbol": "nsc_core_model_snapshot", "params": [], "returns": "bytes" },
+    { "export": "persist_snapshot", "symbol": "nsc_core_persist_snapshot", "params": [], "returns": "bytes" },
+    { "export": "restore_model", "symbol": "nsc_core_restore_model", "params": ["bytes"], "returns": "bytes" },
+    { "export": "migrate_model", "symbol": "nsc_core_migrate_model", "params": ["bytes", "f64"], "returns": "bytes" },
+    { "export": "helper_call", "symbol": "nsc_core_helper_call", "params": ["u32", "bytes"], "returns": "bytes" }
+  ],
+  "sidecar": {
+    "path": "core.contract.json",
+    "wire_version": 7,
+    "abi_version": 2,
+    "snapshot_format": 1,
+    "build_id_symbol": "nsc_core_build_id",
+    "abi_version_symbol": "nsc_core_abi_version",
+    "model": "Model",
+    "msg": "Msg",
+    "init_export": "init",
+    "update_export": "coreUpdate",
+    "integer_slots": [
+      { "slot": "Model.count", "class": "i64" }
+    ]
+  },
+  "determinism": {
+    "teachings": {
+      "async": "async, promises, and timer callbacks are unavailable in an app core: the host executes effects — declare a command (Cmd.fetch, Cmd.delay) or a subscription (Sub.timer) and results arrive as Msgs."
+    },
+    "remediations": {
+      "SC4013": "rebuild the app: an exception escaping a core entry is contract skew between the compiled core and its host bindings, and one build regenerates both from one contract.",
+      "SC4017": "restart the app process: a trapped core is poisoned and never resumes in place, and the recorded session replays deterministically."
+    },
+    "fences": [
+      { "id": "stdlib.math.random", "teaching": "randomness is an effect: the core requests it through a command and the value arrives as a Msg, so a recorded session replays it exactly." },
+      { "id": "node-builtin.crypto.randomBytes", "teaching": "randomness is an effect: the core requests it through a command and the value arrives as a Msg, so a recorded session replays it exactly." },
+      { "id": "node-builtin.crypto.randomUUID", "teaching": "randomness is an effect: the core requests it through a command and the value arrives as a Msg, so a recorded session replays it exactly." },
+      { "prefix": "stdlib.date.", "teaching": "the wall clock is an effect: read it through the host's journaled clock — Cmd.now, Cmd.delay, and Sub.timer deliver fire times as Msgs, so a recorded session replays them exactly." },
+      { "prefix": "node-builtin.perf_hooks.", "teaching": "the wall clock is an effect: read it through the host's journaled clock — Cmd.now, Cmd.delay, and Sub.timer deliver fire times as Msgs, so a recorded session replays them exactly." },
+      { "prefix": "node-builtin.fs.", "teaching": "files are effects: declare reads and writes as commands (Cmd.readFile, Cmd.writeFile) and results arrive as Msgs." },
+      { "prefix": "node-builtin.net.", "teaching": "network is an effect: declare requests as commands (Cmd.fetch, Cmd.request) and responses arrive as Msgs." },
+      { "prefix": "node-builtin.http2.", "teaching": "network is an effect: declare requests as commands (Cmd.fetch, Cmd.request) and responses arrive as Msgs." },
+      { "prefix": "node-builtin.tls.", "teaching": "network is an effect: declare requests as commands (Cmd.fetch, Cmd.request) and responses arrive as Msgs." },
+      { "prefix": "node-builtin.child_process.", "teaching": "processes are effects: run them through Cmd.spawn and their output arrives as Msgs." },
+      { "prefix": "node-builtin.timers.", "teaching": "timers are effects: schedule Cmd.delay or Sub.timer and fire times arrive as Msgs through the host's journaled clock." },
+      { "prefix": "node-builtin.os.", "teaching": "machine and session facts are host inputs: they reach a core as journaled Msgs, never as ambient reads." },
+      { "prefix": "node-builtin.process.", "teaching": "process and environment facts are host inputs: environment values arrive as journaled Msgs through the env channel, and every other session fact reaches a core only as a host-delivered Msg." }
+    ]
+  }
+}

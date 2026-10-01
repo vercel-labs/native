@@ -157,7 +157,7 @@ const compileEnv = zigCcCompile
   : process.env;
 
 // The profile's determinism-fence table is RELEASE-PINNED DATA (see
-// tools/corewire/emit_profile.zig): its ids resolve against one
+// tools/corewire/emit_profile.ts): its ids resolve against one
 // toolchain release's surface manifest, so the supplied command must BE
 // the release the SDK pins — the exact-pinned dependency of
 // packages/core (the ONE place the pin lives).

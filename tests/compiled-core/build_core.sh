@@ -40,7 +40,7 @@ else
   exit 2
 fi
 
-# The profile's determinism-fence table is RELEASE-PINNED DATA (see tools/corewire/emit_profile.zig): its ids resolve against one toolchain release's surface manifest, so the supplied command must BE that release. packages/core/package.json's dependencies.scriptc is the ONE place the pin lives — bump it there and everything downstream follows.
+# The profile's determinism-fence table is RELEASE-PINNED DATA (see tools/corewire/emit_profile.ts): its ids resolve against one toolchain release's surface manifest, so the supplied command must BE that release. packages/core/package.json's dependencies.scriptc is the ONE place the pin lives — bump it there and everything downstream follows.
 pin="$(sed -n 's/.*"scriptc": *"\([0-9][0-9.]*\)".*/\1/p' "$repo/packages/core/package.json")"
 if [ -z "$pin" ]; then
   echo "packages/core/package.json carries no exact scriptc pin — the SDK tree is broken; reinstall or re-clone it" >&2

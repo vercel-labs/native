@@ -436,7 +436,6 @@ pub fn build(b: *std.Build) void {
     const corewire_sidecar_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/sidecar.zig"));
     const corewire_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit.zig"));
     const corewire_facade_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_facade.zig"));
-    const corewire_profile_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_profile.zig"));
     const corewire_service_contract_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/service_contract.zig"));
     const corewire_service_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_service.zig"));
     const corewire_shim_rt_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/shim_rt.zig"));
@@ -739,7 +738,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(corewire_sidecar_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_facade_tests).step);
-    test_step.dependOn(&b.addRunArtifact(corewire_profile_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_service_contract_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_service_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
@@ -808,6 +806,20 @@ pub fn build(b: *std.Build) void {
         const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
         const sidecar_conformance_step = b.step("sidecar-conformance", "Validate corewire-generated mirrors over every fixture's frontend-emitted contract (requires node)");
         sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
+        const profile_tests_mod = module(b, b.graph.host, optimize, "tools/corewire/profile_tests.zig");
+        @import("build/corewire.zig").linkProfile(profile_tests_mod, ts_core_artifacts.profile_archive);
+        const profile_tests_run = b.addRunArtifact(testArtifact(b, profile_tests_mod));
+        const profile_step = b.step("test-corewire-profile", "Test the scriptc-compiled profile generator and its preserved output fixtures");
+        profile_step.dependOn(&profile_tests_run.step);
+        test_step.dependOn(&profile_tests_run.step);
+        const profile_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        profile_cli_tests.addFileArg(b.path("tools/corewire/profile.test.ts"));
+        profile_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        profile_cli_tests.addFileInput(b.path("tools/corewire/emit_profile.ts"));
+        profile_cli_tests.setCwd(b.path("."));
+        profile_cli_tests.has_side_effects = true;
+        profile_step.dependOn(&profile_cli_tests.step);
+        test_step.dependOn(&profile_cli_tests.step);
         // ABI-law suites over real compiled cores: the broad markup fixture
         // plus the focused mixed bare-Model/[Model, Cmd] return regression.
         const abi_laws_run = b.addRunArtifact(ts_core_artifacts.external_core_abi_laws);
@@ -3356,6 +3368,8 @@ fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
 /// skipped, not failed — when node or the transpiler package's
 /// installed dependency (`npm ci` in packages/core) is missing.
 const TsCoreE2eArtifacts = struct {
+    corewire: *std.Build.Step.Compile,
+    profile_archive: std.Build.LazyPath,
     host: *std.Build.Step.Compile,
     persist: *std.Build.Step.Compile,
     /// The markup battery is its own binary: the compiled-core symbol
@@ -3456,6 +3470,8 @@ fn tsCoreE2eArtifact(
         .target = b.graph.host,
         .optimize = optimize,
     });
+    const profile_archive = @import("build/corewire.zig").profileArchive(b, b, node);
+    @import("build/corewire.zig").linkProfile(corewire_mod, profile_archive);
     const corewire_exe = b.addExecutable(.{
         .name = "corewire",
         .root_module = corewire_mod,
@@ -3877,6 +3893,8 @@ fn tsCoreE2eArtifact(
         .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
         .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
+        .corewire = corewire_exe,
+        .profile_archive = profile_archive,
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .feed_reader = filteredTestArtifact(b, feed_reader_mod, "ts-feed-reader-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),

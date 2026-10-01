@@ -1,0 +1,17 @@
+{
+  "profile_format": 1,
+  "name": "native-sdk-profile-generator",
+  "entry": "emit_profile.ts",
+  "emission": "llvm",
+  "optimization": "release",
+  "abi": {
+    "prefix": "nsc_profile_",
+    "init_symbol": "nsc_profile_init",
+    "sink_register_symbol": "nsc_profile_set_panic_sink",
+    "collect_symbol": "nsc_profile_collect",
+    "result_reset_symbol": "nsc_profile_reset"
+  },
+  "exports": [
+    { "export": "generate", "symbol": "nsc_profile_generate", "params": ["string", "string", "string"], "returns": "string" }
+  ]
+}

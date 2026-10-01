@@ -1106,7 +1106,7 @@ fn tsCoreStage(
     // corewire, compiled from the SDK dependency for the build host: one
     // invocation projects the generated compile entry and its profile,
     // so the profile's entry spelling and the facade file can never skew.
-    const corewire_exe = corewireExe(b, dep);
+    const corewire_exe = @import("corewire.zig").executable(b, dep.builder, node, .Debug, useLlvmWorkaround(b.graph.host));
     const project = b.addRunArtifact(corewire_exe);
     project.setName("native corewire (core facade + profile)");
     project.addArg("--sidecar");
@@ -1391,21 +1391,6 @@ fn addAppSqlDirInputs(b: *std.Build, run: *std.Build.Step.Run, src_path: []const
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
         run.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
     }
-}
-
-/// corewire (the contract-sidecar shim generator), compiled from the SDK
-/// dependency's sources for the build host.
-fn corewireExe(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Compile {
-    const mod = b.createModule(.{
-        .root_source_file = dep.path("tools/corewire/main.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    });
-    return b.addExecutable(.{
-        .name = "corewire",
-        .root_module = mod,
-        .use_llvm = useLlvmWorkaround(b.graph.host),
-    });
 }
 
 /// The archive's symbol-safe stem (`<app>_core` with every non-identifier
