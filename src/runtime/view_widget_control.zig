@@ -405,10 +405,18 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                     changed = true;
                 }
             } else if (selected and canvasWidgetSelectionClearsSiblings(widget.kind)) {
+                var clear: [1024]u8 = undefined;
+                const policy_len = if (widget.kind == .segmented_control)
+                    canvas_widget_runtime.canvasWidgetTabsPolicy(self.widgetLayoutTree(), index, 8, &clear)
+                else
+                    null;
+                if (policy_len) |len| if (len != self.widget_layout_node_count) @panic("invalid tabs selection policy result");
                 const parent_index = self.widget_layout_nodes[index].parent_index;
                 for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, sibling_index| {
                     if (sibling_index == index) continue;
-                    if (node.parent_index != parent_index or node.widget.kind != widget.kind) continue;
+                    if (policy_len != null) {
+                        if (clear[sibling_index] == 0) continue;
+                    } else if (node.parent_index != parent_index or node.widget.kind != widget.kind) continue;
                     if (!canvasWidgetSelectableSelected(node.widget)) continue;
                     node.widget.state.selected = false;
                     node.widget.value = 0;

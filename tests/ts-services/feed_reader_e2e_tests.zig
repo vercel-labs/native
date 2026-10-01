@@ -595,9 +595,12 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     const secondary = core.nativeWindowView("feed", allocator);
     const policy_request = [_]u8{ 1, 0, 0, 2, 0, 255, 255, 2, 0, 0, 0, 1, 7 };
     var policy_output: [2]u8 = undefined;
+    const tabs_request = [_]u8{ 7, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 6, 0, 0, 1, 2 };
     for (0..16) |_| {
         try std.testing.expectEqual(@as(usize, 2), core.nativeRadioPolicy(&policy_request, &policy_output));
         try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, &policy_output);
+        try std.testing.expectEqual(@as(usize, 2), core.nativeTabsPolicy(&tabs_request, &policy_output));
+        try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
         try std.testing.expectEqualStrings(primary, core.nativeView(allocator));
         try std.testing.expectEqualStrings(secondary, core.nativeWindowView("feed", allocator));
     }
@@ -639,7 +642,7 @@ test "compiled radio group Tab entry falls back when its selection is fixed-clip
         var nodes: [6]canvas.WidgetLayoutNode = undefined;
         const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 220, 80), &nodes);
         if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
-            node.widget.radio_policy = core.nativeRadioPolicy;
+            node.widget.interaction_policy = core.nativeRadioPolicy;
         };
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
@@ -694,7 +697,7 @@ test "compiled radio navigation skips fixed-clipped candidates" {
             }
         }
         if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
-            node.widget.radio_policy = core.nativeRadioPolicy;
+            node.widget.interaction_policy = core.nativeRadioPolicy;
         };
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
@@ -762,7 +765,7 @@ test "compiled radio-group arrow navigation reveals selects and focuses an offsc
         var nodes: [10]canvas.WidgetLayoutNode = undefined;
         const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 64), &nodes);
         if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
-            node.widget.radio_policy = core.nativeRadioPolicy;
+            node.widget.interaction_policy = core.nativeRadioPolicy;
         };
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
         const view = &harness.runtime.views[0];
@@ -806,7 +809,7 @@ test "compiled bare radio selection clears only direct siblings" {
         var nodes: [7]canvas.WidgetLayoutNode = undefined;
         const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .column, .children = &children }, geometry.RectF.init(0, 0, 400, 200), &nodes);
         if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
-            node.widget.radio_policy = core.nativeRadioPolicy;
+            node.widget.interaction_policy = core.nativeRadioPolicy;
         };
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
         _ = try harness.runtime.views[0].setCanvasWidgetSelected(3, true);
@@ -816,5 +819,68 @@ test "compiled bare radio selection clears only direct siblings" {
         try std.testing.expect(retained.findById(5).?.widget.state.selected);
         try std.testing.expect(retained.findById(7).?.widget.state.selected);
         try std.testing.expectEqual(@as(?geometry.RectF, null), try harness.runtime.views[0].setCanvasWidgetSelected(3, true));
+    }
+}
+
+test "compiled tabs skip clipped triggers preserve boundary focus and isolate selection" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-tabs-policy", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 400, 200) });
+        const children = [_]canvas.Widget{
+            .{ .id = 10, .kind = .tabs, .frame = geometry.RectF.init(0, 0, 180, 32), .layout = .{ .clip_content = true }, .children = &.{
+                .{ .id = 11, .kind = .segmented_control, .text = "Clipped first", .frame = geometry.RectF.init(0, 0, 40, 32) },
+                .{ .id = 12, .kind = .segmented_control, .text = "One", .frame = geometry.RectF.init(0, 0, 40, 32), .state = .{ .selected = true } },
+                .{ .id = 13, .kind = .segmented_control, .text = "Disabled", .frame = geometry.RectF.init(0, 0, 40, 32), .state = .{ .disabled = true } },
+                .{ .id = 14, .kind = .segmented_control, .text = "Two", .frame = geometry.RectF.init(0, 0, 40, 32) },
+                .{ .id = 15, .kind = .segmented_control, .text = "Clipped last", .frame = geometry.RectF.init(0, 0, 40, 32) },
+            } },
+            .{ .id = 20, .kind = .tabs, .frame = geometry.RectF.init(0, 50, 100, 32), .children = &.{
+                .{ .id = 21, .kind = .segmented_control, .text = "Other strip", .state = .{ .selected = true } },
+            } },
+            .{ .id = 30, .kind = .row, .frame = geometry.RectF.init(0, 100, 100, 32), .children = &.{
+                .{ .id = 31, .kind = .segmented_control, .text = "Standalone", .state = .{ .selected = true } },
+            } },
+        };
+        var nodes: [12]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 400, 200), &nodes);
+        for (nodes[0..layout.nodes.len]) |*node| {
+            if (node.widget.id == 11 or node.widget.id == 15) node.frame.x = 300;
+            if (compiled and (node.widget.kind == .tabs or node.widget.kind == .segmented_control)) node.widget.interaction_policy = core.nativeTabsPolicy;
+        }
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        view.canvas_widget_focused_id = 12;
+        // Tabs follow visible authored order, unlike radio scroll-reveal
+        // traversal. Navigation moves focus without activating a panel.
+        for ([_]struct { key: []const u8, id: canvas.ObjectId }{
+            .{ .key = "arrowright", .id = 14 },
+            .{ .key = "arrowright", .id = 14 },
+            .{ .key = "home", .id = 12 },
+            .{ .key = "arrowleft", .id = 12 },
+            .{ .key = "end", .id = 14 },
+        }) |step| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = step.key } });
+            try std.testing.expectEqual(step.id, view.canvas_widget_focused_id);
+            const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expect(retained.findById(12).?.widget.state.selected);
+            try std.testing.expect(!retained.findById(14).?.widget.state.selected);
+        }
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "enter" } });
+        const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(12).?.widget.state.selected);
+        try std.testing.expect(retained.findById(14).?.widget.state.selected);
+        try std.testing.expect(retained.findById(21).?.widget.state.selected);
+        try std.testing.expect(retained.findById(31).?.widget.state.selected);
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try view.setCanvasWidgetSelected(14, true));
     }
 }

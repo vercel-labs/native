@@ -166,3 +166,50 @@ export function native_radio_policy(request: Uint8Array): Uint8Array {
   result[0] = target % 256; result[1] = Math.floor(target / 256);
   return result;
 }
+
+/** Tabs wire: operation u8 (0 scope, 4 previous, 5 next, 6 first,
+ * 7 last, 8 selection clear mask), subject/count u16LE, then
+ * parent u16LE, kind (0 other/1 segment/2 tabs), flags (2 visible,
+ * 4 selected). Segments share their direct parent; arrows do not wrap.
+ * Native owns visibility, applied selection, and focus presentation.
+ */
+export function native_tabs_policy(request: Uint8Array): Uint8Array {
+  const read = (at: number): number => request[at]! + request[at + 1]! * 256;
+  if (request.length < 5) throw new Error("invalid tabs policy request");
+  const operation = request[0]!, subject = read(1), count = read(3);
+  if (count > 1024 || subject >= count || request.length !== 5 + count * 4 ||
+      ![0, 4, 5, 6, 7, 8].includes(operation)) throw new Error("invalid tabs policy request");
+  const parent = (i: number): number => read(5 + i * 4);
+  const kind = (i: number): number => request[7 + i * 4]!;
+  const flags = (i: number): number => request[8 + i * 4]!;
+  const group = parent(subject);
+  if (operation === 8) {
+    const result = new Uint8Array(count);
+    for (let i = 0; i < count; i++) if (i !== subject && kind(i) === 1 &&
+      parent(i) === group && (flags(i) & 4) !== 0) result[i] = 1;
+    return result;
+  }
+  let target = 65535;
+  if (operation === 0) target = group < count && kind(group) === 2 ? group : 65535;
+  else {
+    for (let i = 0; i < count; i++) {
+      if (kind(i) !== 1 || parent(i) !== group || (flags(i) & 2) === 0) continue;
+      if (operation === 6) { target = i; break; }
+      if (operation === 7 || operation === 4 && i < subject) target = i;
+      if (operation === 5 && i > subject) { target = i; break; }
+    }
+    if (target === 65535 && (operation === 4 || operation === 5)) target = subject;
+  }
+  const result = new Uint8Array(2);
+  result[0] = target % 256; result[1] = Math.floor(target / 256);
+  return result;
+}
+
+/** Lower direct button triggers after structural if/for expansion, matching
+ * native markup. Nested buttons and toggle-button contracts stay distinct.
+ */
+function nscvTabs(nodes: NscViewNode[], first: number): void {
+  for (let i = first + 1; i < nodes[first]!.end; i = nodes[i]!.end) {
+    if (nodes[i]!.kind === "button") nodes[i]!.kind = "segmented_control";
+  }
+}

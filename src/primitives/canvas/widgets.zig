@@ -901,8 +901,8 @@ pub const WidgetGroupSegment = enum {
 };
 
 pub const Widget = struct {
-    /// Optional portable retained radio policy, installed by compiled views.
-    radio_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Optional portable retained component policy, installed by compiled views.
+    interaction_policy: ?*const fn ([]const u8, []u8) usize = null,
     id: ObjectId = 0,
     kind: WidgetKind,
     frame: geometry.RectF = .{},
@@ -1649,7 +1649,7 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
     return merged;
 }
 
-test "Widget keeps the reviewed retained footprint with portable radio policy" {
+test "Widget keeps the reviewed retained footprint with portable component policy" {
     // One layout tree holds thousands of Widgets by value. On the 64-bit
     // targets that run the renderer, 784 bytes is the reviewed footprint:
     // the 776-byte native widget plus one optional 8-byte policy callback.

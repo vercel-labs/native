@@ -290,3 +290,16 @@ test("radio markup preserves native checked state and canonical change handlers"
   assert.throws(() => compileView('<radio-group><radio>Missing label</radio></radio-group>', contract), /requires a label/);
   assert.throws(() => compileView('<button on-change="reset">Invalid</button>', contract), /unsupported on button/);
 });
+
+test("tabs lower only direct button triggers after structural expansion", () => {
+  const { view } = evaluate('<column><tabs label="Workspace"><if test="{count > 0}"><button selected="true" on-press="reset">Overview</button></if><segmented-control disabled="true" icon="settings">Settings</segmented-control><column><button>Nested</button></column></tabs><button>Outside</button></column>');
+  const nodes = view().nodes;
+  assert.equal(nodes[1].kind, "tabs");
+  assert.equal(nodes[2].kind, "segmented_control");
+  assert.equal(nodes[2].selected, true);
+  assert.deepEqual(nodes[2].press, [1, 5]);
+  assert.equal(nodes[3].disabled, true);
+  assert.equal(nodes[3].icon, "settings");
+  assert.equal(nodes[5].kind, "button");
+  assert.equal(nodes[6].kind, "button");
+});

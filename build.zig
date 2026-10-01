@@ -840,6 +840,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&radio_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&radio_policy_driver_run.step);
         test_step.dependOn(&radio_policy_driver_run.step);
+        const tabs_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        tabs_policy_reference_run.setCwd(b.path("examples/tabs-policy"));
+        tabs_policy_reference_run.has_side_effects = true;
+        tabs_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        tabs_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/tabs-policy-view-reference"));
+        _ = tabs_policy_reference_run.captureStdOut(.{});
+        _ = tabs_policy_reference_run.captureStdErr(.{});
+        const tabs_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        tabs_policy_driver_run.setCwd(b.path("examples/tabs-policy"));
+        tabs_policy_driver_run.has_side_effects = true;
+        tabs_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        tabs_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/tabs-policy-view-reference"));
+        _ = tabs_policy_driver_run.captureStdOut(.{});
+        _ = tabs_policy_driver_run.captureStdErr(.{});
+        tabs_policy_driver_run.step.dependOn(&tabs_policy_reference_run.step);
+        native_driver_step.dependOn(&tabs_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&tabs_policy_driver_run.step);
+        test_step.dependOn(&tabs_policy_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -2002,6 +2020,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-service-feed-reader", "Run TypeScript service feed-reader example tests", "examples/service-feed-reader", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-pipeline", "Run portable pipeline component example tests", "examples/pipeline", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-radio-policy", "Run portable radio policy example tests", "examples/radio-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-tabs-policy", "Run portable tabs policy example tests", "examples/tabs-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

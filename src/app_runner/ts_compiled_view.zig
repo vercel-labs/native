@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group, tabs, segmented_control },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -86,9 +86,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group;
+    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .tabs;
     if (!container and value.end != index + 1) return error.InvalidView;
-    if (value.press != null and value.kind != .button and value.kind != .stack and value.kind != .radio) return error.InvalidView;
+    if (value.press != null and value.kind != .button and value.kind != .stack and value.kind != .radio and value.kind != .segmented_control) return error.InvalidView;
     if (value.toggle != null and value.kind != .switch_control and value.kind != .radio) return error.InvalidView;
     if (value.change != null and value.kind != .radio) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
@@ -143,7 +143,10 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .on_submit = if (value.submit) |bytes| try event(ui, bytes) else null,
     }, children.items);
     if (comptime @hasDecl(core, "nativeRadioPolicy")) {
-        if (value.kind == .radio or value.kind == .radio_group) result.widget.radio_policy = core.nativeRadioPolicy;
+        if (value.kind == .radio or value.kind == .radio_group) result.widget.interaction_policy = core.nativeRadioPolicy;
+    }
+    if (comptime @hasDecl(core, "nativeTabsPolicy")) {
+        if (value.kind == .tabs or value.kind == .segmented_control) result.widget.interaction_policy = core.nativeTabsPolicy;
     }
     if (paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);

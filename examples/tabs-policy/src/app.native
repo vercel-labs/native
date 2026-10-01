@@ -1,0 +1,18 @@
+<column padding="16" gap="12">
+  <text size="heading">Tabs policy</text>
+  <text>Presses: {presses}</text>
+  <button on-press="reset">Reset</button>
+  <tabs label="Workspace">
+    <for each="tabs" as="tab" key="id">
+      <button selected="{tab.chosen}" disabled="{tab.disabled}" on-press="choose:{tab.id}">{tab.title}</button>
+    </for>
+  </tabs>
+  <if test="{selected == 1}"><text>Overview panel</text></if>
+  <else><if test="{selected == 2}"><text>Activity panel</text></if><else><text>Settings panel</text></else></else>
+  <tabs label="Details">
+    <segmented-control selected="{secondary == 11}" on-press="summary">Summary</segmented-control>
+    <segmented-control selected="{secondary == 12}" icon="settings" on-press="preferences">Preferences</segmented-control>
+  </tabs>
+  <button on-press="reverse">Reverse</button>
+  <button on-press="hide">Hide activity</button>
+</column>

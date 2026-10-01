@@ -1,0 +1,78 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readFileSync, writeFileSync } from "node:fs";
+import { NativeApp, findWidget, type NativeSnapshot } from "@native-sdk/core/testing";
+const backend = process.env.NATIVE_SDK_TEST_VIEW_BACKEND;
+const tab = (s: NativeSnapshot, name: string) => findWidget(s, { role: "tab", name });
+const button = (s: NativeSnapshot, name: string) => findWidget(s, { role: "button", name });
+const compare = (snapshots: NativeSnapshot[]) => {
+  const reference = process.env.NATIVE_SDK_TEST_VIEW_REFERENCE;
+  if (!reference) return;
+  const values = snapshots.map(({ viewBackend, ...s }) => s);
+  if (backend === "zig") writeFileSync(`${reference}.navigation.json`, JSON.stringify(values));
+  else assert.deepEqual(values, JSON.parse(readFileSync(`${reference}.navigation.json`, "utf8")));
+};
+test("tabs focus, explicit activation, independent selection, identity and replay match", async () => {
+  const app = await NativeApp.start({ width: 760, height: 580 });
+  try {
+    let s = await app.snapshot();
+    if (backend) assert.equal(s.viewBackend, backend);
+    const snapshots = [s], view = tab(s, "Overview").view;
+    const settingsId = tab(s, "Settings").id;
+    const focused = (name: string) => {
+      assert.equal(tab(s, name).focused, true);
+      snapshots.push(s);
+    };
+    const selected = (name: string, id: number, presses: number) => {
+      assert.equal(s.model.selected, id);
+      assert.equal(s.model.presses, presses);
+      assert.equal(tab(s, name).selected, true);
+      assert.equal(s.widgets.filter(w => w.role === "tab" && w.selected).length, 2);
+      snapshots.push(s);
+    };
+    s = await app.click(tab(s, "Activity café")); selected("Activity café", 2, 1);
+    s = await app.key(view, "space"); selected("Activity café", 2, 2);
+    s = await app.key(view, "enter"); selected("Activity café", 2, 3);
+    s = await app.key(view, "arrowright"); focused("Settings");
+    assert.equal(s.model.selected, 2); assert.equal(s.model.presses, 3);
+    s = await app.key(view, "arrowright"); focused("Settings");
+    s = await app.key(view, "arrowleft"); focused("Activity café");
+    s = await app.key(view, "arrowleft"); focused("Overview");
+    s = await app.key(view, "arrowleft"); focused("Overview");
+    s = await app.key(view, "end"); focused("Settings");
+    s = await app.key(view, "enter"); selected("Settings", 3, 4);
+    s = await app.key(view, "home"); focused("Overview");
+    s = await app.key(view, "space"); selected("Overview", 1, 5);
+    await app.action(button(s, "Reset"), "focus");
+    s = await app.key(view, "tab"); focused("Overview");
+    s = await app.key(view, "tab"); focused("Activity café");
+    s = await app.key(view, "tab"); focused("Settings");
+    s = await app.key(view, "tab"); focused("Summary");
+    s = await app.key(view, "arrowright"); focused("Preferences");
+    s = await app.key(view, "space");
+    assert.equal(s.model.secondary, 12); selected("Overview", 1, 6);
+    s = await app.key(view, "shift+tab"); focused("Summary");
+    s = await app.key(view, "shift+tab"); focused("Settings");
+    const disabled = tab(s, "Unavailable");
+    assert.equal(disabled.enabled, false);
+    const point = { x: disabled.bounds.x + disabled.bounds.width / 2, y: disabled.bounds.y + disabled.bounds.height / 2 };
+    await app.pointer(disabled, "down", point);
+    s = await app.pointer(disabled, "up", point); selected("Overview", 1, 6);
+    s = await app.click(button(s, "Reverse"));
+    assert.equal(tab(s, "Settings").id, settingsId); snapshots.push(s);
+    await app.action(tab(s, "Settings"), "focus");
+    s = await app.key(view, "arrowright"); focused("Overview");
+    s = await app.key(view, "end"); focused("Activity café");
+    s = await app.key(view, "enter"); selected("Activity café", 2, 7);
+    s = await app.click(button(s, "Hide activity"));
+    assert.equal(s.widgets.some(w => w.role === "tab" && w.name === "Activity café"), false);
+    assert.ok(s.widgets.some(w => w.name === "Activity panel" || w.text === "Activity panel"), JSON.stringify(s.widgets)); snapshots.push(s);
+    await app.action(tab(s, "Overview"), "focus");
+    s = await app.key(view, "end"); focused("Overview");
+    s = await app.click(button(s, "Hide activity")); selected("Activity café", 2, 7);
+    const replay = await app.verifyReplay();
+    assert.deepEqual(replay.snapshot.model, s.model);
+    assert.deepEqual(replay.snapshot.widgets, s.widgets); snapshots.push(replay.snapshot);
+    compare(snapshots);
+  } finally { await app.close(); }
+});
