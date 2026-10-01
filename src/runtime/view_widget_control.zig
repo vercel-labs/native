@@ -360,7 +360,15 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             // a "Duplicate" row must never come back checked. The group's
             // declared row is the whole distinction; there is no separate
             // menu mode flag.
-            if (selected and widget.kind == .menu_item and !canvasWidgetMenuGroupHasCommittedRow(self, index)) return null;
+            var menu_clear: [1025]u8 = undefined;
+            const menu_policy_len = if (selected and widget.kind == .menu_item)
+                canvas_widget_runtime.canvasWidgetMenuPolicy(self.widgetLayoutTree(), index, 8, &menu_clear)
+            else
+                null;
+            if (menu_policy_len) |len| {
+                if (len != self.widget_layout_node_count + 1) @panic("invalid menu selection policy result");
+                if (menu_clear[0] == 0) return null;
+            } else if (selected and widget.kind == .menu_item and !canvasWidgetMenuGroupHasCommittedRow(self, index)) return null;
 
             var dirty: ?geometry.RectF = null;
             var changed = false;
@@ -421,7 +429,9 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                 const parent_index = self.widget_layout_nodes[index].parent_index;
                 for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, sibling_index| {
                     if (sibling_index == index) continue;
-                    if (policy_len != null) {
+                    if (menu_policy_len != null) {
+                        if (menu_clear[sibling_index + 1] == 0) continue;
+                    } else if (policy_len != null) {
                         if (clear[sibling_index] == 0) continue;
                     } else if (node.parent_index != parent_index or node.widget.kind != widget.kind) continue;
                     if (!canvasWidgetSelectableSelected(node.widget)) continue;

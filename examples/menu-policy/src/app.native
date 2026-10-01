@@ -1,0 +1,56 @@
+<column padding="24" gap="16">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Queue actions</text>
+    <button on-press="reverse">Reverse</button>
+    <button on-press="hide">Hide review</button>
+    <button on-press="empty">Empty</button>
+    <button on-press="reset">Reset</button>
+  </row>
+  <text>Queue {selected} | environment {environment} | actions {presses}</text>
+  <text foreground="text_muted">Open a menu, then use arrows. Enter or Space picks; Escape closes.</text>
+  <row gap="20" cross="start">
+    <column gap="8" width="220">
+      <text>Work queue</text>
+      <stack>
+        <select label="Choose queue" text="{selectedTitle}" on-press="toggle_picker"/>
+        <if test="{pickerOpen}">
+          <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_picker" label="Queues">
+            <for each="choices" key="id" as="choice">
+              <menu-item selected="{choice.selected}" disabled="{choice.disabled}" on-press="choose:{choice.id}">{choice.title}</menu-item>
+            </for>
+            <if test="{empty}"><text>No queues available</text></if>
+          </dropdown-menu>
+        </if>
+      </stack>
+    </column>
+    <column gap="8" width="220">
+      <text>Actions</text>
+      <stack>
+        <button label="Open actions" on-press="toggle_actions">Actions</button>
+        <if test="{actionsOpen}">
+          <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_actions" label="Actions">
+            <menu-item icon="copy" on-press="duplicate">Duplicate</menu-item>
+            <menu-item icon="edit" on-press="rename">Rename</menu-item>
+            <separator/>
+            <menu-item disabled="true" on-press="download">Unavailable action</menu-item>
+            <menu-item icon="download" on-press="download">Download</menu-item>
+          </dropdown-menu>
+        </if>
+      </stack>
+    </column>
+    <column gap="8" grow="1">
+      <text>Environment</text>
+      <stack>
+        <select label="Choose environment" text="{environmentTitle}" on-press="toggle_environment"/>
+        <if test="{environmentOpen}">
+          <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_environment" label="Environments">
+            <menu-item selected="{environment == 101}" on-press="production">Production</menu-item>
+            <menu-item selected="{environment == 102}" on-press="staging">Staging</menu-item>
+          </dropdown-menu>
+        </if>
+      </stack>
+    </column>
+  </row>
+  <text>Last action: {lastAction}</text>
+  <text foreground="text_muted">Picker choices stay checked. Action menus stay unchecked after activation.</text>
+</column>

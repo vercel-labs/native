@@ -343,3 +343,29 @@ test("list rows preserve leaf text, composed children, selection and press envel
   assert.throws(() => compileView('<list-item role="treeitem"/>', contract), /compiled treeitem requires/);
   assert.throws(() => compileView('<list role="tree"/>', contract), /tree role requires/);
 });
+
+test("menu views preserve anchored picker composition and canonical dismissal", () => {
+  const { view } = evaluate('<stack><select text="{status}" placeholder="Choose" on-press="increment"/><dropdown-menu anchor="above" anchor-alignment="stretch" anchor-offset="6" on-dismiss="reset" label="Choices"><menu-item icon="folder" selected="true" on-press="reset">Inbox</menu-item><separator/><menu-item disabled="true" on-press="increment">Unavailable</menu-item></dropdown-menu></stack>');
+  const nodes = view().nodes;
+  assert.equal(nodes[0].kind, "stack");
+  assert.equal(nodes[1].kind, "select");
+  assert.equal(nodes[1].placeholder, "Choose");
+  assert.deepEqual(nodes[1].press, [1, 3]);
+  assert.equal(nodes[2].kind, "dropdown_menu");
+  assert.equal(nodes[2].anchor, "above");
+  assert.equal(nodes[2].anchorAlignment, "stretch");
+  assert.equal(nodes[2].anchorOffset, 6);
+  assert.deepEqual(nodes[2].dismiss, [1, 5]);
+  assert.equal(nodes[3].kind, "menu_item");
+  assert.equal(nodes[3].selected, true);
+  assert.equal(nodes[3].icon, "folder");
+  assert.equal(nodes[4].kind, "separator");
+  assert.equal(nodes[5].disabled, true);
+  assert.throws(() => compileView('<button on-dismiss="reset"/>', contract), /unsupported on button/);
+  assert.throws(() => compileView('<panel anchor="below"/>', contract), /requires dropdown-menu/);
+  assert.throws(() => compileView('<dropdown-menu anchor-alignment="stretch"/>', contract), /requires anchor/);
+  assert.throws(() => compileView('<dropdown-menu anchor="below" anchor-offset="{count}"/>', contract), /finite literal number/);
+  assert.throws(() => compileView('<dropdown-menu anchor="sideways"/>', contract), /unsupported anchor/);
+  assert.throws(() => compileView('<menu-item>Mixed<text>child</text></menu-item>', contract), /mixed content/);
+  assert.throws(() => compileView('<menu-item role="treeitem"/>', contract), /compiled treeitem requires/);
+});

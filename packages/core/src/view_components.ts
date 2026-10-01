@@ -14,7 +14,8 @@ type NscViewNode = {
   listItemIndex?: number; listItemCount?: number;
   spanWeight?: string; spanColor?: string; spanScale?: number;
   press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
-  input?: number; submit?: number[];
+  input?: number; submit?: number[]; dismiss?: number[];
+  anchor?: string; anchorAlignment?: string; anchorOffset?: number;
 };
 
 function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
@@ -255,6 +256,70 @@ export function native_list_policy(request: Uint8Array): Uint8Array {
     let previous = 65535, sawSubject = false;
     for (let i = 0; i < count; i++) {
       if (kind(i) !== 1 || parent(i) !== group || (flags(i) & 1) === 0) continue;
+      if (sawSubject) { target = i; break; }
+      if (i === subject) {
+        if (operation === 4) { if (previous !== 65535) target = previous; break; }
+        sawSubject = true;
+      } else previous = i;
+    }
+  }
+  const result = new Uint8Array(2);
+  result[0] = target % 256; result[1] = Math.floor(target / 256);
+  return result;
+}
+
+/** Retained menu wire: operation u8, subject/count u16LE, then parent
+ * u16LE, kind (0 other/1 menu item/2 menu surface/3 list item), flags
+ * (2 visible focus/4 selected state or value/8 selected state).
+ * Entry (2 first/3 last)
+ * prefers a selected visible descendant, including list items. Arrows
+ * (4 previous/5 next) traverse visible direct menu children without wrapping;
+ * 6/7 preserve visible same-parent Home/End. Selection (8) returns a
+ * committed-choice byte followed by a sibling clear mask: action menus
+ * without a selected row never acquire a checkmark on activation.
+ */
+export function native_menu_policy(request: Uint8Array): Uint8Array {
+  const read = (at: number): number => request[at]! + request[at + 1]! * 256;
+  if (request.length < 5) throw new Error("invalid menu policy request");
+  const operation = request[0]!, subject = read(1), count = read(3);
+  if (count > 1024 || subject >= count || request.length !== 5 + count * 4 ||
+      ![2, 3, 4, 5, 6, 7, 8].includes(operation)) throw new Error("invalid menu policy request");
+  const parent = (i: number): number => read(5 + i * 4);
+  const kind = (i: number): number => request[7 + i * 4]!;
+  const flags = (i: number): number => request[8 + i * 4]!;
+  const group = parent(subject);
+  if (operation === 8) {
+    const result = new Uint8Array(count + 1);
+    for (let i = 0; i < count; i++) if (kind(i) === 1 && parent(i) === group && (flags(i) & 4) !== 0) {
+      result[0] = 1;
+      if (i !== subject) result[i + 1] = 1;
+    }
+    return result;
+  }
+  let target = 65535;
+  if (operation === 2 || operation === 3) {
+    for (let i = 0; i < count; i++) {
+      if ((kind(i) !== 1 && kind(i) !== 3) || (flags(i) & 2) === 0) continue;
+      let ancestor = parent(i), inside = false;
+      for (let steps = 0; steps < count && ancestor < count; steps++) {
+        if (ancestor === subject) { inside = true; break; }
+        ancestor = parent(ancestor);
+      }
+      if (!inside) continue;
+      if ((flags(i) & 8) !== 0) { target = i; break; }
+      if (operation === 3 || target === 65535) target = i;
+    }
+  } else if (operation === 6 || operation === 7) {
+    for (let i = 0; i < count; i++) {
+      if (kind(i) !== 1 || parent(i) !== group || (flags(i) & 2) === 0) continue;
+      target = i;
+      if (operation === 6) break;
+    }
+  } else if (group < count && kind(group) === 2) {
+    target = subject;
+    let previous = 65535, sawSubject = false;
+    for (let i = 0; i < count; i++) {
+      if (kind(i) !== 1 || parent(i) !== group || (flags(i) & 2) === 0) continue;
       if (sawSubject) { target = i; break; }
       if (i === subject) {
         if (operation === 4) { if (previous !== 65535) target = previous; break; }

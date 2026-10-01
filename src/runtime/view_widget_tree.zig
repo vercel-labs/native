@@ -937,6 +937,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// focusable row for an ArrowDown entry or the last for ArrowUp —
         /// the open-menu keymap shared by picker and menu-button triggers.
         pub fn canvasWidgetMenuSurfaceEntryId(self: *const RuntimeView, surface_index: usize, from_end: bool) ?canvas.ObjectId {
+            if (surface_index < self.widget_layout_node_count and self.widget_layout_nodes[surface_index].widget.interaction_policy != null) {
+                const target = canvas_widget_runtime.canvasWidgetCompiledMenuFocus(self.widgetLayoutTree(), surface_index, if (from_end) 3 else 2) orelse return null;
+                return target.id;
+            }
             var first: ?canvas.ObjectId = null;
             var last: ?canvas.ObjectId = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, node_index| {

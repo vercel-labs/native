@@ -598,7 +598,13 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     const tabs_request = [_]u8{ 7, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 6, 0, 0, 1, 2 };
     const tree_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 0, 0, 1, 5, 1, 0, 0, 0, 1, 1, 2, 0 };
     const list_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 7, 0, 0, 1, 3 };
+    const menu_request = [_]u8{ 2, 0, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 2, 0, 0, 1, 14 };
+    const menu_select_request = [_]u8{ 8, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 2, 0, 0, 1, 14 };
+    var menu_clear: [4]u8 = undefined;
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(usize, 4), core.nativeMenuPolicy(&menu_select_request, &menu_clear));
+        try std.testing.expectEqual(@as(usize, 2), core.nativeMenuPolicy(&menu_request, &policy_output));
+        try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
         try std.testing.expectEqual(@as(usize, 2), core.nativeListPolicy(&list_request, &policy_output));
         try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
         try std.testing.expectEqual(@as(usize, 2), core.nativeRadioPolicy(&policy_request, &policy_output));
@@ -609,6 +615,7 @@ test "compiled primary and window view copies survive alternating scriptc arena 
         try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
         try std.testing.expectEqualStrings(primary, core.nativeView(allocator));
         try std.testing.expectEqualStrings(secondary, core.nativeWindowView("feed", allocator));
+        try std.testing.expectEqualSlices(u8, &.{ 1, 0, 0, 1 }, &menu_clear);
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
@@ -1105,5 +1112,134 @@ test "compiled list policy preserves visible edges logical reveal and sibling se
         // A fully fixed-clipped logical target cannot be scrolled into view.
         try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
         try std.testing.expectEqual(@as(canvas.ObjectId, 32), view.canvas_widget_focused_id);
+    }
+}
+
+test "compiled menu policy preserves visible entry traversal committed choice and isolation" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-menu-policy", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 600, 320) });
+        const children = [_]canvas.Widget{
+            .{ .id = 2, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 180, 70), .layout = .{ .clip_content = true }, .children = &.{
+                .{ .id = 10, .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 180, 210), .children = &.{
+                    .{ .id = 11, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 150, 24), .state = .{ .selected = true } },
+                    .{ .id = 12, .kind = .menu_item, .frame = geometry.RectF.init(0, 30, 150, 24), .state = .{ .disabled = true } },
+                    .{ .id = 13, .kind = .menu_item, .frame = geometry.RectF.init(0, 60, 150, 24) },
+                    .{ .id = 14, .kind = .menu_item, .frame = geometry.RectF.init(0, 150, 150, 24) },
+                } },
+            } },
+            .{ .id = 20, .kind = .dropdown_menu, .frame = geometry.RectF.init(210, 0, 150, 70), .children = &.{
+                .{ .id = 21, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 150, 24), .state = .{ .selected = true } },
+                .{ .id = 22, .kind = .menu_item, .frame = geometry.RectF.init(0, 30, 150, 24) },
+            } },
+            // A plain action group must not acquire a committed selection.
+            .{ .id = 25, .kind = .menu_surface, .frame = geometry.RectF.init(400, 0, 150, 70), .children = &.{
+                .{ .id = 26, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 150, 24) },
+                .{ .id = 27, .kind = .menu_item, .frame = geometry.RectF.init(0, 30, 150, 24) },
+            } },
+            // Fixed clipping excludes the selected row from visible entry.
+            .{ .id = 30, .kind = .panel, .frame = geometry.RectF.init(210, 100, 150, 20), .layout = .{ .clip_content = true }, .children = &.{
+                .{ .id = 31, .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 150, 120), .children = &.{
+                    .{ .id = 32, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 150, 24) },
+                    .{ .id = 33, .kind = .menu_item, .frame = geometry.RectF.init(0, 80, 150, 24), .state = .{ .selected = true } },
+                } },
+            } },
+            // Entry scans descendants, including list rows and nested menus;
+            // committed selection still clears only direct menu siblings.
+            .{ .id = 40, .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 130, 180, 120), .children = &.{
+                .{ .id = 41, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 150, 24), .state = .{ .selected = true } },
+                .{ .id = 42, .kind = .column, .frame = geometry.RectF.init(0, 30, 150, 90), .children = &.{
+                    .{ .id = 43, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 150, 24) },
+                    .{ .id = 44, .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 30, 150, 60), .children = &.{
+                        .{ .id = 45, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 150, 24), .state = .{ .selected = true } },
+                        .{ .id = 46, .kind = .menu_item, .frame = geometry.RectF.init(0, 30, 150, 24) },
+                    } },
+                } },
+            } },
+        };
+        var nodes: [32]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 600, 320), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            if (node.widget.kind == .dropdown_menu or node.widget.kind == .menu_surface or node.widget.kind == .menu_item) node.widget.interaction_policy = core.nativeMenuPolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        const menu_index = view.canvasWidgetNodeIndexById(10).?;
+        const fixed_index = view.canvasWidgetNodeIndexById(31).?;
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 11), view.canvasWidgetMenuSurfaceEntryId(menu_index, false));
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 11), view.canvasWidgetMenuSurfaceEntryId(menu_index, true));
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 32), view.canvasWidgetMenuSurfaceEntryId(fixed_index, true));
+        const selected_index = view.canvasWidgetNodeIndexById(11).?;
+        view.widget_layout_nodes[selected_index].widget.state.disabled = true;
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 13), view.canvasWidgetMenuSurfaceEntryId(menu_index, false));
+        view.widget_layout_nodes[selected_index].widget.state.disabled = false;
+        view.canvas_widget_focused_id = 11;
+        view.canvas_widget_focus_visible_id = 11;
+        // Menu arrows and Home/End stay on visible rows, including a
+        // partially clipped row; they do not reveal the offscreen id 14.
+        for ([_]struct { key: []const u8, id: canvas.ObjectId }{
+            .{ .key = "end", .id = 13 },
+            .{ .key = "arrowdown", .id = 13 },
+            .{ .key = "arrowdown", .id = 13 },
+            .{ .key = "arrowup", .id = 11 },
+            .{ .key = "arrowup", .id = 11 },
+        }) |move| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = move.key } });
+            try std.testing.expectEqual(move.id, view.canvas_widget_focused_id);
+        }
+        _ = try view.setCanvasWidgetSelected(14, true);
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(11).?.widget.state.selected);
+        try std.testing.expect(retained.findById(14).?.widget.state.selected);
+        try std.testing.expect(retained.findById(21).?.widget.state.selected);
+        try std.testing.expect(retained.findById(41).?.widget.state.selected);
+        try std.testing.expect(retained.findById(45).?.widget.state.selected);
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try view.setCanvasWidgetSelected(14, true));
+        _ = try view.setCanvasWidgetSelected(22, true);
+        _ = try view.setCanvasWidgetSelected(46, true);
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(21).?.widget.state.selected);
+        try std.testing.expect(retained.findById(22).?.widget.state.selected);
+        try std.testing.expect(!retained.findById(45).?.widget.state.selected);
+        try std.testing.expect(retained.findById(46).?.widget.state.selected);
+        try std.testing.expect(retained.findById(41).?.widget.state.selected);
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try view.setCanvasWidgetSelected(26, true));
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try view.setCanvasWidgetSelected(27, true));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(26).?.widget.state.selected);
+        try std.testing.expect(!retained.findById(27).?.widget.state.selected);
+        const actions_index = view.canvasWidgetNodeIndexById(25).?;
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 26), view.canvasWidgetMenuSurfaceEntryId(actions_index, false));
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 27), view.canvasWidgetMenuSurfaceEntryId(actions_index, true));
+        view.canvas_widget_focused_id = 32;
+        view.canvas_widget_focus_visible_id = 32;
+        for ([_][]const u8{ "home", "end", "arrowdown" }) |key| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = key } });
+            try std.testing.expectEqual(@as(canvas.ObjectId, 32), view.canvas_widget_focused_id);
+        }
+        // Entry considers state.selected, while committed-choice clearing
+        // also considers a nonzero control value, matching the native seam.
+        const nested_index = view.canvasWidgetNodeIndexById(40).?;
+        _ = try view.setCanvasWidgetSelected(41, false);
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 46), view.canvasWidgetMenuSurfaceEntryId(nested_index, false));
+        _ = try view.setCanvasWidgetSelected(46, false);
+        const list_index = view.canvasWidgetNodeIndexById(43).?;
+        view.widget_layout_nodes[list_index].widget.state.selected = true;
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 43), view.canvasWidgetMenuSurfaceEntryId(nested_index, true));
+        view.widget_layout_nodes[list_index].widget.state.selected = false;
+        const valued_index = view.canvasWidgetNodeIndexById(41).?;
+        view.widget_layout_nodes[valued_index].widget.value = 1;
+        try std.testing.expectEqual(@as(?canvas.ObjectId, 46), view.canvasWidgetMenuSurfaceEntryId(nested_index, true));
+        try std.testing.expect((try view.setCanvasWidgetSelected(41, true)) != null);
     }
 }

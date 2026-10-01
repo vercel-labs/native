@@ -263,6 +263,7 @@ pub const conditional_exports = [_][]const u8{
     "native_tabs_policy",
     "native_tree_policy",
     "native_list_policy",
+    "native_menu_policy",
 };
 
 // ------------------------------------------------------------ reading
@@ -2428,6 +2429,11 @@ test "V11: the optional native view extension is unique and follows channels" {
     const list = try replaced(arena, tree, "\"native_tree_policy\"]", "\"native_tree_policy\", \"native_list_policy\"]");
     const list_valid = try readValid(arena, list);
     try testing.expect(abiHasExport(list_valid.abi, "native_list_policy"));
+    const menu = try replaced(arena, list, "\"native_list_policy\"]", "\"native_list_policy\", \"native_menu_policy\"]");
+    const menu_valid = try readValid(arena, menu);
+    try testing.expect(abiHasExport(menu_valid.abi, "native_menu_policy"));
+    const menu_duplicate = try replaced(arena, menu, "\"native_menu_policy\"]", "\"native_menu_policy\", \"native_menu_policy\"]");
+    try expectRefusal(menu_duplicate, "abi.exports[29]", "out of canonical order");
     const list_duplicate = try replaced(arena, list, "\"native_list_policy\"]", "\"native_list_policy\", \"native_list_policy\"]");
     try expectRefusal(list_duplicate, "abi.exports[28]", "out of canonical order");
     const tree_duplicate = try replaced(arena, tree, "\"native_tree_policy\"]", "\"native_tree_policy\", \"native_tree_policy\"]");
