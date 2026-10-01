@@ -1091,7 +1091,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
                 }
                 continue;
             };
-            const previous_source = canvasWidgetSourceScrollById(previous_source_scroll_entries, node.widget.id) orelse continue;
+            const previous_source = canvasWidgetSourceScrollById(previous_source_scroll_entries, node.widget.id);
             // Source-wins: the runtime-owned fraction survives rebuilds only
             // while the SOURCE fraction is unchanged; a source-side change
             // (the model echoing or driving the fraction) wins — UNLESS the
@@ -1103,10 +1103,17 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
             // frame at a time. Reduced motion still snaps: the tween
             // lowering's snap path applies the target through this same
             // mutation family in the same rebuild.
-            const source_moved = node.widget.value != previous_source;
-            if (source_moved and node.widget.resize_duration_ms == 0 and !tween_armed) continue;
-            if (node.widget.value == previous_runtime) continue;
-            staged_nodes[index].widget.value = previous_runtime;
+            const source_moved = if (previous_source) |source| node.widget.value != source else false;
+            const retained_fraction = canvas.widgetCompiledSplitValue(node.widget, .{
+                .operation = 2,
+                .value = node.widget.value,
+                .previous_source = previous_source,
+                .retained = previous_runtime,
+                .declared_tween = node.widget.resize_duration_ms != 0,
+                .armed_tween = tween_armed,
+            }) orelse if (previous_source == null or (source_moved and node.widget.resize_duration_ms == 0 and !tween_armed)) node.widget.value else previous_runtime;
+            if (node.widget.value == retained_fraction) continue;
+            staged_nodes[index].widget.value = retained_fraction;
             // Retained trees clear children; a split without them keeps the
             // value restore only (frames follow on the next full layout).
             if (node.widget.children.len == 0) continue;
@@ -1115,7 +1122,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
             // so the slide shape only applies to tween-owned motion.
             const dragging = pressed_split_id != 0 and node.widget.id == pressed_split_id;
             if (!dragging and (tween_armed or (source_moved and node.widget.resize_duration_ms != 0))) {
-                canvas.slideSplitChildren(node.frame, previous_runtime, index, staged_nodes);
+                canvas.slideSplitChildren(node.frame, retained_fraction, index, staged_nodes);
             } else {
                 try canvas.relayoutSplitChildren(staged_nodes[index].widget, node.frame, index, node.depth, node_buffer, staged_root_bounds, tokens);
             }

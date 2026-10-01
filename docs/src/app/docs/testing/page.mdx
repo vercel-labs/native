@@ -42,7 +42,7 @@ For secondary windows, `snapshot.windows` lists live window identities, labels, 
 
 ### Models, effects, and replay
 
-`snapshot.model` is the committed native model's JSON projection: byte values become number arrays, enums become strings, and tagged unions use the generated mirror's `{arm: payload}` shape. Its TypeScript type is a JSON record. `snapshot.widgets` contains accessibility state, bounds, and available actions. Each widget's `value` reports its applied numeric accessibility value, or `null` when it has none; use it to assert slider positions, including retained values outside the model. The `fingerprint` covers the native accessibility tree.
+`snapshot.model` is the committed native model's JSON projection: byte values become number arrays, enums become strings, and tagged unions use the generated mirror's `{arm: payload}` shape. Its TypeScript type is a JSON record. `snapshot.widgets` contains accessibility state, bounds, and available actions. Each widget's `value` reports its applied numeric accessibility value, or `null` when it has none; use it to assert slider and split-divider positions, including retained values outside the model. The `fingerprint` covers the native accessibility tree.
 
 The host drives the primary canvas and every live secondary canvas on the current desktop build target. It uses fake effects and a fixed clock (`wallMs`, default zero). It does not start production services, load persistence, read launch environment values, or open app-data directories.
 

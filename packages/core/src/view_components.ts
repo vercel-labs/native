@@ -5,7 +5,8 @@
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; wrap?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
-  gap?: number; padding?: number; grow?: number; width?: number; height?: number;
+  gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number;
+  resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
   value?: number; image?: number; icon?: string; label?: string; role?: string;
   background?: string; foreground?: string; radius?: string; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
@@ -14,7 +15,7 @@ type NscViewNode = {
   listItemIndex?: number; listItemCount?: number;
   spanWeight?: string; spanColor?: string; spanScale?: number;
   press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
-  input?: number; valueChange?: number; submit?: number[]; dismiss?: number[];
+  input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number;
 };
 
@@ -218,6 +219,22 @@ function nscvTabs(nodes: NscViewNode[], first: number): void {
 
 function nscvTreeLevel(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > 65535) throw new Error("tree-level requires an integer from 0 to 65535");
+  return value;
+}
+
+/** A split's two panes are counted after structural expansion. The native
+ * consumer synthesizes the divider without changing authored pane keys.
+ */
+function nscvSplit(nodes: NscViewNode[], first: number): void {
+  const root = nodes[first]!;
+  if ((root.resizeEasing !== undefined || root.resizeOrigin !== undefined) && (root.resizeDuration ?? 0) === 0) throw new Error("split resize options require nonzero resize-duration");
+  let count = 0;
+  for (let i = first + 1; i < nodes[first]!.end; i = nodes[i]!.end) count++;
+  if (count !== 2) throw new Error("split requires exactly two panes");
+}
+
+function nscvResizeDuration(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 4294967295) throw new Error("resize-duration requires a nonnegative u32 integer");
   return value;
 }
 
@@ -425,6 +442,50 @@ export function native_slider_policy(request: Uint8Array): Uint8Array {
   if (operation === 6) value = 0;
   if (operation === 7) value = 1;
   if (operation < 2) value = Math.max(0, Math.min(1, value));
+  const result = new Uint8Array(4);
+  new DataView(result.buffer).setFloat32(0, value, true);
+  return result;
+}
+
+/** Split wire: operation u8, flags (1 previous source present, 2 declared
+ * tween, 4 armed tween), then value, available width, first/second minimum,
+ * previous source, and retained fraction as f32LE. Operations: 0 layout,
+ * 1 applied clamp, 2 reconcile, 3/4 small decrement/increment, 5/6 coarse
+ * decrement/increment, 7 Home, 8 End. Native owns geometry, capture, timing,
+ * eligibility and mutation. Each arithmetic stage preserves native f32.
+ */
+export function native_split_policy(request: Uint8Array): Uint8Array {
+  if (request.length !== 26 || request[0]! > 8 || request[1]! > 7) throw new Error("invalid split policy request");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const operation = request[0]!, flags = request[1]!;
+  const current = wire.getFloat32(2, true), available = wire.getFloat32(6, true);
+  const first = wire.getFloat32(10, true), second = wire.getFloat32(14, true);
+  const previous = wire.getFloat32(18, true), retained = wire.getFloat32(22, true);
+  if (![available, first, second, previous, retained].every(value => Number.isFinite(value)) || operation !== 0 && !Number.isFinite(current)) {
+    throw new Error("non-finite split policy value");
+  }
+  let value = current;
+  if (operation === 2 && (flags & 1) !== 0 && (current === previous || (flags & 6) !== 0)) value = retained;
+  if (operation === 3 || operation === 4 || operation === 5 || operation === 6) {
+    const step = Math.fround(operation < 5 ? 0.05 : 0.1);
+    value = Math.fround(current + (operation === 3 || operation === 5 ? -step : step));
+  }
+  if (operation === 7) value = 0;
+  if (operation === 8) value = 1;
+  if (operation === 0 || operation === 1) {
+    if (operation === 1) value = Math.max(value, Math.fround(0.0001));
+    value = !Number.isFinite(value) || value <= 0 ? 0.5 : Math.min(value, 1);
+    let low = 0, high = 1;
+    if (available > 0) {
+      low = Math.max(0, Math.min(1, Math.fround(Math.max(0, first) / available)));
+      high = Math.max(0, Math.min(1, Math.fround(1 - Math.fround(Math.max(0, second) / available))));
+      if (low > high) {
+        const mid = Math.fround(low / Math.max(Math.fround(low + Math.fround(1 - high)), Math.fround(0.0001)));
+        low = mid; high = mid;
+      }
+    }
+    value = Math.max(low, Math.min(high, value));
+  }
   const result = new Uint8Array(4);
   new DataView(result.buffer).setFloat32(0, value, true);
   return result;

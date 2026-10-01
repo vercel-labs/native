@@ -999,6 +999,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&slider_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&slider_policy_driver_run.step);
         test_step.dependOn(&slider_policy_driver_run.step);
+        const split_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        split_policy_reference_run.setCwd(b.path("examples/split-policy"));
+        split_policy_reference_run.has_side_effects = true;
+        split_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        split_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/split-policy-view-reference"));
+        _ = split_policy_reference_run.captureStdOut(.{});
+        _ = split_policy_reference_run.captureStdErr(.{});
+        const split_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        split_policy_driver_run.setCwd(b.path("examples/split-policy"));
+        split_policy_driver_run.has_side_effects = true;
+        split_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        split_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/split-policy-view-reference"));
+        _ = split_policy_driver_run.captureStdOut(.{});
+        _ = split_policy_driver_run.captureStdErr(.{});
+        split_policy_driver_run.step.dependOn(&split_policy_reference_run.step);
+        native_driver_step.dependOn(&split_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&split_policy_driver_run.step);
+        test_step.dependOn(&split_policy_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -2169,6 +2187,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-accordion-policy", "Run portable accordion policy example tests", "examples/accordion-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-checkable-policy", "Run portable checkable policy example tests", "examples/checkable-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-slider-policy", "Run portable slider policy example tests", "examples/slider-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-policy", "Run portable split policy example tests", "examples/split-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

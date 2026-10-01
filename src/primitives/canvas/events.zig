@@ -677,7 +677,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
         // adjust the parent split's fraction, Home/End jump to the
         // clamp edges (the runtime clamps against the panes' min
         // widths when it applies the value).
-        .split_divider => if (widgetSplitDividerKeyboardValue(widget.value, keyboard)) |next_value|
+        .split_divider => if (widgetSplitControlKeyboardValue(widget, keyboard)) |next_value|
             .{
                 .kind = .set_value,
                 .actions = .{
@@ -878,6 +878,52 @@ pub fn widgetSplitDividerKeyboardValue(current: f32, keyboard: WidgetKeyboardEve
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
     return null;
+}
+
+pub const SplitPolicyRequest = struct {
+    operation: u8,
+    value: f32,
+    available: f32 = 0,
+    first_min: f32 = 0,
+    second_min: f32 = 0,
+    previous_source: ?f32 = null,
+    retained: f32 = 0,
+    declared_tween: bool = false,
+    armed_tween: bool = false,
+};
+
+/// Canonical f32 policy exchange; the generated callback copies its result
+/// before resetting the scriptc arena. The retained widget owns no ABI bytes.
+pub fn widgetCompiledSplitValue(widget: Widget, input: SplitPolicyRequest) ?f32 {
+    if (widget.kind != .split and widget.kind != .split_divider) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [26]u8 = undefined;
+    request[0] = input.operation;
+    request[1] = @as(u8, if (input.previous_source != null) 1 else 0) |
+        @as(u8, if (input.declared_tween) 2 else 0) | @as(u8, if (input.armed_tween) 4 else 0);
+    const values = [_]f32{ input.value, input.available, input.first_min, input.second_min, input.previous_source orelse 0, input.retained };
+    for (values, 0..) |value, index| std.mem.writeInt(u32, request[2 + index * 4 ..][0..4], @bitCast(value), .little);
+    var output: [4]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled split policy result");
+    const value: f32 = @bitCast(std.mem.readInt(u32, &output, .little));
+    if (!std.math.isFinite(value) or (input.operation < 2 and (value < 0 or value > 1))) @panic("invalid compiled split policy value");
+    return value;
+}
+
+fn widgetSplitControlKeyboardValue(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
+    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier() or widget.state.disabled) return null;
+    if (widget.interaction_policy == null) return widgetSplitDividerKeyboardValue(widget.value, keyboard);
+    const operation: u8 = if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft"))
+        (if (keyboard.modifiers.shift) @as(u8, 5) else 3)
+    else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright"))
+        (if (keyboard.modifiers.shift) @as(u8, 6) else 4)
+    else if (std.ascii.eqlIgnoreCase(keyboard.key, "home"))
+        7
+    else if (std.ascii.eqlIgnoreCase(keyboard.key, "end"))
+        8
+    else
+        return null;
+    return widgetCompiledSplitValue(widget, .{ .operation = operation, .value = widget.value });
 }
 
 /// The ARIA tree-row keymap, resolved on the routed keyboard target:

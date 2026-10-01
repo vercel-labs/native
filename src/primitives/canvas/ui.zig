@@ -3837,6 +3837,7 @@ pub fn Ui(comptime Msg: type) type {
                 .kind = .split_divider,
                 .id = structuralId(split_widget.id, .split_divider, UiKey{ .str = "divider" }),
                 .value = split_widget.value,
+                .interaction_policy = split_widget.interaction_policy,
                 .state = .{ .disabled = split_widget.state.disabled },
                 .semantics = .{ .label = "Split divider" },
             };

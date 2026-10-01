@@ -826,6 +826,9 @@ pub const windowDragContentUnderWindowControls = @import("widget_layout.zig").wi
 pub const splitDividerExtent = @import("widget_layout.zig").splitDividerExtent;
 pub const splitFractionBounds = @import("widget_layout.zig").splitFractionBounds;
 pub const splitEffectiveFraction = @import("widget_layout.zig").splitEffectiveFraction;
+pub const widgetSplitEffectiveFraction = @import("widget_layout.zig").widgetSplitEffectiveFraction;
+pub const widgetCompiledSplitValue = @import("events.zig").widgetCompiledSplitValue;
+pub const SplitPolicyRequest = @import("events.zig").SplitPolicyRequest;
 pub const relayoutSplitChildren = @import("widget_layout.zig").relayoutSplitChildren;
 pub const slideSplitChildren = @import("widget_layout.zig").slideSplitChildren;
 /// The layout audit (layout_audit.zig): a machine pass over a laid-out

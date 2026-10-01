@@ -66,6 +66,33 @@ test("mixer sliders route applied float values separately from static change mes
   }
 });
 
+test("split panes preserve float resize channels, minimum widths and structural pane counts", () => {
+  const floatContract: ViewContract = { ...contract, msg: { arms: [...contract.msg.arms,
+    { name: "resized", member: "fraction", payload: { kind: "number", class: "f64" } },
+    { name: "integer_resize", member: "count", payload: { kind: "number", class: "i64" } }] } };
+  const render = (markup: string) => {
+    const exports: { native_view?: () => Uint8Array } = {};
+    runInNewContext(ts.transpile(compileView(markup, floatContract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+      exports, TextEncoder, TextDecoder, nscfCommitted: { count: 2, ticking: true }, nscfPackMsg: () => Uint8Array.of(1, 5),
+    });
+    return JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  };
+  const nodes = render('<split value="0.35" on-resize="resized" gap="12" resize-duration="180" resize-easing="linear" resize-origin="0.2"><column min-width="150"><text>First</text></column><if test="{ticking}"><column min-width="220"/></if><else><column/></else></split>');
+  assert.equal(nodes[0].resize, floatContract.msg.arms.findIndex(arm => arm.name === "resized"));
+  assert.equal(nodes[0].resizeDuration, 180); assert.equal(nodes[0].resizeEasing, "linear"); assert.equal(nodes[0].resizeOrigin, 0.2);
+  assert.deepEqual(nodes.filter((node: any) => node.kind === "column").map((node: any) => node.minWidth), [150, 220]);
+  assert.equal(nodes.filter((node: any) => node.kind === "split_divider").length, 0);
+  for (const markup of ['<split on-resize="integer_resize"><column/><column/></split>', '<split on-resize="reset"><column/><column/></split>',
+    '<split on-resize="resized:{count}"><column/><column/></split>', '<column on-resize="resized"/>',
+    '<column resize-duration="180"/>', '<split resize-easing="linear"><column/><column/></split>',
+    '<split resize-duration="0" resize-origin="0.2"><column/><column/></split>', '<split resize-duration="180" resize-origin="1.1"><column/><column/></split>']) {
+    assert.throws(() => compileView(markup, floatContract), /compiled TypeScript view:/);
+  }
+  for (const markup of ['<split><column/></split>', '<split><column/><column/><column/></split>',
+    '<split><column/><if test="{count < 0}"><column/></if></split>']) assert.throws(() => render(markup), /exactly two panes/);
+  assert.throws(() => render('<split resize-duration="0.5"><column/><column/></split>'), /resize-duration/);
+});
+
 test("counter view reads the committed TypeScript model, helpers and canonical event tags", () => {
   const { model, view } = evaluate(source);
   const initial = view();

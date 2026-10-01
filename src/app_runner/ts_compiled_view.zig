@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, split },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -24,6 +24,10 @@ const Record = struct {
     grow: f32 = 0,
     width: f32 = 0,
     height: f32 = 0,
+    minWidth: f32 = 0,
+    resizeDuration: u32 = 0,
+    resizeEasing: sdk.canvas.Easing = .standard,
+    resizeOrigin: f32 = -1,
     value: f32 = 0,
     image: u64 = 0,
     icon: []const u8 = "",
@@ -55,6 +59,7 @@ const Record = struct {
     scroll: ?u8 = null,
     input: ?u8 = null,
     valueChange: ?u8 = null,
+    resize: ?u8 = null,
     submit: ?[]const u8 = null,
     dismiss: ?[]const u8 = null,
     anchor: ?sdk.canvas.WidgetAnchorPlacement = null,
@@ -87,13 +92,17 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.end <= index or value.end > parent_end) return error.InvalidView;
     if (!std.math.isFinite(value.gap) or value.gap < 0 or !std.math.isFinite(value.grow) or value.grow < 0) return error.InvalidView;
     if (value.padding) |padding| if (!std.math.isFinite(padding) or padding < 0) return error.InvalidView;
-    for ([_]f32{ value.width, value.height }) |extent| if (!std.math.isFinite(extent) or extent < 0) return error.InvalidView;
+    for ([_]f32{ value.width, value.height, value.minWidth }) |extent| if (!std.math.isFinite(extent) or extent < 0) return error.InvalidView;
+    if (value.resize != null and value.kind != .split) return error.InvalidView;
+    if (!std.math.isFinite(value.resizeOrigin) or (value.resizeOrigin != -1 and (value.resizeOrigin < 0 or value.resizeOrigin > 1))) return error.InvalidView;
+    if ((value.resizeDuration != 0 or value.resizeEasing != .standard or value.resizeOrigin != -1) and value.kind != .split) return error.InvalidView;
+    if ((value.resizeEasing != .standard or value.resizeOrigin != -1) and value.resizeDuration == 0) return error.InvalidView;
     if (!std.math.isFinite(value.value)) return error.InvalidView;
     if (value.key != null and value.keyInt != null or value.globalKey != null and value.globalKeyInt != null) return error.InvalidView;
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu;
+    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
@@ -123,6 +132,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         try children.append(ui.arena, try node(ui, records, child_index, value.end, depth + 1));
         child_index = records[child_index].end;
     }
+    if (value.kind == .split and children.items.len != 2) return error.InvalidView;
     const kind: sdk.canvas.WidgetKind = switch (value.kind) {
         .spacer => .stack,
         .scroll => .scroll_view,
@@ -139,6 +149,10 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .grow = value.grow,
         .width = value.width,
         .height = value.height,
+        .min_width = value.minWidth,
+        .resize_duration = value.resizeDuration,
+        .resize_easing = value.resizeEasing,
+        .resize_origin = value.resizeOrigin,
         .value = value.value,
         .image = value.image,
         .icon = value.icon,
@@ -161,6 +175,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .on_scroll = if (value.scroll) |tag| try scrollEvent(tag) else null,
         .on_input = if (value.input) |tag| try inputEvent(tag) else null,
         .on_value = if (value.valueChange) |tag| try valueEvent(tag) else null,
+        .on_resize = if (value.resize) |tag| try valueEvent(tag) else null,
         .on_submit = if (value.submit) |bytes| try event(ui, bytes) else null,
         .on_dismiss = if (value.dismiss) |bytes| try event(ui, bytes) else null,
         .anchor = value.anchor,
@@ -190,6 +205,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     }
     if (comptime @hasDecl(core, "nativeSliderPolicy")) {
         if (value.kind == .slider) result.widget.interaction_policy = core.nativeSliderPolicy;
+    }
+    if (comptime @hasDecl(core, "nativeSplitPolicy")) {
+        if (value.kind == .split) result.widget.interaction_policy = core.nativeSplitPolicy;
     }
     if (paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
@@ -255,6 +273,22 @@ test "compiled sliders reject incompatible value channels" {
         inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, tag| {
             if (comptime @typeInfo(field.type) != .float) try std.testing.expectError(error.InvalidView, valueEvent(tag));
         }
+    } else return error.SkipZigTest;
+}
+
+test "compiled splits reject malformed panes and resize channels" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"button\",\"text\":\"\",\"resize\":0}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"split\",\"text\":\"\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"split\",\"text\":\"\"},{\"end\":2,\"kind\":\"column\",\"text\":\"\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":3,\"kind\":\"split\",\"text\":\"\",\"resize\":255},{\"end\":2,\"kind\":\"column\",\"text\":\"\"},{\"end\":3,\"kind\":\"column\",\"text\":\"\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"column\",\"text\":\"\",\"minWidth\":-1}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"column\",\"text\":\"\",\"resizeDuration\":180}]}",
+        }) |source| try std.testing.expectError(error.InvalidView, decode(&ui, source));
     } else return error.SkipZigTest;
 }
 

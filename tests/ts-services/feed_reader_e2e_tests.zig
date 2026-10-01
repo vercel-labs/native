@@ -610,7 +610,9 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     std.mem.writeInt(u32, slider_request[6..10], @bitCast(@as(f32, 0.3)), .little);
     std.mem.writeInt(u32, slider_request[10..14], @bitCast(@as(f32, 0.8)), .little);
     var slider_state: [4]u8 = undefined;
+    const split_widget = canvas.Widget{ .kind = .split, .value = 0.3, .interaction_policy = core.nativeSplitPolicy };
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(f32, 0.8), canvas.widgetCompiledSplitValue(split_widget, .{ .operation = 2, .value = 0.3, .previous_source = 0.3, .retained = 0.8 }).?);
         try std.testing.expectEqual(@as(usize, 4), core.nativeSliderPolicy(&slider_request, &slider_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 10, 5 }, &checkable_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeAccordionPolicy(&.{ 9, 13 }, &accordion_state));
@@ -638,6 +640,128 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
+}
+
+test "compiled split clamps preserve exact native f32 minimum-width bounds" {
+    const widget = canvas.Widget{ .kind = .split, .interaction_policy = core.nativeSplitPolicy };
+    for ([_]f32{ -0.1, 0, 0.02, 0.3, 0.95, 1.2, std.math.nan(f32), std.math.inf(f32) }) |value| {
+        for ([_]f32{ 0, 1, 200, 396, 777.3 }) |available| {
+            for ([_]f32{ 0, 150, 999 }) |first_min| {
+                for ([_]f32{ 0, 180, 999 }) |second_min| {
+                    try std.testing.expectEqual(canvas.splitEffectiveFraction(value, available, first_min, second_min), canvas.widgetSplitEffectiveFraction(widget, value, available, first_min, second_min, false));
+                    if (std.math.isFinite(value)) try std.testing.expectEqual(canvas.splitEffectiveFraction(@max(value, 0.0001), available, first_min, second_min), canvas.widgetSplitEffectiveFraction(widget, value, available, first_min, second_min, true));
+                }
+            }
+        }
+    }
+    for ([_]f32{ 0.2, 0.5 }) |source| for ([_]?f32{ null, 0.2, 0.5 }) |previous| {
+        for ([_]bool{ false, true }) |declared| for ([_]bool{ false, true }) |armed| {
+            const expected: f32 = if (previous == null or (source != previous.? and !declared and !armed)) source else 0.7;
+            try std.testing.expectEqual(expected, canvas.widgetCompiledSplitValue(widget, .{ .operation = 2, .value = source, .previous_source = previous, .retained = 0.7, .declared_tween = declared, .armed_tween = armed }).?);
+        };
+    };
+}
+
+test "compiled split divider keyboard policy preserves horizontal native intents" {
+    for ([_]f32{ -0.1, 0, 0.02, 0.3, 0.4999, 0.95, 1, 1.2 }) |value| {
+        const reference = canvas.Widget{ .kind = .split_divider, .value = value };
+        var compiled = reference;
+        compiled.interaction_policy = core.nativeSplitPolicy;
+        for ([_][]const u8{ "arrowleft", "arrowright", "arrowup", "arrowdown", "home", "end", "space", "pageup" }) |key| {
+            for ([_]canvas.WidgetKeyboardModifiers{ .{}, .{ .shift = true }, .{ .control = true }, .{ .alt = true }, .{ .super = true } }) |modifiers| {
+                for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up }) |phase| {
+                    const keyboard = canvas.WidgetKeyboardEvent{ .key = key, .modifiers = modifiers, .phase = phase };
+                    try std.testing.expectEqualDeep(canvas.widgetKeyboardControlIntent(reference, keyboard), canvas.widgetKeyboardControlIntent(compiled, keyboard));
+                }
+            }
+        }
+        compiled.state.disabled = true;
+        try std.testing.expect(canvas.widgetKeyboardControlIntent(compiled, .{ .phase = .key_down, .key = "end" }) == null);
+    }
+}
+
+test "compiled split capture, retained layout and source tweens match native frames" {
+    const TestApp = struct {
+        resize_count: usize = 0,
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-split-runtime", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *runtime_ns.Runtime, value: native_sdk.Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (value == .canvas_widget_resize) self.resize_count += 1;
+        }
+    };
+    const Fixture = struct {
+        fn layout(allocator: std.mem.Allocator, source: f32, duration: u32, disabled: bool, compiled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            var ui = canvas.Ui(core.Msg).init(allocator);
+            var split = ui.split(.{ .value = source, .gap = 9, .disabled = disabled, .resize_duration = duration, .resize_easing = .linear }, .{
+                ui.column(.{ .min_width = 60 }, .{ui.text(.{ .wrap = true }, "First pane with text that wraps as its width changes.")}),
+                ui.column(.{ .min_width = 90 }, .{ui.text(.{ .wrap = true }, "Second pane with text that stays at its target wrap during a tween.")}),
+            });
+            if (compiled) split.widget.interaction_policy = core.nativeSplitPolicy;
+            const tree = try ui.finalize(split);
+            if (compiled) try std.testing.expect(tree.root.children[1].interaction_policy != null);
+            return canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 309, 100), nodes);
+        }
+        fn frame(harness: anytype, app: native_sdk.App, timestamp: u64) !void {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .window_id = 1, .label = "canvas", .size = geometry.SizeF.init(309, 100), .timestamp_ns = timestamp } });
+        }
+    };
+    var fractions: [2][5]f32 = undefined;
+    var frames: [2][5]geometry.RectF = undefined;
+    var notes: [2]usize = undefined;
+    for ([_]bool{ false, true }, 0..) |compiled, backend| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 309, 100) });
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var nodes: [8]canvas.WidgetLayoutNode = undefined;
+        const initial = try Fixture.layout(arena.allocator(), 0.5, 0, false, compiled, &nodes);
+        const split_id = initial.nodes[0].widget.id;
+        var divider_id: canvas.ObjectId = 0;
+        for (initial.nodes) |node| if (node.widget.kind == .split_divider) {
+            divider_id = node.widget.id;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", initial);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 154.5, .y = 50 } });
+        try std.testing.expectEqual(divider_id, harness.runtime.views[0].canvas_widget_pressed_id);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_drag, .x = 1000, .y = 50 } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 1000, .y = 50 } });
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.5, 0, false, compiled, &nodes));
+        var layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqual(@as(f32, 0.7), layout.findById(split_id).?.widget.value);
+        try std.testing.expectEqual(@as(f32, 210), layout.findById(divider_id).?.frame.x);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.3, 0, false, compiled, &nodes));
+        layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqual(@as(f32, 0.3), layout.findById(split_id).?.widget.value);
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetSplitFraction(0, std.math.nan(f32))) == null);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.3, 0, true, compiled, &nodes));
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetSplitPointer(divider_id, .{ .x = 200, .y = 50 })) == null);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.3, 160, false, compiled, &nodes));
+        _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.6, 160, false, compiled, &nodes));
+        try std.testing.expectEqual(@as(f32, 0.3), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(split_id).?.widget.value);
+        for ([_]u64{ 0, 40_000_000, 80_000_000, 120_000_000, 200_000_000 }, 0..) |timestamp, sample| {
+            try Fixture.frame(harness, app, timestamp);
+            layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            fractions[backend][sample] = layout.findById(split_id).?.widget.value;
+            frames[backend][sample] = layout.findById(divider_id).?.frame;
+        }
+        try std.testing.expectEqual(@as(f32, 0.6), fractions[backend][4]);
+        harness.runtime.appearance.reduce_motion = true;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.4, 160, false, compiled, &nodes));
+        try std.testing.expectEqual(@as(f32, 0.4), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(split_id).?.widget.value);
+        notes[backend] = state.resize_count;
+    }
+    try std.testing.expectEqualSlices(f32, &fractions[0], &fractions[1]);
+    try std.testing.expectEqualDeep(frames[0], frames[1]);
+    try std.testing.expectEqual(notes[0], notes[1]);
 }
 
 test "compiled slider keyboard and accessibility steps preserve native f32 intents" {

@@ -1,0 +1,57 @@
+<column key="{workspace}" gap="10" padding="16">
+  <row gap="8" cross="center">
+    <text grow="1" size="heading">Workspace Desk</text>
+    <button size="sm" on-press="refresh">Refresh</button>
+    <button size="sm" on-press="lock">Lock layout</button>
+    <button size="sm" variant="ghost" on-press="new_workspace">New workspace</button>
+  </row>
+  <row gap="8" cross="center">
+    <text grow="1" foreground="text_muted">Navigation {sidebarPercent}% · Editor {editorPercent}%</text>
+    <button size="sm" variant="secondary" on-press="preset">Writing preset</button>
+  </row>
+  <split value="{sidebar}" on-resize="sidebar_resized" disabled="{locked}" grow="1" gap="12" label="Workspace panes">
+    <column min-width="150" background="surface" padding="12" gap="8">
+      <text size="heading">Navigation</text>
+      <text>Project overview</text>
+      <text>Drafts</text>
+      <text>Published notes</text>
+      <text foreground="text_muted" wrap="true">Drag the divider or use Left and Right. Shift takes a larger step.</text>
+    </column>
+    <split value="{editor}" on-resize="editor_resized" disabled="{locked}" min-width="390" gap="10" label="Editor panes">
+      <column min-width="200" padding="12" gap="8" background="surface">
+        <text size="heading">Draft editor</text>
+        <text wrap="true">A quiet place to shape the next idea. Both dividers keep the model in sync as the panes resize.</text>
+        <text foreground="text_muted" wrap="true">Home and End stop at the pane minimum widths.</text>
+      </column>
+      <column min-width="180" padding="12" gap="8" background="surface">
+        <text size="heading">Outline</text>
+        <text>1. Context</text>
+        <text>2. The idea</text>
+        <text>3. Next steps</text>
+      </column>
+    </split>
+  </split>
+  <row gap="8" cross="center">
+    <text grow="1">Preview panes</text>
+    <button size="sm" on-press="preview_preset">Preview preset</button>
+    <button size="sm" on-press="reverse">Reverse</button>
+    <button size="sm" on-press="hide">Hide notes</button>
+    <button size="sm" on-press="empty">Empty</button>
+  </row>
+  <row gap="12" height="130">
+    <for each="previews" as="preview" key="id">
+      <split value="{preview.fraction}" disabled="{preview.disabled}" grow="1" gap="10" label="{preview.title}">
+        <column min-width="100" padding="10" gap="6" background="surface">
+          <text>{preview.title}</text>
+          <text foreground="text_muted" wrap="true">The divider retains your adjustment across refreshes.</text>
+        </column>
+        <column min-width="100" padding="10" gap="6" background="surface">
+          <text>Details</text>
+          <text foreground="text_muted" wrap="true">Review is managed and cannot be resized.</text>
+        </column>
+      </split>
+    </for>
+    <if test="{empty}"><text>No previews</text></if>
+  </row>
+  <status-bar>Workspace {workspace} · {resizes} resize updates · {refreshes} refreshes</status-bar>
+</column>

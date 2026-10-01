@@ -158,8 +158,8 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             const available = @max(0, content.width - divider_extent);
             const first_min = @max(0, self.widget_layout_nodes[first_index].widget.layout.min_size.width);
             const second_min = @max(0, self.widget_layout_nodes[second_index].widget.layout.min_size.width);
-            const fraction = canvas.splitEffectiveFraction(@max(requested_fraction, 0.0001), available, first_min, second_min);
-            const previous_fraction = canvas.splitEffectiveFraction(self.widget_layout_nodes[handle_index].widget.value, available, first_min, second_min);
+            const fraction = canvas.widgetSplitEffectiveFraction(split_node.widget, requested_fraction, available, first_min, second_min, true);
+            const previous_fraction = canvas.widgetSplitEffectiveFraction(split_node.widget, self.widget_layout_nodes[handle_index].widget.value, available, first_min, second_min, false);
             if (fraction == previous_fraction) return null;
 
             const first_width = available * fraction;

@@ -1700,6 +1700,18 @@ pub fn splitEffectiveFraction(value: f32, available: f32, first_min: f32, second
     return std.math.clamp(base, bounds.low, bounds.high);
 }
 
+/// Compiled splits choose their effective fraction beside the app model.
+/// Native supplies measured extents and keeps the reference for other trees.
+pub fn widgetSplitEffectiveFraction(widget: Widget, value: f32, available: f32, first_min: f32, second_min: f32, applied: bool) f32 {
+    return event_model.widgetCompiledSplitValue(widget, .{
+        .operation = if (applied) 1 else 0,
+        .value = value,
+        .available = available,
+        .first_min = first_min,
+        .second_min = second_min,
+    }) orelse splitEffectiveFraction(if (applied) @max(value, 0.0001) else value, available, first_min, second_min);
+}
+
 /// Split layout: [pane 1][divider][pane 2] along the horizontal axis.
 /// The divider is the builder-synthesized `.split_divider` child; panes
 /// are the remaining flow children (exactly two by the validator's
@@ -1737,7 +1749,7 @@ fn layoutSplitChildren(
     const available = @max(0, content.width - divider_extent);
     const first_min = if (panes[0]) |pane| nonNegative(pane.layout.min_size.width) else 0;
     const second_min = if (panes[1]) |pane| nonNegative(pane.layout.min_size.width) else 0;
-    const fraction = splitEffectiveFraction(widget.value, available, first_min, second_min);
+    const fraction = widgetSplitEffectiveFraction(widget, widget.value, available, first_min, second_min, false);
     const first_width = if (panes[1] == null) available else available * fraction;
 
     var cursor = content.x;
@@ -1840,7 +1852,7 @@ pub fn slideSplitChildren(
     // The same clamp family the runtime's drag echo applies: a
     // sub-epsilon fraction stays a sliver instead of falling into the
     // `<= 0` unset sentinel, and pane min widths bound the boundary.
-    const effective = splitEffectiveFraction(@max(fraction, 0.0001), available, first_min, second_min);
+    const effective = widgetSplitEffectiveFraction(nodes[node_index].widget, fraction, available, first_min, second_min, true);
 
     const first_width = available * effective;
     const divider_x = content.x + first_width;
