@@ -38,11 +38,13 @@ For text-entry widgets, `setText(widget, text)` replaces the content through nat
 
 For drag and scroll tests, `drag(widget, { x, y })` sends a physical pointer gesture through native hit testing. Coordinates are in the receiving canvas. `beginDrag` leaves the gesture active so you can inspect its preview; finish it with `pointer(widget, "up", point)` or cancel with `key(widget.view, "escape")`. `pointer` also accepts `"down"`, `"drag"`, and `"cancel"`, with an optional `{ x, y }` movement delta. `wheel(widget, deltaY, deltaX)` scrolls at the widget's center. `dropFiles(view, paths, window)` sends a platform file-drop event; an empty view addresses the window, and the default window is `1`. These inputs use the normal runtime and replay journal.
 
+For secondary windows, `snapshot.windows` lists live window identities, labels, titles, bounds, focus, and hidden state. `frame()` presents all live canvases. Select controls with `findWidget(snapshot, { role, name, view })`; pointer, text, and keyboard operations route to that canvas. `closeWindow(window)` sends a native user-close notification, including the window's close command. `menu(command, windowId)` addresses a specific window and defaults to the primary window.
+
 ### Models, effects, and replay
 
 `snapshot.model` is the committed native model's JSON projection: byte values become number arrays, enums become strings, and tagged unions use the generated mirror's `{arm: payload}` shape. Its TypeScript type is a JSON record. `snapshot.widgets` contains accessibility state, bounds, and available actions. The `fingerprint` covers the native accessibility tree.
 
-This initial host drives the primary canvas on the current desktop build target. It uses fake effects and a fixed clock (`wallMs`, default zero). It does not start production services, load persistence, read launch environment values, or open app-data directories.
+The host drives the primary canvas and every live secondary canvas on the current desktop build target. It uses fake effects and a fixed clock (`wallMs`, default zero). It does not start production services, load persistence, read launch environment values, or open app-data directories.
 
 Inspect `snapshot.effects.requests`, then answer a request with `app.respond(key, bytes, ok)`. For typed services, successful responses use the service contract's canonical binary encoding; the generated result decoder routes them to the typed Msg arm. Failed responses carry error bytes. See `examples/service-feed-reader/tests/view.test.ts` for a record response fixture. Inspect `snapshot.effects.timers`, then call `app.fireTimer(key)` to send a journaled platform timer event. `snapshot.effects.recorded` counts journaled effect results, including clock reads.
 

@@ -18,12 +18,21 @@ export interface NativeWidget {
   readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
   readonly actions: Readonly<Record<string, boolean>>;
 }
+export interface NativeWindow {
+  readonly id: number;
+  readonly label: string;
+  readonly title: string;
+  readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly focused: boolean;
+  readonly hidden: boolean;
+}
 export interface NativeSnapshot {
   readonly viewBackend: "zig" | "typescript";
   /** Committed native model projection. Bytes are number arrays; tagged unions
    * use the generated mirror's {arm: payload} representation. */
   readonly model: Readonly<Record<string, JsonValue>>;
   readonly fingerprint: string;
+  readonly windows: readonly NativeWindow[];
   readonly widgets: readonly NativeWidget[];
   readonly effects: {
     readonly recorded: number;
@@ -163,6 +172,7 @@ export class NativeApp implements AsyncDisposable {
   }
 
   snapshot(): Promise<NativeSnapshot> { return this.#snapshot({ op: "snapshot" }); }
+  /** Present the primary canvas and every live secondary canvas. */
   frame(): Promise<NativeSnapshot> { return this.#snapshot({ op: "frame" }); }
   click(widget: NativeWidget): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-click ${token(widget.view)} ${identity(widget.id)}` });
@@ -219,7 +229,12 @@ export class NativeApp implements AsyncDisposable {
   action(widget: NativeWidget, action: "focus" | "press" | "toggle" | "increment" | "decrement" | "dismiss"): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-action ${token(widget.view)} ${identity(widget.id)} ${token(action)}` });
   }
-  menu(command: string): Promise<NativeSnapshot> { return this.#snapshot({ op: "menu", command }); }
+  menu(command: string, window = 1): Promise<NativeSnapshot> { return this.#snapshot({ op: "menu", command, window }); }
+  /** Native user-close notification; routes the window's close command. */
+  closeWindow(window: NativeWindow): Promise<NativeSnapshot> {
+    if (!Number.isSafeInteger(window.id) || window.id <= 0) throw new Error("Invalid window identity");
+    return this.#snapshot({ op: "window_close", window: window.id });
+  }
   respond(key: string, bytes: Uint8Array, ok = true): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "host_result", key: identity(key), bytes: Array.from(bytes), ok });
   }

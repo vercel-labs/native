@@ -174,6 +174,24 @@ pub fn replaySession(
                         // below fails loudly instead.
                     };
                 }
+                if (event == .window_frame_changed and !event.window_frame_changed.open) {
+                    // Live hosts remove a user-closed window before reporting
+                    // this event. Reproduce that native teardown on the replay
+                    // host before on_close can declare the same label again.
+                    // Do not flip runtime state here: dispatch must observe the
+                    // open -> closed edge and deliver the app's close Msg.
+                    var windows: [platform.max_windows]platform.WindowInfo = undefined;
+                    for (runtime.listWindows(&windows)) |window| {
+                        if (window.id != event.window_frame_changed.id or !window.open) continue;
+                        runtime.options.platform.services.closeWindow(window.id) catch |err| switch (err) {
+                            // An adopted startup window may have no native owner
+                            // in a headless replay host.
+                            error.WindowNotFound => {},
+                            else => return err,
+                        };
+                        break;
+                    }
+                }
                 try runtime.dispatchPlatformEvent(app, event);
                 report.events_replayed += 1;
             },

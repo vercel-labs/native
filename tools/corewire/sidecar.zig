@@ -224,7 +224,7 @@ pub const Sidecar = struct {
 /// init, collect, result reset), then the program's entry-point map
 /// (core_abi.zig binds the matching extern signatures). The five
 /// conditional channel-entry suffixes follow, present exactly when the
-/// matching channel is wired, then the optional native_view extension.
+/// matching channel is wired, then the optional compiled view extensions.
 pub const unconditional_exports = [_][]const u8{
     "abi_version",
     "build_id",
@@ -258,6 +258,7 @@ pub const conditional_exports = [_][]const u8{
     "drop_msg",
     // Native SDK's opt-in compiled-view extension, after function channels.
     "native_view",
+    "native_window_view",
 };
 
 // ------------------------------------------------------------ reading
@@ -2408,6 +2409,11 @@ test "V11: the optional native view extension is unique and follows channels" {
     const source = try replaced(arena, minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"native_view\"]");
     const valid = try readValid(arena, source);
     try testing.expect(abiHasExport(valid.abi, "native_view"));
+    const windows = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_window_view\"]");
+    const window_valid = try readValid(arena, windows);
+    try testing.expect(abiHasExport(window_valid.abi, "native_window_view"));
+    const window_duplicate = try replaced(arena, windows, "\"native_window_view\"]", "\"native_window_view\", \"native_window_view\"]");
+    try expectRefusal(window_duplicate, "abi.exports[24]", "out of canonical order");
     const duplicate = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_view\"]");
     try expectRefusal(duplicate, "abi.exports[23]", "out of canonical order");
     const reordered = try replaced(arena, source, "\"helper_call\", \"native_view\"", "\"native_view\", \"helper_call\"");

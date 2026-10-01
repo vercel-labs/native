@@ -1,0 +1,28 @@
+<import src="components/items.native" />
+<column padding="24" gap="12" background="background">
+  <row gap="8" cross="center">
+    <input text="{url}" placeholder="Feed URL" label="Feed URL" grow="1" on-input="url_edit" on-submit="refresh" />
+    <button variant="primary" on-press="refresh">Fetch feed</button>
+  </row>
+  <if test="{loading}">
+    <badge variant="secondary">Working</badge>
+  </if>
+  <if test="{failed}">
+    <column gap="4">
+      <text foreground="destructive">The request failed.</text>
+      <text size="sm" foreground="text_muted" wrap="true">{reason}</text>
+    </column>
+  </if>
+  <if test="{ready}">
+    <column gap="10" grow="1">
+      <text size="lg">{feedTitle}</text>
+      <use template="feed-items" />
+    </column>
+  </if>
+  <row gap="8" cross="center">
+    <button variant="outline" on-press="load_sample">Parse the sample</button>
+    <button variant="outline" on-press="close_feed_window">Close feed window</button>
+    <spacer grow="1" />
+    <text size="sm" foreground="text_muted">{itemSummary}</text>
+  </row>
+</column>

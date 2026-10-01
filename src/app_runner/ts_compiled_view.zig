@@ -53,6 +53,11 @@ pub fn build(ui: *Ui, model: *const core.Model) Ui.Node {
     return decode(ui, core.nativeView(ui.arena)) catch @panic("invalid compiled TypeScript view data");
 }
 
+pub fn buildWindow(ui: *Ui, model: *const core.Model, label: []const u8) Ui.Node {
+    _ = model;
+    return decode(ui, core.nativeWindowView(label, ui.arena)) catch @panic("invalid compiled TypeScript window view data");
+}
+
 fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
     const tree = try std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always });

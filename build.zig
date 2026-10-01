@@ -3699,6 +3699,7 @@ fn tsCoreE2eArtifact(
         .entry = "examples/service-feed-reader/src/core.ts",
         .src_dir = b.path("examples/service-feed-reader/src"),
         .name = "feed_reader_core",
+        .window_views = &.{"feed"},
         .emit_services = true,
         .typescript_view = true,
     });
@@ -3715,6 +3716,8 @@ fn tsCoreE2eArtifact(
     const feed_reader_stage = b.addWriteFiles();
     const feed_reader_root = feed_reader_stage.addCopyFile(b.path("tests/ts-services/feed_reader_e2e_tests.zig"), "feed_reader_e2e_tests.zig");
     _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/app.native"), "app.native");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/windows/feed.native"), "windows/feed.native");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/windows/components/items.native"), "windows/components/items.native");
     _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/fixtures/feed.xml"), "fixture_feed.xml");
     _ = feed_reader_stage.addCopyFile(b.path("src/app_runner/ts_compiled_view.zig"), "ts_compiled_view.zig");
     _ = feed_reader_stage.add("core.zig",
@@ -3722,6 +3725,7 @@ fn tsCoreE2eArtifact(
         \\pub const Model = core.Model;
         \\pub const Msg = core.Msg;
         \\pub const nativeView = core.nativeView;
+        \\pub const nativeWindowView = core.nativeWindowView;
         \\pub const nativeViewEvent = core.nativeViewEvent;
     );
     const feed_reader_mod = b.createModule(.{
@@ -4214,6 +4218,7 @@ const ExternalCoreFixtureSpec = struct {
     emit_services: bool = false,
     service_packages: []const []const u8 = &.{},
     typescript_view: bool = false,
+    window_views: []const []const u8 = &.{},
 };
 
 /// Compile one TS fixture core through the external core compiler at
@@ -4245,6 +4250,8 @@ fn externalCoreFixtureModule(
     const contract = app_build.stabilizeGeneratedFile(b, contract_raw, "core.contract.json", false);
     check.addArg("--contract-entry");
     check.addArg(spec.entry);
+    if (spec.window_views.len > 0) check.addArg("--window-views");
+    for (spec.window_views) |label| check.addArgs(&.{ "--window-view", label });
     const services_contract: ?std.Build.LazyPath = if (spec.emit_services) services: {
         check.addArg("--services-contract");
         const raw = check.addOutputFileArg("services.contract.json");
@@ -4317,7 +4324,7 @@ fn externalCoreFixtureModule(
         stage_run.addArg("--view-contract");
         stage_run.addFileArg(contract);
     }
-    tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".");
+    tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".", spec.typescript_view);
     app_build.addStagedCoreSdkInputs(b, b, stage_run);
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
@@ -4405,13 +4412,15 @@ fn tsCoreAddDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, dir_path: [
 
 /// The source set stage_external_core.mjs copies: every ordinary `.ts` file,
 /// excluding the independent services compiler class and declaration files.
-fn tsCoreAddCoreDirInputs(b: *std.Build, stage: *std.Build.Step.Run, dir_path: []const u8) void {
+/// Compiled views additionally consume every markup source in this tree.
+fn tsCoreAddCoreDirInputs(b: *std.Build, stage: *std.Build.Step.Run, dir_path: []const u8, include_markup: bool) void {
     var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(b.graph.io);
     var walker = dir.walk(b.allocator) catch return;
     defer walker.deinit();
     while (walker.next(b.graph.io) catch null) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".ts") or std.mem.endsWith(u8, entry.basename, ".d.ts")) continue;
+        if (entry.kind != .file or std.mem.endsWith(u8, entry.basename, ".d.ts")) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".ts") and !(include_markup and std.mem.endsWith(u8, entry.basename, ".native"))) continue;
         const normalized = b.dupe(entry.path);
         for (normalized) |*char| if (char.* == '\\') {
             char.* = '/';

@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, host_result, timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, timer, replay, close },
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -92,6 +92,22 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 .frame_index = self.frame_index,
                 .timestamp_ns = self.frame_index * 16_000_000,
             } });
+            var windows: [sdk.platform.max_windows]sdk.platform.WindowInfo = undefined;
+            for (self.harness.runtime.listWindows(&windows)) |window| {
+                if (!window.open) continue;
+                var views: [sdk.platform.max_views]sdk.platform.ViewInfo = undefined;
+                for (self.harness.runtime.listViews(window.id, &views)) |view| {
+                    if (view.kind != .gpu_surface or std.mem.eql(u8, view.label, label)) continue;
+                    try self.harness.runtime.dispatchPlatformEvent(self.state.app(), .{ .gpu_surface_frame = .{
+                        .window_id = window.id,
+                        .label = view.label,
+                        .size = sdk.geometry.SizeF.init(view.frame.width, view.frame.height),
+                        .scale_factor = 1,
+                        .frame_index = self.frame_index,
+                        .timestamp_ns = self.frame_index * 16_000_000,
+                    } });
+                }
+            }
             try self.harness.runtime.dispatchPlatformEvent(self.state.app(), .frame_requested);
         }
 
@@ -109,6 +125,21 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
             try json.objectField("fingerprint");
             var id_buffer: [32]u8 = undefined;
             try json.write(try std.fmt.bufPrint(&id_buffer, "{x}", .{self.harness.runtime.sessionStateFingerprint()}));
+            try json.objectField("windows");
+            try json.beginArray();
+            var windows: [sdk.platform.max_windows]sdk.platform.WindowInfo = undefined;
+            for (self.harness.runtime.listWindows(&windows)) |window| {
+                if (!window.open) continue;
+                try json.write(.{
+                    .id = window.id,
+                    .label = window.label,
+                    .title = window.title,
+                    .bounds = window.frame,
+                    .focused = window.focused,
+                    .hidden = window.hidden,
+                });
+            }
+            try json.endArray();
             try json.objectField("widgets");
             try json.beginArray();
             for (snapshot_value.widgets) |widget| {
@@ -240,7 +271,11 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     .view_label = request.view,
                     .paths = request.paths,
                 } }),
-                .menu => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .menu_command = .{ .name = request.command, .window_id = 1 } }),
+                .menu => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .menu_command = .{ .name = request.command, .window_id = request.window } }),
+                .window_close => {
+                    const event = value.harness.null_platform.userCloseWindow(request.window) orelse return error.WindowNotFound;
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), event);
+                },
                 .host_result => {
                     try value.state.effects.feedHostResult(try std.fmt.parseInt(u64, request.key, 10), request.ok, request.bytes);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);

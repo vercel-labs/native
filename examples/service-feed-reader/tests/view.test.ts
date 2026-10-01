@@ -5,7 +5,7 @@ import { NativeApp, findWidget, type NativeSnapshot } from "@native-sdk/core/tes
 
 const backend = process.env.NATIVE_SDK_TEST_VIEW_BACKEND;
 const field = (snapshot: NativeSnapshot) => findWidget(snapshot, { role: "textbox", name: "Feed URL" });
-interface State { url: number[]; urlAnchor: number; urlFocus: number; urlCompStart: number; urlCompEnd: number; phase: string; items: unknown[] }
+interface State { feedWindowOpen: boolean; url: number[]; urlAnchor: number; urlFocus: number; urlCompStart: number; urlCompEnd: number; phase: string; items: unknown[] }
 const state = (snapshot: NativeSnapshot) => snapshot.model as unknown as State;
 const url = (snapshot: NativeSnapshot) => new TextDecoder().decode(Uint8Array.from(state(snapshot).url));
 const compare = (name: string, snapshots: NativeSnapshot[]) => {
@@ -118,5 +118,79 @@ test("native IME commit, cancel, service errors and submit replay through both v
     assert.deepEqual(replay.snapshot.widgets, snapshot.widgets);
     snapshots.push(replay.snapshot);
     compare("ime", snapshots);
+  } finally { await app.close(); }
+});
+
+
+test("secondary window inputs, service updates, close and reopen share one model and replay", async () => {
+  const app = await start();
+  const main = "feed-canvas", secondary = "feed-window-canvas";
+  const inView = (snapshot: NativeSnapshot, role: string, name: string, view: string) => findWidget(snapshot, { role, name, view });
+  const input = (snapshot: NativeSnapshot, view: string) => inView(snapshot, "textbox", "Feed URL", view);
+  const open = (snapshot: NativeSnapshot) => app.click(inView(snapshot, "button", "Open feed window", main));
+  try {
+    let snapshot = await app.snapshot();
+    const snapshots = [snapshot];
+    const mainId = input(snapshot, main).id;
+    snapshot = await open(snapshot);
+    assert.equal(state(snapshot).feedWindowOpen, true);
+    const window = snapshot.windows.find(window => window.label === "feed")!;
+    assert.ok(window);
+    assert.equal(window.bounds.width, 560);
+    assert.equal(window.bounds.height, 400);
+    const secondaryInput = input(snapshot, secondary);
+    assert.equal(secondaryInput.window, window.id);
+    assert.notEqual(secondaryInput.window, input(snapshot, main).window);
+    snapshots.push(snapshot);
+    // Repeated model/view requests must preserve each retained tree and identity.
+    snapshot = await app.frame();
+    assert.equal(input(snapshot, secondary).id, secondaryInput.id);
+    snapshots.push(snapshot);
+    snapshot = await app.setText(secondaryInput, "café🙂/feed");
+    assert.equal(input(snapshot, main).text, "café🙂/feed");
+    assert.equal(input(snapshot, main).id, mainId);
+    snapshots.push(snapshot);
+    snapshot = await app.selectText(secondaryInput, 0, 5);
+    snapshot = await app.key(secondary, "backspace");
+    assert.equal(url(snapshot), "🙂/feed");
+    assert.equal(input(snapshot, main).text, url(snapshot));
+    snapshots.push(snapshot);
+    snapshot = await app.setText(input(snapshot, main), "https://example.com/shared");
+    assert.equal(input(snapshot, secondary).text, url(snapshot));
+    snapshots.push(snapshot);
+    // Physical pointer hit testing in the secondary canvas starts the real Msg/effect path.
+    const sample = inView(snapshot, "button", "Parse the sample", secondary);
+    const point = { x: sample.bounds.x + sample.bounds.width / 2, y: sample.bounds.y + sample.bounds.height / 2 };
+    await app.pointer(sample, "down", point);
+    snapshot = await app.pointer(sample, "up", point);
+    assert.equal(state(snapshot).phase, "loading");
+    for (const view of [main, secondary]) assert.ok(snapshot.widgets.some(widget => widget.view === view && widget.name === "Working"));
+    snapshots.push(snapshot);
+    snapshot = await app.respond(snapshot.effects.requests[0]!.key, new TextEncoder().encode("shared service failure"), false);
+    for (const view of [main, secondary]) assert.ok(snapshot.widgets.some(widget => widget.view === view && widget.name === "shared service failure"));
+    snapshots.push(snapshot);
+    snapshot = await app.closeWindow(window);
+    assert.equal(state(snapshot).feedWindowOpen, false);
+    assert.ok(!snapshot.windows.some(window => window.label === "feed"));
+    assert.ok(!snapshot.widgets.some(widget => widget.view === secondary));
+    snapshots.push(snapshot);
+    snapshot = await open(snapshot);
+    assert.equal(input(snapshot, secondary).text, "https://example.com/shared");
+    snapshots.push(snapshot);
+    snapshot = await app.click(inView(snapshot, "button", "Parse the sample", main));
+    snapshot = await app.respond(snapshot.effects.requests[0]!.key, feedResult());
+    for (const view of [main, secondary]) assert.ok(snapshot.widgets.some(widget => widget.view === view && widget.name === "Fixture café"));
+    snapshots.push(snapshot);
+    snapshot = await app.click(inView(snapshot, "button", "Close feed window", secondary));
+    assert.equal(state(snapshot).feedWindowOpen, false);
+    assert.ok(!snapshot.widgets.some(widget => widget.view === secondary));
+    snapshots.push(snapshot);
+    snapshot = await open(snapshot);
+    const replay = await app.verifyReplay();
+    assert.deepEqual(replay.snapshot.model, snapshot.model);
+    assert.deepEqual(replay.snapshot.windows, snapshot.windows);
+    assert.deepEqual(replay.snapshot.widgets, snapshot.widgets);
+    snapshots.push(replay.snapshot);
+    compare("windows", snapshots);
   } finally { await app.close(); }
 });

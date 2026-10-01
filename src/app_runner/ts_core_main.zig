@@ -126,8 +126,12 @@ fn appOptions(io: ?std.Io) Adapter.Options {
     };
     if (comptime ts_view.enabled) options.view = ts_view.build else if (comptime !dev) options.view = CompiledAppView.build;
     if (comptime @hasDecl(core.Model, "windows")) {
-        options.window_view = window_views.build;
-        if (io) |watch_io| options.fragment_watch = .{ .fragments = &window_views.fragments, .io = watch_io };
+        if (comptime ts_view.enabled) {
+            options.window_view = ts_view.buildWindow;
+        } else {
+            options.window_view = window_views.build;
+            if (io) |watch_io| options.fragment_watch = .{ .fragments = &window_views.fragments, .io = watch_io };
+        }
     }
     if (comptime @hasDecl(core, "commandMsg")) {
         // Menus, shortcuts, and chrome tabs dispatch through the core's

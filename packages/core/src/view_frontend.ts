@@ -15,7 +15,35 @@ type Scope = ReadonlyMap<string, Expr>;
 interface Slot { children: Element[]; scope: Scope; slot?: Slot }
 export interface ViewSources { entry?: string; sources?: ReadonlyMap<string, string> }
 
+export interface WindowViewSource extends ViewSources { label: string; source: string }
+
 export function compileView(source: string, contract: ViewContract, options: ViewSources = {}): string {
+  return viewPrelude + compileViewFunction(source, contract, options, "native_view", true);
+}
+
+/** One shared prelude, primary view, and a closed label-addressed window set.
+ * Window source paths are relative to src/windows, preserving its import boundary.
+ */
+export function compileViewBundle(source: string, contract: ViewContract, options: ViewSources,
+  windows: readonly WindowViewSource[]): string {
+  let generated = compileView(source, contract, options);
+  if (windows.length === 0) return generated;
+  const labels = new Set<string>();
+  const branches: string[] = [];
+  for (const [index, window] of windows.entries()) {
+    if (!window.label || new TextEncoder().encode(window.label).length > 64 ||
+      /[\\/\0]/.test(window.label) || [".", ".."].includes(window.label) || labels.has(window.label)) {
+      throw new Error("compiled TypeScript view: invalid or duplicate window label");
+    }
+    labels.add(window.label);
+    generated += compileViewFunction(window.source, contract, window, `nscvWindow${index}`, false);
+    branches.push(`if (nscvWindowLabel(label, ${JSON.stringify(window.label)})) return nscvWindow${index}();`);
+  }
+  return generated + `function nscvWindowLabel(label: Uint8Array, expected: string): boolean { const bytes = new TextEncoder().encode(expected); if (label.length !== bytes.length) return false; for (let i = 0; i < bytes.length; i++) if (label[i] !== bytes[i]) return false; return true; }\n` +
+    `export function native_window_view(label: Uint8Array): Uint8Array {\n${branches.join("\n")}\nthrow new Error("unknown compiled window view label");\n}\n`;
+}
+
+function compileViewFunction(source: string, contract: ViewContract, options: ViewSources, functionName: string, exported: boolean): string {
   const entry = options.entry ?? "app.native";
   const sources = new Map(options.sources); sources.set(entry, source);
   const fail: (node: Pick<Element, "file" | "at">, message: string) => never = (node, message) => {
@@ -23,7 +51,7 @@ export function compileView(source: string, contract: ViewContract, options: Vie
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewNode", "native_view", "JSON", "TextEncoder", "TextDecoder", "String", "Number", "Array"];
+  const reserved = ["NscViewNode", "native_view", "native_window_view", "JSON", "TextEncoder", "TextDecoder", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -352,9 +380,10 @@ export function compileView(source: string, contract: ViewContract, options: Vie
     emitChildren(node.children, scope, slot, stack, depth + 1); output.push(`nscvNode${id}.end = nscvNodes.length;`);
   };
   emit(roots[0]!, new Map(), undefined, [], 0);
-  return `\n// Generated Native markup; reads the actual committed TypeScript model.\n` +
+  return `${exported ? "export " : ""}function ${functionName}(): Uint8Array {\nconst nscvNodes: NscViewNode[] = [];\n${output.join("\n")}\nif (nscvNodes.length === 0 || nscvNodes[0]!.end !== nscvNodes.length) throw new Error("compiled view requires one rendered root");\nreturn new TextEncoder().encode(JSON.stringify({ format: 2, nodes: nscvNodes }));\n}\n`;
+}
+
+const viewPrelude = `\n// Generated Native markup; reads the actual committed TypeScript model.\n` +
     `type NscViewNode = { end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number; gap?: number; padding?: number; grow?: number; width?: number; height?: number; value?: number; image?: number; icon?: string; label?: string; role?: string; background?: string; foreground?: string; radius?: string; windowDrag?: boolean; main?: string; cross?: string; size?: string; variant?: string; checked?: boolean; disabled?: boolean; press?: number[]; toggle?: number[]; drag?: number[]; scroll?: number; input?: number; submit?: number[] };\n` +
     `function nscvInteger(value: number): number { if (!Number.isSafeInteger(value)) throw new Error("compiled view key is not an exact integer"); return value; }\n` +
-    `function nscvLoopKeys(nodes: NscViewNode[], first: number, base: string | number): void { let slot = 0; for (let i = first; i < nodes.length; i = nodes[i]!.end) { const node = nodes[i]!; if (node.key === undefined && node.keyInt === undefined && node.globalKey === undefined && node.globalKeyInt === undefined) { if (typeof base === "number") node.keyInt = base; else node.key = base; node.keySlot = slot; } slot++; } }\n` +
-    `export function native_view(): Uint8Array {\nconst nscvNodes: NscViewNode[] = [];\n${output.join("\n")}\nif (nscvNodes.length === 0 || nscvNodes[0]!.end !== nscvNodes.length) throw new Error("compiled view requires one rendered root");\nreturn new TextEncoder().encode(JSON.stringify({ format: 2, nodes: nscvNodes }));\n}\n`;
-}
+    `function nscvLoopKeys(nodes: NscViewNode[], first: number, base: string | number): void { let slot = 0; for (let i = first; i < nodes.length; i = nodes[i]!.end) { const node = nodes[i]!; if (node.key === undefined && node.keyInt === undefined && node.globalKey === undefined && node.globalKeyInt === undefined) { if (typeof base === "number") node.keyInt = base; else node.key = base; node.keySlot = slot; } slot++; } }\n`;

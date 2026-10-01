@@ -27,7 +27,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { compileView } from "../src/view_frontend.ts";
+import { compileViewBundle } from "../src/view_frontend.ts";
 
 function parseArgs(argv) {
   const args = {};
@@ -163,10 +163,16 @@ if (args["view-markup"]) {
     }
   };
   markupFiles(args.src);
-  const view = compileView(fs.readFileSync(args["view-markup"], "utf8"), contract, { sources });
+  const windowSources = new Map([...sources].filter(([name]) => name.startsWith("windows/"))
+    .map(([name, source]) => [name.slice("windows/".length), source]));
+  const windows = [...windowSources].filter(([name]) => !name.includes("/"))
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([entry, source]) => ({ label: entry.slice(0, -".native".length), entry, source, sources: windowSources }));
+  const view = compileViewBundle(fs.readFileSync(args["view-markup"], "utf8"), contract, { sources }, windows);
   fs.appendFileSync(path.join(args.out, "core_facade.ts"), view);
   const profile = JSON.parse(fs.readFileSync(args.profile, "utf8"));
   profile.exports.push({ export: "native_view", symbol: `${profile.abi.prefix}native_view`, params: [], returns: "bytes" });
+  if (windows.length) profile.exports.push({ export: "native_window_view", symbol: `${profile.abi.prefix}native_window_view`, params: ["bytes"], returns: "bytes" });
   fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
 }
 if (args["services-client"]) {

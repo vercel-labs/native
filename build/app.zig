@@ -981,7 +981,6 @@ fn tsCoreStage(
     const node = tsCorePreflight(b, dep, app_root);
     const window_views = collectTsWindowViews(b, app_root);
     const app_markup_sources = collectAppMarkupSources(b, app_root, window_views);
-    if (typescript_view and window_views.views.len != 0) @panic("compiled TypeScript views currently support one root canvas; secondary window views are unsupported");
     const has_services = appHasServiceFiles(b, app_root);
     if (!scriptcCompileSupported(b.graph.host.result, target)) {
         panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
@@ -1244,6 +1243,9 @@ fn tsCoreStage(
         for (app_markup_sources.files) |source| {
             stage_run.addFileInput(b.path(appPath(b, app_root, source.source_path)));
         }
+        for (window_views.sources) |source| {
+            stage_run.addFileInput(b.path(appPath(b, app_root, source.source_path)));
+        }
     }
     if (service_client) |client| {
         stage_run.addArg("--services-client");
@@ -1351,7 +1353,7 @@ fn tsCoreStage(
         _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
     }
     _ = staged.add("app_sources.zig", tsAppMarkupSourcesSource(b, app_markup_sources));
-    _ = staged.add("window_views.zig", tsWindowRegistrySource(b, window_views));
+    _ = staged.add("window_views.zig", tsWindowRegistrySource(b, if (typescript_view) .{ .views = &.{}, .sources = &.{} } else window_views));
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
     // The mobile wiring stages beside the desktop entry: same mirror, same
     // registry, same carrier constant — only the shell differs (the embed

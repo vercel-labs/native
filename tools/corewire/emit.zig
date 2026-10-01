@@ -294,6 +294,9 @@ const Emitter = struct {
         if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_view")) {
             try reserved.appendSlice(self.arena, &.{ "nativeView", "nativeViewEvent", "ptr", "len", "arena" });
         }
+        if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_window_view")) {
+            try reserved.appendSlice(self.arena, &.{ "nativeWindowView", "label", "ptr", "len", "arena" });
+        }
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
         if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg or sidecar_mod.abiHasExport(self.sidecar.abi, "native_view")) {
@@ -1164,6 +1167,22 @@ const Emitter = struct {
                 \\
             );
             try self.print("pub fn nativeViewEvent(envelope: []const u8, arena: std.mem.Allocator) ?{f} {{\n    return decodeMsgEnvelope(envelope, arena);\n}}\n", .{ident(self.sidecar.msg.name)});
+        }
+        if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_window_view")) {
+            try self.raw(
+                \\
+                \\/// Window label selects a view over the same committed model.
+                \\/// Copy before resetting scriptc's shared result arena.
+                \\pub fn nativeWindowView(label: []const u8, arena: std.mem.Allocator) []const u8 {
+                \\    var ptr: [*]const u8 = undefined;
+                \\    var len: usize = 0;
+                \\    abi.native_window_view(label.ptr, label.len, &ptr, &len);
+                \\    defer abi.frame_reset();
+                \\    if (len > 1024 * 1024) @panic("compiled window view exceeds 1 MiB");
+                \\    return arena.dupe(u8, ptr[0..len]) catch @panic("compiled window view allocation failed");
+                \\}
+                \\
+            );
         }
 
         if (chan.command_msg) {

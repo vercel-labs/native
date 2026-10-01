@@ -1,0 +1,12 @@
+<template name="feed-items">
+  <scroll grow="1" label="Feed items">
+    <column gap="8">
+      <for each="items" as="item" key="link">
+        <column gap="2">
+          <text wrap="true">{item.title}</text>
+          <text size="sm" foreground="text_muted" wrap="false">{item.link}</text>
+        </column>
+      </for>
+    </column>
+  </scroll>
+</template>

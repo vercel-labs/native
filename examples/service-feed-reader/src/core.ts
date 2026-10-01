@@ -2,14 +2,16 @@
 // them to the `feeds.parse` service through the generated typed client, and
 // commits the typed result records the markup renders. The service is never
 // imported here — the core knows it only through `@native-sdk/services`.
-import { Cmd, asciiBytes, utf8Bytes, type EnvMsg } from "@native-sdk/core";
+import { Cmd, asciiBytes, utf8Bytes, windowDescriptor, type EnvMsg } from "@native-sdk/core";
 import { applyTextInputEvent, clampedInsertEvent, type TextInputEvent, type TextEditState } from "@native-sdk/core/text";
 import { feedsParse } from "@native-sdk/services";
+import type { WindowDescriptor } from "@native-sdk/core/events";
 import type { FeedItem, FeedResult } from "./shared.ts";
 
 export type Phase = "idle" | "loading" | "ready" | "failed";
 
 export interface Model {
+  readonly feedWindowOpen: boolean;
   readonly url: Uint8Array;
   readonly urlAnchor: number;
   readonly urlFocus: number;
@@ -23,6 +25,8 @@ export interface Model {
 }
 
 export type Msg =
+  | { readonly kind: "open_feed_window" }
+  | { readonly kind: "close_feed_window" }
   | { readonly kind: "refresh" }
   | { readonly kind: "load_sample" }
   | { readonly kind: "url_edit"; readonly edit: TextInputEvent }
@@ -49,6 +53,7 @@ const SAMPLE_FEED = utf8Bytes(
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
     {
+      feedWindowOpen: false,
       url: DEFAULT_FEED_URL,
       urlAnchor: 0,
       urlFocus: 0,
@@ -66,6 +71,11 @@ export function initialModel(): [Model, Cmd<Msg>] {
 
 export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
   switch (msg.kind) {
+    case "open_feed_window":
+      if (model.feedWindowOpen) return [model, Cmd.showWindow("feed")];
+      return [{ ...model, feedWindowOpen: true }, Cmd.none];
+    case "close_feed_window":
+      return [{ ...model, feedWindowOpen: false }, Cmd.none];
     case "refresh":
       if (model.phase === "loading" || model.url.length === 0) return [model, Cmd.none];
       return [
@@ -145,6 +155,27 @@ export function itemSummary(model: Model): Uint8Array {
   return utf8Bytes(`${model.items.length} of ${model.totalItems} items`);
 }
 
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.feedWindowOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("feed"),
+    canvasLabel: asciiBytes("feed-window-canvas"),
+    title: asciiBytes("Feed"),
+    width: 560,
+    height: 400,
+    minWidth: 460,
+    minHeight: 320,
+    restorePolicy: "center_on_primary",
+    closePolicy: "quit",
+    onCloseCommand: asciiBytes("feed.closed"),
+  })];
+}
+
+export function commandMsg(name: string): Msg | null {
+  if (name === "feed.closed") return { kind: "close_feed_window" };
+  return null;
+}
+
 // --------------------------------------------------- host-event channels
 
 /// The launch configuration channel: an override URL arrives as one
@@ -153,4 +184,4 @@ export const envMsgs: readonly EnvMsg<Msg>[] = [{ env: "NATIVE_SDK_FEED_URL", ms
 
 /// Update-only state: host-fired Msg arms and the fields markup reads
 /// through the exported derived helpers instead of directly.
-export const viewUnbound = ["fetched", "fetch_failed", "parsed", "parse_failed", "url_set", "phase", "totalItems", "urlAnchor", "urlFocus", "urlCompStart", "urlCompEnd"] as const;
+export const viewUnbound = ["feedWindowOpen", "fetched", "fetch_failed", "parsed", "parse_failed", "url_set", "phase", "totalItems", "urlAnchor", "urlFocus", "urlCompStart", "urlCompEnd"] as const;

@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "@typescript/old";
-import { compileView, type ViewContract } from "../src/view_frontend.ts";
+import { compileView, compileViewBundle, type ViewContract } from "../src/view_frontend.ts";
 import { checkFile } from "../src/frontend.ts";
 
 const contract: ViewContract = {
@@ -173,12 +173,12 @@ test("the complete feed view uses native input constructors and committed servic
   const bytes = (text: string) => new TextEncoder().encode(text);
   const model = { url: bytes("https://example.com/café"), items: [{ title: bytes("日本語"), link: bytes("https://example.com/1") }], feedTitle: bytes("Feed"), reason: bytes("failure"), phase: "ready" };
   const exports: { native_view?: () => Uint8Array } = {};
-  runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model, loading: () => model.phase === "loading", ready: () => model.phase === "ready", failed: () => model.phase === "failed", itemSummary: () => bytes("1 of 1 items"), nscfPackMsg: () => Uint8Array.of(1, 0) });
+  runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model, loading: () => model.phase === "loading", ready: () => model.phase === "ready", failed: () => model.phase === "failed", itemSummary: () => bytes("1 of 1 items"), nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, feedContract.msg.arms.findIndex(arm => arm.name === msg.kind)) });
   const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
   const input = view().find((node: any) => node.kind === "input");
   assert.equal(input.text, "https://example.com/café");
   assert.equal(input.input, feedContract.msg.arms.findIndex(arm => arm.name === "url_edit"));
-  assert.deepEqual(input.submit, [1, 0]);
+  assert.deepEqual(input.submit, [1, feedContract.msg.arms.findIndex(arm => arm.name === "refresh")]);
   assert.ok(view().some((node: any) => node.text === "日本語" && node.wrap));
   assert.ok(view().some((node: any) => node.key === "https://example.com/1"));
   model.phase = "loading";
@@ -196,4 +196,31 @@ test("text event bindings reject malformed unions and mismatched widgets at buil
     const broken = { ...feedContract, types: { ...feedContract.types, unions: [{ ...inputUnion, arms }] } };
     assert.throws(() => compileView('<input on-input="url_edit"/>', broken), /TextInputEvent/);
   }
+});
+
+
+test("window bundle shares helpers, routes exact labels, and preserves independent model views", () => {
+  const sources = new Map([["components/value.native", '<template name="value"><text>{count}</text></template>']]);
+  const window = { label: "café", entry: "feed.native", source: '<import src="components/value.native"/><column><use template="value"/><button on-press="increment">Bump</button></column>', sources };
+  const generated = compileViewBundle('<text>{count}</text>', contract, {}, [window, { ...window, label: "other" }]);
+  assert.equal(generated.match(/type NscViewNode/g)?.length, 1);
+  assert.equal(generated.match(/function nscvInteger/g)?.length, 1);
+  const exports: { native_view?: () => Uint8Array; native_window_view?: (label: Uint8Array) => Uint8Array } = {};
+  const model = { count: 7 };
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }),
+    { exports, TextEncoder, nscfCommitted: model, nscfPackMsg: () => Uint8Array.of(1, 3) });
+  const view = (label: string) => JSON.parse(new TextDecoder().decode(exports.native_window_view!(new TextEncoder().encode(label))));
+  const first = view("café");
+  assert.equal(first.nodes[1].text, "7");
+  assert.deepEqual(first.nodes[2].press, [1, 3]);
+  model.count = 8;
+  assert.equal(view("other").nodes[1].text, "8");
+  assert.equal(JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0].text, "8");
+  assert.equal(first.nodes[1].text, "7");
+  for (const label of ["", "missing", "café\0", "caf"]) assert.throws(() => view(label), /unknown compiled window/);
+  assert.throws(() => exports.native_window_view!(Uint8Array.of(0xff)), /unknown compiled window/);
+  assert.throws(() => compileViewBundle('<text/>', contract, {}, [window, window]), /duplicate window label/);
+  assert.throws(() => compileViewBundle('<text/>', contract, {}, [{ ...window, label: "../bad" }]), /invalid/);
+  assert.throws(() => compileViewBundle('<text/>', contract, {}, [{ ...window, source: '<import src="../app.native"/><text/>' }]), /escapes/);
+  assert.throws(() => compileViewBundle('<text/>', contract, {}, [{ ...window, source: '<unsupported/>' }]), /feed.native:1:1/);
 });

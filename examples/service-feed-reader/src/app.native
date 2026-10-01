@@ -1,6 +1,10 @@
 <column padding="24" gap="16" background="background">
   <column gap="6">
-    <text size="heading">Service Feed Reader</text>
+    <row gap="8" cross="center">
+      <text size="heading">Service Feed Reader</text>
+      <spacer grow="1" />
+      <button variant="outline" on-press="open_feed_window">Open feed window</button>
+    </row>
     <text wrap="true" foreground="text_muted">Cmd.fetch downloads the feed. The feeds.parse service turns the raw bytes into typed records, and this view renders them.</text>
   </column>
   <panel padding="18" background="surface" radius="lg" grow="1">

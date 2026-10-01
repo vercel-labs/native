@@ -21,6 +21,8 @@ The loop, end to end:
    `src/services/feeds.ts` is ordinary static-tier TypeScript: regexes over RSS 2.0 and Atom markup, CDATA and entity handling, a `Map` that drops duplicate links. Malformed input escapes as a kind-tagged throw and lands on `parse_failed` as UTF-8 JSON. No JavaScript engine ships — both classes compile through the pinned scriptc.
 3. **Render.** `parsed` commits `FeedResult` — title bytes, a `readonly FeedItem[]`, and the discovered total — and `src/app.native` lists the items.
 
+"Open feed window" opens a second view of the same feed. URL edits and service results update both windows. Close it with its native close button or "Close feed window", then reopen it from the main window.
+
 A small RSS sample is baked into the core, so the same service operation also runs with zero network ("Parse the sample", and the boot command). Edit the Feed URL field and press Enter or "Fetch feed" to download another feed. The field supports native UTF-8 selection, deletion, and IME composition. The URL defaults to `https://github.com/vercel/ai/releases.atom`; `NATIVE_SDK_FEED_URL` overrides it through the env channel, journaled like every other input.
 
 ```sh
@@ -28,7 +30,7 @@ native dev                                    # run the real app (child service 
 native dev --core --script dev-script.ndjson  # the core-logic loop under node — real service, scripted network
 native check                                  # subset-check the core + services contract + markup + app.zon
 native build -Dtypescript-view=true             # compile the complete view beside the TypeScript core
-native test -Dplatform=null -Dtypescript-view=true # native TypeScript text/service tests
+native test -Dplatform=null -Dtypescript-view=true # native TypeScript text/service/window tests
 ```
 
 The end-to-end proof battery lives in the SDK repo (`tests/ts-services/feed_reader_e2e_tests.zig`, run by `zig build test-ts-services-e2e`): it drives this example's real compiled core, its shipping markup, and its real compiled service child against a loopback HTTP fixture, then records the whole loop and replays it byte-identically with the service executable absent and the launch variable unset — the journaled fetch and service results feed the replay.

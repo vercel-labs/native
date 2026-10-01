@@ -37,6 +37,15 @@ const ServiceTransport = native_sdk.ServiceHost(registry);
 
 const app_markup = @embedFile("app.native");
 const CompiledAppView = canvas.CompiledMarkupView(core.Model, core.Msg, app_markup);
+const window_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "feed.native", .source = @embedFile("windows/feed.native") },
+    .{ .path = "components/items.native", .source = @embedFile("windows/components/items.native") },
+};
+const CompiledWindowView = canvas.CompiledMarkupImports(core.Model, core.Msg, "feed.native", &window_sources);
+fn referenceWindowView(ui: *App.Ui, model: *const core.Model, label: []const u8) App.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, label, "feed"));
+    return CompiledWindowView.build(ui, model);
+}
 const TsView = @import("ts_compiled_view.zig");
 
 const fixture_feed = @embedFile("fixture_feed.xml");
@@ -58,6 +67,8 @@ fn appOptions(reference: bool) App.Options {
         .scene = app_scene,
         .canvas_label = canvas_label,
         .view = if (reference) CompiledAppView.build else TsView.build,
+        .window_view = if (reference) referenceWindowView else TsView.buildWindow,
+        .on_command = core.commandMsg,
     };
 }
 
@@ -220,17 +231,65 @@ const Harness = struct {
         std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_root) catch {};
     }
 
-    fn refreshFromInput(self: *Harness) !void {
-        const url = self.env_values[0].value;
-        const id = self.findLabel("Feed URL").?;
+    fn feedWindow(self: *Harness) !native_sdk.platform.WindowInfo {
+        var windows: [native_sdk.platform.max_windows]native_sdk.platform.WindowInfo = undefined;
+        for (self.harness.runtime.listWindows(&windows)) |window| {
+            if (window.open and std.mem.eql(u8, window.label, "feed")) return window;
+        }
+        return error.WindowNotFound;
+    }
+
+    fn openFeedWindow(self: *Harness) !void {
         try self.harness.runtime.dispatchAutomationWidgetAction(self.app, .{
             .view_label = canvas_label,
+            .id = self.findKindText(.button, "Open feed window").?,
+            .action = .press,
+        });
+        try self.frameFeedWindow();
+    }
+
+    fn frameFeedWindow(self: *Harness) !void {
+        const window = try self.feedWindow();
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
+            .window_id = window.id,
+            .label = "feed-window-canvas",
+            .size = geometry.SizeF.init(window.frame.width, window.frame.height),
+            .scale_factor = 1,
+            .frame_index = 2,
+            .timestamp_ns = 2_000_000,
+        } });
+    }
+
+    fn closeFeedWindow(self: *Harness) !void {
+        const event = self.harness.null_platform.userCloseWindow((try self.feedWindow()).id) orelse return error.WindowNotFound;
+        try self.harness.runtime.dispatchPlatformEvent(self.app, event);
+        try std.testing.expect(!Bridge.model().feedWindowOpen);
+    }
+
+    fn refreshFromInput(self: *Harness) !void {
+        try self.refreshFromView(canvas_label);
+    }
+
+    fn refreshFromView(self: *Harness, view: []const u8) !void {
+        const url = self.env_values[0].value;
+        const snapshot = self.harness.runtime.automationSnapshot("feed-reader-e2e");
+        const id = for (snapshot.widgets) |widget| {
+            if (std.mem.eql(u8, widget.view_label, view) and std.mem.eql(u8, widget.name, "Feed URL")) break widget.id;
+        } else return error.WidgetNotFound;
+        try self.harness.runtime.dispatchAutomationWidgetAction(self.app, .{
+            .view_label = view,
             .id = id,
             .action = .set_text,
             .value = url,
         });
         try std.testing.expectEqualStrings(url, Bridge.model().url);
-        try self.harness.runtime.dispatchAutomationCommand(self.app, "widget-key feed-canvas enter");
+        try self.harness.runtime.dispatchAutomationWidgetAction(self.app, .{
+            .view_label = view,
+            .id = id,
+            .action = .focus,
+        });
+        var command_buffer: [128]u8 = undefined;
+        try self.harness.runtime.dispatchAutomationCommand(self.app, try std.fmt.bufPrint(&command_buffer, "widget-key {s} enter", .{view}));
     }
 
     fn wake(self: *Harness) !void {
@@ -310,7 +369,7 @@ fn expectFeedViewportAboveActions(h: *Harness) !void {
 
 test "the service facade preserves the core's unbound view declarations" {
     try std.testing.expectEqualDeep(
-        .{ "phase", "totalItems", "urlAnchor", "urlFocus", "urlCompStart", "urlCompEnd" },
+        .{ "feedWindowOpen", "phase", "totalItems", "urlAnchor", "urlFocus", "urlCompStart", "urlCompEnd", "windows" },
         core.Model.view_unbound,
     );
     try std.testing.expectEqualDeep(
@@ -468,9 +527,18 @@ test "the recorded loop replays byte-identically without the service or the netw
         defer h.destroy();
         try h.settleBoot();
         try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
-        try h.refreshFromInput();
+        try h.openFeedWindow();
+        try h.refreshFromView("feed-window-canvas");
         try h.settle();
+        try h.frameFeedWindow();
         try std.testing.expectEqualStrings("Native SDK Engineering", Bridge.model().feedTitle);
+        const snapshot = h.harness.runtime.automationSnapshot("feed-reader-e2e");
+        const has_title = for (snapshot.widgets) |widget| {
+            if (std.mem.eql(u8, widget.view_label, "feed-window-canvas") and std.mem.eql(u8, widget.name, "Native SDK Engineering")) break true;
+        } else false;
+        try std.testing.expect(has_title);
+        try h.closeFeedWindow();
+        try h.openFeedWindow();
         try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
         recorder.finish();
         try std.testing.expect(!recorder.failed);
@@ -514,4 +582,21 @@ test "the recorded loop replays byte-identically without the service or the netw
     try std.testing.expectEqual(@as(u64, 4), report.effects_fed);
     try std.testing.expectEqual(@as(?std.process.Child.Id, null), absent_transport.processId());
     try std.testing.expectEqualDeep(recorded, Snapshot.take());
+}
+
+test "compiled primary and window view copies survive alternating scriptc arena resets" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const primary = core.nativeView(allocator);
+    const secondary = core.nativeWindowView("feed", allocator);
+    for (0..16) |_| {
+        try std.testing.expectEqualStrings(primary, core.nativeView(allocator));
+        try std.testing.expectEqualStrings(secondary, core.nativeWindowView("feed", allocator));
+    }
+    try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
+    try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
 }

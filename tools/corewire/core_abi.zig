@@ -112,6 +112,7 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// Optional Native SDK view extension. Versioned tree data evaluated
         /// against the committed TS model; borrowed until frame_reset.
         pub const native_view = Symbol(fn (out: *[*]const u8, len: *usize) callconv(.c) void, "native_view");
+        pub const native_window_view = Symbol(fn (label: [*]const u8, label_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_window_view");
 
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");
