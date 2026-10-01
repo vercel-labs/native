@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -92,7 +92,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .toggle_group or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu;
+    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
@@ -103,7 +103,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (!std.math.isFinite(value.anchorOffset)) return error.InvalidView;
     if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu) return error.InvalidView;
     if (value.anchor == null and (value.anchorAlignment != .start or value.anchorOffset != 4)) return error.InvalidView;
-    if (value.toggle != null and !tree_row and value.kind != .switch_control and value.kind != .radio and value.kind != .toggle_button) return error.InvalidView;
+    if (value.toggle != null and !tree_row and value.kind != .switch_control and value.kind != .radio and value.kind != .toggle_button and value.kind != .accordion) return error.InvalidView;
     if ((value.expanded != null or value.treeLevel != 0) and value.role != .treeitem) return error.InvalidView;
     if (value.change != null and value.kind != .radio) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
@@ -181,6 +181,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     }
     if (comptime @hasDecl(core, "nativeTogglePolicy")) {
         if (value.kind == .toggle_group or value.kind == .toggle_button) result.widget.interaction_policy = core.nativeTogglePolicy;
+    }
+    if (comptime @hasDecl(core, "nativeAccordionPolicy")) {
+        if (value.kind == .accordion) result.widget.interaction_policy = core.nativeAccordionPolicy;
     }
     if (paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
@@ -310,6 +313,9 @@ test "compiled view refuses bad versions, spans, kinds and geometry" {
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_group\",\"text\":\"\",\"toggle\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_button\",\"text\":\"\",\"change\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"toggle_button\",\"text\":\"Mixed\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"change\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"placeholder\":\"Help\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"button\",\"text\":\"\",\"dismiss\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"panel\",\"text\":\"\",\"anchor\":\"below\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"dropdown_menu\",\"text\":\"\",\"anchorAlignment\":\"stretch\"}]}",

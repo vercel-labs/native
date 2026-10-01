@@ -603,7 +603,9 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     var menu_clear: [4]u8 = undefined;
     const toggle_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 2, 0, 0, 1, 2 };
     var toggle_state: [1]u8 = undefined;
+    var accordion_state: [1]u8 = undefined;
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(usize, 1), core.nativeAccordionPolicy(&.{ 9, 13 }, &accordion_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 9, 4 }, &toggle_state));
         try std.testing.expectEqual(@as(usize, 2), core.nativeTogglePolicy(&toggle_request, &policy_output));
         try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
@@ -622,6 +624,7 @@ test "compiled primary and window view copies survive alternating scriptc arena 
         try std.testing.expectEqualStrings(secondary, core.nativeWindowView("feed", allocator));
         try std.testing.expectEqualSlices(u8, &.{ 1, 0, 0, 1 }, &menu_clear);
         try std.testing.expectEqualSlices(u8, &.{1}, &toggle_state);
+        try std.testing.expectEqualSlices(u8, &.{1}, &accordion_state);
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
@@ -1395,4 +1398,154 @@ test "compiled toggle reconciliation preserves controlled chips and uncontrolled
         try std.testing.expect(retained.findById(21).?.widget.state.selected);
         try std.testing.expect(!retained.findById(22).?.widget.state.selected);
     }
+}
+
+test "compiled accordion reconciliation preserves source flips and retained expansion" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-accordion-reconcile", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const Fixture = struct {
+        fn layout(source: bool, compiled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            const tree = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .column, .children = &.{
+                .{ .id = 11, .kind = .accordion, .frame = geometry.RectF.init(0, 0, 200, 32), .value = if (source) 0.75 else 0 },
+                .{ .id = 12, .kind = .accordion, .frame = geometry.RectF.init(0, 40, 200, 32) },
+                .{ .id = 13, .kind = .accordion, .frame = geometry.RectF.init(0, 80, 200, 32), .state = .{ .disabled = true } },
+            } }, geometry.RectF.init(0, 0, 300, 160), nodes);
+            if (compiled) for (nodes[0..tree.nodes.len]) |*node| {
+                if (node.widget.kind == .accordion) node.widget.interaction_policy = core.nativeAccordionPolicy;
+            };
+            return tree;
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        try harness.start(state.app());
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 300, 160) });
+        var nodes: [8]canvas.WidgetLayoutNode = undefined;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(false, compiled, &nodes));
+        const view = &harness.runtime.views[0];
+        _ = try view.toggleCanvasWidgetBooleanControl(12);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(true, compiled, &nodes));
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(retained.findById(11).?.widget.state.selected);
+        try std.testing.expect(retained.findById(12).?.widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 1), retained.findById(11).?.widget.value);
+        _ = try view.toggleCanvasWidgetBooleanControl(11);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(true, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        // An unchanged true source preserves a user collapse; unlike
+        // a toggle chip, an accordion does not reassert source selection.
+        try std.testing.expect(!retained.findById(11).?.widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 0), retained.findById(11).?.widget.value);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(false, compiled, &nodes));
+        _ = try view.toggleCanvasWidgetBooleanControl(11);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(false, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(retained.findById(11).?.widget.state.selected);
+        try std.testing.expect(retained.findById(12).?.widget.state.selected);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(true, compiled, &nodes));
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(false, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(11).?.widget.state.selected);
+        try std.testing.expect(retained.findById(12).?.widget.state.selected);
+        // Missing source history is not a source flip.
+        view.widget_source_control_count = 0;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(true, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(11).?.widget.state.selected);
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try view.toggleCanvasWidgetBooleanControl(13));
+    }
+}
+
+test "compiled accordion toggle retains disclosure animation and concealed input" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-accordion-disclosure", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const Fixture = struct {
+        fn layout(arena: std.mem.Allocator, open: bool, compiled: bool) !canvas.WidgetLayoutTree {
+            const Ui = canvas.Ui(union(enum) { toggle, press });
+            var ui = Ui.init(arena);
+            const tree = try ui.finalize(ui.column(.{ .width = 300 }, .{
+                ui.el(.accordion, .{ .key = .{ .int = 1 }, .text = "Section", .selected = open, .on_toggle = .toggle }, .{
+                    ui.column(.{ .padding = 8 }, .{
+                        ui.text(.{}, "Revealed content"),
+                        ui.button(.{ .on_press = .press }, "Inside"),
+                    }),
+                }),
+                ui.button(.{ .on_press = .press }, "Below"),
+            }));
+            const nodes = try arena.alloc(canvas.WidgetLayoutNode, 16);
+            const result = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 300, 240), nodes);
+            if (compiled) for (nodes[0..result.nodes.len]) |*node| {
+                if (node.widget.kind == .accordion) node.widget.interaction_policy = core.nativeAccordionPolicy;
+            };
+            return result;
+        }
+        fn find(layout_tree: canvas.WidgetLayoutTree, text: []const u8) canvas.WidgetLayoutNode {
+            for (layout_tree.nodes) |node| if (std.mem.eql(u8, node.widget.text, text)) return node;
+            unreachable;
+        }
+        fn frame(harness: anytype, app: native_sdk.App, ns: u64) !void {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+                .window_id = 1,
+                .label = "canvas",
+                .size = geometry.SizeF.init(300, 240),
+                .timestamp_ns = ns,
+            } });
+        }
+    };
+    var heights: [2][5]f32 = undefined;
+    for ([_]bool{ false, true }, 0..) |compiled, backend| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 300, 240) });
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), false, compiled));
+        const view = &harness.runtime.views[0];
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const header = Fixture.find(retained, "Section");
+        const inside = Fixture.find(retained, "Inside");
+        const below = Fixture.find(retained, "Below");
+        const closed = header.frame.height;
+        try std.testing.expectEqual(@as(?canvas.WidgetFocusTarget, null), retained.focusTargetById(inside.widget.id));
+        _ = try view.toggleCanvasWidgetBooleanControl(header.widget.id);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), true, compiled));
+        try std.testing.expect(view.canvasWidgetDisclosureTweenActive());
+        try std.testing.expectEqual(closed, Fixture.find(try harness.runtime.canvasWidgetLayout(1, "canvas"), "Section").frame.height);
+        for ([_]u64{ 1_000_000_000, 1_050_000_000, 1_100_000_000, 1_300_000_000, 1_500_000_000 }, 0..) |ns, i| {
+            try Fixture.frame(harness, app, ns);
+            retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            heights[backend][i] = Fixture.find(retained, "Section").frame.height;
+            if (i < 3) try std.testing.expectEqual(@as(?canvas.WidgetFocusTarget, null), retained.focusTargetById(inside.widget.id));
+        }
+        try std.testing.expect(heights[backend][1] > closed);
+        try std.testing.expect(heights[backend][1] < heights[backend][4]);
+        try std.testing.expect(!view.canvasWidgetDisclosureTweenActive());
+        try std.testing.expect(retained.focusTargetById(inside.widget.id) != null);
+        _ = try view.toggleCanvasWidgetBooleanControl(header.widget.id);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), false, compiled));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqual(@as(?canvas.WidgetFocusTarget, null), retained.focusTargetById(inside.widget.id));
+        view.canvas_widget_focused_id = header.widget.id;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+        try std.testing.expectEqual(below.widget.id, view.canvas_widget_focused_id);
+        harness.runtime.appearance.reduce_motion = true;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), true, compiled));
+        try std.testing.expect(!view.canvasWidgetDisclosureTweenActive());
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(retained.focusTargetById(inside.widget.id) != null);
+    }
+    try std.testing.expectEqualSlices(f32, &heights[0], &heights[1]);
 }

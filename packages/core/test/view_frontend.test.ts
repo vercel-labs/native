@@ -388,3 +388,20 @@ test("toggle groups preserve independent toggles, model selection and toggle env
   assert.throws(() => compileView('<toggle-button>Mixed<text>child</text></toggle-button>', contract), /mixed content/);
   assert.throws(() => compileView('<toggle-button role="treeitem"/>', contract), /compiled treeitem requires/);
 });
+
+test("accordion headers preserve nested content, expansion and toggle envelopes", () => {
+  const { view } = evaluate('<accordion text="Account café" selected="true" on-toggle="reset"><column gap="8"><text>Profile</text><button on-press="increment">Apply</button><accordion text="Nested" on-toggle="reset"><text>Tip</text></accordion></column></accordion>');
+  const nodes = view().nodes;
+  assert.equal(nodes[0].kind, "accordion");
+  assert.equal(nodes[0].text, "Account café");
+  assert.equal(nodes[0].selected, true);
+  assert.deepEqual(nodes[0].toggle, [1, 5]);
+  assert.equal(nodes[0].end, nodes.length);
+  assert.equal(nodes[4].kind, "accordion");
+  assert.equal(nodes[4].end, 6);
+  assert.throws(() => compileView('<accordion text="Section" on-press="reset"/>', contract), /unsupported on accordion/);
+  assert.throws(() => compileView('<accordion text="Section" on-change="reset"/>', contract), /unsupported on accordion/);
+  assert.throws(() => compileView('<accordion text="Section" placeholder="Help"/>', contract), /placeholder requires/);
+  assert.throws(() => compileView('<accordion text="Section">Mixed<text>child</text></accordion>', contract), /mixed content/);
+  assert.throws(() => compileView('<accordion text="Section" role="treeitem"/>', contract), /compiled treeitem requires/);
+});

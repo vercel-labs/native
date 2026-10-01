@@ -855,10 +855,8 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 const source_selected = canvasWidgetBooleanSelected(copy.widget);
                 const previous_source = previous_source_controls.firstWithKind(copy.widget.id, copy.widget.kind);
                 const source_moved = if (previous_source) |source_entry| source_selected != source_entry.selected else false;
-                const selected = if (source_moved)
-                    source_selected
-                else
-                    entry.state.selected or entry.value >= 0.5;
+                const selected = canvasWidgetCompiledAccordionSelected(copy.widget, 9, if (previous_source) |source_entry| source_entry.selected else null, entry.state.selected or entry.value >= 0.5) orelse
+                    if (source_moved) source_selected else entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
             },
@@ -1778,6 +1776,22 @@ pub fn canvasWidgetCompiledToggleSelected(widget: canvas.Widget, operation: u8, 
     var output: [1]u8 = undefined;
     const len = policy(&request, &output);
     if (len != 1 or output[0] > 1) @panic("invalid toggle state policy result");
+    return output[0] == 1;
+}
+
+pub fn canvasWidgetCompiledAccordionSelected(widget: canvas.Widget, operation: u8, previous_source: ?bool, retained_selected: bool) ?bool {
+    if (widget.kind != .accordion) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const request = [_]u8{
+        operation,
+        @as(u8, if (canvasWidgetBooleanSelected(widget)) 1 else 0) |
+            @as(u8, if (previous_source orelse false) 2 else 0) |
+            @as(u8, if (retained_selected) 4 else 0) |
+            @as(u8, if (previous_source != null) 8 else 0),
+    };
+    var output: [1]u8 = undefined;
+    const len = policy(&request, &output);
+    if (len != 1 or output[0] > 1) @panic("invalid accordion state policy result");
     return output[0] == 1;
 }
 

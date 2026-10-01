@@ -1,0 +1,83 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readFileSync, writeFileSync } from "node:fs";
+import { NativeApp, findWidget, type NativeSnapshot } from "@native-sdk/core/testing";
+
+const backend = process.env.NATIVE_SDK_TEST_VIEW_BACKEND;
+const headers = ["Account café", "Notifications", "Unavailable", "Local notes", "Nested tips"];
+const widget = (s: NativeSnapshot, name: string) => findWidget(s, { role: headers.includes(name) ? "group" : "button", name });
+const compare = (snapshots: NativeSnapshot[]) => {
+  const reference = process.env.NATIVE_SDK_TEST_VIEW_REFERENCE;
+  if (!reference) return;
+  const values = snapshots.map(({ viewBackend, ...s }) => s);
+  if (backend === "zig") writeFileSync(`${reference}.disclosure.json`, JSON.stringify(values));
+  else assert.deepEqual(values, JSON.parse(readFileSync(`${reference}.disclosure.json`, "utf8")));
+};
+
+test("accordion state, concealed content, animation, identities and replay match", async () => {
+  const app = await NativeApp.start({ width: 960, height: 600 });
+  try {
+    let s = await app.snapshot();
+    if (backend) assert.equal(s.viewBackend, backend);
+    const snapshots = [s], view = widget(s, "Account café").view;
+    const accountId = widget(s, "Account café").id, notificationsId = widget(s, "Notifications").id;
+    const save = () => snapshots.push(s);
+    const expanded = (name: string, value: boolean) => { assert.equal(widget(s, name).selected, value); save(); };
+    const visible = (name: string, value: boolean) => { assert.equal(s.widgets.some(w => w.name === name), value); save(); };
+    const focused = (name: string) => { assert.equal(widget(s, name).focused, true); save(); };
+    const settle = async () => { for (let i = 0; i < 20; i++) { s = await app.frame(); save(); } };
+    expanded("Account café", false); visible("Apply Account café", false);
+    visible("Save notes", false); assert.equal(widget(s, "Unavailable").enabled, false);
+    const closed = widget(s, "Account café").bounds.height;
+    s = await app.click(widget(s, "Account café")); expanded("Account café", true);
+    visible("Apply Account café", false); assert.equal(s.model.changes, 1);
+    assert.equal(widget(s, "Account café").bounds.height, closed);
+    s = await app.key(view, "tab"); focused("Notifications"); visible("Apply Account café", false);
+    for (let i = 0; i < 5; i++) { s = await app.frame(); save(); }
+    const intermediate = widget(s, "Account café").bounds.height;
+    assert.ok(intermediate > closed); visible("Apply Account café", false);
+    await settle(); visible("Apply Account café", true);
+    assert.ok(widget(s, "Account café").bounds.height > intermediate);
+    s = await app.action(widget(s, "Account café"), "focus");
+    s = await app.key(view, "tab"); focused("Apply Account café");
+    s = await app.key(view, "enter"); assert.equal(s.model.actions, 1); save();
+    s = await app.key(view, "shift+tab"); focused("Account café");
+    s = await app.key(view, "space"); expanded("Account café", false);
+    visible("Apply Account café", false); assert.equal(s.model.changes, 2);
+    await settle(); assert.equal(widget(s, "Account café").bounds.height, closed);
+    s = await app.key(view, "enter"); expanded("Account café", true); await settle();
+    s = await app.action(widget(s, "Notifications"), "toggle"); expanded("Notifications", true); await settle();
+    expanded("Account café", true); assert.equal(s.model.changes, 4);
+    s = await app.click(widget(s, "Close all")); expanded("Account café", false); expanded("Notifications", false);
+    visible("Apply Account café", false); await settle();
+    s = await app.click(widget(s, "Open all")); expanded("Account café", true); expanded("Notifications", true);
+    expanded("Unavailable", false); await settle(); visible("Apply Notifications", true);
+    s = await app.click(widget(s, "Refresh")); expanded("Account café", true); assert.equal(s.model.refreshes, 1);
+    s = await app.click(widget(s, "Local notes")); expanded("Local notes", true); visible("Save notes", false); await settle();
+    s = await app.action(widget(s, "Local notes"), "focus"); s = await app.key(view, "tab"); focused("Save notes");
+    s = await app.key(view, "tab"); focused("Nested tips");
+    s = await app.key(view, "enter"); expanded("Nested tips", true); visible("Use tip", false); await settle();
+    s = await app.key(view, "tab"); focused("Use tip");
+    s = await app.key(view, "space"); assert.equal(s.model.actions, 2); save();
+    s = await app.action(widget(s, "Local notes"), "toggle"); expanded("Local notes", false);
+    visible("Nested tips", false); visible("Use tip", false); await settle();
+    s = await app.click(widget(s, "Refresh")); assert.equal(s.model.nestedOpen, true); save();
+    s = await app.action(widget(s, "Local notes"), "toggle"); await settle(); expanded("Nested tips", true); visible("Use tip", true);
+    s = await app.click(widget(s, "Reverse")); save();
+    assert.equal(widget(s, "Account café").id, accountId); assert.equal(widget(s, "Notifications").id, notificationsId);
+    s = await app.click(widget(s, "Hide account")); visible("Account café", false); visible("Apply Account café", false);
+    s = await app.click(widget(s, "Refresh")); save();
+    s = await app.click(widget(s, "Hide account")); assert.equal(widget(s, "Account café").id, accountId); expanded("Account café", true);
+    s = await app.click(widget(s, "Empty")); visible("Notifications", false); visible("No account sections", true);
+    s = await app.click(widget(s, "Refresh")); expanded("Nested tips", true);
+    s = await app.click(widget(s, "Empty")); assert.equal(widget(s, "Account café").id, accountId); expanded("Account café", true);
+    const disabled = widget(s, "Unavailable"), point = { x: disabled.bounds.x + 10, y: disabled.bounds.y + 10 };
+    await app.pointer(disabled, "down", point); s = await app.pointer(disabled, "up", point);
+    expanded("Unavailable", false); assert.equal(s.model.changes, 8);
+    s = await app.click(widget(s, "Reset")); await settle(); expanded("Account café", false); expanded("Local notes", false);
+    visible("Use tip", false); assert.equal(s.model.changes, 0);
+    const replay = await app.verifyReplay();
+    assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
+    snapshots.push(replay.snapshot); compare(snapshots);
+  } finally { await app.close(); }
+});

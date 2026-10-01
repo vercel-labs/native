@@ -377,6 +377,24 @@ export function native_toggle_policy(request: Uint8Array): Uint8Array {
   return result;
 }
 
+/** Accordion state requests: operation 8 (activate) or 9 (reconcile),
+ * then flags (1 current/source open, 2 previous source open, 4 retained
+ * open, 8 previous source present). A source flip wins; an unchanged or
+ * absent previous source preserves retained expansion. Native owns the
+ * disclosure animation, geometry, and concealed-content eligibility.
+ */
+export function native_accordion_policy(request: Uint8Array): Uint8Array {
+  if (request.length !== 2 || (request[0] !== 8 && request[0] !== 9) || request[1]! > 15) {
+    throw new Error("invalid accordion state request");
+  }
+  const flags = request[1]!, source = (flags & 1) !== 0;
+  const moved = (flags & 8) !== 0 && source !== ((flags & 2) !== 0);
+  const selected = request[0] === 8 ? !source : moved ? source : (flags & 4) !== 0;
+  const result = new Uint8Array(1);
+  result[0] = selected ? 1 : 0;
+  return result;
+}
+
 /** Retained tree wire: operation u8, subject/count u16LE, then parent
  * u16LE, kind bits (1 treeitem/2 tree scope), flags (1 logical focus,
  * 4 selected/8 expanded), and tree-level u16LE per node. Operations:

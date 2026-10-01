@@ -1,0 +1,44 @@
+<column padding="24" gap="16">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Account settings</text>
+    <button on-press="open_all">Open all</button>
+    <button on-press="close_all">Close all</button>
+    <button on-press="refresh">Refresh</button>
+    <button on-press="reset">Reset</button>
+  </row>
+  <text>changes {changes} | actions {actions} | refreshes {refreshes}</text>
+  <text foreground="text_muted">Enter or Space toggles a section. Tab visits content when the reveal finishes.</text>
+  <row gap="24" cross="start">
+    <column grow="1" gap="8">
+      <row gap="8">
+        <button on-press="reverse">Reverse</button>
+        <button on-press="hide">Hide account</button>
+        <button on-press="empty">Empty</button>
+      </row>
+      <for each="visibleSections" key="id" as="section">
+        <accordion text="{section.title}" selected="{section.open}" disabled="{section.disabled}" on-toggle="toggle_section:{section.id}">
+          <column padding="8" gap="8">
+            <text wrap="true">{section.body}</text>
+            <button on-press="action">Apply {section.title}</button>
+          </column>
+        </accordion>
+      </for>
+      <if test="{empty}"><text>No account sections</text></if>
+    </column>
+    <column grow="1" gap="8">
+      <accordion text="Local notes" selected="{localOpen}" on-toggle="toggle_local">
+        <column padding="8" gap="8">
+          <text wrap="true">These notes open independently of the account sections.</text>
+          <button on-press="action">Save notes</button>
+          <accordion text="Nested tips" selected="{nestedOpen}" on-toggle="toggle_nested">
+            <column padding="8" gap="8">
+              <text wrap="true">Nested sections keep their state when their parent closes.</text>
+              <button on-press="action">Use tip</button>
+            </column>
+          </accordion>
+        </column>
+      </accordion>
+    </column>
+  </row>
+  <text foreground="text_muted">Open all and Close all change the model. Refresh keeps the current expansion.</text>
+</column>
