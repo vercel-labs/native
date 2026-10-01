@@ -176,6 +176,7 @@ if (args["view-markup"]) {
   profile.exports.push({ export: "native_radio_policy", symbol: `${profile.abi.prefix}native_radio_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_tabs_policy", symbol: `${profile.abi.prefix}native_tabs_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_tree_policy", symbol: `${profile.abi.prefix}native_tree_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_list_policy", symbol: `${profile.abi.prefix}native_list_policy`, params: ["bytes"], returns: "bytes" });
   fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
 }
 if (args["services-client"]) {

@@ -1605,6 +1605,8 @@ pub fn canvasWidgetGroupDirectionalFocusTarget(layout: canvas.WidgetLayoutTree, 
     const group_direction = canvasWidgetGroupDirectionForFocus(parent_kind, focused.kind, direction) orelse return null;
     if (parent_kind == .tabs and focused.kind == .segmented_control and layout.nodes[focused.index].widget.interaction_policy != null)
         return compiledTabsFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    if (parent_kind == .list and focused.kind == .list_item and layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledListFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
     return canvasWidgetAdjacentGroupFocusTarget(layout, parent_index, focused, group_direction) orelse focused;
 }
 
@@ -1696,6 +1698,41 @@ fn compiledTabsFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation:
     if (index == 65535) return null;
     if (index >= layout.nodes.len) @panic("tabs policy target outside tree");
     return layout.focusTargetById(layout.nodes[index].widget.id);
+}
+
+/// Direct-sibling list policy receives both logical and visible eligibility:
+/// arrows admit scroll-clipped rows; Home/End preserves visible-only edges.
+pub fn canvasWidgetListPolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("list policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = switch (node.widget.kind) {
+            .list_item => 1,
+            .list => 2,
+            else => 0,
+        };
+        request[at + 3] = @as(u8, if ((operation == 4 or operation == 5) and node.widget.kind == .list_item and layout.logicalFocusTargetAtIndex(index) != null) 1 else 0) |
+            @as(u8, if ((operation == 6 or operation == 7) and node.widget.kind == .list_item and layout.focusTargetById(node.widget.id) != null) 2 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 4], output);
+}
+
+fn compiledListFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetListPolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid list policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("list policy target outside tree");
+    return if (operation == 4 or operation == 5) layout.logicalFocusTargetAtIndex(index) else layout.focusTargetById(layout.nodes[index].widget.id);
 }
 
 fn compiledRadioIndex(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?usize {
@@ -2156,6 +2193,8 @@ pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused
     const parent_index = layout.nodes[focused.index].parent_index;
     if (focused.kind == .segmented_control and layout.nodes[focused.index].widget.interaction_policy != null)
         return compiledTabsFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    if (focused.kind == .list_item and layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledListFocus(layout, focused.index, if (edge == .first) 6 else 7);
     switch (edge) {
         .first => {
             for (layout.nodes) |node| {

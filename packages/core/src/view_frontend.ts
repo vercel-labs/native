@@ -53,7 +53,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "JSON", "TextEncoder", "TextDecoder", "String", "Number", "Array"];
+  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "JSON", "TextEncoder", "TextDecoder", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -401,13 +401,13 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${stringAttr("title")}, description: ${stringAttr("description")}, meta: ${stringAttr("meta")}, indicator: ${stringAttr("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
       return;
     }
-    const kinds: Record<string, string> = { column: "column", row: "row", panel: "panel", badge: "badge", input: "input", "search-field": "search_field", text: "text", button: "button", switch: "switch_control", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree" };
+    const kinds: Record<string, string> = { column: "column", row: "row", panel: "panel", badge: "badge", input: "input", "search-field": "search_field", text: "text", button: "button", switch: "switch_control", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
-    const container = ["column", "row", "scroll", "panel", "radio-group", "tabs", "tree"].includes(node.name);
+    const container = ["column", "row", "scroll", "panel", "radio-group", "tabs", "tree", "list", "list-item"].includes(node.name);
     if (node.attrs.get("role") === "treeitem" && !["column", "row", "panel"].includes(node.name)) fail(node, "compiled treeitem requires column, row or panel");
     if (node.attrs.get("role") === "tree" && !["column", "row", "panel", "scroll", "tree"].includes(node.name)) fail(node, "tree role requires a generic container");
-    if (container ? node.text.trim() !== "" : node.children.length !== 0) fail(node, "mixed content is unsupported");
+    if (node.name === "list-item" ? node.text.trim() !== "" && node.children.length !== 0 : container ? node.text.trim() !== "" : node.children.length !== 0) fail(node, "mixed content is unsupported");
     const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${text(node.text.trim(), node, scope)}`];
     for (const [name, value] of node.attrs) {
       if (["gap", "padding", "grow", "width", "height", "value", "image"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
@@ -439,7 +439,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       } else if (["on-press", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
-        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control"].includes(node.name) || channel === "toggle" && !treeRow && !["switch", "radio"].includes(node.name) || channel === "change" && node.name !== "radio" || channel === "scroll" && node.name !== "scroll") fail(node, `${name} is unsupported on ${node.name}`);
+        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item"].includes(node.name) || channel === "toggle" && !treeRow && !["switch", "radio"].includes(node.name) || channel === "change" && node.name !== "radio" || channel === "scroll" && node.name !== "scroll") fail(node, `${name} is unsupported on ${node.name}`);
         if (["input", "submit"].includes(channel) && !["input", "search-field"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         props.push(`${channel}: ${event(value, channel, node, scope)}`);
       } else fail(node, `unsupported attribute ${name}`);

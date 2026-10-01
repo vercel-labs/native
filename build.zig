@@ -729,6 +729,21 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&gtk_pixels_test_run.step);
     test_step.dependOn(&spectrum_bins_test_run.step);
+    if (b.graph.host.result.os.tag == .macos) {
+        const focus_test_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc" });
+        for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "CoreMedia", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
+            focus_test_run.addArgs(&.{ "-framework", framework });
+        }
+        focus_test_run.addArgs(&.{ "-cflags", "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0" });
+        if (b.sysroot) |sysroot| focus_test_run.addArgs(&.{ "-isysroot", sysroot });
+        focus_test_run.addArg("--");
+        focus_test_run.addFileArg(b.path("src/platform/macos/widget_focus_test.m"));
+        focus_test_run.addFileInput(b.path("src/platform/macos/appkit_host.m"));
+        focus_test_run.addFileInput(b.path("src/platform/macos/appkit_host.h"));
+        focus_test_run.expectExitCode(0);
+        b.step("test-macos-widget-focus", "Verify native accessibility publication preserves keyboard focus without assistive feedback").dependOn(&focus_test_run.step);
+        test_step.dependOn(&focus_test_run.step);
+    }
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);
     for (desktop_test_shards) |shard_tests| {
@@ -876,6 +891,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&tree_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&tree_policy_driver_run.step);
         test_step.dependOn(&tree_policy_driver_run.step);
+        const list_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        list_policy_reference_run.setCwd(b.path("examples/list-policy"));
+        list_policy_reference_run.has_side_effects = true;
+        list_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        list_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/list-policy-view-reference"));
+        _ = list_policy_reference_run.captureStdOut(.{});
+        _ = list_policy_reference_run.captureStdErr(.{});
+        const list_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        list_policy_driver_run.setCwd(b.path("examples/list-policy"));
+        list_policy_driver_run.has_side_effects = true;
+        list_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        list_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/list-policy-view-reference"));
+        _ = list_policy_driver_run.captureStdOut(.{});
+        _ = list_policy_driver_run.captureStdErr(.{});
+        list_policy_driver_run.step.dependOn(&list_policy_reference_run.step);
+        native_driver_step.dependOn(&list_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&list_policy_driver_run.step);
+        test_step.dependOn(&list_policy_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -2040,6 +2073,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-radio-policy", "Run portable radio policy example tests", "examples/radio-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-tabs-policy", "Run portable tabs policy example tests", "examples/tabs-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-tree-policy", "Run portable tree policy example tests", "examples/tree-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-list-policy", "Run portable list policy example tests", "examples/list-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

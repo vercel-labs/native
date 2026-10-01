@@ -323,3 +323,23 @@ test("tree rows preserve disclosure, logical levels and canonical row handlers",
   assert.throws(() => compileView('<button role="tree"/>', contract), /tree role requires a generic container/);
   assert.throws(() => compileView('<radio-group role="tree" label="Invalid"/>', contract), /tree role requires a generic container/);
 });
+
+test("list rows preserve leaf text, composed children, selection and press envelopes", () => {
+  const { view } = evaluate('<column><list label="Work"><list-item icon="folder" selected="true" on-press="reset">Inbox</list-item><list-item label="Review" disabled="true" on-press="increment"><column><text>Review</text><text>Details</text></column></list-item><list label="Nested"><list-item>Saved</list-item></list></list></column>');
+  const nodes = view().nodes;
+  assert.equal(nodes[1].kind, "list");
+  assert.equal(nodes[2].kind, "list_item");
+  assert.equal(nodes[2].text, "Inbox");
+  assert.equal(nodes[2].selected, true);
+  assert.equal(nodes[2].icon, "folder");
+  assert.deepEqual(nodes[2].press, [1, 5]);
+  assert.equal(nodes[3].end, 7);
+  assert.equal(nodes[3].text, "");
+  assert.equal(nodes[3].disabled, true);
+  assert.equal(nodes[7].kind, "list");
+  assert.throws(() => compileView('<list-item>Mixed<text>child</text></list-item>', contract), /mixed content/);
+  assert.throws(() => compileView('<list>Mixed</list>', contract), /mixed content/);
+  assert.throws(() => compileView('<list-item on-toggle="reset"/>', contract), /unsupported on list-item/);
+  assert.throws(() => compileView('<list-item role="treeitem"/>', contract), /compiled treeitem requires/);
+  assert.throws(() => compileView('<list role="tree"/>', contract), /tree role requires/);
+});

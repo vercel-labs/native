@@ -1,0 +1,40 @@
+<column padding="20" gap="12">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Work queue</text>
+    <button on-press="reverse">Reverse</button>
+    <button on-press="hide">Hide review</button>
+    <button on-press="empty">Empty</button>
+    <button on-press="reset">Reset</button>
+  </row>
+  <text>Selected {selected} | activations {presses}</text>
+  <text foreground="text_muted">Tab into a queue, then use arrows. Enter or Space opens an item.</text>
+  <row gap="20" cross="start">
+    <scroll width="450" height="220" label="Work items">
+      <list gap="4" label="Queue">
+        <for each="items" key="id" as="item">
+          <list-item label="{item.title}" selected="{item.selected}" disabled="{item.disabled}" on-press="choose:{item.id}" padding="10" height="64">
+            <column gap="4" grow="1">
+              <text>{item.title}</text>
+              <text foreground="text_muted">{item.detail}</text>
+            </column>
+          </list-item>
+        </for>
+      </list>
+    </scroll>
+    <column grow="1" gap="8">
+      <text>Saved queues</text>
+      <list label="Saved queues" gap="4">
+        <list-item icon="folder" selected="{secondary == 101}" on-press="inbox">Inbox</list-item>
+        <list-item selected="{secondary == 102}" on-press="later">Later</list-item>
+        <column gap="8">
+          <text foreground="text_muted">Collections</text>
+          <list label="Collections" gap="4">
+            <list-item selected="{nested == 201}" on-press="pinned">Pinned</list-item>
+            <list-item selected="{nested == 202}" on-press="archive">Archive</list-item>
+          </list>
+        </column>
+      </list>
+    </column>
+  </row>
+  <if test="{empty}"><text>The work queue is empty. Press Empty to restore it.</text></if>
+</column>

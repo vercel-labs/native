@@ -220,6 +220,53 @@ function nscvTreeLevel(value: number): number {
   return value;
 }
 
+/** Retained list wire: operation u8, subject/count u16LE, then parent
+ * u16LE, kind (0 other/1 list item/2 list), flags (1 logical focus,
+ * 2 visible focus/4 selected). Arrows (4 previous/5 next) traverse direct
+ * list children logically, allowing native scroll reveal. Home/End (6/7)
+ * retain visible same-parent targets; 8 clears selected same-parent items,
+ * including bare items. Arrows do not wrap or activate the landed row.
+ */
+export function native_list_policy(request: Uint8Array): Uint8Array {
+  const read = (at: number): number => request[at]! + request[at + 1]! * 256;
+  if (request.length < 5) throw new Error("invalid list policy request");
+  const operation = request[0]!, subject = read(1), count = read(3);
+  if (count > 1024 || subject >= count || request.length !== 5 + count * 4 ||
+      ![4, 5, 6, 7, 8].includes(operation)) throw new Error("invalid list policy request");
+  const parent = (i: number): number => read(5 + i * 4);
+  const kind = (i: number): number => request[7 + i * 4]!;
+  const flags = (i: number): number => request[8 + i * 4]!;
+  const group = parent(subject);
+  if (operation === 8) {
+    const result = new Uint8Array(count);
+    for (let i = 0; i < count; i++) if (i !== subject && kind(i) === 1 &&
+      parent(i) === group && (flags(i) & 4) !== 0) result[i] = 1;
+    return result;
+  }
+  let target = 65535;
+  if (operation === 6 || operation === 7) {
+    for (let i = 0; i < count; i++) {
+      if (kind(i) !== 1 || parent(i) !== group || (flags(i) & 2) === 0) continue;
+      target = i;
+      if (operation === 6) break;
+    }
+  } else if (group < count && kind(group) === 2) {
+    target = subject;
+    let previous = 65535, sawSubject = false;
+    for (let i = 0; i < count; i++) {
+      if (kind(i) !== 1 || parent(i) !== group || (flags(i) & 1) === 0) continue;
+      if (sawSubject) { target = i; break; }
+      if (i === subject) {
+        if (operation === 4) { if (previous !== 65535) target = previous; break; }
+        sawSubject = true;
+      } else previous = i;
+    }
+  }
+  const result = new Uint8Array(2);
+  result[0] = target % 256; result[1] = Math.floor(target / 256);
+  return result;
+}
+
 /** Retained tree wire: operation u8, subject/count u16LE, then parent
  * u16LE, kind bits (1 treeitem/2 tree scope), flags (1 logical focus,
  * 4 selected/8 expanded), and tree-level u16LE per node. Operations:

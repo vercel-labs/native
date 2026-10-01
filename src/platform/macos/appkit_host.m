@@ -486,6 +486,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @end
 
 @interface NativeSdkWidgetAccessibilityElement : NSAccessibilityElement
+- (void)publishAccessibilityFocused:(BOOL)focused;
 @property(nonatomic, assign) NativeSdkMetalSurfaceView *surfaceView;
 @property(nonatomic, assign) uint64_t widgetId;
 @property(nonatomic, assign) uint32_t actionFlags;
@@ -1600,6 +1601,13 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
     if (!focused || !self.accessibilityEnabled) return;
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_FOCUS) == 0) return;
     [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_FOCUS];
+}
+
+/* Publishing runtime state must not look like an assistive client writing
+ * AXFocused. That feedback resets keyboard focus to programmatic focus and
+ * makes plain list rows lose their Tab-established navigation contract. */
+- (void)publishAccessibilityFocused:(BOOL)focused {
+    [super setAccessibilityFocused:focused];
 }
 
 - (BOOL)accessibilityIsAttributeSettable:(NSAccessibilityAttributeName)attribute {
@@ -5886,7 +5894,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             }
         }
         element.accessibilityEnabled = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_ENABLED) != 0;
-        element.accessibilityFocused = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_FOCUSED) != 0;
+        [element publishAccessibilityFocused:(node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_FOCUSED) != 0];
         element.accessibilitySelected = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_SELECTED) != 0;
         element.canUndo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_UNDO) != 0;
         element.canRedo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_REDO) != 0;

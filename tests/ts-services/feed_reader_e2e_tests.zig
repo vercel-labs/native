@@ -597,7 +597,10 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     var policy_output: [2]u8 = undefined;
     const tabs_request = [_]u8{ 7, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 6, 0, 0, 1, 2 };
     const tree_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 0, 0, 1, 5, 1, 0, 0, 0, 1, 1, 2, 0 };
+    const list_request = [_]u8{ 5, 1, 0, 3, 0, 255, 255, 2, 0, 0, 0, 1, 7, 0, 0, 1, 3 };
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(usize, 2), core.nativeListPolicy(&list_request, &policy_output));
+        try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, &policy_output);
         try std.testing.expectEqual(@as(usize, 2), core.nativeRadioPolicy(&policy_request, &policy_output));
         try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, &policy_output);
         try std.testing.expectEqual(@as(usize, 2), core.nativeTabsPolicy(&tabs_request, &policy_output));
@@ -996,5 +999,111 @@ test "compiled tree flat hierarchy preserves disabled child boundaries and maxim
             try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = move.key } });
             try std.testing.expectEqual(move.to, view.canvas_widget_focused_id);
         }
+    }
+}
+
+test "compiled list policy preserves visible edges logical reveal and sibling selection" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-list-policy", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 500, 300) });
+        const children = [_]canvas.Widget{
+            .{ .id = 2, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 180, 70), .layout = .{ .clip_content = true }, .children = &.{
+                .{ .id = 10, .kind = .list, .frame = geometry.RectF.init(0, 0, 180, 210), .children = &.{
+                    .{ .id = 11, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 150, 24), .state = .{ .selected = true } },
+                    .{ .id = 12, .kind = .list_item, .frame = geometry.RectF.init(0, 30, 150, 24), .state = .{ .disabled = true } },
+                    .{ .id = 13, .kind = .list_item, .frame = geometry.RectF.init(0, 60, 150, 24) },
+                    .{ .id = 14, .kind = .list_item, .frame = geometry.RectF.init(0, 150, 150, 24) },
+                    .{ .id = 15, .kind = .column, .frame = geometry.RectF.init(0, 180, 150, 24), .children = &.{
+                        .{ .id = 16, .kind = .list, .frame = geometry.RectF.init(0, 0, 150, 24), .children = &.{
+                            .{ .id = 17, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 70, 24), .state = .{ .selected = true } },
+                            .{ .id = 18, .kind = .list_item, .frame = geometry.RectF.init(75, 0, 70, 24) },
+                        } },
+                    } },
+                } },
+            } },
+            // Bare items still clear direct siblings and use visible Home/End.
+            .{ .id = 20, .kind = .column, .frame = geometry.RectF.init(210, 0, 150, 70), .children = &.{
+                .{ .id = 21, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 150, 24), .state = .{ .selected = true } },
+                .{ .id = 22, .kind = .list_item, .frame = geometry.RectF.init(0, 30, 150, 24) },
+            } },
+            // Fixed clipping excludes a row from visible Home/End edges.
+            .{ .id = 30, .kind = .panel, .frame = geometry.RectF.init(210, 100, 150, 20), .layout = .{ .clip_content = true }, .children = &.{
+                .{ .id = 31, .kind = .list, .frame = geometry.RectF.init(0, 0, 150, 120), .children = &.{
+                    .{ .id = 32, .kind = .list_item, .frame = geometry.RectF.init(0, 0, 150, 24), .state = .{ .selected = true } },
+                    .{ .id = 33, .kind = .list_item, .frame = geometry.RectF.init(0, 80, 150, 24) },
+                } },
+            } },
+        };
+        var nodes: [24]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 500, 300), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            if (node.widget.kind == .list or node.widget.kind == .list_item) node.widget.interaction_policy = core.nativeListPolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        view.canvas_widget_focused_id = 11;
+        view.canvas_widget_focus_visible_id = 11;
+        // End stops at the partially visible third row, rather than the last logical row.
+        for ([_]struct { key: []const u8, id: canvas.ObjectId }{
+            .{ .key = "end", .id = 13 },
+            .{ .key = "arrowdown", .id = 14 },
+            .{ .key = "arrowdown", .id = 14 },
+            .{ .key = "arrowup", .id = 13 },
+            .{ .key = "arrowup", .id = 11 },
+            .{ .key = "arrowup", .id = 11 },
+        }) |move| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = move.key } });
+            try std.testing.expectEqual(move.id, view.canvas_widget_focused_id);
+            if (move.id == 14) {
+                const revealed = try harness.runtime.canvasWidgetLayout(1, "canvas");
+                const viewport = revealed.findById(2).?.frame.normalized();
+                const focused = revealed.findById(14).?.frame.normalized();
+                try std.testing.expect(revealed.findById(2).?.widget.value > 0);
+                try std.testing.expect(focused.y >= viewport.y and focused.maxY() <= viewport.maxY());
+            }
+        }
+        // Arrow movement did not select; Enter applies the sibling clear mask.
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(retained.findById(11).?.widget.state.selected);
+        for (0..2) |_| try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 14), view.canvas_widget_focused_id);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "enter" } });
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(11).?.widget.state.selected);
+        try std.testing.expect(retained.findById(14).?.widget.state.selected);
+        try std.testing.expect(retained.findById(17).?.widget.state.selected);
+        try std.testing.expect(retained.findById(21).?.widget.state.selected);
+        _ = try view.setCanvasWidgetSelected(18, true);
+        _ = try view.setCanvasWidgetSelected(22, true);
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(17).?.widget.state.selected);
+        try std.testing.expect(retained.findById(18).?.widget.state.selected);
+        try std.testing.expect(!retained.findById(21).?.widget.state.selected);
+        try std.testing.expect(retained.findById(22).?.widget.state.selected);
+        try std.testing.expect(retained.findById(14).?.widget.state.selected);
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try view.setCanvasWidgetSelected(22, true));
+        view.canvas_widget_focused_id = 21;
+        view.canvas_widget_focus_visible_id = 21;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "end" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 22), view.canvas_widget_focused_id);
+        view.canvas_widget_focused_id = 32;
+        view.canvas_widget_focus_visible_id = 32;
+        for ([_][]const u8{ "end", "home" }) |key| {
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = key } });
+            try std.testing.expectEqual(@as(canvas.ObjectId, 32), view.canvas_widget_focused_id);
+        }
+        // A fully fixed-clipped logical target cannot be scrolled into view.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 32), view.canvas_widget_focused_id);
     }
 }
