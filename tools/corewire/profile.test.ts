@@ -143,6 +143,6 @@ test("compiled profiles preserve the optional Native view signature", () => with
   assert.deepEqual(profile.exports.at(-1), { export: "native_view", symbol: input.abi.prefix + "native_view", params: [], returns: "bytes" });
   const mirror = fs.readFileSync(path.join(dir, "mirror.zig"), "utf8");
   assert.match(mirror, /pub fn nativeView\(arena:/);
-  assert.match(mirror, /pub fn nativeViewEvent\(tag: u8\)/);
+  assert.match(mirror, /pub fn nativeViewEvent\(envelope: \[\]const u8, arena: std.mem.Allocator\)/);
   assert.ok(!mirror.includes('const nscfCommitted'));
 }));

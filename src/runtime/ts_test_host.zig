@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, menu, frame, host_result, timer, replay, close },
+    op: enum { start, snapshot, automation, input, drop, menu, frame, host_result, timer, replay, close },
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -17,6 +17,14 @@ const Request = struct {
     key: []const u8 = "0",
     ok: bool = true,
     bytes: []const u8 = "",
+    view: []const u8 = "",
+    window: u64 = 1,
+    input: enum { pointer_down, pointer_drag, pointer_up, pointer_cancel, scroll } = .pointer_down,
+    x: f32 = 0,
+    y: f32 = 0,
+    delta_x: f32 = 0,
+    delta_y: f32 = 0,
+    paths: []const []const u8 = &.{},
 };
 
 const Journal = struct {
@@ -195,6 +203,26 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
             if (replayed and request.op != .snapshot) return error.SessionAlreadyReplayed;
             switch (request.op) {
                 .automation => try value.harness.runtime.dispatchAutomationCommand(value.state.app(), request.command),
+                .input => {
+                    for ([_]f32{ request.x, request.y, request.delta_x, request.delta_y }) |number| if (!std.math.isFinite(number)) return error.InvalidInput;
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .gpu_surface_input = .{
+                        .window_id = request.window,
+                        .label = request.view,
+                        .kind = switch (request.input) {
+                            inline else => |kind| @field(sdk.platform.GpuSurfaceInputKind, @tagName(kind)),
+                        },
+                        .x = request.x,
+                        .y = request.y,
+                        .delta_x = request.delta_x,
+                        .delta_y = request.delta_y,
+                        .timestamp_ns = value.frame_index * 16_000_000 + 1,
+                    } });
+                },
+                .drop => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .files_dropped = .{
+                    .window_id = request.window,
+                    .view_label = request.view,
+                    .paths = request.paths,
+                } }),
                 .menu => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .menu_command = .{ .name = request.command, .window_id = 1 } }),
                 .host_result => {
                     try value.state.effects.feedHostResult(try std.fmt.parseInt(u64, request.key, 10), request.ok, request.bytes);

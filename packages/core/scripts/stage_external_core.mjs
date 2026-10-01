@@ -154,7 +154,16 @@ fs.copyFileSync(args.profile, path.join(args.out, "profile.json"));
 if (args["view-markup"]) {
   if (!args["view-contract"]) throw new Error("compiled views require --view-contract");
   const contract = JSON.parse(fs.readFileSync(args["view-contract"], "utf8"));
-  const view = compileView(fs.readFileSync(args["view-markup"], "utf8"), contract);
+  const sources = new Map();
+  const markupFiles = (dir, relative = "") => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = relative + entry.name;
+      if (entry.isDirectory() && rel !== "services") markupFiles(path.join(dir, entry.name), rel + "/");
+      else if (entry.isFile() && rel.endsWith(".native")) sources.set(rel, fs.readFileSync(path.join(dir, entry.name), "utf8"));
+    }
+  };
+  markupFiles(args.src);
+  const view = compileView(fs.readFileSync(args["view-markup"], "utf8"), contract, { sources });
   fs.appendFileSync(path.join(args.out, "core_facade.ts"), view);
   const profile = JSON.parse(fs.readFileSync(args.profile, "utf8"));
   profile.exports.push({ export: "native_view", symbol: `${profile.abi.prefix}native_view`, params: [], returns: "bytes" });

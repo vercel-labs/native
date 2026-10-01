@@ -1241,6 +1241,9 @@ fn tsCoreStage(
         stage_run.addFileArg(b.path(appPath(b, app_root, "src/app.native")));
         stage_run.addArg("--view-contract");
         stage_run.addFileArg(contract);
+        for (app_markup_sources.files) |source| {
+            stage_run.addFileInput(b.path(appPath(b, app_root, source.source_path)));
+        }
     }
     if (service_client) |client| {
         stage_run.addArg("--services-client");

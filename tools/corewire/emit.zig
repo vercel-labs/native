@@ -296,8 +296,8 @@ const Emitter = struct {
         }
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
-        if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg) {
-            try reserved.appendSlice(self.arena, &.{ "msgFromEnvelope", "envelope", "header" });
+        if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg or sidecar_mod.abiHasExport(self.sidecar.abi, "native_view")) {
+            try reserved.appendSlice(self.arena, &.{ "msgFromEnvelope", "decodeMsgEnvelope", "envelope", "header", "arena" });
         }
         if (self.sidecar.init_returns_cmd) try reserved.append(self.arena, "InitResult");
         if (self.sidecar.update_returns_cmd) try reserved.append(self.arena, "UpdateResult");
@@ -1163,11 +1163,7 @@ const Emitter = struct {
                 \\}
                 \\
             );
-            try self.print("pub fn nativeViewEvent(tag: u8) {f} {{\n    switch (tag) {{\n", .{ident(self.sidecar.msg.name)});
-            for (self.sidecar.msg.arms, 0..) |arm, tag| {
-                if (arm.payload == .void) try self.print("        {d} => return .{f},\n", .{ tag, ident(arm.name) });
-            }
-            try self.raw("        else => @panic(\"compiled view event must name a void Msg arm\"),\n    }\n}\n");
+            try self.print("pub fn nativeViewEvent(envelope: []const u8, arena: std.mem.Allocator) ?{f} {{\n    return decodeMsgEnvelope(envelope, arena);\n}}\n", .{ident(self.sidecar.msg.name)});
         }
 
         if (chan.command_msg) {
@@ -1305,7 +1301,7 @@ const Emitter = struct {
             try self.raw("};\n");
         }
 
-        if (any_fn_channel) {
+        if (any_fn_channel or has_view) {
             try self.print(
                 \\
                 \\/// Unpack a channel entry's bytes envelope — [produced u8][tag u8]
@@ -1315,16 +1311,20 @@ const Emitter = struct {
                 \\/// framing panics with a teaching in shim_rt.channelEnvelope; a
                 \\/// tag past the declared arms panics here.
                 \\fn msgFromEnvelope(envelope: []const u8) ?{f} {{
+                \\    return decodeMsgEnvelope(envelope, shim_rt.frameAllocator());
+                \\}}
+                \\fn decodeMsgEnvelope(envelope: []const u8, arena: std.mem.Allocator) ?{f} {{
+                \\    _ = &arena;
                 \\    const header = shim_rt.channelEnvelope(envelope);
                 \\    if (!header.produced) return null;
                 \\    switch (header.tag) {{
                 \\
-            , .{ident(self.sidecar.msg.name)});
+            , .{ ident(self.sidecar.msg.name), ident(self.sidecar.msg.name) });
             for (self.sidecar.msg.arms, 0..) |arm, tag| {
                 if (arm.payload == .void) {
                     try self.print("        {d} => {{\n            shim_rt.assertVoidPayload(header.payload);\n            return .{f};\n        }},\n", .{ tag, ident(arm.name) });
                 } else {
-                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType({f}, \"{f}\"), header.payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), ident(self.sidecar.msg.name), std.zig.fmtString(arm.name) });
+                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType({f}, \"{f}\"), header.payload, arena) }},\n", .{ tag, ident(arm.name), ident(self.sidecar.msg.name), std.zig.fmtString(arm.name) });
                 }
             }
             try self.raw(

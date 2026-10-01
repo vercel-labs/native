@@ -45,6 +45,7 @@ export interface NativeAppOptions {
   /** Usually supplied by `native test`; useful for external test runners. */
   readonly executable?: string;
 }
+export interface NativePoint { readonly x: number; readonly y: number }
 interface Reply {
   protocol: number;
   snapshot?: NativeSnapshot;
@@ -165,6 +166,34 @@ export class NativeApp implements AsyncDisposable {
   frame(): Promise<NativeSnapshot> { return this.#snapshot({ op: "frame" }); }
   click(widget: NativeWidget): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-click ${token(widget.view)} ${identity(widget.id)}` });
+  }
+  /** Physical pointer input through native hit testing and pointer capture. */
+  pointer(widget: NativeWidget, phase: "down" | "drag" | "up" | "cancel", point: NativePoint, delta: NativePoint = { x: 0, y: 0 }): Promise<NativeSnapshot> {
+    for (const number of [point.x, point.y, delta.x, delta.y]) if (!Number.isFinite(number)) throw new Error("Expected finite pointer coordinates");
+    return this.#snapshot({ op: "input", view: token(widget.view), window: widget.window,
+      input: `pointer_${phase}`, x: point.x, y: point.y, delta_x: delta.x, delta_y: delta.y });
+  }
+  /** Leave the gesture active so tests can inspect the projected insertion slot. */
+  async beginDrag(widget: NativeWidget, destination: NativePoint): Promise<NativeSnapshot> {
+    const origin = { x: widget.bounds.x + widget.bounds.width / 2, y: widget.bounds.y + widget.bounds.height / 2 };
+    await this.pointer(widget, "down", origin);
+    return this.pointer(widget, "drag", destination, { x: destination.x - origin.x, y: destination.y - origin.y });
+  }
+  async drag(widget: NativeWidget, destination: NativePoint): Promise<NativeSnapshot> {
+    await this.beginDrag(widget, destination);
+    return this.pointer(widget, "up", destination);
+  }
+  wheel(widget: NativeWidget, deltaY: number, deltaX = 0): Promise<NativeSnapshot> {
+    if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY)) throw new Error("Expected finite wheel deltas");
+    return this.#snapshot({ op: "input", view: token(widget.view), window: widget.window, input: "scroll",
+      x: widget.bounds.x + widget.bounds.width / 2, y: widget.bounds.y + widget.bounds.height / 2,
+      delta_x: deltaX, delta_y: deltaY });
+  }
+  key(view: string, key: string): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "automation", command: `widget-key ${token(view)} ${token(key)}` });
+  }
+  dropFiles(view: string, paths: readonly string[], window = 1): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "drop", view, paths, window });
   }
   action(widget: NativeWidget, action: "focus" | "press" | "toggle" | "increment" | "decrement" | "dismiss"): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-action ${token(widget.view)} ${identity(widget.id)} ${token(action)}` });

@@ -1560,7 +1560,8 @@ const FacadeEmitter = struct {
 
     fn channelEntries(self: *FacadeEmitter) Error!void {
         const chan = self.sidecar.channels;
-        if (!(chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg)) return;
+        // Compiled views also use canonical envelopes for model-bound events.
+        // Keep this internal packer available when there is no host channel.
         self.use(.sink);
         self.use(.trap);
         try self.print(
@@ -3864,7 +3865,7 @@ test "facade emission is deterministic and carries the adapter surface" {
     try testing.expect(std.mem.indexOf(u8, first, "export const viewUnbound = [\n  \"label_set\",\n];") != null);
     // Unwired channels stay out of the module.
     try testing.expect(std.mem.indexOf(u8, first, "abi_frame_msg") == null);
-    try testing.expect(std.mem.indexOf(u8, first, "nscfPackMsg") == null);
+    try testing.expect(std.mem.indexOf(u8, first, "function nscfPackMsg") != null);
     // Facade-only types, tag constants, and SDK effect imports all live in
     // the lowercase reserved namespace, so authored capitalized names cannot
     // collide with them.
